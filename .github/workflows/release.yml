@@ -25,10 +25,10 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
-          - os: macos-13
+          - os: macos-26-intel
             target: x86_64-apple-darwin
             archive: tar.gz
-          - os: macos-14
+          - os: macos-26
             target: aarch64-apple-darwin
             archive: tar.gz
           - os: windows-latest
@@ -36,7 +36,7 @@ jobs:
             archive: zip
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - name: Install Rust
@@ -76,7 +76,7 @@ jobs:
           $hash = Get-FileHash "dist/memzoi-$tag-${{ matrix.target }}.zip" -Algorithm SHA256
           "$($hash.Hash.ToLower())  memzoi-$tag-${{ matrix.target }}.zip" | Set-Content "dist/memzoi-$tag-${{ matrix.target }}.zip.sha256"
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: memzoi-${{ matrix.target }}
           path: dist/*
@@ -87,7 +87,7 @@ jobs:
     needs: build
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
