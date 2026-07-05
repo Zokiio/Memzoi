@@ -6,10 +6,10 @@ const config = {
   favicon: 'img/favicon.ico',
 
   url: 'https://zokiio.github.io',
-  baseUrl: '/memzoi/',
+  baseUrl: '/Memzoi/',
 
   organizationName: 'Zokiio',
-  projectName: 'memzoi',
+  projectName: 'Memzoi',
 
   onBrokenLinks: 'throw',
   markdown: {
@@ -30,7 +30,7 @@ const config = {
         docs: {
           routeBasePath: '/',
           sidebarPath: './sidebars.js',
-          editUrl: 'https://github.com/Zokiio/memzoi/tree/main/website/',
+          editUrl: 'https://github.com/Zokiio/Memzoi/tree/main/website/',
         },
         blog: false,
         theme: {
@@ -46,7 +46,7 @@ const config = {
       items: [
         {to: '/', label: 'Docs', position: 'left'},
         {
-          href: 'https://github.com/Zokiio/memzoi',
+          href: 'https://github.com/Zokiio/Memzoi',
           label: 'GitHub',
           position: 'right',
         },
@@ -64,7 +64,7 @@ const config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/Zokiio/memzoi',
+              href: 'https://github.com/Zokiio/Memzoi',
             },
           ],
         },
