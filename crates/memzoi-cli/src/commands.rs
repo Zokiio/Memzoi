@@ -13,6 +13,7 @@ use crate::{
     cli::{Cli, Commands, DraftCommand, IntegrateCommands, McpCommands, ProposalCommands},
     integrate, mcp,
     output::print_json,
+    update,
 };
 
 pub(crate) fn run(cli: Cli) -> Result<()> {
@@ -128,6 +129,11 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
         Commands::Rebuild { json } => rebuild_command(json),
         Commands::Doctor { project_root, json } => doctor_command(project_root, json),
         Commands::Quickstart { apply_sample, json } => quickstart_command(apply_sample, json),
+        Commands::Update {
+            check,
+            reference,
+            json,
+        } => update::update_command(check, &reference, json),
         Commands::Mcp { command } => match command {
             McpCommands::Config { project_root } => mcp::mcp_config_command(project_root),
         },

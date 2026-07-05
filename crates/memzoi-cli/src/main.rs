@@ -6,6 +6,7 @@ mod commands;
 mod integrate;
 mod mcp;
 mod output;
+mod update;
 
 use cli::Cli;
 

@@ -189,6 +189,21 @@ pub(crate) enum Commands {
         json: bool,
     },
 
+    /// Check for or apply a Memzoi release update.
+    Update {
+        /// Only check whether an update is available.
+        #[arg(long)]
+        check: bool,
+
+        /// Release tag to install, or latest.
+        #[arg(long = "ref", default_value = "latest")]
+        reference: String,
+
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// MCP integration helpers.
     Mcp {
         #[command(subcommand)]
