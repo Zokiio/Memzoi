@@ -42,6 +42,24 @@ curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.
 
 Set `MEMZOI_REF=main` to install from the current main branch instead; that source install path requires Cargo.
 
+## Staying Up To Date
+
+For supported Mac/Linux release-binary installs:
+
+```bash
+memzoi update
+```
+
+To check without changing files:
+
+```bash
+memzoi update --check
+```
+
+`memzoi update` only applies updates to release-binary installs where `memzoi` and `memzoi-mcp` are sibling binaries in a writable, non-package-managed directory. Source checkouts should use `git pull && make install`; Cargo and future package-manager installs should use their installer or package manager. Windows supports `memzoi update --check` and prints the PowerShell install command for manual updates.
+
+Release downloads are verified against the release `.sha256` sidecar for download integrity. This is not a cryptographic signature or proof of artifact authenticity.
+
 ## Local Cargo Install
 
 From the Memzoi repo:

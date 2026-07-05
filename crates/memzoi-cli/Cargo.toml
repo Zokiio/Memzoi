@@ -16,11 +16,17 @@ name = "memzoi"
 path = "src/main.rs"
 
 [dependencies]
-memzoi-core = { version = "0.1.1", path = "../memzoi-core" }
+memzoi-core = { version = "0.2.0", path = "../memzoi-core" }
 anyhow.workspace = true
 clap.workspace = true
-serde_json.workspace = true
+flate2.workspace = true
 rusqlite.workspace = true
+semver.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

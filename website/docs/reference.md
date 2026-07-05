@@ -25,6 +25,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi rebuild` | Rebuild the derived SQLite database from canonical `.memzoi/records/` files. |
 | `memzoi doctor` | Check installation and repo memory readiness. |
 | `memzoi quickstart` | Print or run a tiny first-run workflow. |
+| `memzoi update` | Check for or apply a Memzoi release update. |
 | `memzoi mcp` | Print MCP integration configuration. |
 | `memzoi integrate` | Generate or install agent integration prompts and instructions. |
 
@@ -51,8 +52,32 @@ Run `memzoi <command> --help` for exact options.
 | `rebuild` | `--json` |
 | `doctor` | `--project-root`, `--json` |
 | `quickstart` | `--apply-sample`, `--json` |
+| `update` | `--check`, `--ref`, `--json` |
 | `mcp config` | `--project-root` |
 | `integrate instructions` | `--file`, `--json` |
+
+## Update Command
+
+`memzoi update` checks GitHub Releases and updates supported Mac/Linux release-binary installs. It never installs from branches, SHAs, URLs, or shell scripts. Use `memzoi update --check` to report update state without changing files.
+
+Supported refs:
+
+- `latest`: resolve the latest GitHub release.
+- `vX.Y.Z`: install a stable release tag.
+- `X.Y.Z`: normalize to `vX.Y.Z`.
+
+JSON status values:
+
+- `up_to_date`
+- `update_available`
+- `updated`
+- `unsupported`
+- `invalid_ref`
+- `download_failed`
+- `checksum_mismatch`
+- `rollback_failed`
+
+`--check --json` works from source, Cargo, package-managed, Windows, and CI installs. Apply mode is limited to release-binary installs where `memzoi` and `memzoi-mcp` are sibling binaries in a writable, non-package-managed directory.
 
 ## MCP tools
 

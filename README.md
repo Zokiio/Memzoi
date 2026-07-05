@@ -23,6 +23,7 @@ Memzoi is currently a local-first v0 for dogfooding and early experimentation. T
 | MCP server | Available via install script or source checkout |
 | Documentation site | Available under `website/docs/` |
 | Release binaries | Available on GitHub Releases for supported platforms |
+| Self-update | Available for supported Mac/Linux release-binary installs |
 | Homebrew and package-manager installs | Planned |
 
 The primary binaries are `memzoi` and `memzoi-mcp`.
@@ -54,6 +55,12 @@ Verify the install:
 ```bash
 memzoi --version
 memzoi-mcp --version
+```
+
+Check for newer Memzoi releases:
+
+```bash
+memzoi update --check
 ```
 
 Create a demo repo and run the first workflow:
