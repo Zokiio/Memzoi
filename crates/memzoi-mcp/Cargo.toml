@@ -1,0 +1,24 @@
+[package]
+name = "memzoi-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Model Context Protocol server for Memzoi file-native AI memory."
+repository = "https://github.com/Zokiio/memzoi"
+keywords = ["ai", "agents", "memory", "mcp", "sqlite"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "memzoi-mcp"
+path = "src/main.rs"
+
+[dependencies]
+memzoi-core = { version = "0.1.0", path = "../memzoi-core" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

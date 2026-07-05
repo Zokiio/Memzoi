@@ -1,0 +1,46 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2.9.1
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace
+      - name: Run onboarding smoke test
+        run: make onboarding-smoke
+      - name: Check old-name drift
+        run: |
+          ! grep -rIE 'agent[.]memory[.]lab|[.]ai-memory|ai[.]memory' \
+            --exclude-dir=.git \
+            --exclude-dir=.hermes \
+            --exclude-dir=.research \
+            --exclude-dir=target \
+            --exclude-dir=node_modules \
+            --exclude-dir=build \
+            --exclude-dir=.docusaurus \
+            .

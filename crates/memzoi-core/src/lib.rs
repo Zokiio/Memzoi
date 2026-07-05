@@ -1,0 +1,38 @@
+mod config;
+mod context;
+mod db;
+mod error;
+mod events;
+mod exporters;
+mod models;
+mod okf;
+mod precheck;
+mod proposals;
+mod schema;
+mod search;
+mod service;
+
+#[cfg(test)]
+pub(crate) use db::{init_database, open_database};
+
+pub use config::{MemoryPaths, discover_paths};
+pub use context::ContextPackInput;
+pub use error::{CoreError, Result};
+pub use models::{
+    ContextPack, MemoryCitation, MemoryEvent, MemoryPath, MemoryProposal, MemoryRecord,
+    MemoryStatus, MemoryType, PrecheckWarning, ScopeKind, SearchResult, Visibility,
+};
+pub use okf::{
+    OkfRecordFile, import_okf_records, parse_okf_record_file, parse_okf_record_markdown,
+    read_okf_record_files, write_memory_record_file, write_memory_record_file_with_metadata,
+    write_memory_record_file_with_tags,
+};
+pub use precheck::PrecheckInput;
+pub use proposals::{
+    MemoryDraft, Proposal, ProposalStatus, SupersedeResult, ValidationIssue, ValidationResult,
+};
+pub use search::SearchInput;
+pub use service::{
+    ExportFormat, ExportInput, ExportResult, InitBundleResult, InitRequest, InitResult,
+    MemoryService, RebuildResult, init_bundle,
+};

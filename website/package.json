@@ -1,0 +1,22 @@
+{
+  "name": "memzoi-docs",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.10.0",
+  "scripts": {
+    "docs:start": "docusaurus start",
+    "docs:build": "docusaurus build",
+    "docs:clear": "docusaurus clear",
+    "docs:serve": "docusaurus serve"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.10.1",
+    "@docusaurus/faster": "3.10.1",
+    "@docusaurus/preset-classic": "3.10.1",
+    "@mdx-js/react": "^3.1.1",
+    "clsx": "^2.1.1",
+    "prism-react-renderer": "^2.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

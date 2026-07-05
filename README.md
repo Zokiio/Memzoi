@@ -1,0 +1,160 @@
+# Memzoi
+
+File-native project memory for coding agents.
+
+Memzoi, pronounced "mem-zoy", gives AI coding agents a safe way to recall durable project knowledge, propose new memory, run pre-action checks, and export reviewable agent instructions. Canonical memory lives in human-readable files, while generated indexes and exports are disposable runtime state.
+
+Memzoi is currently a local-first v0 for dogfooding and early experimentation. The CLI is usable from source today; release binaries and package-manager installs are roadmap items.
+
+## Why Memzoi?
+
+- Keep durable agent memory in Markdown/YAML files that humans can review and diff.
+- Separate canonical repo memory from generated SQLite indexes and exports.
+- Require proposed, reviewable writes before durable memory changes are applied.
+- Build prompt-ready context packs for the task at hand.
+- Check risky paths, actions, and shell commands against known warnings.
+- Expose safe recall and proposal workflows through a minimal stdio MCP server.
+
+## Status
+
+| Area | Status |
+| --- | --- |
+| CLI | Available from source via `make install` |
+| MCP server | Available from source via `make install` |
+| Documentation site | Available under `website/docs/` |
+| Release binaries | Planned |
+| Homebrew and package-manager installs | Planned |
+
+The primary binaries are `memzoi` and `memzoi-mcp`. The v0 install also ships `agent-memory` and `agent-memory-mcp` as compatibility aliases for pre-rename scripts and MCP configs.
+
+## Quickstart
+
+Install both binaries from this repo:
+
+```bash
+make install
+```
+
+Create a demo repo and run the first workflow:
+
+```bash
+mkdir -p /tmp/memzoi-demo
+cd /tmp/memzoi-demo
+git init
+
+memzoi init
+memzoi doctor
+memzoi quickstart --apply-sample
+memzoi search quickstart
+memzoi context --task "remember quickstart setup"
+memzoi precheck --command "rm -rf .memzoi"
+memzoi export agents-md
+memzoi mcp config --project-root .
+```
+
+For the full walkthrough, see [website/docs/quickstart.md](website/docs/quickstart.md).
+
+## Documentation
+
+The documentation site covers installation, memory lifecycle, recall, prechecks, exports, MCP integration, and the CLI reference.
+
+- [Start here](website/docs/index.md)
+- [Install](website/docs/install.md)
+- [Quickstart](website/docs/quickstart.md)
+- [Memory lifecycle](website/docs/memory-lifecycle.md)
+- [Recall and precheck](website/docs/recall-and-precheck.md)
+- [MCP and agent integration](website/docs/mcp-and-agent-integration.md)
+- [Reference](website/docs/reference.md)
+- [Development](website/docs/development.md)
+
+Run the docs site locally:
+
+```bash
+cd website
+pnpm install
+pnpm docs:start
+```
+
+Build the docs site:
+
+```bash
+cd website
+pnpm install
+pnpm docs:build
+```
+
+GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/workflows/pages.yml).
+
+## What Works Now
+
+- File-native canonical memory records under `.memzoi/records/`.
+- Local runtime state under `~/.memzoi/projects/<project-key>/` for derived SQLite indexes, generated exports, and DB-local open proposal state.
+- Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
+- Rebuild from canonical records with `memzoi rebuild` when the derived runtime index needs to be regenerated.
+- Text search and prompt-ready context packs.
+- Pre-action governance checks with citations and suggested next steps.
+- Deterministic generated exports: OKF Markdown projections, `AGENTS.memory.md`, and `CLAUDE.memory.md`.
+- Minimal stdio MCP server with safe tools:
+  - `search_memory`
+  - `build_context_pack`
+  - `propose_memory`
+  - `precheck_path`
+  - `precheck_action`
+  - `precheck_command`
+
+## Project Layout
+
+```text
+crates/memzoi-core/  Core memory model, storage, lifecycle, search, context, precheck, and exports
+crates/memzoi-cli/   `memzoi` command-line interface
+crates/memzoi-mcp/   `memzoi-mcp` stdio MCP server
+examples/            Example MCP config and memory files
+scripts/             Install and smoke-test scripts
+website/docs/        Docusaurus documentation source
+```
+
+## Development
+
+Run the primary smoke checks:
+
+```bash
+make smoke
+make onboarding-smoke
+```
+
+Run the underlying Rust checks directly:
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Run the binaries from source without installing:
+
+```bash
+cargo run -p memzoi-cli -- --help
+cargo run -p memzoi-mcp -- --help
+```
+
+## Contributing
+
+Contributions are welcome while the project is still in v0. Please keep changes small, reviewable, and aligned with the file-native memory model:
+
+- Treat Markdown/YAML memory records as the source of truth.
+- Keep generated indexes and exports disposable.
+- Prefer typed, scoped records over large unstructured memory dumps.
+- Do not store secrets or private personal data in repo-shared memory.
+- Update or add docs for user-facing CLI, MCP, or schema changes.
+
+Before opening a pull request, run the relevant checks from the [Development](#development) section. For documentation-only changes, run `pnpm docs:build` from `website/`.
+
+## Security and Privacy
+
+Memzoi is designed for project memory, not secret storage. Do not commit API keys, credentials, private personal data, raw chat logs, or temporary task progress into repo-shared memory records.
+
+If you discover a security issue, please avoid posting sensitive details publicly. Open a minimal issue or contact the maintainer with enough context to coordinate a fix.
+
+## License
+
+Memzoi is licensed under the MIT license as declared in the Cargo workspace metadata.

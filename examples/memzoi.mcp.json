@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "memzoi": {
+      "command": "memzoi-mcp",
+      "args": ["--project-root", "/absolute/path/to/your/repo"],
+      "env": {}
+    }
+  }
+}

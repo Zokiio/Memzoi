@@ -1,0 +1,390 @@
+use std::{fmt, str::FromStr};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryType {
+    Fact,
+    Preference,
+    Decision,
+    Procedure,
+    Episode,
+    Relationship,
+    Warning,
+    FailedAttempt,
+    Risk,
+    InstructionProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryStatus {
+    Proposed,
+    Active,
+    Rejected,
+    Superseded,
+    Expired,
+    Tombstoned,
+    Redacted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeKind {
+    Personal,
+    Repo,
+    Project,
+    Team,
+    Org,
+    Agent,
+    ImportedUntrusted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    Public,
+    Private,
+    Repo,
+    Team,
+    Org,
+}
+
+impl MemoryType {
+    pub fn as_str(self) -> &'static str {
+        enum_to_str(self)
+    }
+}
+
+impl MemoryStatus {
+    pub fn as_str(self) -> &'static str {
+        status_to_str(self)
+    }
+}
+
+impl ScopeKind {
+    pub fn as_str(self) -> &'static str {
+        scope_to_str(self)
+    }
+}
+
+impl Visibility {
+    pub fn as_str(self) -> &'static str {
+        visibility_to_str(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryRecord {
+    pub id: String,
+    pub memory_type: MemoryType,
+    pub scope_kind: ScopeKind,
+    pub scope_id: Option<String>,
+    pub visibility: Visibility,
+    pub title: String,
+    pub body: String,
+    pub status: MemoryStatus,
+    pub confidence: f64,
+    pub source_kind: Option<String>,
+    pub source_ref: Option<String>,
+    pub content_hash: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub supersedes_id: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryProposal {
+    pub id: String,
+    pub operation: String,
+    pub payload: Value,
+    pub status: String,
+    pub actor: String,
+    pub validation: Option<Value>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryEvent {
+    pub id: String,
+    pub event_type: String,
+    pub actor: String,
+    pub payload: Value,
+    pub record_id: Option<String>,
+    pub proposal_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryPath {
+    pub path: String,
+    pub symbol: Option<String>,
+    pub line_start: Option<i64>,
+    pub line_end: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryCitation {
+    pub record_id: String,
+    pub memory_type: MemoryType,
+    pub scope_kind: ScopeKind,
+    pub source_ref: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub record: MemoryRecord,
+    pub score: f64,
+    pub snippet: Option<String>,
+    pub rationale: Option<String>,
+    pub paths: Vec<MemoryPath>,
+    pub citations: Vec<MemoryCitation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextPack {
+    pub id: String,
+    pub task: String,
+    pub prompt: String,
+    pub records: Vec<SearchResult>,
+    pub citations: Vec<MemoryCitation>,
+    pub token_budget: Option<usize>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrecheckWarning {
+    pub id: String,
+    pub record_id: String,
+    pub message: String,
+    pub severity: String,
+    pub citations: Vec<MemoryCitation>,
+    pub suggested_next_step: String,
+}
+
+impl fmt::Display for MemoryType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(enum_to_str(*self))
+    }
+}
+
+impl fmt::Display for MemoryStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(status_to_str(*self))
+    }
+}
+
+impl fmt::Display for ScopeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(scope_to_str(*self))
+    }
+}
+
+impl fmt::Display for Visibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(visibility_to_str(*self))
+    }
+}
+
+impl FromStr for MemoryType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "fact" => Ok(Self::Fact),
+            "preference" => Ok(Self::Preference),
+            "decision" => Ok(Self::Decision),
+            "procedure" => Ok(Self::Procedure),
+            "episode" => Ok(Self::Episode),
+            "relationship" => Ok(Self::Relationship),
+            "warning" => Ok(Self::Warning),
+            "failed_attempt" => Ok(Self::FailedAttempt),
+            "risk" => Ok(Self::Risk),
+            "instruction_projection" => Ok(Self::InstructionProjection),
+            other => Err(format!("unknown memory type {other:?}")),
+        }
+    }
+}
+
+impl FromStr for MemoryStatus {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "proposed" => Ok(Self::Proposed),
+            "active" => Ok(Self::Active),
+            "rejected" => Ok(Self::Rejected),
+            "superseded" => Ok(Self::Superseded),
+            "expired" => Ok(Self::Expired),
+            "tombstoned" => Ok(Self::Tombstoned),
+            "redacted" => Ok(Self::Redacted),
+            other => Err(format!("unknown memory status {other:?}")),
+        }
+    }
+}
+
+impl FromStr for ScopeKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "personal" => Ok(Self::Personal),
+            "repo" => Ok(Self::Repo),
+            "project" => Ok(Self::Project),
+            "team" => Ok(Self::Team),
+            "org" => Ok(Self::Org),
+            "agent" => Ok(Self::Agent),
+            "imported_untrusted" => Ok(Self::ImportedUntrusted),
+            other => Err(format!("unknown scope kind {other:?}")),
+        }
+    }
+}
+
+impl FromStr for Visibility {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "public" => Ok(Self::Public),
+            "private" => Ok(Self::Private),
+            "repo" => Ok(Self::Repo),
+            "team" => Ok(Self::Team),
+            "org" => Ok(Self::Org),
+            other => Err(format!("unknown visibility {other:?}")),
+        }
+    }
+}
+
+pub fn enum_to_str(value: MemoryType) -> &'static str {
+    match value {
+        MemoryType::Fact => "fact",
+        MemoryType::Preference => "preference",
+        MemoryType::Decision => "decision",
+        MemoryType::Procedure => "procedure",
+        MemoryType::Episode => "episode",
+        MemoryType::Relationship => "relationship",
+        MemoryType::Warning => "warning",
+        MemoryType::FailedAttempt => "failed_attempt",
+        MemoryType::Risk => "risk",
+        MemoryType::InstructionProjection => "instruction_projection",
+    }
+}
+
+pub fn status_to_str(value: MemoryStatus) -> &'static str {
+    match value {
+        MemoryStatus::Proposed => "proposed",
+        MemoryStatus::Active => "active",
+        MemoryStatus::Rejected => "rejected",
+        MemoryStatus::Superseded => "superseded",
+        MemoryStatus::Expired => "expired",
+        MemoryStatus::Tombstoned => "tombstoned",
+        MemoryStatus::Redacted => "redacted",
+    }
+}
+
+pub fn scope_to_str(value: ScopeKind) -> &'static str {
+    match value {
+        ScopeKind::Personal => "personal",
+        ScopeKind::Repo => "repo",
+        ScopeKind::Project => "project",
+        ScopeKind::Team => "team",
+        ScopeKind::Org => "org",
+        ScopeKind::Agent => "agent",
+        ScopeKind::ImportedUntrusted => "imported_untrusted",
+    }
+}
+
+pub fn visibility_to_str(value: Visibility) -> &'static str {
+    match value {
+        Visibility::Public => "public",
+        Visibility::Private => "private",
+        Visibility::Repo => "repo",
+        Visibility::Team => "team",
+        Visibility::Org => "org",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Debug;
+
+    use serde::{Serialize, de::DeserializeOwned};
+
+    use crate::models::{MemoryStatus, MemoryType, ScopeKind, Visibility};
+
+    #[test]
+    fn memory_model_enums_round_trip_as_stable_schema_strings() -> anyhow::Result<()> {
+        assert_json_string_round_trip(MemoryType::Fact, "fact")?;
+        assert_json_string_round_trip(MemoryType::Preference, "preference")?;
+        assert_json_string_round_trip(MemoryType::Decision, "decision")?;
+        assert_json_string_round_trip(MemoryType::Procedure, "procedure")?;
+        assert_json_string_round_trip(MemoryType::Episode, "episode")?;
+        assert_json_string_round_trip(MemoryType::Relationship, "relationship")?;
+        assert_json_string_round_trip(MemoryType::Warning, "warning")?;
+        assert_json_string_round_trip(MemoryType::FailedAttempt, "failed_attempt")?;
+        assert_json_string_round_trip(MemoryType::Risk, "risk")?;
+        assert_json_string_round_trip(MemoryType::InstructionProjection, "instruction_projection")?;
+
+        assert_json_string_round_trip(MemoryStatus::Proposed, "proposed")?;
+        assert_json_string_round_trip(MemoryStatus::Active, "active")?;
+        assert_json_string_round_trip(MemoryStatus::Rejected, "rejected")?;
+        assert_json_string_round_trip(MemoryStatus::Superseded, "superseded")?;
+        assert_json_string_round_trip(MemoryStatus::Expired, "expired")?;
+        assert_json_string_round_trip(MemoryStatus::Tombstoned, "tombstoned")?;
+        assert_json_string_round_trip(MemoryStatus::Redacted, "redacted")?;
+
+        assert_json_string_round_trip(ScopeKind::Personal, "personal")?;
+        assert_json_string_round_trip(ScopeKind::Repo, "repo")?;
+        assert_json_string_round_trip(ScopeKind::Project, "project")?;
+        assert_json_string_round_trip(ScopeKind::Team, "team")?;
+        assert_json_string_round_trip(ScopeKind::Org, "org")?;
+        assert_json_string_round_trip(ScopeKind::Agent, "agent")?;
+        assert_json_string_round_trip(ScopeKind::ImportedUntrusted, "imported_untrusted")?;
+
+        assert_json_string_round_trip(Visibility::Public, "public")?;
+        assert_json_string_round_trip(Visibility::Private, "private")?;
+        assert_json_string_round_trip(Visibility::Repo, "repo")?;
+        assert_json_string_round_trip(Visibility::Team, "team")?;
+        assert_json_string_round_trip(Visibility::Org, "org")?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn memory_model_enums_reject_unknown_schema_strings() {
+        assert_invalid_json_string::<MemoryType>("note");
+        assert_invalid_json_string::<MemoryStatus>("archived");
+        assert_invalid_json_string::<ScopeKind>("workspace");
+        assert_invalid_json_string::<Visibility>("friends");
+    }
+
+    fn assert_json_string_round_trip<T>(value: T, encoded: &str) -> anyhow::Result<()>
+    where
+        T: Clone + Debug + Eq + Serialize + DeserializeOwned,
+    {
+        let json = serde_json::to_string(&value)?;
+        assert_eq!(json, format!("\"{encoded}\""));
+
+        let decoded: T = serde_json::from_str(&json)?;
+        assert_eq!(decoded, value);
+        Ok(())
+    }
+
+    fn assert_invalid_json_string<T>(encoded: &str)
+    where
+        T: Debug + DeserializeOwned,
+    {
+        let json = format!("\"{encoded}\"");
+        let error = serde_json::from_str::<T>(&json).expect_err("invalid enum string must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains(encoded),
+            "error should name the rejected value {encoded:?}, got {message:?}"
+        );
+    }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "memzoi-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command-line interface for Memzoi file-native AI memory workflows."
+repository = "https://github.com/Zokiio/memzoi"
+keywords = ["ai", "agents", "memory", "sqlite", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "memzoi"
+path = "src/main.rs"
+
+[dependencies]
+memzoi-core = { version = "0.1.0", path = "../memzoi-core" }
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
