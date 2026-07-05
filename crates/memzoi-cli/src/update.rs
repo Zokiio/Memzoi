@@ -27,6 +27,9 @@ const INSTALL_PS1_URL: &str =
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_RELEASE_METADATA_BYTES: u64 = 256 * 1024;
+const MAX_CHECKSUM_MANIFEST_BYTES: u64 = 64 * 1024;
+const MAX_RELEASE_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[cfg(windows)]
 const MEMZOI_BIN: &str = "memzoi.exe";
@@ -491,7 +494,7 @@ fn resolve_requested_ref(
 fn resolve_latest_ref() -> std::result::Result<ResolvedRef, ResolveError> {
     let api_base = env_value("MEMZOI_RELEASE_API_BASE", RELEASE_API_BASE);
     let url = format!("{}/latest", api_base.trim_end_matches('/'));
-    let bytes = http_get_bytes(&url).map_err(|error| {
+    let bytes = http_get_bytes(&url, MAX_RELEASE_METADATA_BYTES).map_err(|error| {
         ResolveError::Download(format!(
             "could not fetch latest Memzoi release metadata: {error}"
         ))
@@ -786,12 +789,14 @@ fn apply_release_update(
     );
     let checksum_url = format!("{archive_url}.sha256");
 
-    let archive_bytes = http_get_bytes(&archive_url).map_err(|error| {
-        ApplyError::Download(format!("failed to download {archive_url}: {error}"))
-    })?;
-    let checksum_bytes = http_get_bytes(&checksum_url).map_err(|error| {
-        ApplyError::Download(format!("failed to download {checksum_url}: {error}"))
-    })?;
+    let archive_bytes =
+        http_get_bytes(&archive_url, MAX_RELEASE_ARCHIVE_BYTES).map_err(|error| {
+            ApplyError::Download(format!("failed to download {archive_url}: {error}"))
+        })?;
+    let checksum_bytes =
+        http_get_bytes(&checksum_url, MAX_CHECKSUM_MANIFEST_BYTES).map_err(|error| {
+            ApplyError::Download(format!("failed to download {checksum_url}: {error}"))
+        })?;
     let checksum_manifest = std::str::from_utf8(&checksum_bytes).map_err(|error| {
         ApplyError::Checksum(format!("checksum manifest was not UTF-8: {error}"))
     })?;
@@ -828,7 +833,7 @@ fn env_value(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_owned())
 }
 
-fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
+fn http_get_bytes(url: &str, max_bytes: u64) -> Result<Vec<u8>> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(HTTP_CONNECT_TIMEOUT)
         .timeout_read(HTTP_READ_TIMEOUT)
@@ -839,11 +844,18 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
         .set("User-Agent", concat!("memzoi/", env!("CARGO_PKG_VERSION")))
         .call()
         .map_err(|error| anyhow!("{error}"))?;
+    read_limited_response(response.into_reader(), max_bytes)
+        .with_context(|| format!("failed reading response body from {url}"))
+}
+
+fn read_limited_response(reader: impl Read, max_bytes: u64) -> Result<Vec<u8>> {
+    let mut limited = reader.take(max_bytes.saturating_add(1));
     let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("failed reading response body from {url}"))?;
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        bail!("response body exceeded {max_bytes} bytes");
+    }
+
     Ok(bytes)
 }
 
@@ -1323,6 +1335,22 @@ mod tests {
             parse_sha256_manifest(&manifest, "memzoi.tar.gz").expect_err("ambiguous manifest");
 
         assert!(error.to_string().contains("none matched memzoi.tar.gz"));
+    }
+
+    #[test]
+    fn limited_response_reader_accepts_limit_boundary() {
+        let bytes =
+            read_limited_response(Cursor::new(b"abcd".as_slice()), 4).expect("within limit");
+
+        assert_eq!(bytes, b"abcd");
+    }
+
+    #[test]
+    fn limited_response_reader_rejects_bodies_over_limit() {
+        let error =
+            read_limited_response(Cursor::new(b"abcde".as_slice()), 4).expect_err("over limit");
+
+        assert!(error.to_string().contains("exceeded 4 bytes"));
     }
 
     #[test]
