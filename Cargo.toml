@@ -11,6 +11,9 @@ edition = "2024"
 rust-version = "1.85"
 version = "0.1.0"
 license = "MIT"
+repository = "https://github.com/Zokiio/Memzoi"
+homepage = "https://zokiio.github.io/Memzoi/"
+readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "1"

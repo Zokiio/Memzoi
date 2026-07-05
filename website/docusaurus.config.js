@@ -31,6 +31,17 @@ const config = {
           routeBasePath: '/',
           sidebarPath: './sidebars.js',
           editUrl: 'https://github.com/Zokiio/Memzoi/tree/main/website/',
+          lastVersion: '0.1.0',
+          versions: {
+            current: {
+              label: 'Next',
+              path: 'next',
+            },
+            '0.1.0': {
+              label: '0.1.0',
+              path: '',
+            },
+          },
         },
         blog: false,
         theme: {
@@ -45,6 +56,10 @@ const config = {
       title: 'Memzoi',
       items: [
         {to: '/', label: 'Docs', position: 'left'},
+        {
+          type: 'docsVersionDropdown',
+          position: 'right',
+        },
         {
           href: 'https://github.com/Zokiio/Memzoi',
           label: 'GitHub',

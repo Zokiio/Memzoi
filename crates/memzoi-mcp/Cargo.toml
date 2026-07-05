@@ -4,8 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Model Context Protocol server for Memzoi file-native AI memory."
-repository = "https://github.com/Zokiio/memzoi"
 keywords = ["ai", "agents", "memory", "mcp", "sqlite"]
 categories = ["command-line-utilities", "development-tools"]
 
