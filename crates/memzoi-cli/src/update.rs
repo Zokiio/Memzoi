@@ -46,15 +46,14 @@ pub(crate) fn update_command(check_only: bool, reference: &str, as_json: bool) -
 
     if as_json {
         print_json(&report.to_json())?;
+    } else if report.status.is_failure() {
+        bail!("{}", report.failure_message());
     } else {
         report.print_human();
     }
 
     if report.status.is_failure() {
-        bail!(
-            "{}",
-            report.message.as_deref().unwrap_or(report.status.as_str())
-        );
+        bail!("{}", report.failure_message());
     }
 
     Ok(())
@@ -177,6 +176,22 @@ impl UpdateReport {
                 }
             }
         }
+    }
+
+    fn failure_message(&self) -> String {
+        let mut message = self
+            .message
+            .as_deref()
+            .unwrap_or(self.status.as_str())
+            .to_owned();
+        if let Some(command) = &self.manual_command {
+            if !message.is_empty() {
+                message.push('\n');
+            }
+            message.push_str("Use: ");
+            message.push_str(command);
+        }
+        message
     }
 }
 
@@ -780,7 +795,7 @@ fn apply_release_update(
     let checksum_manifest = std::str::from_utf8(&checksum_bytes).map_err(|error| {
         ApplyError::Checksum(format!("checksum manifest was not UTF-8: {error}"))
     })?;
-    let expected_checksum = parse_sha256_manifest(checksum_manifest)
+    let expected_checksum = parse_sha256_manifest(checksum_manifest, &archive_name)
         .map_err(|error| ApplyError::Checksum(error.to_string()))?;
     verify_archive_checksum(&archive_bytes, &expected_checksum)
         .map_err(|error| ApplyError::Checksum(error.to_string()))?;
@@ -832,21 +847,61 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn parse_sha256_manifest(manifest: &str) -> Result<String> {
+fn parse_sha256_manifest(manifest: &str, archive_name: &str) -> Result<String> {
+    let mut candidates = Vec::new();
+
     for line in manifest.lines() {
-        let Some(first_field) = line.split_whitespace().next() else {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let Some(first_field) = fields.first() else {
             continue;
         };
-        if first_field.len() == 64
-            && first_field
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
+
+        if is_sha256_digest(first_field) {
+            let checksum = first_field.to_ascii_lowercase();
+            let file_name = fields.get(1).map(|field| field.trim_start_matches('*'));
+            if file_name
+                .is_some_and(|file_name| manifest_file_matches_archive(file_name, archive_name))
+            {
+                return Ok(checksum);
+            }
+            candidates.push((checksum, file_name.map(str::to_owned)));
+            continue;
+        }
+
+        if let Some(last_field) = fields.last()
+            && is_sha256_digest(last_field)
+            && let Some(file_name) = bsd_sha256_manifest_filename(line)
         {
-            return Ok(first_field.to_ascii_lowercase());
+            let checksum = last_field.to_ascii_lowercase();
+            if manifest_file_matches_archive(file_name, archive_name) {
+                return Ok(checksum);
+            }
+            candidates.push((checksum, Some(file_name.to_owned())));
         }
     }
 
-    bail!("could not read SHA-256 checksum from manifest")
+    match candidates.as_slice() {
+        [(checksum, None)] => Ok(checksum.clone()),
+        [] => bail!("could not read SHA-256 checksum from manifest"),
+        [(_, Some(_))] => bail!("checksum manifest did not include an entry for {archive_name}"),
+        _ => bail!(
+            "checksum manifest contained multiple SHA-256 entries but none matched {archive_name}"
+        ),
+    }
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn manifest_file_matches_archive(file_name: &str, archive_name: &str) -> bool {
+    Path::new(file_name).file_name().and_then(OsStr::to_str) == Some(archive_name)
+}
+
+fn bsd_sha256_manifest_filename(line: &str) -> Option<&str> {
+    let start = line.find('(')? + 1;
+    let end = line[start..].find(')')? + start;
+    Some(&line[start..end])
 }
 
 fn verify_archive_checksum(archive_bytes: &[u8], expected_checksum: &str) -> Result<()> {
@@ -1238,12 +1293,36 @@ mod tests {
     }
 
     #[test]
-    fn parses_sha256_manifest_first_field() {
+    fn parses_sha256_manifest_single_bare_digest() {
         let digest = "ABCDEFabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234";
-        let parsed = parse_sha256_manifest(&format!("{digest}  memzoi.tar.gz\n"))
+        let parsed = parse_sha256_manifest(&format!("{digest}\n"), "memzoi.tar.gz")
             .expect("manifest should parse");
 
         assert_eq!(parsed, digest.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn parses_sha256_manifest_matching_archive_entry() {
+        let wrong = "1111111111111111111111111111111111111111111111111111111111111111";
+        let expected = "ABCDEFabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234";
+        let manifest = format!(
+            "{wrong}  other.tar.gz\n{expected}  dist/memzoi-v1.2.3-x86_64-apple-darwin.tar.gz\n"
+        );
+        let parsed = parse_sha256_manifest(&manifest, "memzoi-v1.2.3-x86_64-apple-darwin.tar.gz")
+            .expect("manifest should parse matching archive");
+
+        assert_eq!(parsed, expected.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn rejects_ambiguous_sha256_manifest_without_matching_archive_entry() {
+        let one = "1111111111111111111111111111111111111111111111111111111111111111";
+        let two = "2222222222222222222222222222222222222222222222222222222222222222";
+        let manifest = format!("{one}  one.tar.gz\n{two}  two.tar.gz\n");
+        let error =
+            parse_sha256_manifest(&manifest, "memzoi.tar.gz").expect_err("ambiguous manifest");
+
+        assert!(error.to_string().contains("none matched memzoi.tar.gz"));
     }
 
     #[test]

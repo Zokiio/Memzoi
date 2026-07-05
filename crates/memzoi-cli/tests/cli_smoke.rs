@@ -135,6 +135,25 @@ fn update_apply_json_reports_unsupported_for_source_builds_without_network() {
 }
 
 #[test]
+fn update_apply_human_failure_reports_message_once() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    let mut cmd = memzoi();
+
+    let assert = cmd
+        .args(["update"])
+        .current_dir(repo.path())
+        .env("MEMZOI_RELEASE_API_BASE", "http://127.0.0.1:1")
+        .assert()
+        .failure();
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).expect("stdout is utf-8");
+    let stderr = std::str::from_utf8(&assert.get_output().stderr).expect("stderr is utf-8");
+
+    assert_eq!(stdout, "");
+    assert_eq!(stderr.matches("source checkout").count(), 1);
+    assert!(stderr.contains("Use: git pull && make install"));
+}
+
+#[test]
 fn update_invalid_ref_fails_before_network() {
     let repo = tempfile::tempdir().expect("temp repo");
     let mut cmd = memzoi();
