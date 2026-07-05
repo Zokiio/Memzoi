@@ -58,7 +58,7 @@ Run `memzoi <command> --help` for exact options.
 
 ## Update Command
 
-`memzoi update` checks GitHub Releases and updates supported Mac/Linux release-binary installs. It never installs from branches, SHAs, URLs, or shell scripts. Use `memzoi update --check` to report update state without changing files.
+`memzoi update` checks GitHub Releases and updates supported Mac/Linux release-binary installs. Automatic apply mode never installs from branches, SHAs, URLs, or shell scripts; unsupported installs may print manual commands that use the official install scripts. Use `memzoi update --check` to report update state without changing files.
 
 Supported refs:
 

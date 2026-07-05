@@ -5,6 +5,7 @@ use std::{
     io::{Cursor, Read},
     path::{Component, Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -23,6 +24,9 @@ const INSTALL_SH_URL: &str =
     "https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh";
 const INSTALL_PS1_URL: &str =
     "https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1";
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(windows)]
 const MEMZOI_BIN: &str = "memzoi.exe";
@@ -810,7 +814,13 @@ fn env_value(name: &str, default: &str) -> String {
 }
 
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
-    let response = ureq::get(url)
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(HTTP_CONNECT_TIMEOUT)
+        .timeout_read(HTTP_READ_TIMEOUT)
+        .timeout_write(HTTP_WRITE_TIMEOUT)
+        .build();
+    let response = agent
+        .get(url)
         .set("User-Agent", concat!("memzoi/", env!("CARGO_PKG_VERSION")))
         .call()
         .map_err(|error| anyhow!("{error}"))?;
@@ -991,11 +1001,7 @@ fn replace_installed_binaries(
             })?
             .permissions()
             .mode();
-        let mode = if existing_mode & 0o111 == 0 {
-            existing_mode | 0o755
-        } else {
-            existing_mode
-        };
+        let mode = staged_binary_mode(existing_mode);
         fs::set_permissions(&replacement.source, fs::Permissions::from_mode(mode)).map_err(
             |error| {
                 ReplaceError::RolledBack(format!(
@@ -1021,6 +1027,15 @@ fn replace_installed_binaries(
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn staged_binary_mode(existing_mode: u32) -> u32 {
+    if existing_mode & 0o111 == 0 {
+        existing_mode | ((existing_mode & 0o444) >> 2)
+    } else {
+        existing_mode
+    }
 }
 
 #[cfg(not(unix))]
@@ -1313,6 +1328,15 @@ mod tests {
         assert!(matches!(result, Err(ReplaceError::RolledBack(_))));
         assert_eq!(fs::read(&one_dest).expect("one restored"), b"old-one");
         assert_eq!(fs::read(&two_dest).expect("two restored"), b"old-two");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_binary_mode_adds_only_matching_execute_bits() {
+        assert_eq!(staged_binary_mode(0o600), 0o700);
+        assert_eq!(staged_binary_mode(0o640), 0o750);
+        assert_eq!(staged_binary_mode(0o644), 0o755);
+        assert_eq!(staged_binary_mode(0o750), 0o750);
     }
 
     fn archive_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
