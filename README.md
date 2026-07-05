@@ -25,7 +25,7 @@ Memzoi is currently a local-first v0 for dogfooding and early experimentation. T
 | Release binaries | Available on GitHub Releases for supported platforms |
 | Homebrew and package-manager installs | Planned |
 
-The primary binaries are `memzoi` and `memzoi-mcp`. The v0 install also ships `agent-memory` and `agent-memory-mcp` as compatibility aliases for pre-rename scripts and MCP configs.
+The primary binaries are `memzoi` and `memzoi-mcp`.
 
 ## Quickstart
 

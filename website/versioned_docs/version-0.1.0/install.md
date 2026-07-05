@@ -12,7 +12,7 @@ Memzoi v0 is installed through release binaries or from a source checkout. Homeb
 | --- | --- | --- | --- |
 | Install script | Available now | `curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh \| MEMZOI_REF=v0.1.0 sh` | Downloads the v0.1.0 release binary for supported platforms. |
 | Windows install script | Available now | `$env:MEMZOI_REF="v0.1.0"; irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 \| iex` | Downloads the v0.1.0 release binary for supported platforms. |
-| Source checkout | Available now | `make install` | Requires Cargo; installs `memzoi`, `memzoi-mcp`, and v0 compatibility aliases. |
+| Source checkout | Available now | `make install` | Requires Cargo; installs `memzoi` and `memzoi-mcp`. |
 | crates.io | Planned | `cargo install memzoi-cli` and `cargo install memzoi-mcp` | Publish `memzoi-core` first; dependent package checks need it in the crates.io index. |
 | GitHub release binary | Available now | [Download from GitHub Releases](https://github.com/Zokiio/Memzoi/releases) | The install scripts select the matching release asset automatically. |
 | Homebrew | Future | TBD | Defer until at least one GitHub release exists. |
@@ -61,11 +61,6 @@ It installs the primary binaries:
 
 - `memzoi`
 - `memzoi-mcp`
-
-It also installs compatibility aliases for v0-era scripts and MCP configs:
-
-- `agent-memory`
-- `agent-memory-mcp`
 
 ## Release Packaging Note
 

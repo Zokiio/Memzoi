@@ -269,15 +269,6 @@ printf '%s\n' '+ memzoi --version'
 printf '%s\n' '+ memzoi-mcp --version'
 "$BIN_DIR/memzoi-mcp" --version
 
-ln -sf memzoi "$BIN_DIR/agent-memory"
-ln -sf memzoi-mcp "$BIN_DIR/agent-memory-mcp"
-
-printf '%s\n' '+ agent-memory compatibility alias --version'
-"$BIN_DIR/agent-memory" --version
-
-printf '%s\n' '+ agent-memory-mcp compatibility alias --version'
-"$BIN_DIR/agent-memory-mcp" --version
-
 if ! command -v memzoi >/dev/null 2>&1; then
   printf '\n%s\n' "Note: $BIN_DIR is not on PATH in this shell."
   printf '%s\n' "Add it with: export PATH=\"$BIN_DIR:\$PATH\""
@@ -286,8 +277,6 @@ fi
 cat <<'NEXT'
 
 Installed Memzoi.
-
-Compatibility aliases are also installed: agent-memory, agent-memory-mcp.
 
 Next:
   memzoi init

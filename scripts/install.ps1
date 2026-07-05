@@ -237,16 +237,10 @@ Write-Host "+ memzoi --version"
 Write-Host "+ memzoi-mcp --version"
 & $MemzoiMcp --version
 
-New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-Set-Content -Path (Join-Path $BinDir "agent-memory.cmd") -Value "@echo off`r`n`"%~dp0memzoi.exe`" %*`r`n"
-Set-Content -Path (Join-Path $BinDir "agent-memory-mcp.cmd") -Value "@echo off`r`n`"%~dp0memzoi-mcp.exe`" %*`r`n"
-
 Add-ToUserPath
 
 Write-Host ""
 Write-Host "Installed Memzoi."
-Write-Host ""
-Write-Host "Compatibility aliases are also installed: agent-memory, agent-memory-mcp."
 Write-Host ""
 Write-Host "Next:"
 Write-Host "  memzoi init"
