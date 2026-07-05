@@ -8,9 +8,21 @@ This workflow creates a throwaway Git repo, initializes repo `.memzoi/` memory p
 state, writes the built-in sample memory, recalls it, checks a risky command, exports an agent
 projection, and prints MCP configuration.
 
-## Install first
+## Install Memzoi
 
-From the Memzoi repo:
+Mac or Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh | sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 | iex"
+```
+
+Or install from a source checkout:
 
 ```bash
 make install
@@ -29,7 +41,11 @@ memzoi-mcp --version
 mkdir -p /tmp/memzoi-demo
 cd /tmp/memzoi-demo
 git init
+```
 
+Initialize Memzoi memory and try recall, precheck, export, and MCP config:
+
+```bash
 memzoi init
 memzoi doctor
 memzoi quickstart --apply-sample

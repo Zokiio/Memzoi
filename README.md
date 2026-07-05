@@ -19,20 +19,39 @@ Memzoi is currently a local-first v0 for dogfooding and early experimentation. T
 
 | Area | Status |
 | --- | --- |
-| CLI | Available from source via `make install` |
-| MCP server | Available from source via `make install` |
+| CLI | Available via install script or source checkout |
+| MCP server | Available via install script or source checkout |
 | Documentation site | Available under `website/docs/` |
-| Release binaries | Planned |
+| Release binaries | Available on GitHub Releases for supported platforms |
 | Homebrew and package-manager installs | Planned |
 
 The primary binaries are `memzoi` and `memzoi-mcp`. The v0 install also ships `agent-memory` and `agent-memory-mcp` as compatibility aliases for pre-rename scripts and MCP configs.
 
 ## Quickstart
 
-Install both binaries from this repo:
+Install Memzoi on Mac or Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh | sh
+```
+
+Install Memzoi on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 | iex"
+```
+
+Or install both binaries from a source checkout:
 
 ```bash
 make install
+```
+
+Verify the install:
+
+```bash
+memzoi --version
+memzoi-mcp --version
 ```
 
 Create a demo repo and run the first workflow:
@@ -41,7 +60,11 @@ Create a demo repo and run the first workflow:
 mkdir -p /tmp/memzoi-demo
 cd /tmp/memzoi-demo
 git init
+```
 
+Initialize Memzoi memory and try recall, precheck, export, and MCP config:
+
+```bash
 memzoi init
 memzoi doctor
 memzoi quickstart --apply-sample
