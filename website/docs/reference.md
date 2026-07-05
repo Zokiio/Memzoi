@@ -130,9 +130,9 @@ Valid `memzoi export <format>` values:
 
 ## v0 limitations
 
-- v0 expects a Rust/Cargo-capable environment for installation.
+- Source installs require a Rust/Cargo-capable environment; release binaries do not.
 - Search is text/FTS-first, not vector or semantic recall.
 - Memory is repo-local; global, personal, team, and org sync are future work.
 - `memzoi rebuild` restores approved records from `.memzoi/records/`. Current proposals are DB-local; rebuild refuses to discard readable pending/approved proposals, but a corrupt unreadable DB is treated as derived-cache recovery and may discard DB-local proposal state.
 - MCP is intentionally minimal and safe-by-default.
-- Release binaries, Homebrew, and standalone installers are not available yet.
+- Homebrew and package-manager installers are not available yet.

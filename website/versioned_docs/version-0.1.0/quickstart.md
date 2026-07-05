@@ -13,14 +13,17 @@ projection, and prints MCP configuration.
 Mac or Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh | MEMZOI_REF=v0.1.0 sh
 ```
 
 Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 | iex"
+$env:MEMZOI_REF = "v0.1.0"
+irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 | iex
 ```
+
+The install script downloads the v0.1.0 release binary and does not require Cargo.
 
 Or install from a source checkout:
 

@@ -4,7 +4,7 @@ File-native project memory for coding agents.
 
 Memzoi, pronounced "mem-zoy", gives AI coding agents a safe way to recall durable project knowledge, propose new memory, run pre-action checks, and export reviewable agent instructions. Canonical memory lives in human-readable files, while generated indexes and exports are disposable runtime state.
 
-Memzoi is currently a local-first v0 for dogfooding and early experimentation. The CLI is usable from source today; release binaries and package-manager installs are roadmap items.
+Memzoi is currently a local-first v0 for dogfooding and early experimentation. The CLI and MCP server are available through release binaries or from a source checkout; package-manager installs are roadmap items.
 
 ## Why Memzoi?
 
@@ -40,6 +40,8 @@ Install Memzoi on Windows:
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 | iex"
 ```
+
+The install script downloads the latest release binary for supported platforms and verifies its SHA-256 checksum. On Mac/Linux it installs to `~/.local/bin` by default; Cargo is only required for source installs.
 
 Or install both binaries from a source checkout:
 

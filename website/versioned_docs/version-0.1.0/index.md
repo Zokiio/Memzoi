@@ -8,7 +8,7 @@ slug: /
 
 Memzoi, pronounced "mem-zoy", is safe project memory for coding agents. It gives agents a repo-local place to recall durable knowledge, propose new memories, check planned work against warnings, export reviewable instruction files, and connect through MCP.
 
-Memzoi v0 is local-first and intended for dogfooding and early experimentation. It is usable from the CLI today; release binaries and package-manager installs are still roadmap items.
+Memzoi v0 is local-first and intended for dogfooding and early experimentation. It is usable from release binaries or from source today; package-manager installs are still roadmap items.
 
 ## Start here
 

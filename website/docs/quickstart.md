@@ -22,6 +22,8 @@ Windows:
 powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 | iex"
 ```
 
+The install script downloads the latest release binary and does not require Cargo.
+
 Or install from a source checkout:
 
 ```bash

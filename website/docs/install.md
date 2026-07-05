@@ -4,15 +4,15 @@ title: Install
 
 # Install
 
-Memzoi v0 is installed through the install script or from a source checkout. Homebrew is a roadmap item.
+Memzoi v0 is installed through release binaries or from a source checkout. Homebrew and crates.io packages are roadmap items.
 
 ## Install methods
 
 | Method | Status | Command | Notes |
 | --- | --- | --- | --- |
-| Install script | Available now | `curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh \| sh` | Downloads release binaries for supported platforms. |
-| Windows install script | Available now | `powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 \| iex"` | Downloads release binaries for supported platforms. |
-| Source checkout | Available now | `make install` | Installs `memzoi`, `memzoi-mcp`, and v0 compatibility aliases. |
+| Install script | Available now | `curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh \| sh` | Downloads the latest release binary for supported platforms. |
+| Windows install script | Available now | `powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 \| iex"` | Downloads the latest release binary for supported platforms. |
+| Source checkout | Available now | `make install` | Requires Cargo; installs `memzoi`, `memzoi-mcp`, and v0 compatibility aliases. |
 | crates.io | Planned | `cargo install memzoi-cli` and `cargo install memzoi-mcp` | Publish `memzoi-core` first; dependent package checks need it in the crates.io index. |
 | GitHub release binary | Available now | [Download from GitHub Releases](https://github.com/Zokiio/Memzoi/releases) | The install scripts select the matching release asset automatically. |
 | Homebrew | Future | TBD | Defer until at least one GitHub release exists. |
@@ -31,7 +31,15 @@ Windows:
 powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.ps1 | iex"
 ```
 
-By default, the install script downloads `v0.1.0` release binaries from GitHub. Set `MEMZOI_REF=main` to install from the current main branch instead; that source install path requires Cargo.
+By default, the install script downloads the latest GitHub release binary, verifies its SHA-256 checksum, and installs into `~/.local/bin` on Mac/Linux. On Windows, it installs under `%LOCALAPPDATA%\Programs\Memzoi\bin` and updates the user `Path`.
+
+Install a pinned release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh | MEMZOI_REF=v0.1.0 sh
+```
+
+Set `MEMZOI_REF=main` to install from the current main branch instead; that source install path requires Cargo.
 
 ## Local Cargo Install
 
@@ -70,13 +78,13 @@ memzoi-mcp --version
 memzoi doctor
 ```
 
-If the binaries install successfully but the shell cannot find them, add Cargo's bin directory to `PATH`:
+If the Mac/Linux binaries install successfully but the shell cannot find them, add the install directory to `PATH`:
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-If `CARGO_INSTALL_ROOT` or `CARGO_HOME` is set, use that install root's `bin` directory instead.
+If `MEMZOI_INSTALL_DIR` is set, use that directory instead.
 
 ## Developer Mode
 
