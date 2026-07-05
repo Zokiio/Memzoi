@@ -2,13 +2,13 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 use uuid::Uuid;
 
 use crate::events::{AppendEvent, append_event, now_utc};
 use crate::models::{MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalStatus {
     Pending,
@@ -26,6 +26,46 @@ impl ProposalStatus {
             Self::Approved => "approved",
             Self::Rejected => "rejected",
             Self::Applied => "applied",
+        }
+    }
+
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Pending | Self::Validated | Self::Approved)
+    }
+}
+
+impl FromStr for ProposalStatus {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "validated" => Ok(Self::Validated),
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            "applied" => Ok(Self::Applied),
+            other => bail!(
+                "invalid proposal status {other:?}; expected open, pending, validated, approved, rejected, applied, or all"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalStatusFilter {
+    Open,
+    Status(ProposalStatus),
+    All,
+}
+
+impl FromStr for ProposalStatusFilter {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "open" => Ok(Self::Open),
+            "all" => Ok(Self::All),
+            status => Ok(Self::Status(status.parse()?)),
         }
     }
 }
@@ -96,6 +136,59 @@ pub fn propose_memory(conn: &Connection, actor: &str, draft: MemoryDraft) -> Res
         },
     )?;
     load_proposal(conn, &id)
+}
+
+pub fn list_proposals(conn: &Connection, filter: ProposalStatusFilter) -> Result<Vec<Proposal>> {
+    let mut stmt = match filter {
+        ProposalStatusFilter::Open => conn.prepare(
+            "SELECT id, operation, payload_json, status, actor, validation_json, created_at, updated_at
+             FROM proposal
+             WHERE status IN ('pending', 'validated', 'approved')
+             ORDER BY created_at ASC, id ASC",
+        )?,
+        ProposalStatusFilter::Status(_) => conn.prepare(
+            "SELECT id, operation, payload_json, status, actor, validation_json, created_at, updated_at
+             FROM proposal
+             WHERE status = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?,
+        ProposalStatusFilter::All => conn.prepare(
+            "SELECT id, operation, payload_json, status, actor, validation_json, created_at, updated_at
+             FROM proposal
+             ORDER BY created_at ASC, id ASC",
+        )?,
+    };
+    let rows = match filter {
+        ProposalStatusFilter::Status(status) => stmt
+            .query_map(params![status.as_str()], proposal_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+        ProposalStatusFilter::Open | ProposalStatusFilter::All => stmt
+            .query_map([], proposal_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+    };
+    rows.into_iter().map(proposal_from_row).collect()
+}
+
+pub fn load_proposal_public(conn: &Connection, id: &str) -> Result<Proposal> {
+    load_proposal(conn, id)
+}
+
+pub fn open_proposal_counts(conn: &Connection) -> Result<BTreeMap<ProposalStatus, usize>> {
+    let mut stmt = conn.prepare(
+        "SELECT status, COUNT(*)
+         FROM proposal
+         WHERE status IN ('pending', 'validated', 'approved')
+         GROUP BY status",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        let (status, count) = row?;
+        counts.insert(parse_proposal_status(&status)?, count as usize);
+    }
+    Ok(counts)
 }
 
 pub fn validate_proposal(conn: &Connection, proposal_id: &str) -> Result<ValidationResult> {
@@ -260,30 +353,44 @@ fn validate_draft_shape(draft: &MemoryDraft) -> Result<()> {
     Ok(())
 }
 
+type ProposalRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+);
+
 fn load_proposal(conn: &Connection, id: &str) -> Result<Proposal> {
     let row = conn
         .query_row(
             "SELECT id, operation, payload_json, status, actor, validation_json, created_at, updated_at
              FROM proposal WHERE id = ?1",
             [id],
-            |row| {
-                let payload_json: String = row.get(2)?;
-                let status: String = row.get(3)?;
-                let validation_json: Option<String> = row.get(5)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    payload_json,
-                    status,
-                    row.get::<_, String>(4)?,
-                    validation_json,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                ))
-            },
+            proposal_row,
         )
         .optional()?
         .with_context(|| format!("proposal not found: {id}"))?;
+    proposal_from_row(row)
+}
+
+fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProposalRow> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, String>(4)?,
+        row.get::<_, Option<String>>(5)?,
+        row.get::<_, String>(6)?,
+        row.get::<_, String>(7)?,
+    ))
+}
+
+fn proposal_from_row(row: ProposalRow) -> Result<Proposal> {
     Ok(Proposal {
         id: row.0,
         operation: row.1,
@@ -439,16 +546,9 @@ fn title_to_concept_id(title: &str) -> String {
 }
 
 fn parse_proposal_status(value: &str) -> rusqlite::Result<ProposalStatus> {
-    match value {
-        "pending" => Ok(ProposalStatus::Pending),
-        "validated" => Ok(ProposalStatus::Validated),
-        "approved" => Ok(ProposalStatus::Approved),
-        "rejected" => Ok(ProposalStatus::Rejected),
-        "applied" => Ok(ProposalStatus::Applied),
-        other => Err(rusqlite::Error::InvalidParameterName(format!(
-            "invalid proposal status: {other}"
-        ))),
-    }
+    value.parse().map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("invalid proposal status: {value}"))
+    })
 }
 
 fn parse_memory_type(value: &str) -> rusqlite::Result<MemoryType> {
@@ -484,8 +584,9 @@ mod tests {
         models::{MemoryStatus, MemoryType, ScopeKind, Visibility},
         open_database,
         proposals::{
-            MemoryDraft, ProposalStatus, apply_proposal, approve_proposal, load_proposal,
-            propose_memory, reject_proposal, supersede_record, tombstone_record, validate_proposal,
+            MemoryDraft, ProposalStatus, ProposalStatusFilter, apply_proposal, approve_proposal,
+            list_proposals, load_proposal, open_proposal_counts, propose_memory, reject_proposal,
+            supersede_record, tombstone_record, validate_proposal,
         },
     };
 
@@ -645,6 +746,132 @@ mod tests {
     }
 
     #[test]
+    fn proposal_inbox_filters_order_counts_and_missing_show_errors() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        let pending = propose_memory(
+            &conn,
+            "agent:red-tests",
+            sample_memory_draft("Pending inbox proposal"),
+        )?;
+        let validated = propose_memory(
+            &conn,
+            "agent:red-tests",
+            sample_memory_draft("Validated inbox proposal"),
+        )?;
+        let approved = propose_memory(
+            &conn,
+            "agent:red-tests",
+            sample_memory_draft("Approved inbox proposal"),
+        )?;
+        let rejected = propose_memory(
+            &conn,
+            "agent:red-tests",
+            sample_memory_draft("Rejected inbox proposal"),
+        )?;
+        let applied = propose_memory(
+            &conn,
+            "agent:red-tests",
+            sample_memory_draft("Applied inbox proposal"),
+        )?;
+
+        set_proposal_fixture_status(
+            &conn,
+            pending.id.as_str(),
+            ProposalStatus::Pending,
+            "2026-07-05T00:00:01Z",
+        )?;
+        set_proposal_fixture_status(
+            &conn,
+            validated.id.as_str(),
+            ProposalStatus::Validated,
+            "2026-07-05T00:00:02Z",
+        )?;
+        approve_proposal(&conn, approved.id.as_str(), "reviewer:human")?;
+        set_proposal_fixture_status(
+            &conn,
+            approved.id.as_str(),
+            ProposalStatus::Approved,
+            "2026-07-05T00:00:03Z",
+        )?;
+        reject_proposal(
+            &conn,
+            rejected.id.as_str(),
+            "reviewer:human",
+            "not supported",
+        )?;
+        set_proposal_fixture_status(
+            &conn,
+            rejected.id.as_str(),
+            ProposalStatus::Rejected,
+            "2026-07-05T00:00:04Z",
+        )?;
+        approve_proposal(&conn, applied.id.as_str(), "reviewer:human")?;
+        apply_proposal(&conn, applied.id.as_str(), "agent:applier")?;
+        set_proposal_fixture_status(
+            &conn,
+            applied.id.as_str(),
+            ProposalStatus::Applied,
+            "2026-07-05T00:00:05Z",
+        )?;
+
+        let open = list_proposals(&conn, ProposalStatusFilter::Open)?;
+        assert_eq!(
+            open.iter()
+                .map(|proposal| (proposal.id.as_str(), proposal.status))
+                .collect::<Vec<_>>(),
+            vec![
+                (pending.id.as_str(), ProposalStatus::Pending),
+                (validated.id.as_str(), ProposalStatus::Validated),
+                (approved.id.as_str(), ProposalStatus::Approved),
+            ]
+        );
+
+        let all = list_proposals(&conn, ProposalStatusFilter::All)?;
+        assert_eq!(
+            all.iter()
+                .map(|proposal| proposal.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                pending.id.as_str(),
+                validated.id.as_str(),
+                approved.id.as_str(),
+                rejected.id.as_str(),
+                applied.id.as_str(),
+            ]
+        );
+
+        let approved_only = list_proposals(
+            &conn,
+            ProposalStatusFilter::Status(ProposalStatus::Approved),
+        )?;
+        assert_eq!(
+            approved_only
+                .iter()
+                .map(|proposal| proposal.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![approved.id.as_str()]
+        );
+
+        let counts = open_proposal_counts(&conn)?;
+        assert_eq!(counts.get(&ProposalStatus::Pending), Some(&1));
+        assert_eq!(counts.get(&ProposalStatus::Validated), Some(&1));
+        assert_eq!(counts.get(&ProposalStatus::Approved), Some(&1));
+        assert_eq!(counts.get(&ProposalStatus::Rejected), None);
+        assert_eq!(counts.get(&ProposalStatus::Applied), None);
+
+        let error = load_proposal(&conn, "prop_missing")
+            .expect_err("missing proposal lookup should explain what was not found");
+        assert!(
+            error
+                .to_string()
+                .contains("proposal not found: prop_missing"),
+            "missing proposal error should include the requested id: {error:#}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn supersede_and_tombstone_update_current_state_and_append_events() -> anyhow::Result<()> {
         let (_temp, conn) = initialized_database()?;
         let proposal = propose_memory(
@@ -698,6 +925,21 @@ mod tests {
             ]
         );
 
+        Ok(())
+    }
+
+    fn set_proposal_fixture_status(
+        conn: &rusqlite::Connection,
+        proposal_id: &str,
+        status: ProposalStatus,
+        created_at: &str,
+    ) -> anyhow::Result<()> {
+        conn.execute(
+            "UPDATE proposal
+             SET status = ?1, created_at = ?2, updated_at = ?2
+             WHERE id = ?3",
+            rusqlite::params![status.as_str(), created_at, proposal_id],
+        )?;
         Ok(())
     }
 

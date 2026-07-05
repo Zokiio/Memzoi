@@ -41,6 +41,12 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "cli")]
         actor: String,
         #[arg(long)]
+        manual: bool,
+        #[arg(long = "auto-approve")]
+        auto_approve: bool,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
         json: bool,
     },
 
@@ -71,6 +77,12 @@ pub(crate) enum Commands {
         actor: String,
         #[arg(long)]
         json: bool,
+    },
+
+    /// Inspect and apply proposal inbox state.
+    Proposals {
+        #[command(subcommand)]
+        command: ProposalCommands,
     },
 
     /// Supersede an active memory record with new content.
@@ -187,6 +199,34 @@ pub(crate) enum Commands {
     Integrate {
         #[command(subcommand)]
         command: IntegrateCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProposalCommands {
+    /// List proposals by status.
+    List {
+        #[arg(long, default_value = "open")]
+        status: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show one proposal.
+    Show {
+        proposal_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Apply all approved proposals.
+    Apply {
+        #[arg(long = "all-approved")]
+        all_approved: bool,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 

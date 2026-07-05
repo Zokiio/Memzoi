@@ -5,11 +5,12 @@ title: Exports and Files
 # Exports and Files
 
 Memzoi keeps canonical authored memory under repo `.memzoi/records/` and keeps runtime state under
-`~/.memzoi/projects/<project-key>/`. Current proposals are DB-local pending state until file-backed
-`.memzoi/proposals/` lands in a later slice. Rebuild restores approved records from canonical files
-and refuses to discard readable open DB-local proposals. If the runtime database is corrupt or
-unreadable, rebuild treats it as a disposable derived cache and may discard DB-local proposal state.
-See the [OKF profile](./okf-profile.md) for the file-native source layout.
+`~/.memzoi/projects/<project-key>/`. Current proposals are DB-local workflow state until file-backed
+`.memzoi/proposals/` lands in a later slice. Valid proposals default to `approved`, but approved is
+not applied: canonical record files are written only by explicit CLI apply flows. Rebuild restores
+records from canonical files and refuses to discard readable open DB-local proposals. If the runtime
+database is corrupt or unreadable, rebuild treats it as a disposable derived cache and may discard
+DB-local proposal state. See the [OKF profile](./okf-profile.md) for the file-native source layout.
 
 ## Bundle layout
 
@@ -17,30 +18,49 @@ After `memzoi init`, the repo-local memory directory contains:
 
 ```text
 .memzoi/
+  config.toml        # optional repo workflow policy
   index.md
   records/
 ```
 
-The local runtime directory contains generated state:
+The local Memzoi home can contain user-global workflow policy and generated project state:
 
 ```text
-~/.memzoi/projects/<project-key>/
-  config.toml
-  memory.db
-  exports/
+~/.memzoi/
+  config.toml        # optional user-global workflow policy
+  projects/<project-key>/
+    config.toml      # runtime project config, not workflow policy
+    memory.db
+    exports/
 ```
 
-The default runtime config is:
+Workflow policy config is separate from the runtime project config. Effective proposal approval mode is resolved in this order:
+
+1. Built-in default: `auto`.
+2. User-global `${MEMZOI_HOME:-~/.memzoi}/config.toml`.
+3. Repo `.memzoi/config.toml`.
+4. CLI or MCP per-call override.
 
 ```toml
-version = 1
-scope_kind = "repo"
-
-[exports]
-okf = "exports/okf"
-agents_md = "exports/AGENTS.memory.md"
-claude_md = "exports/CLAUDE.memory.md"
+[workflow]
+proposal_approval = "manual" # or "auto"
 ```
+
+The runtime project config under `~/.memzoi/projects/<project-key>/config.toml` controls generated paths such as exports; it is not the repo/user workflow policy file.
+
+## Proposal inbox and rebuild
+
+Open proposals are `pending`, `validated`, or `approved`. Use the inbox commands to inspect and close them before rebuilding:
+
+```bash
+memzoi proposals list --status open
+memzoi proposals show <proposal-id>
+memzoi proposals apply --all-approved
+memzoi reject <proposal-id> --reason "not durable repo knowledge"
+memzoi rebuild
+```
+
+`memzoi propose --manual` keeps one proposal pending. `memzoi propose --apply` is a CLI-only shortcut that writes a canonical record after approval. MCP proposal calls can auto-approve or stay manual, but MCP never applies.
 
 ## Export formats
 
@@ -79,9 +99,8 @@ They intentionally skip background fact records that are useful for search but t
 
 ## Generated file policy
 
-Recommended defaults:
-
 - Commit `.memzoi/records/*` when the records are durable repo knowledge.
+- Commit `.memzoi/config.toml` only when the repo intentionally overrides workflow policy.
 - Do not commit runtime `memory.db`; it lives under the local Memzoi home directory.
 - Keep generated runtime exports out of Git unless explicitly copied into reviewed agent instructions.
 - Regenerate exports after memory lifecycle changes with `memzoi export agents-md`, `memzoi export claude-md`, or `memzoi export okf`.

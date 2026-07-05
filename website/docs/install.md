@@ -33,10 +33,11 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zok
 
 By default, the install script downloads the latest GitHub release binary, verifies its SHA-256 checksum, and installs into `~/.local/bin` on Mac/Linux. On Windows, it installs under `%LOCALAPPDATA%\Programs\Memzoi\bin` and updates the user `Path`.
 
-Install a pinned release:
+Install a pinned release by tag. Replace `vX.Y.Z` with a tag from the
+[latest GitHub release](https://github.com/Zokiio/Memzoi/releases/latest):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh | MEMZOI_REF=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh | MEMZOI_REF=vX.Y.Z sh
 ```
 
 Set `MEMZOI_REF=main` to install from the current main branch instead; that source install path requires Cargo.

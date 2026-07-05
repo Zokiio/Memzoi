@@ -15,7 +15,10 @@ mod service;
 #[cfg(test)]
 pub(crate) use db::{init_database, open_database};
 
-pub use config::{MemoryPaths, discover_paths};
+pub use config::{
+    ConfigSource, ConfigSources, EffectiveConfig, MemoryPaths, ProposalApprovalPolicy,
+    WorkflowConfig, discover_paths, load_effective_config, runtime_home, user_config_path,
+};
 pub use context::ContextPackInput;
 pub use error::{CoreError, Result};
 pub use models::{
@@ -29,10 +32,12 @@ pub use okf::{
 };
 pub use precheck::PrecheckInput;
 pub use proposals::{
-    MemoryDraft, Proposal, ProposalStatus, SupersedeResult, ValidationIssue, ValidationResult,
+    MemoryDraft, Proposal, ProposalStatus, ProposalStatusFilter, SupersedeResult, ValidationIssue,
+    ValidationResult,
 };
 pub use search::SearchInput;
 pub use service::{
     ExportFormat, ExportInput, ExportResult, InitBundleResult, InitRequest, InitResult,
-    MemoryService, RebuildResult, init_bundle,
+    MemoryService, ProposalApprovalOverride, ProposeOptions, ProposeResult, RebuildResult,
+    init_bundle,
 };

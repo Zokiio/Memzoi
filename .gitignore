@@ -12,6 +12,7 @@ build/
 .research/
 /target/
 .memzoi/*
+!.memzoi/config.toml
 !.memzoi/index.md
 !.memzoi/log.md
 !.memzoi/records/

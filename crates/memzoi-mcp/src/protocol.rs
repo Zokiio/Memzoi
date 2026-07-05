@@ -2,8 +2,8 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
-    ContextPackInput, MemoryDraft, MemoryService, MemoryType, PrecheckInput, ScopeKind,
-    SearchInput, Visibility,
+    ContextPackInput, MemoryDraft, MemoryService, MemoryType, PrecheckInput,
+    ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, Visibility,
 };
 use serde_json::{Value, json};
 
@@ -150,7 +150,7 @@ fn tools_list_result() -> Value {
             ),
             tool_schema(
                 "propose_memory",
-                "Create a pending memory proposal. Does not approve or apply it.",
+                "Create a memory proposal under the effective approval policy. Never applies canonical records.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -166,7 +166,12 @@ fn tools_list_result() -> Value {
                         "source_kind": { "type": "string" },
                         "source_ref": { "type": "string" },
                         "confidence": { "type": "number" },
-                        "actor": { "type": "string" }
+                        "actor": { "type": "string" },
+                        "approval_mode": {
+                            "type": "string",
+                            "enum": ["auto", "manual"],
+                            "description": "Override the effective proposal approval policy for this proposal. MCP cannot apply records."
+                        }
                     },
                     "required": ["title", "body"]
                 })
@@ -238,10 +243,7 @@ fn tools_call(service: &MemoryService, params: Value) -> Result<Value> {
         "build_context_pack" => {
             serde_json::to_value(service.build_context_pack(context_input(&arguments)?)?)?
         }
-        "propose_memory" => serde_json::to_value(service.propose_memory(
-            optional_str(&arguments, "actor").unwrap_or(DEFAULT_ACTOR),
-            memory_draft(&arguments)?,
-        )?)?,
+        "propose_memory" => propose_memory_output(service, &arguments)?,
         "precheck_path" => json!({
             "warnings": service.precheck(PrecheckInput {
                 path: Some(required_str(&arguments, "path")?.to_owned()),
@@ -304,6 +306,34 @@ fn context_input(arguments: &Value) -> Result<ContextPackInput> {
     })
 }
 
+fn propose_memory_output(service: &MemoryService, arguments: &Value) -> Result<Value> {
+    if arguments.get("apply").is_some() || arguments.get("auto_apply").is_some() {
+        bail!("MCP propose_memory cannot apply canonical records; use the CLI apply workflow");
+    }
+
+    let result = service.propose_memory_with_options(
+        optional_str(arguments, "actor").unwrap_or(DEFAULT_ACTOR),
+        memory_draft(arguments)?,
+        ProposeOptions {
+            approval_override: optional_approval_override(arguments)?,
+            apply: false,
+        },
+    )?;
+    let proposal_id = result.proposal.id.clone();
+    let status = result.proposal.status;
+    let validation = result
+        .validation
+        .or_else(|| result.proposal.validation.clone());
+
+    Ok(json!({
+        "proposal": result.proposal,
+        "proposal_id": proposal_id,
+        "status": status,
+        "validation": validation,
+        "applied": false,
+    }))
+}
+
 fn memory_draft(arguments: &Value) -> Result<MemoryDraft> {
     Ok(MemoryDraft {
         memory_type: optional_memory_type(arguments)?.unwrap_or(MemoryType::Fact),
@@ -355,6 +385,15 @@ fn optional_visibility(value: &Value) -> Result<Option<Visibility>> {
         .map(str::parse)
         .transpose()
         .map_err(|error: String| anyhow!(error))
+}
+
+fn optional_approval_override(value: &Value) -> Result<Option<ProposalApprovalOverride>> {
+    match optional_str(value, "approval_mode") {
+        Some("auto") => Ok(Some(ProposalApprovalOverride::Auto)),
+        Some("manual") => Ok(Some(ProposalApprovalOverride::Manual)),
+        Some(_) => bail!("invalid approval_mode: expected \"auto\" or \"manual\""),
+        None => Ok(None),
+    }
 }
 
 fn optional_usize(value: &Value, key: &str) -> Result<Option<usize>> {
@@ -413,7 +452,7 @@ fn jsonrpc_error(id: Value, code: i64, message: String) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, fs};
 
     use memzoi_core::InitRequest;
     use serde_json::{Value, json};
@@ -545,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn propose_memory_tool_creates_pending_proposal_result() {
+    fn propose_memory_tool_defaults_to_approved_result() {
         let (_temp, service) = test_service();
 
         let response = response(
@@ -570,6 +609,7 @@ mod tests {
 
         let result = &response["result"];
         let structured = &result["structuredContent"];
+        let proposal = &structured["proposal"];
         let content = result["content"].as_array().unwrap();
         let text_value: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
 
@@ -577,21 +617,147 @@ mod tests {
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(text_value, *structured);
-        assert!(structured["id"].as_str().unwrap().starts_with("prop_"));
-        assert_eq!(structured["operation"], "create");
-        assert_eq!(structured["status"], "pending");
-        assert_eq!(structured["actor"], "mcp-smoke");
-        assert_eq!(structured["payload"]["memory_type"], "decision");
-        assert_eq!(structured["payload"]["scope_kind"], "repo");
-        assert_eq!(structured["payload"]["visibility"], "repo");
-        assert_eq!(
-            structured["payload"]["title"],
-            "Keep MCP smoke tests focused"
+        assert!(
+            structured["proposal_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("prop_")
         );
+        assert_eq!(structured["proposal_id"], proposal["id"]);
+        assert_eq!(structured["status"], "approved");
+        assert_eq!(structured["applied"], false);
+        assert_eq!(structured["validation"]["is_valid"], true);
+        assert_eq!(proposal["operation"], "create");
+        assert_eq!(proposal["status"], "approved");
+        assert_eq!(proposal["actor"], "mcp-smoke");
+        assert_eq!(proposal["payload"]["memory_type"], "decision");
+        assert_eq!(proposal["payload"]["scope_kind"], "repo");
+        assert_eq!(proposal["payload"]["visibility"], "repo");
+        assert_eq!(proposal["payload"]["title"], "Keep MCP smoke tests focused");
         assert_eq!(
-            structured["payload"]["body"],
+            proposal["payload"]["body"],
             "MCP smoke tests cover the JSON-RPC tool contract."
         );
+    }
+
+    #[test]
+    fn propose_memory_tool_manual_override_returns_pending() {
+        let (_temp, service) = test_service();
+
+        let response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "manual-propose",
+                "method": "tools/call",
+                "params": {
+                    "name": "propose_memory",
+                    "arguments": {
+                        "title": "Manual MCP proposal",
+                        "body": "Manual approval keeps this MCP proposal pending.",
+                        "approval_mode": "manual"
+                    }
+                }
+            }),
+        );
+
+        let structured = &response["result"]["structuredContent"];
+        assert_eq!(structured["status"], "pending");
+        assert_eq!(structured["proposal"]["status"], "pending");
+        assert_eq!(structured["validation"], Value::Null);
+        assert_eq!(structured["applied"], false);
+    }
+
+    #[test]
+    fn propose_memory_tool_auto_override_returns_approved() {
+        let (_temp, service) = test_service();
+
+        let response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "auto-propose",
+                "method": "tools/call",
+                "params": {
+                    "name": "propose_memory",
+                    "arguments": {
+                        "title": "Auto MCP proposal",
+                        "body": "Auto approval approves this MCP proposal without applying it.",
+                        "approval_mode": "auto"
+                    }
+                }
+            }),
+        );
+
+        let structured = &response["result"]["structuredContent"];
+        assert_eq!(structured["status"], "approved");
+        assert_eq!(structured["proposal"]["status"], "approved");
+        assert_eq!(structured["validation"]["is_valid"], true);
+        assert_eq!(structured["applied"], false);
+    }
+
+    #[test]
+    fn propose_memory_tool_rejects_invalid_approval_mode() {
+        let (_temp, service) = test_service();
+
+        let response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "bad-approval-mode",
+                "method": "tools/call",
+                "params": {
+                    "name": "propose_memory",
+                    "arguments": {
+                        "title": "Bad MCP proposal",
+                        "body": "Invalid approval mode should fail before proposal creation.",
+                        "approval_mode": "sometimes"
+                    }
+                }
+            }),
+        );
+
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(
+            response["error"]["message"],
+            "invalid approval_mode: expected \"auto\" or \"manual\""
+        );
+    }
+
+    #[test]
+    fn propose_memory_tool_rejects_apply_like_arguments() {
+        let (temp, service) = test_service();
+
+        for apply_argument in ["apply", "auto_apply"] {
+            let mut arguments = json!({
+                "title": "Unsafe MCP proposal",
+                "body": "MCP must reject apply-like arguments."
+            });
+            arguments[apply_argument] = json!(true);
+
+            let response = response(
+                &service,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": apply_argument,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "propose_memory",
+                        "arguments": arguments
+                    }
+                }),
+            );
+
+            assert_eq!(response["error"]["code"], -32602);
+            assert_eq!(
+                response["error"]["message"],
+                "MCP propose_memory cannot apply canonical records; use the CLI apply workflow"
+            );
+        }
+
+        let records_dir = temp.path().join(".memzoi/records");
+        let record_files = fs::read_dir(records_dir).unwrap().count();
+        assert_eq!(record_files, 0);
     }
 
     #[test]

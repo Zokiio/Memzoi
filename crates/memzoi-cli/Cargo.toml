@@ -16,7 +16,7 @@ name = "memzoi"
 path = "src/main.rs"
 
 [dependencies]
-memzoi-core = { version = "0.1.0", path = "../memzoi-core" }
+memzoi-core = { version = "0.1.1", path = "../memzoi-core" }
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true

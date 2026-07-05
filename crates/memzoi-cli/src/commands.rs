@@ -3,13 +3,14 @@ use std::{path::PathBuf, process::Command};
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
     ContextPackInput, ExportFormat, ExportInput, InitRequest, MemoryDraft, MemoryService,
-    MemoryType, PrecheckInput, ScopeKind, SearchInput, Visibility, discover_paths,
+    MemoryType, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalStatus,
+    ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, Visibility, discover_paths,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 use crate::{
-    cli::{Cli, Commands, DraftCommand, IntegrateCommands, McpCommands},
+    cli::{Cli, Commands, DraftCommand, IntegrateCommands, McpCommands, ProposalCommands},
     integrate, mcp,
     output::print_json,
 };
@@ -24,14 +25,24 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             title,
             body,
             actor,
+            manual,
+            auto_approve,
+            apply,
             json,
         } => propose_command(
-            &memory_type,
-            &scope_kind,
-            &visibility,
-            title,
-            body,
+            DraftCommand {
+                memory_type,
+                scope_kind,
+                visibility,
+                title,
+                body,
+            },
             &actor,
+            ProposeFlags {
+                manual,
+                auto_approve,
+                apply,
+            },
             json,
         ),
         Commands::Approve {
@@ -50,6 +61,17 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             actor,
             json,
         } => apply_command(&proposal_id, &actor, json),
+        Commands::Proposals { command } => match command {
+            ProposalCommands::List { status, json } => proposals_list_command(&status, json),
+            ProposalCommands::Show { proposal_id, json } => {
+                proposals_show_command(&proposal_id, json)
+            }
+            ProposalCommands::Apply {
+                all_approved,
+                actor,
+                json,
+            } => proposals_apply_command(all_approved, &actor, json),
+        },
         Commands::Supersede {
             record_id,
             memory_type,
@@ -146,25 +168,79 @@ fn init_command(force: bool, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProposeFlags {
+    manual: bool,
+    auto_approve: bool,
+    apply: bool,
+}
+
 fn propose_command(
-    memory_type: &str,
-    scope_kind: &str,
-    visibility: &str,
-    title: String,
-    body: String,
+    draft_args: DraftCommand,
     actor: &str,
+    flags: ProposeFlags,
     as_json: bool,
 ) -> Result<()> {
+    if flags.manual && flags.auto_approve {
+        bail!("--manual and --auto-approve cannot be used together");
+    }
+    if flags.manual && flags.apply {
+        bail!("--apply is incompatible with --manual");
+    }
+
     let service = open_service()?;
-    let draft = draft_from_args(memory_type, scope_kind, visibility, title, body)?;
-    let proposal = service.propose_memory(actor, draft)?;
+    let draft = draft_from_args(
+        &draft_args.memory_type,
+        &draft_args.scope_kind,
+        &draft_args.visibility,
+        draft_args.title,
+        draft_args.body,
+    )?;
+    let approval_override = match (flags.manual, flags.auto_approve || flags.apply) {
+        (true, false) => Some(ProposalApprovalOverride::Manual),
+        (false, true) => Some(ProposalApprovalOverride::Auto),
+        (false, false) => None,
+        (true, true) => unreachable!("manual/auto conflict is checked above"),
+    };
+    let result = service.propose_memory_with_options(
+        actor,
+        draft,
+        ProposeOptions {
+            approval_override,
+            apply: flags.apply,
+        },
+    )?;
     if as_json {
+        let record_id = result.record.as_ref().map(|record| record.id.as_str());
+        let record_status = result.record.as_ref().map(|record| record.status.as_str());
         print_json(&json!({
-            "proposal_id": proposal.id,
-            "status": proposal.status.as_str(),
+            "proposal_id": result.proposal.id,
+            "status": result.proposal.status.as_str(),
+            "record_id": record_id,
+            "record_status": record_status,
+            "validation": result.validation,
+            "applied": result.applied,
         }))
     } else {
-        println!("proposed memory {}", proposal.id);
+        if let Some(record) = result.record {
+            println!(
+                "applied proposal {} as memory {}",
+                result.proposal.id, record.id
+            );
+        } else if result.proposal.status == ProposalStatus::Approved {
+            println!("approved proposal {}", result.proposal.id);
+        } else {
+            println!(
+                "created {} proposal {}",
+                result.proposal.status.as_str(),
+                result.proposal.id
+            );
+        }
+        if let Some(validation) = result.validation {
+            for issue in validation.issues {
+                println!("validation\t{}\t{}", issue.code, issue.message);
+            }
+        }
         Ok(())
     }
 }
@@ -210,6 +286,122 @@ fn apply_command(proposal_id: &str, actor: &str, as_json: bool) -> Result<()> {
         println!("applied proposal {proposal_id} as memory {}", record.id);
         Ok(())
     }
+}
+
+fn proposals_list_command(status: &str, as_json: bool) -> Result<()> {
+    let service = open_service()?;
+    let filter: ProposalStatusFilter = status.parse()?;
+    let proposals = service.list_proposals(filter)?;
+    if as_json {
+        let proposals = proposals.iter().map(proposal_json).collect::<Vec<_>>();
+        print_json(&json!({
+            "status": status,
+            "proposals": proposals,
+        }))
+    } else {
+        for proposal in proposals {
+            println!(
+                "{}\t{}\t{}",
+                proposal.status.as_str(),
+                proposal.id,
+                proposal.payload.title
+            );
+        }
+        Ok(())
+    }
+}
+
+fn proposals_show_command(proposal_id: &str, as_json: bool) -> Result<()> {
+    let service = open_service()?;
+    let proposal = service.show_proposal(proposal_id)?;
+    if as_json {
+        print_json(&proposal_json(&proposal))
+    } else {
+        println!("id:\t{}", proposal.id);
+        println!("status:\t{}", proposal.status.as_str());
+        println!("actor:\t{}", proposal.actor);
+        println!("created:\t{}", proposal.created_at);
+        println!("updated:\t{}", proposal.updated_at);
+        println!("title:\t{}", proposal.payload.title);
+        println!("body:\t{}", proposal.payload.body);
+        if let Some(validation) = proposal.validation {
+            println!(
+                "validation:\t{}",
+                if validation.is_valid {
+                    "valid"
+                } else {
+                    "invalid"
+                }
+            );
+            for issue in validation.issues {
+                println!("validation_issue:\t{}\t{}", issue.code, issue.message);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn proposals_apply_command(all_approved: bool, actor: &str, as_json: bool) -> Result<()> {
+    if !all_approved {
+        bail!("proposals apply requires --all-approved");
+    }
+
+    let service = open_service()?;
+    let approved =
+        service.list_proposals(ProposalStatusFilter::Status(ProposalStatus::Approved))?;
+    let mut applied = Vec::new();
+    let mut failed = None;
+    for proposal in approved {
+        match service.apply_proposal(&proposal.id, actor) {
+            Ok(record) => {
+                if !as_json {
+                    println!("applied proposal {} as memory {}", proposal.id, record.id);
+                }
+                applied.push(json!({
+                    "proposal_id": proposal.id,
+                    "record_id": record.id,
+                }));
+            }
+            Err(error) => {
+                failed = Some(json!({
+                    "proposal_id": proposal.id,
+                    "error": error.to_string(),
+                }));
+                break;
+            }
+        }
+    }
+
+    let remaining_open_count: usize = service.open_proposal_counts()?.values().sum();
+    if as_json {
+        print_json(&json!({
+            "applied": applied,
+            "failed": failed,
+            "remaining_open_count": remaining_open_count,
+        }))?;
+    }
+    if let Some(failed) = failed {
+        bail!(
+            "failed to apply proposal {}: {}",
+            failed["proposal_id"].as_str().unwrap_or("unknown"),
+            failed["error"].as_str().unwrap_or("unknown error")
+        );
+    }
+    Ok(())
+}
+
+fn proposal_json(proposal: &Proposal) -> serde_json::Value {
+    json!({
+        "id": proposal.id,
+        "proposal_id": proposal.id,
+        "operation": proposal.operation,
+        "status": proposal.status.as_str(),
+        "actor": proposal.actor,
+        "created_at": proposal.created_at,
+        "updated_at": proposal.updated_at,
+        "payload": proposal.payload,
+        "validation": proposal.validation,
+    })
 }
 
 fn supersede_command(
@@ -438,16 +630,25 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         push_next_step(&mut next_steps, "memzoi init");
     }
 
-    if paths.db_path.is_file() {
+    let schema_is_ready = if paths.db_path.is_file() {
         checks.push(check("database", "ok", paths.db_path.display().to_string()));
         match schema_ready(&paths.db_path) {
-            Ok(true) => checks.push(check("schema", "ok", "memory schema is initialized")),
-            Ok(false) => checks.push(check(
-                "schema",
-                "warning",
-                "memory schema is missing tables",
-            )),
-            Err(error) => checks.push(check("schema", "warning", error.to_string())),
+            Ok(true) => {
+                checks.push(check("schema", "ok", "memory schema is initialized"));
+                true
+            }
+            Ok(false) => {
+                checks.push(check(
+                    "schema",
+                    "warning",
+                    "memory schema is missing tables",
+                ));
+                false
+            }
+            Err(error) => {
+                checks.push(check("schema", "warning", error.to_string()));
+                false
+            }
         }
     } else {
         checks.push(check(
@@ -456,6 +657,39 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
             format!("{} missing", paths.db_path.display()),
         ));
         checks.push(check("schema", "skip", "database missing; run init first"));
+        false
+    };
+
+    if paths.db_path.is_file() && schema_is_ready {
+        match MemoryService::open_paths(paths.clone())
+            .and_then(|service| service.open_proposal_counts())
+        {
+            Ok(counts) => {
+                let total: usize = counts.values().sum();
+                if total == 0 {
+                    checks.push(check("proposals", "ok", "no open proposals"));
+                } else {
+                    let parts = counts
+                        .iter()
+                        .filter(|(_, count)| **count > 0)
+                        .map(|(status, count)| format!("{}={count}", status.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    checks.push(check(
+                        "proposals",
+                        "warning",
+                        format!("{total} open proposals ({parts})"),
+                    ));
+                    push_next_step(&mut next_steps, "memzoi proposals list --status open");
+                    push_next_step(&mut next_steps, "memzoi proposals apply --all-approved");
+                    push_next_step(
+                        &mut next_steps,
+                        "memzoi reject <proposal-id> --reason \"...\"",
+                    );
+                }
+            }
+            Err(error) => checks.push(check("proposals", "warning", error.to_string())),
+        }
     }
 
     if paths.exports_dir.is_dir() {

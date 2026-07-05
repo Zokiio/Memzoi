@@ -4,7 +4,15 @@ title: MCP and Agent Integration
 
 # MCP and Agent Integration
 
-Memzoi ships a minimal stdio MCP server for safe agent access. Agents can search, build context, propose memory, and run prechecks, but they cannot approve or apply proposals through MCP.
+Memzoi ships a minimal stdio MCP server for safe agent access. Agents can search, build context, propose memory, and run prechecks, but they cannot approve, reject, apply, supersede, tombstone, or export through MCP.
+
+MCP proposals follow the effective proposal approval policy:
+
+- Built-in default is `auto`, so valid proposals return `approved`.
+- `approved` is not `applied`; no canonical `.memzoi/records/*.md` file is written by MCP.
+- A client can pass `approval_mode: "manual"` on `propose_memory` to keep that proposal `pending`.
+- A client can pass `approval_mode: "auto"` to force auto-approval for that proposal.
+- Apply-like arguments such as `apply` or `auto_apply` are rejected. Use the CLI apply workflow for durable writes.
 
 ## Generate MCP config
 
@@ -36,12 +44,45 @@ The server exposes:
 | --- | --- |
 | `search_memory` | Search active memory records by text with optional scope, type, path, and limit filters. |
 | `build_context_pack` | Build a prompt-ready context pack for a task. |
-| `propose_memory` | Create a pending memory proposal. |
+| `propose_memory` | Create a memory proposal using the effective approval policy or an `approval_mode` override. |
 | `precheck_path` | Check a path against warnings, risks, and failed attempts. |
 | `precheck_action` | Check a planned action, optionally scoped to a path. |
 | `precheck_command` | Check a planned shell command, optionally scoped to a path. |
 
-The server does not expose lifecycle mutation tools such as approve, apply, supersede, tombstone, or export. Those stay CLI-side so durable memory writes remain reviewable.
+The server does not expose lifecycle mutation tools such as approve, reject, apply, supersede, tombstone, or export. Those stay CLI-side so durable memory writes remain reviewable.
+
+## `propose_memory` contract
+
+Required arguments:
+
+- `title`
+- `body`
+
+Optional arguments:
+
+- `type` or `memory_type`
+- `scope_kind` or `scope`
+- `scope_id`
+- `visibility`
+- `tags`
+- `source_kind`
+- `source_ref`
+- `confidence`
+- `actor`
+- `approval_mode`: `"auto"` or `"manual"`
+
+Example manual proposal:
+
+```json
+{
+  "title": "Keep MCP writes reviewable",
+  "body": "MCP clients may propose memory, but durable record writes must use the CLI apply workflow.",
+  "type": "decision",
+  "approval_mode": "manual"
+}
+```
+
+Structured output includes the proposal ID, status, validation details when available, and `applied: false`. Under the built-in default policy, a valid proposal returns `status: "approved"` and `applied: false`. With `approval_mode: "manual"`, it returns `status: "pending"` and `applied: false`.
 
 ## Agent instruction prompt
 

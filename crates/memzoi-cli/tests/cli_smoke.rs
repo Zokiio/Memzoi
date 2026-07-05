@@ -119,8 +119,39 @@ fn doctor_json_reports_ready_after_init_and_warns_when_mcp_binary_is_missing() {
     assert_check_status(&doctor, "database", "ok");
     assert_check_status(&doctor, "schema", "ok");
     assert_check_status(&doctor, "exports", "ok");
+    assert_check_status(&doctor, "proposals", "ok");
     assert_check_status(&doctor, "mcp", "warning");
     assert_json_array_contains(&doctor, "next_steps", "memzoi mcp config --project-root .");
+}
+
+#[test]
+fn doctor_json_warns_about_open_proposals_and_prints_next_steps() {
+    let repo = initialized_temp_repo();
+    run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--manual",
+            "--type",
+            "decision",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Doctor should surface pending proposals",
+            "--body",
+            "Doctor must report pending proposal inbox work before destructive maintenance.",
+            "--actor",
+            "agent:cli-smoke",
+            "--json",
+        ],
+    );
+
+    let doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+
+    assert_check_status(&doctor, "proposals", "warning");
+    assert_json_array_contains_substring(&doctor, "next_steps", "memzoi proposals");
 }
 
 #[test]
@@ -362,6 +393,7 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
         repo.path(),
         &[
             "propose",
+            "--manual",
             "--type",
             "fact",
             "--scope-kind",
@@ -476,6 +508,362 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
 }
 
 #[test]
+fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record() {
+    let repo = initialized_temp_repo();
+
+    let approved = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Default proposal is approved",
+            "--body",
+            "A proposal without manual policy should be ready to apply.",
+            "--actor",
+            "agent:cli-smoke",
+            "--json",
+        ],
+    );
+    assert_eq!(json_string(&approved, "status"), "approved");
+
+    let manual = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--manual",
+            "--type",
+            "decision",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Manual proposal stays pending",
+            "--body",
+            "Manual policy must require human approval before application.",
+            "--actor",
+            "agent:cli-smoke",
+            "--json",
+        ],
+    );
+    assert_eq!(json_string(&manual, "status"), "pending");
+
+    let applied = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "procedure",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Apply approved proposal immediately",
+            "--body",
+            "The --apply flag should create an active record for an approved proposal.",
+            "--actor",
+            "agent:cli-smoke",
+            "--json",
+        ],
+    );
+    assert_eq!(json_string(&applied, "record_status"), "active");
+    assert_eq!(applied.get("applied").and_then(Value::as_bool), Some(true));
+
+    let record_id = json_string(&applied, "record_id");
+    let record_file = test_paths(repo.path())
+        .records_dir()
+        .join(format!("{record_id}.md"));
+    let record_markdown = fs::read_to_string(&record_file).unwrap_or_else(|error| {
+        panic!(
+            "--apply should write the active record file {}: {error}",
+            record_file.display()
+        )
+    });
+    assert!(
+        record_markdown.contains("# Apply approved proposal immediately"),
+        "applied record should be reviewable markdown: {record_markdown}"
+    );
+}
+
+#[test]
+fn propose_apply_implies_auto_approval_when_repo_policy_is_manual() {
+    let repo = initialized_temp_repo();
+    fs::write(
+        repo.path().join(".memzoi/config.toml"),
+        "[workflow]\nproposal_approval = \"manual\"\n",
+    )
+    .expect("write repo approval policy");
+
+    let applied = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Apply overrides manual policy",
+            "--body",
+            "The CLI --apply flag creates, approves, and applies even under repo manual policy.",
+            "--actor",
+            "agent:cli-smoke",
+            "--json",
+        ],
+    );
+
+    assert_eq!(json_string(&applied, "status"), "applied");
+    assert_eq!(json_string(&applied, "record_status"), "active");
+    assert_eq!(applied.get("applied").and_then(Value::as_bool), Some(true));
+    let record_id = json_string(&applied, "record_id");
+    assert!(
+        test_paths(repo.path())
+            .records_dir()
+            .join(format!("{record_id}.md"))
+            .is_file(),
+        "--apply under manual repo policy should write the active canonical record"
+    );
+}
+
+#[test]
+fn propose_policy_flags_reject_conflicting_combinations() {
+    let repo = initialized_temp_repo();
+
+    let mut manual_auto = memzoi();
+    manual_auto
+        .args([
+            "propose",
+            "--manual",
+            "--auto-approve",
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Conflicting policies",
+            "--body",
+            "Manual and auto approval cannot both own the same proposal.",
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("--manual").and(predicate::str::contains("--auto-approve")),
+        );
+
+    let mut manual_apply = memzoi();
+    manual_apply
+        .args([
+            "propose",
+            "--manual",
+            "--apply",
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Manual apply conflict",
+            "--body",
+            "Pending proposals must not be applied in the same command.",
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--manual").and(predicate::str::contains("--apply")));
+}
+
+#[test]
+fn proposals_list_show_and_bulk_apply_report_proposal_state() {
+    let repo = initialized_temp_repo();
+
+    let pending = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--manual",
+            "--type",
+            "warning",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Human reviews risky memory",
+            "--body",
+            "Manual proposals should appear in the proposal inbox until reviewed.",
+            "--actor",
+            "agent:cli-smoke",
+            "--json",
+        ],
+    );
+    let pending_id = json_string(&pending, "proposal_id").to_owned();
+
+    let approved_one = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Bulk apply first approved proposal",
+            "--body",
+            "Bulk apply should apply every approved proposal in the inbox.",
+            "--actor",
+            "agent:cli-smoke",
+            "--json",
+        ],
+    );
+    let approved_one_id = json_string(&approved_one, "proposal_id").to_owned();
+
+    let approved_two = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--type",
+            "decision",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Bulk apply second approved proposal",
+            "--body",
+            "Bulk apply should leave pending proposals untouched.",
+            "--actor",
+            "agent:cli-smoke",
+            "--json",
+        ],
+    );
+    let approved_two_id = json_string(&approved_two, "proposal_id").to_owned();
+
+    let pending_list = run_json_command(
+        repo.path(),
+        &["proposals", "list", "--status", "pending", "--json"],
+    );
+    let pending_proposals = proposals_from_json(&pending_list);
+    assert!(
+        pending_proposals
+            .iter()
+            .any(|proposal| proposal_id_from_value(proposal) == pending_id
+                && proposal_status(proposal) == Some("pending")),
+        "pending list should include the manual proposal: {pending_list}"
+    );
+    assert!(
+        !pending_proposals
+            .iter()
+            .any(|proposal| proposal_id_from_value(proposal) == approved_one_id),
+        "pending list should exclude approved proposals: {pending_list}"
+    );
+
+    let mut human_list = memzoi();
+    human_list
+        .args(["proposals", "list", "--status", "pending"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(pending_id.as_str())
+                .and(predicate::str::contains("pending"))
+                .and(predicate::str::contains("Human reviews risky memory")),
+        );
+
+    let shown = run_json_command(
+        repo.path(),
+        &["proposals", "show", pending_id.as_str(), "--json"],
+    );
+    assert_eq!(proposal_id_from_value(&shown), pending_id);
+    assert_eq!(proposal_status(&shown), Some("pending"));
+    assert_eq!(
+        proposal_title(&shown),
+        Some("Human reviews risky memory"),
+        "show JSON should include the proposal payload/title: {shown}"
+    );
+
+    let bulk_applied = run_json_command(
+        repo.path(),
+        &[
+            "proposals",
+            "apply",
+            "--all-approved",
+            "--actor",
+            "agent:bulk-applier",
+            "--json",
+        ],
+    );
+    let applied = applied_proposals_from_json(&bulk_applied);
+    assert!(
+        applied
+            .iter()
+            .any(|proposal| proposal_id_from_value(proposal) == approved_one_id),
+        "bulk apply should apply first approved proposal: {bulk_applied}"
+    );
+    assert!(
+        applied
+            .iter()
+            .any(|proposal| proposal_id_from_value(proposal) == approved_two_id),
+        "bulk apply should apply second approved proposal: {bulk_applied}"
+    );
+    assert!(
+        !applied
+            .iter()
+            .any(|proposal| proposal_id_from_value(proposal) == pending_id),
+        "bulk apply should not apply pending proposals: {bulk_applied}"
+    );
+
+    let applied_list = run_json_command(
+        repo.path(),
+        &["proposals", "list", "--status", "applied", "--json"],
+    );
+    let applied_proposals = proposals_from_json(&applied_list);
+    assert!(
+        applied_proposals.iter().any(|proposal| {
+            proposal_id_from_value(proposal) == approved_one_id
+                && proposal_status(proposal) == Some("applied")
+        }),
+        "first approved proposal should be listed as applied after bulk apply: {applied_list}"
+    );
+    assert!(
+        applied_proposals.iter().any(|proposal| {
+            proposal_id_from_value(proposal) == approved_two_id
+                && proposal_status(proposal) == Some("applied")
+        }),
+        "second approved proposal should be listed as applied after bulk apply: {applied_list}"
+    );
+
+    let still_pending = run_json_command(
+        repo.path(),
+        &["proposals", "list", "--status", "pending", "--json"],
+    );
+    assert!(
+        proposals_from_json(&still_pending)
+            .iter()
+            .any(|proposal| proposal_id_from_value(proposal) == pending_id),
+        "pending proposal should remain pending after bulk apply: {still_pending}"
+    );
+}
+
+#[test]
 fn reject_json_prevents_apply_from_creating_active_record() {
     let repo = initialized_temp_repo();
 
@@ -483,6 +871,7 @@ fn reject_json_prevents_apply_from_creating_active_record() {
         repo.path(),
         &[
             "propose",
+            "--manual",
             "--type",
             "warning",
             "--scope-kind",
@@ -925,14 +1314,15 @@ Changing rebuild sentinel precheck command handling previously hid destructive c
 }
 
 #[test]
-fn rebuild_refuses_to_discard_pending_proposals() {
+fn rebuild_refuses_to_discard_open_proposals_with_ids_statuses_and_next_steps() {
     let repo = initialized_temp_repo();
     let repo = repo.path();
 
-    run_json_command(
+    let pending = run_json_command(
         repo,
         &[
             "propose",
+            "--manual",
             "--type",
             "decision",
             "--scope-kind",
@@ -948,6 +1338,28 @@ fn rebuild_refuses_to_discard_pending_proposals() {
             "--json",
         ],
     );
+    let pending_id = json_string(&pending, "proposal_id").to_owned();
+
+    let approved = run_json_command(
+        repo,
+        &[
+            "propose",
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--title",
+            "Approved rebuild protection",
+            "--body",
+            "Rebuild should not silently discard approved proposals waiting to apply.",
+            "--actor",
+            "agent:red-tests",
+            "--json",
+        ],
+    );
+    let approved_id = json_string(&approved, "proposal_id").to_owned();
 
     let mut rebuild = memzoi();
     rebuild
@@ -955,9 +1367,18 @@ fn rebuild_refuses_to_discard_pending_proposals() {
         .current_dir(repo)
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "rebuild would discard 1 pending proposal",
-        ));
+        .stderr(
+            predicate::str::contains(pending_id.as_str())
+                .and(predicate::str::contains("pending"))
+                .and(predicate::str::contains(approved_id.as_str()))
+                .and(predicate::str::contains("approved"))
+                .and(predicate::str::contains(
+                    "memzoi proposals list --status open",
+                ))
+                .and(predicate::str::contains(
+                    "memzoi proposals apply --all-approved",
+                )),
+        );
 }
 
 #[test]
@@ -1214,10 +1635,11 @@ fn create_applied_memory_with_visibility(
     title: &str,
     body: &str,
 ) -> String {
-    let proposal = run_json_command(
+    let applied = run_json_command(
         repo,
         &[
             "propose",
+            "--apply",
             "--type",
             memory_type,
             "--scope-kind",
@@ -1233,29 +1655,9 @@ fn create_applied_memory_with_visibility(
             "--json",
         ],
     );
-    let proposal_id = json_string(&proposal, "proposal_id").to_owned();
 
-    run_json_command(
-        repo,
-        &[
-            "approve",
-            proposal_id.as_str(),
-            "--actor",
-            "reviewer:cli-search-context-tests",
-            "--json",
-        ],
-    );
-    let applied = run_json_command(
-        repo,
-        &[
-            "apply",
-            proposal_id.as_str(),
-            "--actor",
-            "agent:cli-search-context-tests",
-            "--json",
-        ],
-    );
-
+    assert_eq!(json_string(&applied, "record_status"), "active");
+    assert_eq!(applied.get("applied").and_then(Value::as_bool), Some(true));
     json_string(&applied, "record_id").to_owned()
 }
 
@@ -1375,6 +1777,58 @@ fn prompt_text(json: &Value) -> Option<&str> {
         .find_map(|key| json.get(key).and_then(Value::as_str))
 }
 
+fn proposals_from_json(json: &Value) -> &[Value] {
+    json.get("proposals")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| panic!("JSON should include proposals array: {json}"))
+}
+
+fn applied_proposals_from_json(json: &Value) -> &[Value] {
+    json.get("applied_proposals")
+        .or_else(|| json.get("applied"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| panic!("JSON should include applied proposals array: {json}"))
+}
+
+fn proposal_id_from_value(value: &Value) -> &str {
+    value
+        .get("proposal")
+        .and_then(|proposal| proposal.get("id").or_else(|| proposal.get("proposal_id")))
+        .or_else(|| value.get("proposal_id"))
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("proposal entry should expose a proposal id: {value}"))
+}
+
+fn proposal_status(value: &Value) -> Option<&str> {
+    value
+        .get("proposal")
+        .and_then(|proposal| proposal.get("status"))
+        .or_else(|| value.get("status"))
+        .and_then(Value::as_str)
+}
+
+fn proposal_title(value: &Value) -> Option<&str> {
+    value
+        .get("proposal")
+        .and_then(|proposal| {
+            proposal.get("title").or_else(|| {
+                proposal
+                    .get("payload")
+                    .and_then(|payload| payload.get("title"))
+            })
+        })
+        .or_else(|| value.get("title"))
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("title"))
+        })
+        .and_then(Value::as_str)
+}
+
 fn json_string<'a>(json: &'a Value, key: &str) -> &'a str {
     json.get(key)
         .and_then(Value::as_str)
@@ -1402,6 +1856,20 @@ fn assert_json_array_contains(json: &Value, key: &str, expected: &str) {
     assert!(
         values.iter().any(|value| value.as_str() == Some(expected)),
         "expected {key} to contain {expected:?} in {json}"
+    );
+}
+
+fn assert_json_array_contains_substring(json: &Value, key: &str, expected: &str) {
+    let values = json
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("missing array field {key} in {json}"));
+    assert!(
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|value| value.contains(expected)),
+        "expected {key} to contain a value with {expected:?} in {json}"
     );
 }
 

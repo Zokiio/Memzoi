@@ -12,21 +12,25 @@ This page describes the target authored-memory shape. Runtime indexes are derive
 
 ```text
 .memzoi/
+  config.toml        # optional repo workflow policy
   index.md
   log.md
   records/
     <path-concept-id>.md
 
-~/.memzoi/projects/<project-key>/
-  memory.db
-  exports/
+~/.memzoi/
+  config.toml        # optional user-global workflow policy
+  projects/<project-key>/
+    memory.db
+    exports/
 ```
 
 Rules:
 
-- `.memzoi/records/*.md` is the canonical home for approved durable records.
-- Proposals are currently DB-local pending workflow state in `~/.memzoi/projects/<project-key>/memory.db`; file-backed `.memzoi/proposals/*.md` proposals are planned for a later profile slice.
-- `~/.memzoi/projects/<project-key>/memory.db` is derived runtime state for approved records, plus current pending proposal state. `memzoi rebuild` refuses to discard readable open proposals; if the existing DB is corrupt or unreadable, rebuild treats it as derived-cache recovery and may discard DB-local proposal state.
+- `.memzoi/records/*.md` is the canonical home for applied durable records.
+- `.memzoi/config.toml` can set repo workflow policy, such as `[workflow] proposal_approval = "manual"`. It overrides the user-global `${MEMZOI_HOME:-~/.memzoi}/config.toml`.
+- Proposals are currently DB-local workflow state in `~/.memzoi/projects/<project-key>/memory.db`; file-backed `.memzoi/proposals/*.md` proposals are planned for a later profile slice.
+- `~/.memzoi/projects/<project-key>/memory.db` is derived runtime state for canonical records, plus current proposal state. `memzoi rebuild` refuses to discard readable open proposals; if the existing DB is corrupt or unreadable, rebuild treats it as derived-cache recovery and may discard DB-local proposal state.
 - `~/.memzoi/projects/<project-key>/exports/` contains generated projections such as OKF exports and agent instruction files. Do not author canonical records there.
 
 ## Path concept IDs
@@ -150,11 +154,12 @@ apps/active should use React Query for server state and avoid a second data-fetc
 
 Proposal status values:
 
-- `pending`
-- `validated`
-- `approved`
-- `rejected`
-- `applied`
+- `pending`: proposal exists but has not been approved.
+- `validated`: validation passed, but approval is still required. This state remains supported even when most flows do not create it.
+- `approved`: proposal is approved for durable write, but canonical `.memzoi/records/*.md` has not been written.
+- `applied`: proposal produced an active canonical record and no longer blocks rebuilds.
+- `rejected`: proposal was intentionally closed without applying.
+- `open`: synthetic filter meaning `pending`, `validated`, or `approved`.
 
 Target flow:
 
@@ -165,7 +170,9 @@ Target flow:
 5. The importer rebuilds or updates the local runtime database from canonical files.
 6. Export commands regenerate local runtime `exports/*` projections from the DB and canonical record state.
 
-MCP tools may create proposals, but durable apply remains an explicit review/apply step.
+The built-in proposal policy is `auto`, so valid CLI/MCP proposals can enter `approved` directly. Auto-approved is not applied; canonical records are written only by CLI apply flows such as `memzoi apply <proposal-id>`, `memzoi propose --apply`, or `memzoi proposals apply --all-approved`.
+
+MCP tools may create proposals and can override one call with `approval_mode: "auto"` or `"manual"`, but durable apply remains an explicit CLI review/apply step.
 
 ## Generated exports
 

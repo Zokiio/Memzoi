@@ -1,12 +1,79 @@
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 const MEMORY_DIR_NAME: &str = ".memzoi";
 const RUNTIME_PROJECTS_DIR: &str = "projects";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalApprovalPolicy {
+    Auto,
+    Manual,
+}
+
+impl ProposalApprovalPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+impl FromStr for ProposalApprovalPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "manual" => Ok(Self::Manual),
+            other => {
+                bail!("invalid proposal approval policy {other:?}; expected \"auto\" or \"manual\"")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowConfig {
+    pub proposal_approval: ProposalApprovalPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveConfig {
+    pub workflow: WorkflowConfig,
+    pub sources: ConfigSources,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSources {
+    pub user_config_path: PathBuf,
+    pub repo_config_path: PathBuf,
+    pub proposal_approval_source: ConfigSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    BuiltInDefault,
+    UserGlobal(PathBuf),
+    Repo(PathBuf),
+}
+
+#[derive(Debug, Deserialize)]
+struct FileConfig {
+    workflow: Option<FileWorkflowConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileWorkflowConfig {
+    proposal_approval: Option<toml::Value>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryPaths {
@@ -45,6 +112,46 @@ impl MemoryPaths {
     pub fn proposals_dir(&self) -> PathBuf {
         self.memory_dir.join("proposals")
     }
+
+    pub fn runtime_project_config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    pub fn repo_config_path(&self) -> PathBuf {
+        self.memory_dir.join("config.toml")
+    }
+}
+
+pub fn load_effective_config(paths: &MemoryPaths) -> Result<EffectiveConfig> {
+    let user_config_path = runtime_home_for_paths(paths).join("config.toml");
+    let repo_config_path = paths.repo_config_path();
+    let mut workflow = WorkflowConfig {
+        proposal_approval: ProposalApprovalPolicy::Auto,
+    };
+    let mut proposal_approval_source = ConfigSource::BuiltInDefault;
+
+    if let Some(policy) = read_proposal_policy(&user_config_path)? {
+        workflow.proposal_approval = policy;
+        proposal_approval_source = ConfigSource::UserGlobal(user_config_path.clone());
+    }
+
+    if let Some(policy) = read_proposal_policy(&repo_config_path)? {
+        workflow.proposal_approval = policy;
+        proposal_approval_source = ConfigSource::Repo(repo_config_path.clone());
+    }
+
+    Ok(EffectiveConfig {
+        workflow,
+        sources: ConfigSources {
+            user_config_path,
+            repo_config_path,
+            proposal_approval_source,
+        },
+    })
+}
+
+pub fn user_config_path() -> PathBuf {
+    runtime_home().join("config.toml")
 }
 
 pub fn discover_paths(start: impl AsRef<Path>) -> Result<MemoryPaths> {
@@ -81,7 +188,7 @@ fn find_configured_root(start: &Path) -> Option<PathBuf> {
     })
 }
 
-fn runtime_home() -> PathBuf {
+pub fn runtime_home() -> PathBuf {
     if let Some(path) = env::var_os("MEMZOI_HOME") {
         return PathBuf::from(path);
     }
@@ -89,6 +196,44 @@ fn runtime_home() -> PathBuf {
         return PathBuf::from(path).join(MEMORY_DIR_NAME);
     }
     PathBuf::from(MEMORY_DIR_NAME)
+}
+
+fn runtime_home_for_paths(paths: &MemoryPaths) -> PathBuf {
+    paths
+        .runtime_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(runtime_home)
+}
+
+fn read_proposal_policy(path: &Path) -> Result<Option<ProposalApprovalPolicy>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let config = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config {}", path.display()))?;
+    let parsed: FileConfig = toml::from_str(&config)
+        .with_context(|| format!("failed to parse config {}", path.display()))?;
+    let Some(workflow) = parsed.workflow else {
+        return Ok(None);
+    };
+    let Some(value) = workflow.proposal_approval else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_str() else {
+        bail!(
+            "invalid workflow.proposal_approval {value} in {}; expected \"auto\" or \"manual\"",
+            path.display()
+        );
+    };
+    value.parse().map(Some).map_err(|_| {
+        anyhow::anyhow!(
+            "invalid workflow.proposal_approval {value:?} in {}; expected \"auto\" or \"manual\"",
+            path.display()
+        )
+    })
 }
 
 fn project_runtime_key(project_root: &Path) -> String {
@@ -163,6 +308,22 @@ mod tests {
         std::fs::create_dir_all(path).unwrap();
     }
 
+    fn paths_with_runtime_home(temp: &TempDir) -> MemoryPaths {
+        let project_root = temp.path().join("repo");
+        create_dir(&project_root);
+        MemoryPaths::with_runtime_home(
+            project_root.canonicalize().unwrap(),
+            temp.path().join(".memzoi-runtime"),
+        )
+    }
+
+    fn write_config(path: impl AsRef<Path>, contents: &str) {
+        if let Some(parent) = path.as_ref().parent() {
+            create_dir(parent);
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
     #[test]
     fn existing_config_takes_precedence_over_git_root() {
         let temp = TempDir::new().unwrap();
@@ -223,6 +384,91 @@ mod tests {
                 .unwrap()
                 .join(".memzoi")
                 .join("records")
+        );
+    }
+
+    #[test]
+    fn proposal_approval_policy_precedence_uses_user_global_then_repo_override() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths_with_runtime_home(&temp);
+        let user_config_path = temp.path().join(".memzoi-runtime").join("config.toml");
+        let repo_config_path = paths.repo_config_path();
+
+        let built_in = load_effective_config(&paths).unwrap();
+        assert_eq!(
+            built_in.workflow.proposal_approval,
+            ProposalApprovalPolicy::Auto
+        );
+        assert_eq!(
+            built_in.sources.proposal_approval_source,
+            ConfigSource::BuiltInDefault
+        );
+
+        write_config(
+            &user_config_path,
+            r#"
+[workflow]
+proposal_approval = "manual"
+"#,
+        );
+        let user_global = load_effective_config(&paths).unwrap();
+        assert_eq!(
+            user_global.workflow.proposal_approval,
+            ProposalApprovalPolicy::Manual
+        );
+        assert_eq!(
+            user_global.sources.proposal_approval_source,
+            ConfigSource::UserGlobal(user_config_path.clone())
+        );
+
+        write_config(
+            &repo_config_path,
+            r#"
+[workflow]
+proposal_approval = "auto"
+"#,
+        );
+        let repo_override = load_effective_config(&paths).unwrap();
+        assert_eq!(
+            repo_override.workflow.proposal_approval,
+            ProposalApprovalPolicy::Auto
+        );
+        assert_eq!(
+            repo_override.sources.proposal_approval_source,
+            ConfigSource::Repo(repo_config_path.clone())
+        );
+    }
+
+    #[test]
+    fn invalid_proposal_approval_error_names_path_and_allowed_values() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths_with_runtime_home(&temp);
+        let repo_config_path = paths.repo_config_path();
+        write_config(
+            &repo_config_path,
+            r#"
+[workflow]
+proposal_approval = "sometimes"
+"#,
+        );
+
+        let error = load_effective_config(&paths).unwrap_err().to_string();
+
+        assert!(
+            error.contains(repo_config_path.to_string_lossy().as_ref()),
+            "error should include the invalid config path: {error}"
+        );
+        assert!(
+            error.contains("workflow.proposal_approval"),
+            "error should name the invalid key: {error}"
+        );
+        assert!(
+            error.contains("\"auto\"") && error.contains("\"manual\""),
+            "error should list allowed policy values: {error}"
+        );
+        assert!(
+            error.contains("sometimes"),
+            "error should include the rejected value: {error}"
         );
     }
 
