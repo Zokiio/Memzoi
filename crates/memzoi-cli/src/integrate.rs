@@ -64,23 +64,23 @@ fn upsert_memzoi_block(original: &str) -> String {
     let end = "<!-- memzoi:end -->";
     let block = memzoi_instruction_block();
 
-    if let Some(start_index) = original.find(start) {
-        if let Some(relative_end) = original[start_index..].find(end) {
-            let end_index = start_index + relative_end + end.len();
-            let mut updated = String::new();
-            updated.push_str(original[..start_index].trim_end());
-            if !updated.is_empty() {
-                updated.push_str("\n\n");
-            }
-            updated.push_str(block.trim_end());
-            let tail = original[end_index..].trim_start();
-            if !tail.is_empty() {
-                updated.push_str("\n\n");
-                updated.push_str(tail);
-            }
-            updated.push('\n');
-            return updated;
+    if let Some(start_index) = original.find(start)
+        && let Some(relative_end) = original[start_index..].find(end)
+    {
+        let end_index = start_index + relative_end + end.len();
+        let mut updated = String::new();
+        updated.push_str(original[..start_index].trim_end());
+        if !updated.is_empty() {
+            updated.push_str("\n\n");
         }
+        updated.push_str(block.trim_end());
+        let tail = original[end_index..].trim_start();
+        if !tail.is_empty() {
+            updated.push_str("\n\n");
+            updated.push_str(tail);
+        }
+        updated.push('\n');
+        return updated;
     }
 
     if original.trim().is_empty() {

@@ -1112,14 +1112,14 @@ fn replace_files_transaction(
 fn rollback_replacements(moved: &[(PathBuf, PathBuf)]) -> std::result::Result<(), ReplaceError> {
     let mut failures = Vec::new();
     for (backup, dest) in moved.iter().rev() {
-        if dest.exists() {
-            if let Err(error) = fs::remove_file(dest) {
-                failures.push(format!(
-                    "failed to remove partial {}: {error}",
-                    dest.display()
-                ));
-                continue;
-            }
+        if dest.exists()
+            && let Err(error) = fs::remove_file(dest)
+        {
+            failures.push(format!(
+                "failed to remove partial {}: {error}",
+                dest.display()
+            ));
+            continue;
         }
         if let Err(error) = fs::rename(backup, dest) {
             failures.push(format!(
