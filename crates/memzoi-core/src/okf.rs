@@ -626,6 +626,12 @@ mod tests {
     fn parses_supported_memory_lanes() -> anyhow::Result<()> {
         for (lane, memory_type, expected_lane, expected_type) in [
             (
+                "session",
+                "episode",
+                MemoryLane::Session,
+                MemoryType::Episode,
+            ),
+            (
                 "semantic",
                 "decision",
                 MemoryLane::Semantic,
