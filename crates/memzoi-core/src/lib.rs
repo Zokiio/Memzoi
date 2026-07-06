@@ -26,8 +26,11 @@ pub use models::{
     MemoryStatus, MemoryType, PrecheckWarning, ScopeKind, SearchResult, Visibility,
 };
 pub use okf::{
-    OkfRecordFile, import_okf_records, parse_okf_record_file, parse_okf_record_markdown,
-    read_okf_record_files, write_memory_record_file, write_memory_record_file_with_metadata,
+    OkfProposalAction, OkfProposalFile, OkfProposalMetadata, OkfProposalSensitivity,
+    OkfProposalSource, OkfProposalStatus, OkfRecordFile, import_okf_records,
+    parse_okf_proposal_file, parse_okf_proposal_markdown, parse_okf_record_file,
+    parse_okf_record_markdown, read_okf_proposal_files, read_okf_record_files,
+    write_memory_record_file, write_memory_record_file_with_metadata,
     write_memory_record_file_with_tags,
 };
 pub use precheck::PrecheckInput;

@@ -116,6 +116,34 @@ Valid record `lane` values:
 
 Records without `lane` remain valid and are treated as `semantic`. `lane` is separate from `type`: lane describes memory usage and retention, while type describes the record content.
 
+## Proposal file schema values
+
+OKF-compatible proposal files live under `.memzoi/proposals/pending/*.md`. They are review packets and use:
+
+```yaml
+status: proposed
+proposal:
+  action: create
+```
+
+Valid proposal file actions:
+
+- `create`
+- `supersede`
+- `tombstone`
+
+`supersede` proposals require at least one `supersedes` target. `tombstone` proposals require `proposal.target`. `update` is intentionally unsupported in the first file profile.
+
+Valid proposal sensitivity values:
+
+- `repo-safe`
+- `local-only`
+- `sensitive`
+- `secret`
+- `unknown`
+
+The current CLI/MCP proposal inbox remains DB-local workflow state and uses the operational proposal statuses below.
+
 ## Scope kinds
 
 Valid `--scope-kind`, `scope_kind`, and `scope` values:
@@ -142,7 +170,7 @@ Exports skip `private` records.
 
 ## Status values
 
-Proposal statuses:
+Operational proposal inbox statuses:
 
 - `pending`: proposal exists but has not been approved.
 - `validated`: validation passed, but approval is still required. This state remains supported even when most flows do not create it.

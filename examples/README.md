@@ -6,8 +6,10 @@ This directory contains small, copyable examples for Memzoi users and maintainer
 
 | File | Purpose |
 | --- | --- |
+| `compact-canonical-from-proposal.md` | A compact canonical record shape that could result from applying a verbose proposal. |
 | `example-memory.md` | A canonical OKF-profile memory record. This file is also used by parser tests, so keep it valid and intentionally small. |
 | `memzoi.mcp.json` | A minimal MCP client configuration shape for starting `memzoi-mcp`. |
+| `proposals/*.md` | OKF-compatible proposal file examples for create, supersede, and tombstone actions. |
 
 ## Memory Record Example
 
@@ -18,6 +20,16 @@ This directory contains small, copyable examples for Memzoi users and maintainer
 ```
 
 Use this example to understand the fields, not as a place to store this repository's own memory.
+
+## Proposal Examples
+
+`proposals/*.md` shows the review packet shape for future file-backed proposals under:
+
+```text
+.memzoi/proposals/pending/<proposal-id>.md
+```
+
+Proposal files may carry review-only context such as reason, confidence, and review notes. Applied canonical records should be compact and should not copy proposal-only metadata unless it remains durable project knowledge.
 
 ## MCP Config Example
 
