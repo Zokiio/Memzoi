@@ -1,8 +1,9 @@
 use std::fs;
 
 use memzoi_core::{
-    InitRequest, MemoryDraft, MemoryPaths, MemoryRecord, MemoryService, MemoryStatus, MemoryType,
-    ScopeKind, Visibility, parse_okf_record_file, read_okf_record_files, write_memory_record_file,
+    InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryRecord, MemoryService, MemoryStatus,
+    MemoryType, ScopeKind, Visibility, parse_okf_record_file, read_okf_record_files,
+    write_memory_record_file,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -124,6 +125,7 @@ fn rendered_records_are_valid_yaml_and_preserve_core_fields() -> anyhow::Result<
     let record = MemoryRecord {
         id: "team/install-risk".to_owned(),
         memory_type: MemoryType::Risk,
+        lane: MemoryLane::Semantic,
         scope_kind: ScopeKind::Team,
         scope_id: Some("platform".to_owned()),
         visibility: Visibility::Team,
@@ -557,6 +559,7 @@ fn service_preserves_path_bindings_when_rewriting_canonical_files() -> anyhow::R
 fn memory_draft(title: &str, body: &str, tags: Vec<String>) -> MemoryDraft {
     MemoryDraft {
         memory_type: MemoryType::Fact,
+        lane: MemoryLane::Semantic,
         scope_kind: ScopeKind::Repo,
         scope_id: None,
         visibility: Visibility::Repo,

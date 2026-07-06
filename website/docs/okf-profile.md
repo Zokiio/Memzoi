@@ -77,6 +77,7 @@ kind: memory
 version: okf/v0.1
 profile: memzoi/v0
 type: decision
+lane: semantic
 title: Use React Query in apps/active
 description: apps/active uses React Query for server state.
 timestamp: 2026-07-05T00:00:00Z
@@ -101,6 +102,7 @@ These fields extend OKF v0.1 for Memzoi:
 
 | Field | Meaning |
 | --- | --- |
+| `lane` | Memzoi memory lane. Valid values are `session`, `semantic`, `episodic`, and `procedural`. Records without `lane` are accepted as `semantic` for backward compatibility. |
 | `status` | Lifecycle state. Canonical active record value is `active`; inbound `current` is accepted as an alias for `active` and should be normalized on write. |
 | `visibility` | Sharing boundary. Valid values are `public`, `private`, `repo`, `team`, and `org`. Exports skip `private` records. |
 | `confidence` | Numeric confidence `0.0`-`1.0` or a label. Label mappings: `confirmed` -> `1.0`, `likely` -> `0.75`, `uncertain` -> `0.4`. |
@@ -109,6 +111,15 @@ These fields extend OKF v0.1 for Memzoi:
 | `source_ref` | Optional durable reference for provenance, such as `issue://123`, `pr://45`, a commit SHA, or a URL. |
 | `supersedes` | Optional record ID replaced by this record. Prefer this over mutating old records in place. |
 | `expires` | Optional date or timestamp after which the record should stop participating in recall/precheck unless renewed. |
+
+Memory lanes:
+
+- `session`: active task context, handoff notes, checkpoints, or current working assumptions. Raw transcripts should remain local by default.
+- `semantic`: durable project truths such as facts, decisions, constraints, preferences, warnings, and risks.
+- `episodic`: chronological project memory such as session summaries, incident notes, migration notes, and handoff history.
+- `procedural`: reusable workflows, runbooks, debugging recipes, release processes, and agent procedures.
+
+`lane` is orthogonal to `type`: `lane` describes how the memory is used and retained, while `type` describes the knowledge record's content shape.
 
 Record status values:
 
@@ -137,6 +148,7 @@ profile: memzoi/v0
 operation: create
 status: pending
 type: decision
+lane: semantic
 title: Use React Query in apps/active
 description: apps/active should use React Query for server state.
 timestamp: 2026-07-05T00:00:00Z

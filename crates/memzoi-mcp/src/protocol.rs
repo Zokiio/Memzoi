@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
-    ContextPackInput, MemoryDraft, MemoryService, MemoryType, PrecheckInput,
+    ContextPackInput, MemoryDraft, MemoryLane, MemoryService, MemoryType, PrecheckInput,
     ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, Visibility,
 };
 use serde_json::{Value, json};
@@ -337,6 +337,7 @@ fn propose_memory_output(service: &MemoryService, arguments: &Value) -> Result<V
 fn memory_draft(arguments: &Value) -> Result<MemoryDraft> {
     Ok(MemoryDraft {
         memory_type: optional_memory_type(arguments)?.unwrap_or(MemoryType::Fact),
+        lane: MemoryLane::Semantic,
         scope_kind: optional_scope_kind(arguments)?.unwrap_or(ScopeKind::Repo),
         scope_id: optional_string(arguments, "scope_id"),
         visibility: optional_visibility(arguments)?.unwrap_or(Visibility::Repo),
@@ -476,6 +477,7 @@ mod tests {
     fn draft(title: &str, body: &str) -> MemoryDraft {
         MemoryDraft {
             memory_type: MemoryType::Fact,
+            lane: MemoryLane::Semantic,
             scope_kind: ScopeKind::Repo,
             scope_id: None,
             visibility: Visibility::Repo,

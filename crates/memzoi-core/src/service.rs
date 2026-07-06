@@ -526,7 +526,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::{MemoryStatus, MemoryType, ProposalStatus, ScopeKind, Visibility};
+    use crate::{MemoryLane, MemoryStatus, MemoryType, ProposalStatus, ScopeKind, Visibility};
     use tempfile::TempDir;
 
     #[test]
@@ -826,6 +826,7 @@ mod tests {
     fn sample_memory_draft(title: &str, body: &str) -> MemoryDraft {
         MemoryDraft {
             memory_type: MemoryType::Fact,
+            lane: MemoryLane::Semantic,
             scope_kind: ScopeKind::Repo,
             scope_id: None,
             visibility: Visibility::Repo,

@@ -105,6 +105,17 @@ Valid `--type` and `memory_type` values:
 - `risk`
 - `instruction_projection`
 
+## Memory lanes
+
+Valid record `lane` values:
+
+- `session`
+- `semantic`
+- `episodic`
+- `procedural`
+
+Records without `lane` remain valid and are treated as `semantic`. `lane` is separate from `type`: lane describes memory usage and retention, while type describes the record content.
+
 ## Scope kinds
 
 Valid `--scope-kind`, `scope_kind`, and `scope` values:

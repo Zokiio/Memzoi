@@ -22,7 +22,7 @@ pub use config::{
 pub use context::ContextPackInput;
 pub use error::{CoreError, Result};
 pub use models::{
-    ContextPack, MemoryCitation, MemoryEvent, MemoryPath, MemoryProposal, MemoryRecord,
+    ContextPack, MemoryCitation, MemoryEvent, MemoryLane, MemoryPath, MemoryProposal, MemoryRecord,
     MemoryStatus, MemoryType, PrecheckWarning, ScopeKind, SearchResult, Visibility,
 };
 pub use okf::{

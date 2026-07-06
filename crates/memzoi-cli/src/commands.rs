@@ -2,8 +2,8 @@ use std::{path::PathBuf, process::Command};
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    ContextPackInput, ExportFormat, ExportInput, InitRequest, MemoryDraft, MemoryService,
-    MemoryType, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalStatus,
+    ContextPackInput, ExportFormat, ExportInput, InitRequest, MemoryDraft, MemoryLane,
+    MemoryService, MemoryType, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalStatus,
     ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, Visibility, discover_paths,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -804,6 +804,7 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
     } else {
         let draft = MemoryDraft {
             memory_type: MemoryType::Decision,
+            lane: MemoryLane::Semantic,
             scope_kind: ScopeKind::Repo,
             scope_id: None,
             visibility: Visibility::Repo,
@@ -908,6 +909,7 @@ fn draft_from_args(
 ) -> Result<MemoryDraft> {
     Ok(MemoryDraft {
         memory_type: parse_memory_type(memory_type)?,
+        lane: MemoryLane::Semantic,
         scope_kind: parse_scope_kind(scope_kind)?,
         scope_id: None,
         visibility: parse_visibility(visibility)?,
