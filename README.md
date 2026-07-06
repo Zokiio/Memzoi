@@ -2,6 +2,15 @@
 
 File-native project memory for coding agents.
 
+
+> **Motivation for building**
+>
+> I am constantly trying out different AI providers, agent harnesses, CLIs, and prompting workflows. Most of them have some form of memory, but that memory is usually siloed inside the tool that created it. As I move between tools, useful project knowledge gets fragmented across chats, prompts, provider state, and local runtimes.
+>
+> The result is that a new agent often feels dumber than it should because it cannot see the context another agent already helped uncover.
+>
+> Memzoi is a way to collect, review, and reuse that knowledge as file-native project memory: durable enough to survive tool switches, transparent enough for humans to review, and portable enough for different agents to build on.
+
 Memzoi, pronounced "mem-zoy", gives AI coding agents a safe way to recall durable project knowledge, propose new memory, run pre-action checks, and export reviewable agent instructions. Canonical memory lives in human-readable files, while generated indexes and exports are disposable runtime state.
 
 Memzoi is currently a local-first v0 for dogfooding and early experimentation. The CLI and MCP server are available through release binaries or from a source checkout; package-manager installs are roadmap items.
