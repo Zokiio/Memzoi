@@ -3,7 +3,38 @@ use rusqlite::Connection;
 
 pub fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)
-        .context("failed to initialize SQLite schema")
+        .context("failed to initialize SQLite schema")?;
+    ensure_memory_lane_column(conn)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)",
+        [],
+    )
+    .context("failed to record schema migration 2")?;
+    Ok(())
+}
+
+fn ensure_memory_lane_column(conn: &Connection) -> Result<()> {
+    let has_lane: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+              SELECT 1 FROM pragma_table_info('memory_record') WHERE name = 'lane'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to inspect memory_record schema")?;
+
+    if !has_lane {
+        conn.execute_batch(
+            "ALTER TABLE memory_record
+               ADD COLUMN lane TEXT NOT NULL DEFAULT 'semantic'
+               CHECK (lane IN ('session', 'semantic', 'episodic', 'procedural'));",
+        )
+        .context("failed to add memory_record.lane column")?;
+    }
+
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_memory_record_lane ON memory_record(lane);")
+        .context("failed to create memory lane index")
 }
 
 const SCHEMA: &str = r#"
@@ -26,6 +57,7 @@ CREATE TABLE IF NOT EXISTS memory_record (
   rowid INTEGER PRIMARY KEY,
   id TEXT NOT NULL UNIQUE,
   type TEXT NOT NULL CHECK (type IN ('fact', 'preference', 'decision', 'procedure', 'episode', 'relationship', 'warning', 'failed_attempt', 'risk', 'instruction_projection')),
+  lane TEXT NOT NULL DEFAULT 'semantic' CHECK (lane IN ('session', 'semantic', 'episodic', 'procedural')),
   scope_kind TEXT NOT NULL CHECK (scope_kind IN ('personal', 'repo', 'project', 'team', 'org', 'agent', 'imported_untrusted')),
   scope_id TEXT,
   visibility TEXT NOT NULL DEFAULT 'repo' CHECK (visibility IN ('public', 'private', 'repo', 'team', 'org')),

@@ -110,7 +110,7 @@ fn active_records_for_scope(
     memory_types: Option<&[MemoryType]>,
 ) -> Result<Vec<MemoryRecord>> {
     let mut sql = String::from(
-        "SELECT id, type, scope_kind, scope_id, visibility, title, body, status, confidence,
+        "SELECT id, type, lane, scope_kind, scope_id, visibility, title, body, status, confidence,
                 source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id,
                 expires_at
          FROM memory_record
@@ -140,6 +140,7 @@ fn render_record_markdown(record: &MemoryRecord, paths: &[MemoryPath]) -> String
     output.push_str("---\n");
     push_frontmatter(&mut output, "id", &record.id);
     push_frontmatter(&mut output, "type", record.memory_type.as_str());
+    push_frontmatter(&mut output, "lane", record.lane.as_str());
     push_frontmatter(&mut output, "scope_kind", record.scope_kind.as_str());
     if let Some(scope_id) = &record.scope_id {
         push_frontmatter(&mut output, "scope_id", scope_id);

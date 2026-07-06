@@ -18,6 +18,16 @@ pub enum MemoryType {
     InstructionProjection,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryLane {
+    Session,
+    #[default]
+    Semantic,
+    Episodic,
+    Procedural,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
@@ -58,6 +68,12 @@ impl MemoryType {
     }
 }
 
+impl MemoryLane {
+    pub fn as_str(self) -> &'static str {
+        lane_to_str(self)
+    }
+}
+
 impl MemoryStatus {
     pub fn as_str(self) -> &'static str {
         status_to_str(self)
@@ -80,6 +96,7 @@ impl Visibility {
 pub struct MemoryRecord {
     pub id: String,
     pub memory_type: MemoryType,
+    pub lane: MemoryLane,
     pub scope_kind: ScopeKind,
     pub scope_id: Option<String>,
     pub visibility: Visibility,
@@ -173,6 +190,12 @@ impl fmt::Display for MemoryType {
     }
 }
 
+impl fmt::Display for MemoryLane {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(lane_to_str(*self))
+    }
+}
+
 impl fmt::Display for MemoryStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(status_to_str(*self))
@@ -207,6 +230,20 @@ impl FromStr for MemoryType {
             "risk" => Ok(Self::Risk),
             "instruction_projection" => Ok(Self::InstructionProjection),
             other => Err(format!("unknown memory type {other:?}")),
+        }
+    }
+}
+
+impl FromStr for MemoryLane {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "session" => Ok(Self::Session),
+            "semantic" => Ok(Self::Semantic),
+            "episodic" => Ok(Self::Episodic),
+            "procedural" => Ok(Self::Procedural),
+            other => Err(format!("unknown memory lane {other:?}")),
         }
     }
 }
@@ -275,6 +312,15 @@ pub fn enum_to_str(value: MemoryType) -> &'static str {
     }
 }
 
+pub fn lane_to_str(value: MemoryLane) -> &'static str {
+    match value {
+        MemoryLane::Session => "session",
+        MemoryLane::Semantic => "semantic",
+        MemoryLane::Episodic => "episodic",
+        MemoryLane::Procedural => "procedural",
+    }
+}
+
 pub fn status_to_str(value: MemoryStatus) -> &'static str {
     match value {
         MemoryStatus::Proposed => "proposed",
@@ -315,7 +361,7 @@ mod tests {
 
     use serde::{Serialize, de::DeserializeOwned};
 
-    use crate::models::{MemoryStatus, MemoryType, ScopeKind, Visibility};
+    use crate::models::{MemoryLane, MemoryStatus, MemoryType, ScopeKind, Visibility};
 
     #[test]
     fn memory_model_enums_round_trip_as_stable_schema_strings() -> anyhow::Result<()> {
@@ -329,6 +375,11 @@ mod tests {
         assert_json_string_round_trip(MemoryType::FailedAttempt, "failed_attempt")?;
         assert_json_string_round_trip(MemoryType::Risk, "risk")?;
         assert_json_string_round_trip(MemoryType::InstructionProjection, "instruction_projection")?;
+
+        assert_json_string_round_trip(MemoryLane::Session, "session")?;
+        assert_json_string_round_trip(MemoryLane::Semantic, "semantic")?;
+        assert_json_string_round_trip(MemoryLane::Episodic, "episodic")?;
+        assert_json_string_round_trip(MemoryLane::Procedural, "procedural")?;
 
         assert_json_string_round_trip(MemoryStatus::Proposed, "proposed")?;
         assert_json_string_round_trip(MemoryStatus::Active, "active")?;
@@ -358,6 +409,7 @@ mod tests {
     #[test]
     fn memory_model_enums_reject_unknown_schema_strings() {
         assert_invalid_json_string::<MemoryType>("note");
+        assert_invalid_json_string::<MemoryLane>("memoir");
         assert_invalid_json_string::<MemoryStatus>("archived");
         assert_invalid_json_string::<ScopeKind>("workspace");
         assert_invalid_json_string::<Visibility>("friends");

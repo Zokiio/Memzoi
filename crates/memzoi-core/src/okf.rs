@@ -8,7 +8,9 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, params};
 use serde::Deserialize;
 
-use crate::{MemoryDraft, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility};
+use crate::{
+    MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OkfRecordFile {
@@ -66,6 +68,7 @@ pub fn parse_okf_record_markdown(
 
     let title = required_string(frontmatter.title, "title")?;
     let memory_type = parse_required_enum::<MemoryType>(frontmatter.memory_type, "type")?;
+    let lane = parse_optional_enum::<MemoryLane>(frontmatter.lane, "lane")?.unwrap_or_default();
     let scope_kind = parse_scope(frontmatter.scope_kind.or(frontmatter.scope))?;
     let visibility = parse_required_enum::<Visibility>(frontmatter.visibility, "visibility")?;
     let status = parse_status(required_string(frontmatter.status, "status")?)?;
@@ -92,6 +95,7 @@ pub fn parse_okf_record_markdown(
         concept_id: concept_id.clone(),
         draft: MemoryDraft {
             memory_type,
+            lane,
             scope_kind,
             scope_id: frontmatter.scope_id,
             visibility,
@@ -184,6 +188,7 @@ fn write_memory_record_file_internal(
 struct OkfFrontmatter {
     #[serde(rename = "type")]
     memory_type: Option<String>,
+    lane: Option<String>,
     title: Option<String>,
     scope: Option<String>,
     scope_kind: Option<String>,
@@ -239,12 +244,13 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
     let updated = record.updated.as_deref().unwrap_or(record.created.as_str());
     conn.execute(
         "INSERT OR REPLACE INTO memory_record (
-          id, type, scope_kind, scope_id, visibility, title, body, status, confidence,
+          id, type, lane, scope_kind, scope_id, visibility, title, body, status, confidence,
           source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id, expires_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             record.concept_id,
             record.draft.memory_type.as_str(),
+            record.draft.lane.as_str(),
             record.draft.scope_kind.as_str(),
             record.draft.scope_id,
             record.draft.visibility.as_str(),
@@ -288,6 +294,7 @@ fn render_memory_record(record: &MemoryRecord, tags: &[String], applies_to: &[St
     let mut output = String::new();
     output.push_str("---\n");
     push_yaml_string(&mut output, "type", record.memory_type.as_str());
+    push_yaml_string(&mut output, "lane", record.lane.as_str());
     push_yaml_string(&mut output, "title", &record.title);
     push_yaml_string(
         &mut output,
@@ -481,6 +488,20 @@ where
     value.parse().map_err(anyhow::Error::msg)
 }
 
+fn parse_optional_enum<T>(value: Option<String>, key: &str) -> Result<Option<T>>
+where
+    T: std::str::FromStr<Err = String>,
+{
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("OKF frontmatter field {key} cannot be empty");
+    }
+    trimmed.parse().map(Some).map_err(anyhow::Error::msg)
+}
+
 fn parse_scope(value: Option<String>) -> Result<ScopeKind> {
     match value {
         Some(value) => value.parse().map_err(anyhow::Error::msg),
@@ -567,7 +588,7 @@ fn body_without_matching_h1(body: &str, title: &str) -> Result<String> {
 mod tests {
     use std::path::Path;
 
-    use crate::{MemoryStatus, MemoryType, ScopeKind, Visibility};
+    use crate::{MemoryLane, MemoryStatus, MemoryType, ScopeKind, Visibility};
 
     const EXAMPLE_MEMORY: &str = include_str!("../../../examples/example-memory.md");
 
@@ -585,6 +606,7 @@ mod tests {
         assert_eq!(parsed.created, "2026-07-04T00:00:00Z");
         assert_eq!(parsed.updated, None);
         assert_eq!(parsed.draft.memory_type, MemoryType::Preference);
+        assert_eq!(parsed.draft.lane, MemoryLane::Semantic);
         assert_eq!(parsed.draft.scope_kind, ScopeKind::Repo);
         assert_eq!(parsed.draft.visibility, Visibility::Team);
         assert_eq!(parsed.draft.title, "Swedish-first UI copy");
@@ -598,6 +620,84 @@ mod tests {
         assert!(parsed.draft.body.contains("User-facing UI"));
         assert!(!parsed.draft.body.contains("# Swedish-first UI copy"));
         Ok(())
+    }
+
+    #[test]
+    fn parses_supported_memory_lanes() -> anyhow::Result<()> {
+        for (lane, memory_type, expected_lane, expected_type) in [
+            (
+                "semantic",
+                "decision",
+                MemoryLane::Semantic,
+                MemoryType::Decision,
+            ),
+            (
+                "episodic",
+                "episode",
+                MemoryLane::Episodic,
+                MemoryType::Episode,
+            ),
+            (
+                "procedural",
+                "procedure",
+                MemoryLane::Procedural,
+                MemoryType::Procedure,
+            ),
+        ] {
+            let parsed = super::parse_okf_record_markdown(
+                Path::new("/bundle"),
+                Path::new("/bundle/memories/lane-test.md"),
+                &record_markdown(lane, memory_type),
+            )?
+            .expect("lane test record should parse");
+
+            assert_eq!(parsed.draft.lane, expected_lane);
+            assert_eq!(parsed.draft.memory_type, expected_type);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn missing_lane_defaults_to_semantic_for_backward_compatibility() -> anyhow::Result<()> {
+        let parsed = super::parse_okf_record_markdown(
+            Path::new("/bundle"),
+            Path::new("/bundle/memories/legacy.md"),
+            r#"---
+type: decision
+title: Legacy memory
+scope: repo
+visibility: repo
+source: human
+status: active
+confidence: confirmed
+created: 2026-07-04
+---
+
+# Legacy memory
+
+Legacy records without lane remain valid.
+"#,
+        )?
+        .expect("legacy memory should parse");
+
+        assert_eq!(parsed.draft.lane, MemoryLane::Semantic);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unknown_memory_lane() {
+        let error = super::parse_okf_record_markdown(
+            Path::new("/bundle"),
+            Path::new("/bundle/memories/invalid-lane.md"),
+            &record_markdown("mystery", "decision"),
+        )
+        .expect_err("unknown memory lane must be rejected");
+
+        assert!(
+            error.to_string().contains("unknown memory lane"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]
@@ -656,5 +756,26 @@ Do not import this.
             .is_none()
         );
         Ok(())
+    }
+
+    fn record_markdown(lane: &str, memory_type: &str) -> String {
+        format!(
+            r#"---
+type: {memory_type}
+lane: {lane}
+title: Lane test
+scope: repo
+visibility: repo
+source: human
+status: active
+confidence: confirmed
+created: 2026-07-04
+---
+
+# Lane test
+
+This record exercises lane parsing.
+"#
+        )
     }
 }

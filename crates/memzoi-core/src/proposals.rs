@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, str::FromStr};
 use uuid::Uuid;
 
 use crate::events::{AppendEvent, append_event, now_utc};
-use crate::models::{MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility};
+use crate::models::{MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +73,8 @@ impl FromStr for ProposalStatusFilter {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryDraft {
     pub memory_type: MemoryType,
+    #[serde(default)]
+    pub lane: MemoryLane,
     pub scope_kind: ScopeKind,
     pub scope_id: Option<String>,
     pub visibility: Visibility,
@@ -426,12 +428,13 @@ fn insert_record(
     let hash = content_hash(draft);
     conn.execute(
         "INSERT INTO memory_record (
-          id, type, scope_kind, scope_id, visibility, title, body, status, confidence,
+          id, type, lane, scope_kind, scope_id, visibility, title, body, status, confidence,
           source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
         params![
             id,
             draft.memory_type.as_str(),
+            draft.lane.as_str(),
             draft.scope_kind.as_str(),
             draft.scope_id,
             draft.visibility.as_str(),
@@ -456,32 +459,34 @@ fn insert_record(
 
 fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
     conn.query_row(
-        "SELECT id, type, scope_kind, scope_id, visibility, title, body, status, confidence,
+        "SELECT id, type, lane, scope_kind, scope_id, visibility, title, body, status, confidence,
                 source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id, expires_at
          FROM memory_record WHERE id = ?1",
         [id],
         |row| {
             let memory_type: String = row.get(1)?;
-            let scope_kind: String = row.get(2)?;
-            let visibility: String = row.get(4)?;
-            let status: String = row.get(7)?;
+            let lane: String = row.get(2)?;
+            let scope_kind: String = row.get(3)?;
+            let visibility: String = row.get(5)?;
+            let status: String = row.get(8)?;
             Ok(MemoryRecord {
                 id: row.get(0)?,
                 memory_type: parse_memory_type(&memory_type)?,
+                lane: parse_model_enum(&lane)?,
                 scope_kind: parse_scope_kind(&scope_kind)?,
-                scope_id: row.get(3)?,
+                scope_id: row.get(4)?,
                 visibility: parse_visibility(&visibility)?,
-                title: row.get(5)?,
-                body: row.get(6)?,
+                title: row.get(6)?,
+                body: row.get(7)?,
                 status: parse_memory_status(&status)?,
-                confidence: row.get(8)?,
-                source_kind: row.get(9)?,
-                source_ref: row.get(10)?,
-                content_hash: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
-                supersedes_id: row.get(14)?,
-                expires_at: row.get(15)?,
+                confidence: row.get(9)?,
+                source_kind: row.get(10)?,
+                source_ref: row.get(11)?,
+                content_hash: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+                supersedes_id: row.get(15)?,
+                expires_at: row.get(16)?,
             })
         },
     )
@@ -581,7 +586,7 @@ mod tests {
     use crate::{
         events::list_events,
         init_database,
-        models::{MemoryStatus, MemoryType, ScopeKind, Visibility},
+        models::{MemoryLane, MemoryStatus, MemoryType, ScopeKind, Visibility},
         open_database,
         proposals::{
             MemoryDraft, ProposalStatus, ProposalStatusFilter, apply_proposal, approve_proposal,
@@ -954,6 +959,7 @@ mod tests {
     fn sample_memory_draft(body: &str) -> MemoryDraft {
         MemoryDraft {
             memory_type: MemoryType::Fact,
+            lane: MemoryLane::Semantic,
             scope_kind: ScopeKind::Repo,
             scope_id: None,
             visibility: Visibility::Repo,

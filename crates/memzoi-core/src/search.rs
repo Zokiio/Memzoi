@@ -81,7 +81,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
     };
 
     let sql = format!(
-        "SELECT memory_record.id, memory_record.type, memory_record.scope_kind,
+        "SELECT memory_record.id, memory_record.type, memory_record.lane, memory_record.scope_kind,
                 memory_record.scope_id, memory_record.visibility, memory_record.title,
                 memory_record.body, memory_record.status, memory_record.confidence,
                 memory_record.source_kind, memory_record.source_ref, memory_record.content_hash,
@@ -120,7 +120,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
             ],
             |row| {
                 let record = record_from_row(row)?;
-                let rank: f64 = row.get(16)?;
+                let rank: f64 = row.get(17)?;
                 Ok((record, rank))
             },
         )
@@ -194,20 +194,21 @@ pub(crate) fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memor
     Ok(MemoryRecord {
         id: row.get(0)?,
         memory_type: parse_cell(row, 1)?,
-        scope_kind: parse_cell(row, 2)?,
-        scope_id: row.get(3)?,
-        visibility: parse_cell(row, 4)?,
-        title: row.get(5)?,
-        body: row.get(6)?,
-        status: parse_cell(row, 7)?,
-        confidence: row.get(8)?,
-        source_kind: row.get(9)?,
-        source_ref: row.get(10)?,
-        content_hash: row.get(11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
-        supersedes_id: row.get(14)?,
-        expires_at: row.get(15)?,
+        lane: parse_cell(row, 2)?,
+        scope_kind: parse_cell(row, 3)?,
+        scope_id: row.get(4)?,
+        visibility: parse_cell(row, 5)?,
+        title: row.get(6)?,
+        body: row.get(7)?,
+        status: parse_cell(row, 8)?,
+        confidence: row.get(9)?,
+        source_kind: row.get(10)?,
+        source_ref: row.get(11)?,
+        content_hash: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        supersedes_id: row.get(15)?,
+        expires_at: row.get(16)?,
     })
 }
 

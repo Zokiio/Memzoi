@@ -4,6 +4,7 @@ kind: memory
 version: okf/v0.1
 profile: memzoi/v0
 type: preference
+lane: semantic
 title: Swedish-first UI copy
 description: User-facing UI and i18n text should be Swedish-first.
 timestamp: 2026-07-04T00:00:00Z
