@@ -1211,6 +1211,33 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
 }
 
 #[test]
+fn proposal_files_apply_uses_file_id_fallback_for_titles_without_ascii_slug() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(
+        repo.path(),
+        "unicode-proposal.md",
+        proposal_markdown_with_title("記憶"),
+    );
+
+    let applied = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_unicode", "--json"],
+    );
+    assert_json_string_field(&applied, &["record_id"], "unicode-proposal");
+    assert_json_string_field(
+        &applied,
+        &["record_path"],
+        ".memzoi/records/unicode-proposal.md",
+    );
+    assert!(
+        repo.path()
+            .join(".memzoi/records/unicode-proposal.md")
+            .is_file(),
+        "non-ASCII titles should use deterministic file-id fallback"
+    );
+}
+
+#[test]
 fn proposal_files_apply_refuses_existing_canonical_record() {
     let repo = initialized_temp_repo();
     write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
@@ -2142,6 +2169,43 @@ fn write_pending_proposal_file(repo: &Path, name: &str, contents: String) {
 
 fn valid_proposal_markdown() -> String {
     proposal_markdown_with("semantic", "create", "supersedes: []", "")
+}
+
+fn proposal_markdown_with_title(title: &str) -> String {
+    format!(
+        r#"---
+id: mem_test_unicode
+kind: proposal
+version: okf/v0.1
+profile: memzoi/v0
+type: decision
+lane: semantic
+title: "{title}"
+description: Valid proposal description.
+status: proposed
+proposal:
+  action: create
+  proposed_by: agent
+  proposed_at: 2026-07-06T00:00:00Z
+scope:
+  kind: repo
+  paths:
+    - src/**
+tags:
+  - testing
+timestamp: 2026-07-06T00:00:00Z
+created_by: agent
+sources:
+  - path: src/lib.rs
+supersedes: []
+sensitivity: repo-safe
+---
+
+# {title}
+
+This proposal body is valid.
+"#
+    )
 }
 
 fn proposal_markdown_with(

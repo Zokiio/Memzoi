@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
-    proposals::title_to_concept_id,
+    proposals::title_to_concept_slug,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -419,7 +419,8 @@ pub fn apply_okf_create_proposal_file(
 
     let body = proposal.body.trim().to_owned();
     let record = MemoryRecord {
-        id: title_to_concept_id(&proposal.title),
+        id: title_to_concept_slug(&proposal.title)
+            .unwrap_or_else(|| proposal.file_id.replace('_', "-")),
         memory_type: proposal.memory_type,
         lane: proposal.lane,
         scope_kind: proposal.scope_kind,
