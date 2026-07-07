@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
+    proposals::title_to_concept_id,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +49,12 @@ pub struct OkfProposalFile {
     pub sources: Vec<OkfProposalSource>,
     pub supersedes: Vec<String>,
     pub sensitivity: OkfProposalSensitivity,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OkfProposalApplyResult {
+    pub record: MemoryRecord,
+    pub record_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +392,64 @@ pub fn create_memory_record_file_with_metadata(
     applies_to: &[String],
 ) -> Result<PathBuf> {
     write_memory_record_file_internal(records_root, record, tags, applies_to, WriteMode::CreateNew)
+}
+
+pub fn apply_okf_create_proposal_file(
+    records_root: impl AsRef<Path>,
+    proposal: &OkfProposalFile,
+) -> Result<OkfProposalApplyResult> {
+    if proposal.status != OkfProposalStatus::Proposed {
+        bail!(
+            "OKF proposal {} must have status proposed before apply",
+            proposal.id
+        );
+    }
+    if proposal.proposal.action != OkfProposalAction::Create {
+        bail!(
+            "OKF proposal action {} is not supported by `memzoi proposal-files apply`; only create is supported",
+            proposal.proposal.action.as_str()
+        );
+    }
+    if proposal.sensitivity != OkfProposalSensitivity::RepoSafe {
+        bail!(
+            "OKF proposal sensitivity {} cannot be applied into repo records; only repo-safe is supported",
+            proposal.sensitivity.as_str()
+        );
+    }
+
+    let body = proposal.body.trim().to_owned();
+    let record = MemoryRecord {
+        id: title_to_concept_id(&proposal.title),
+        memory_type: proposal.memory_type,
+        lane: proposal.lane,
+        scope_kind: proposal.scope_kind,
+        scope_id: proposal.scope_id.clone(),
+        visibility: Visibility::Repo,
+        title: proposal.title.trim().to_owned(),
+        body,
+        status: MemoryStatus::Active,
+        confidence: 1.0,
+        source_kind: Some("memzoi-proposal-file".to_owned()),
+        source_ref: Some(proposal.id.clone()),
+        content_hash: blake3::hash(proposal.body.trim().as_bytes())
+            .to_hex()
+            .to_string(),
+        created_at: proposal.timestamp.clone(),
+        updated_at: proposal.timestamp.clone(),
+        supersedes_id: None,
+        expires_at: None,
+    };
+    let record_path = create_memory_record_file_with_metadata(
+        records_root.as_ref(),
+        &record,
+        &proposal.tags,
+        &proposal.applies_to,
+    )?;
+
+    Ok(OkfProposalApplyResult {
+        record,
+        record_path,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

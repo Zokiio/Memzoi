@@ -37,9 +37,10 @@ Review file-backed proposals with:
 memzoi proposal-files list
 memzoi proposal-files show <proposal-id>
 memzoi proposal-files validate
+memzoi proposal-files apply <proposal-id>
 ```
 
-These commands are read-only. Current CLI/MCP proposal commands still use the runtime proposal inbox states listed above. File-backed apply commands, accepted/rejected proposal directories, and automatic extraction are separate future lifecycle slices.
+`list`, `show`, and `validate` are read-only. `apply` currently supports only repo-safe `create` proposals with `status: proposed`; it writes a compact canonical record under `.memzoi/records/**`, leaves the pending proposal file in place, and does not update the runtime SQLite index. Run `memzoi rebuild` when runtime search should pick up newly applied Git-plane records. Current CLI/MCP proposal commands still use the runtime proposal inbox states listed above. Accepted/rejected proposal directories and automatic extraction are separate future lifecycle slices.
 
 Pending proposal files may be committed when they are explicitly intended for PR review and `sensitivity: repo-safe`. Keep `local-only`, `sensitive`, `secret`, and `unknown` proposals out of repo-shared commits until a human classifies them. Accepted/rejected proposal directories are reserved for a future lifecycle decision; for now, canonical records plus Git history are the durable outcome.
 

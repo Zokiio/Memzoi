@@ -13,7 +13,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi init` | Initialize repo `.memzoi/` memory and local runtime state. |
 | `memzoi propose` | Propose a new memory record. Built-in default auto-approves valid proposals but does not apply them. |
 | `memzoi proposals` | List, show, and bulk-apply proposal inbox state. |
-| `memzoi proposal-files` | List, show, and validate OKF proposal files under `.memzoi/proposals/pending/`. |
+| `memzoi proposal-files` | List, show, validate, and apply OKF proposal files under `.memzoi/proposals/pending/`. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
@@ -44,6 +44,7 @@ Run `memzoi <command> --help` for exact options.
 | `proposal-files list` | `--json` |
 | `proposal-files show` | `<proposal-id>`, `--json` |
 | `proposal-files validate` | `--json` |
+| `proposal-files apply` | `<proposal-id>`, `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
@@ -148,15 +149,16 @@ Valid proposal sensitivity values:
 
 The current CLI/MCP proposal inbox remains DB-local workflow state and uses the operational proposal statuses below.
 
-Read-only proposal file review commands:
+Proposal file review commands:
 
 ```bash
 memzoi proposal-files list
 memzoi proposal-files show <proposal-id>
 memzoi proposal-files validate
+memzoi proposal-files apply <proposal-id>
 ```
 
-These commands parse proposal files and report schema errors. They do not approve, reject, apply, move, or write proposal files.
+`list`, `show`, and `validate` are read-only. `apply` currently supports only `proposal.action: create` with `status: proposed` and `sensitivity: repo-safe`; it writes a compact canonical record under `.memzoi/records/`, leaves the pending proposal file in place, and does not update runtime SQLite state. Run `memzoi rebuild` when the runtime search/index needs to reflect newly applied Git-plane records.
 
 ## Scope kinds
 

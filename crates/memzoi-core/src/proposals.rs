@@ -528,7 +528,7 @@ fn record_exists(conn: &Connection, id: &str) -> Result<bool> {
     )?)
 }
 
-fn title_to_concept_id(title: &str) -> String {
+pub(crate) fn title_to_concept_id(title: &str) -> String {
     let mut slug = String::new();
     let mut previous_dash = false;
     for ch in title.chars().flat_map(char::to_lowercase) {
