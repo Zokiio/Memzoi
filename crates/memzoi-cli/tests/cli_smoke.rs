@@ -1259,7 +1259,24 @@ fn proposal_files_apply_refuses_existing_canonical_record() {
 
 #[test]
 fn proposal_files_apply_rejects_non_repo_safe_sensitivity() {
-    for sensitivity in ["local-only", "sensitive", "secret", "unknown"] {
+    for (sensitivity, guidance) in [
+        (
+            "local-only",
+            "local-only proposals belong in the future local/runtime memory plane",
+        ),
+        (
+            "sensitive",
+            "classify or sanitize sensitive content before applying it to the repo plane",
+        ),
+        (
+            "secret",
+            "secret proposals must not become repo-shared memory",
+        ),
+        (
+            "unknown",
+            "classify the proposal sensitivity before applying it to repo records",
+        ),
+    ] {
         let repo = initialized_temp_repo();
         write_pending_proposal_file(
             repo.path(),
@@ -1277,8 +1294,14 @@ fn proposal_files_apply_rejects_non_repo_safe_sensitivity() {
         let stderr =
             run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
         assert!(
-            stderr.contains(&format!("sensitivity {sensitivity} cannot be applied")),
+            stderr.contains(&format!(
+                "sensitivity {sensitivity} cannot be applied into repo records"
+            )),
             "expected sensitivity rejection for {sensitivity}, got {stderr}"
+        );
+        assert!(
+            stderr.contains(guidance),
+            "expected next-step guidance for {sensitivity}, got {stderr}"
         );
         assert!(
             !repo
@@ -1286,6 +1309,14 @@ fn proposal_files_apply_rejects_non_repo_safe_sensitivity() {
                 .join(".memzoi/records/valid-proposal.md")
                 .exists(),
             "blocked sensitivity {sensitivity} should not create a record"
+        );
+        let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
+        let runtime_records: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))
+            .expect("count runtime records");
+        assert_eq!(
+            runtime_records, 0,
+            "blocked sensitivity {sensitivity} should not write SQLite"
         );
     }
 }

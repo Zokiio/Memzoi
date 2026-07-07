@@ -412,8 +412,9 @@ pub fn apply_okf_create_proposal_file(
     }
     if proposal.sensitivity != OkfProposalSensitivity::RepoSafe {
         bail!(
-            "OKF proposal sensitivity {} cannot be applied into repo records; only repo-safe is supported",
-            proposal.sensitivity.as_str()
+            "OKF proposal sensitivity {} cannot be applied into repo records; {}",
+            proposal.sensitivity.as_str(),
+            repo_apply_sensitivity_guidance(proposal.sensitivity)
         );
     }
 
@@ -451,6 +452,22 @@ pub fn apply_okf_create_proposal_file(
         record,
         record_path,
     })
+}
+
+fn repo_apply_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'static str {
+    match sensitivity {
+        OkfProposalSensitivity::RepoSafe => "repo-safe proposals may be applied after review",
+        OkfProposalSensitivity::Secret => "secret proposals must not become repo-shared memory",
+        OkfProposalSensitivity::Sensitive => {
+            "classify or sanitize sensitive content before applying it to the repo plane"
+        }
+        OkfProposalSensitivity::LocalOnly => {
+            "local-only proposals belong in the future local/runtime memory plane"
+        }
+        OkfProposalSensitivity::Unknown => {
+            "classify the proposal sensitivity before applying it to repo records"
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
