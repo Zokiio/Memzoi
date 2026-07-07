@@ -9,7 +9,7 @@ use memzoi_core::{
     ContextPackInput, ExportFormat, ExportInput, InitRequest, MemoryDraft, MemoryLane,
     MemoryService, MemoryType, OkfProposalFile, PrecheckInput, Proposal, ProposalApprovalOverride,
     ProposalStatus, ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, Visibility,
-    discover_paths, parse_okf_proposal_file,
+    apply_okf_create_proposal_file, discover_paths, parse_okf_proposal_file,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -87,6 +87,9 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 proposal_files_show_command(&proposal_id, json)
             }
             ProposalFileCommands::Validate { json } => proposal_files_validate_command(json),
+            ProposalFileCommands::Apply { proposal_id, json } => {
+                proposal_files_apply_command(&proposal_id, json)
+            }
         },
         Commands::Supersede {
             record_id,
@@ -510,6 +513,57 @@ fn proposal_files_validate_command(as_json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn proposal_files_apply_command(proposal_id: &str, as_json: bool) -> Result<()> {
+    let scan = scan_pending_proposal_files()?;
+    if !scan.errors.is_empty() {
+        if as_json {
+            print_json(&proposal_file_validation_json(&scan))?;
+        }
+        bail!("invalid proposal files found; run `memzoi proposal-files validate` for details");
+    }
+
+    let entry = require_proposal_file_entry(&scan, proposal_id)?;
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let paths = discover_paths(&cwd)?;
+    let result = apply_okf_create_proposal_file(paths.records_dir(), &entry.proposal)?;
+    let record_path = result
+        .record_path
+        .strip_prefix(&paths.project_root)
+        .unwrap_or(&result.record_path);
+
+    if as_json {
+        print_json(&json!({
+            "proposal_id": &entry.proposal.id,
+            "file_id": &entry.proposal.file_id,
+            "record_id": &result.record.id,
+            "record_path": record_path,
+            "action": entry.proposal.proposal.action.as_str(),
+            "sensitivity": entry.proposal.sensitivity.as_str(),
+            "title": &entry.proposal.title,
+        }))?;
+    } else {
+        println!("applied\t{}\t{}", &result.record.id, record_path.display());
+    }
+    Ok(())
+}
+
+fn require_proposal_file_entry<'a>(
+    scan: &'a ProposalFileScan,
+    proposal_id: &str,
+) -> Result<&'a ProposalFileEntry> {
+    let matches = scan
+        .proposals
+        .iter()
+        .filter(|entry| entry.proposal.id == proposal_id || entry.proposal.file_id == proposal_id)
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [] => bail!("proposal file not found: {proposal_id}"),
+        [entry] => Ok(entry),
+        _ => bail!("proposal file id {proposal_id:?} matched multiple files"),
+    }
 }
 
 fn scan_pending_proposal_files() -> Result<ProposalFileScan> {

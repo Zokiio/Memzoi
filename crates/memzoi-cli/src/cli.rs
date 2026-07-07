@@ -271,6 +271,13 @@ pub(crate) enum ProposalFileCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Apply one repo-safe create proposal file into canonical records.
+    Apply {
+        proposal_id: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

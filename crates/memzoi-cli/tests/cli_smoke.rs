@@ -1151,6 +1151,252 @@ fn proposal_files_skip_symlinks_under_pending_directory() {
 }
 
 #[test]
+fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_db_mutation() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+
+    let applied = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_json_string_field(&applied, &["proposal_id"], "mem_test_valid");
+    assert_json_string_field(&applied, &["file_id"], "valid-proposal");
+    assert_json_string_field(&applied, &["record_id"], "valid-proposal");
+    assert_json_string_field(
+        &applied,
+        &["record_path"],
+        ".memzoi/records/valid-proposal.md",
+    );
+    assert_json_string_field(&applied, &["action"], "create");
+    assert_json_string_field(&applied, &["sensitivity"], "repo-safe");
+    assert_json_string_field(&applied, &["title"], "Valid proposal");
+
+    let record_path = repo.path().join(json_string(&applied, "record_path"));
+    let rendered = fs::read_to_string(&record_path).expect("read canonical record");
+    assert!(rendered.contains("type: decision\n"));
+    assert!(rendered.contains("lane: semantic\n"));
+    assert!(rendered.contains("status: active\n"));
+    assert!(rendered.contains("visibility: repo\n"));
+    assert!(rendered.contains("confidence: 1\n"));
+    assert!(rendered.contains("source: memzoi-proposal-file\n"));
+    assert!(rendered.contains("source_ref: mem_test_valid\n"));
+    assert!(rendered.contains("# Valid proposal\n\nThis proposal body is valid."));
+    for forbidden in [
+        "kind:",
+        "version:",
+        "profile:",
+        "proposal:",
+        "proposed_by:",
+        "proposed_at:",
+        "reason:",
+        "sensitivity:",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "canonical record should omit review-only field {forbidden:?}: {rendered}"
+        );
+    }
+
+    assert!(
+        repo.path()
+            .join(".memzoi/proposals/pending/valid-proposal.md")
+            .is_file(),
+        "apply should leave the pending proposal file in place"
+    );
+    let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
+    let runtime_records: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))
+        .expect("count runtime records");
+    assert_eq!(runtime_records, 0, "Git-plane apply must not write SQLite");
+}
+
+#[test]
+fn proposal_files_apply_uses_file_id_fallback_for_titles_without_ascii_slug() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(
+        repo.path(),
+        "unicode-proposal.md",
+        proposal_markdown_with_title("記憶"),
+    );
+
+    let applied = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_unicode", "--json"],
+    );
+    assert_json_string_field(&applied, &["record_id"], "unicode-proposal");
+    assert_json_string_field(
+        &applied,
+        &["record_path"],
+        ".memzoi/records/unicode-proposal.md",
+    );
+    assert!(
+        repo.path()
+            .join(".memzoi/records/unicode-proposal.md")
+            .is_file(),
+        "non-ASCII titles should use deterministic file-id fallback"
+    );
+}
+
+#[test]
+fn proposal_files_apply_refuses_existing_canonical_record() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    let record_path = repo.path().join(".memzoi/records/valid-proposal.md");
+    fs::create_dir_all(record_path.parent().expect("record parent")).expect("create records dir");
+    fs::write(&record_path, "human-authored canonical memory\n").expect("write collision");
+
+    let stderr =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        stderr.contains("failed to create memory record"),
+        "expected collision error, got {stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&record_path).expect("read existing record"),
+        "human-authored canonical memory\n"
+    );
+}
+
+#[test]
+fn proposal_files_apply_rejects_non_repo_safe_sensitivity() {
+    for sensitivity in ["local-only", "sensitive", "secret", "unknown"] {
+        let repo = initialized_temp_repo();
+        write_pending_proposal_file(
+            repo.path(),
+            "valid-proposal.md",
+            proposal_markdown_with_options(
+                "semantic",
+                "create",
+                "proposed",
+                "supersedes: []",
+                "",
+                sensitivity,
+            ),
+        );
+
+        let stderr =
+            run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+        assert!(
+            stderr.contains(&format!("sensitivity {sensitivity} cannot be applied")),
+            "expected sensitivity rejection for {sensitivity}, got {stderr}"
+        );
+        assert!(
+            !repo
+                .path()
+                .join(".memzoi/records/valid-proposal.md")
+                .exists(),
+            "blocked sensitivity {sensitivity} should not create a record"
+        );
+    }
+}
+
+#[test]
+fn proposal_files_apply_rejects_unsupported_actions() {
+    for (action, supersedes_yaml, target_yaml) in [
+        ("supersede", "supersedes:\n  - existing-memory", ""),
+        ("tombstone", "supersedes: []", "  target: existing-memory\n"),
+    ] {
+        let repo = initialized_temp_repo();
+        write_pending_proposal_file(
+            repo.path(),
+            "valid-proposal.md",
+            proposal_markdown_with_options(
+                "semantic",
+                action,
+                "proposed",
+                supersedes_yaml,
+                target_yaml,
+                "repo-safe",
+            ),
+        );
+
+        let stderr =
+            run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+        assert!(
+            stderr.contains(&format!("action {action} is not supported")),
+            "expected unsupported action rejection for {action}, got {stderr}"
+        );
+    }
+}
+
+#[test]
+fn proposal_files_apply_fails_cleanly_for_invalid_or_missing_proposals() {
+    let missing_dir = initialized_temp_repo();
+    let stderr = run_command_failure_stderr(
+        missing_dir.path(),
+        &["proposal-files", "apply", "mem_test_valid"],
+    );
+    assert!(
+        stderr.contains("proposal file not found: mem_test_valid"),
+        "missing pending dir should fail cleanly, got {stderr}"
+    );
+
+    let missing_id = initialized_temp_repo();
+    write_pending_proposal_file(
+        missing_id.path(),
+        "valid-proposal.md",
+        valid_proposal_markdown(),
+    );
+    let stderr = run_command_failure_stderr(
+        missing_id.path(),
+        &["proposal-files", "apply", "missing-proposal"],
+    );
+    assert!(
+        stderr.contains("proposal file not found: missing-proposal"),
+        "missing id should fail cleanly, got {stderr}"
+    );
+
+    let invalid_status = initialized_temp_repo();
+    write_pending_proposal_file(
+        invalid_status.path(),
+        "valid-proposal.md",
+        proposal_markdown_with_options(
+            "semantic",
+            "create",
+            "approved",
+            "supersedes: []",
+            "",
+            "repo-safe",
+        ),
+    );
+    let invalid = run_json_command_failure(
+        invalid_status.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(invalid.get("valid").and_then(Value::as_bool), Some(false));
+    let errors = serde_json::to_string(invalid.get("errors").expect("errors"))
+        .expect("serialize invalid status errors");
+    assert!(
+        errors.contains("unknown OKF proposal status"),
+        "non-proposed status should fail cleanly through schema validation: {invalid}"
+    );
+
+    let invalid_pending = initialized_temp_repo();
+    write_pending_proposal_file(
+        invalid_pending.path(),
+        "valid-proposal.md",
+        valid_proposal_markdown(),
+    );
+    write_pending_proposal_file(
+        invalid_pending.path(),
+        "invalid-lane.md",
+        proposal_markdown_with("mystery", "create", "supersedes: []", ""),
+    );
+    let invalid = run_json_command_failure(
+        invalid_pending.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(invalid.get("valid").and_then(Value::as_bool), Some(false));
+    assert!(
+        !invalid_pending
+            .path()
+            .join(".memzoi/records/valid-proposal.md")
+            .exists(),
+        "apply should not write while any pending proposal file is invalid"
+    );
+}
+
+#[test]
 fn reject_json_prevents_apply_from_creating_active_record() {
     let repo = initialized_temp_repo();
 
@@ -1907,6 +2153,14 @@ fn run_json_command_failure(repo: &Path, args: &[&str]) -> Value {
     json_from_stdout(&assert.get_output().stdout)
 }
 
+fn run_command_failure_stderr(repo: &Path, args: &[&str]) -> String {
+    let mut cmd = memzoi();
+    let assert = cmd.args(args).current_dir(repo).assert().failure();
+    std::str::from_utf8(&assert.get_output().stderr)
+        .expect("stderr is utf-8")
+        .to_owned()
+}
+
 fn write_pending_proposal_file(repo: &Path, name: &str, contents: String) {
     let pending = repo.join(".memzoi").join("proposals").join("pending");
     fs::create_dir_all(&pending).expect("create pending proposals dir");
@@ -1917,11 +2171,66 @@ fn valid_proposal_markdown() -> String {
     proposal_markdown_with("semantic", "create", "supersedes: []", "")
 }
 
+fn proposal_markdown_with_title(title: &str) -> String {
+    format!(
+        r#"---
+id: mem_test_unicode
+kind: proposal
+version: okf/v0.1
+profile: memzoi/v0
+type: decision
+lane: semantic
+title: "{title}"
+description: Valid proposal description.
+status: proposed
+proposal:
+  action: create
+  proposed_by: agent
+  proposed_at: 2026-07-06T00:00:00Z
+scope:
+  kind: repo
+  paths:
+    - src/**
+tags:
+  - testing
+timestamp: 2026-07-06T00:00:00Z
+created_by: agent
+sources:
+  - path: src/lib.rs
+supersedes: []
+sensitivity: repo-safe
+---
+
+# {title}
+
+This proposal body is valid.
+"#
+    )
+}
+
 fn proposal_markdown_with(
     lane: &str,
     action: &str,
     supersedes_yaml: &str,
     target_yaml: &str,
+) -> String {
+    proposal_markdown_with_options(
+        lane,
+        action,
+        "proposed",
+        supersedes_yaml,
+        target_yaml,
+        "repo-safe",
+    )
+}
+
+fn proposal_markdown_with_options(
+    lane: &str,
+    action: &str,
+    status: &str,
+    supersedes_yaml: &str,
+    target_yaml: &str,
+    sensitivity: &str,
 ) -> String {
     format!(
         r#"---
@@ -1933,11 +2242,13 @@ type: decision
 lane: {lane}
 title: Valid proposal
 description: Valid proposal description.
-status: proposed
+status: {status}
 proposal:
   action: {action}
   proposed_by: agent
   proposed_at: 2026-07-06T00:00:00Z
+  reason: Review packet context should not become canonical frontmatter.
+  confidence: medium
 {target_yaml}scope:
   kind: repo
   paths:
@@ -1949,7 +2260,7 @@ created_by: agent
 sources:
   - path: src/lib.rs
 {supersedes_yaml}
-sensitivity: repo-safe
+sensitivity: {sensitivity}
 ---
 
 # Valid proposal

@@ -528,7 +528,11 @@ fn record_exists(conn: &Connection, id: &str) -> Result<bool> {
     )?)
 }
 
-fn title_to_concept_id(title: &str) -> String {
+pub(crate) fn title_to_concept_id(title: &str) -> String {
+    title_to_concept_slug(title).unwrap_or_else(|| format!("memory-{}", Uuid::now_v7()))
+}
+
+pub(crate) fn title_to_concept_slug(title: &str) -> Option<String> {
     let mut slug = String::new();
     let mut previous_dash = false;
     for ch in title.chars().flat_map(char::to_lowercase) {
@@ -543,11 +547,7 @@ fn title_to_concept_id(title: &str) -> String {
     while slug.ends_with('-') {
         slug.pop();
     }
-    if slug.is_empty() {
-        format!("memory-{}", Uuid::now_v7())
-    } else {
-        slug
-    }
+    if slug.is_empty() { None } else { Some(slug) }
 }
 
 fn parse_proposal_status(value: &str) -> rusqlite::Result<ProposalStatus> {
