@@ -160,6 +160,8 @@ memzoi proposal-files apply <proposal-id>
 
 `list`, `show`, and `validate` are read-only. `apply` currently supports only `proposal.action: create` with `status: proposed` and `sensitivity: repo-safe`; it writes a compact canonical record under `.memzoi/records/`, leaves the pending proposal file in place, and does not update runtime SQLite state. Run `memzoi rebuild` when the runtime search/index needs to reflect newly applied Git-plane records.
 
+Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals, and there is no override flag. Classify or sanitize blocked proposals before repo apply, or route `local-only` memory to the future local/runtime plane.
+
 ## Scope kinds
 
 Valid `--scope-kind`, `scope_kind`, and `scope` values:
