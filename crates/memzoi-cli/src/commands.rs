@@ -495,10 +495,10 @@ fn proposal_files_validate_command(as_json: bool) -> Result<()> {
         print_json(&proposal_file_validation_json(&scan))?;
     } else {
         for entry in &scan.proposals {
-            println!("valid\t{}\t{}", entry.path.display(), entry.proposal.id);
+            println!("valid\t{}\t{}", entry.path.display(), &entry.proposal.id);
         }
         for error in &scan.errors {
-            println!("invalid\t{}\t{}", error.path.display(), error.error);
+            println!("invalid\t{}\t{}", error.path.display(), &error.error);
         }
     }
 
@@ -578,19 +578,19 @@ fn is_hidden(path: &Path) -> bool {
 fn print_proposal_file_summary(entry: &ProposalFileEntry) {
     println!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        entry.proposal.id,
+        &entry.proposal.id,
         entry.path.display(),
         entry.proposal.proposal.action.as_str(),
         entry.proposal.lane.as_str(),
         entry.proposal.memory_type.as_str(),
         entry.proposal.sensitivity.as_str(),
-        entry.proposal.title,
+        &entry.proposal.title,
     );
 }
 
 fn print_proposal_file_detail(entry: &ProposalFileEntry) {
-    println!("id:\t{}", entry.proposal.id);
-    println!("file_id:\t{}", entry.proposal.file_id);
+    println!("id:\t{}", &entry.proposal.id);
+    println!("file_id:\t{}", &entry.proposal.file_id);
     println!("path:\t{}", entry.path.display());
     if let Some(kind) = &entry.proposal.kind {
         println!("kind:\t{kind}");
@@ -603,8 +603,8 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     }
     println!("status:\t{}", entry.proposal.status.as_str());
     println!("action:\t{}", entry.proposal.proposal.action.as_str());
-    println!("proposed_by:\t{}", entry.proposal.proposal.proposed_by);
-    println!("proposed_at:\t{}", entry.proposal.proposal.proposed_at);
+    println!("proposed_by:\t{}", &entry.proposal.proposal.proposed_by);
+    println!("proposed_at:\t{}", &entry.proposal.proposal.proposed_at);
     if let Some(reason) = &entry.proposal.proposal.reason {
         println!("reason:\t{reason}");
     }
@@ -626,7 +626,7 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     if !entry.proposal.tags.is_empty() {
         println!("tags:\t{}", entry.proposal.tags.join(", "));
     }
-    println!("timestamp:\t{}", entry.proposal.timestamp);
+    println!("timestamp:\t{}", &entry.proposal.timestamp);
     if let Some(created_by) = &entry.proposal.created_by {
         println!("created_by:\t{created_by}");
     }
@@ -653,14 +653,14 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
         println!("supersedes:\t{}", entry.proposal.supersedes.join(", "));
     }
     println!("sensitivity:\t{}", entry.proposal.sensitivity.as_str());
-    println!("title:\t{}", entry.proposal.title);
-    println!("description:\t{}", entry.proposal.description);
-    println!("body:\t{}", entry.proposal.body);
+    println!("title:\t{}", &entry.proposal.title);
+    println!("description:\t{}", &entry.proposal.description);
+    println!("body:\t{}", &entry.proposal.body);
 }
 
 fn proposal_file_scan_json(scan: &ProposalFileScan) -> serde_json::Value {
     json!({
-        "proposals_root": scan.proposals_root,
+        "proposals_root": &scan.proposals_root,
         "proposals": scan.proposals
             .iter()
             .map(|entry| proposal_file_json(entry, false))
@@ -674,7 +674,7 @@ fn proposal_file_validation_json(scan: &ProposalFileScan) -> serde_json::Value {
         "valid": scan.errors.is_empty(),
         "valid_count": scan.proposals.len(),
         "invalid_count": scan.errors.len(),
-        "proposals_root": scan.proposals_root,
+        "proposals_root": &scan.proposals_root,
         "proposals": scan.proposals
             .iter()
             .map(|entry| proposal_file_json(entry, false))
@@ -688,8 +688,8 @@ fn proposal_file_errors_json(errors: &[ProposalFileError]) -> Vec<serde_json::Va
         .iter()
         .map(|error| {
             json!({
-                "path": error.path,
-                "error": error.error,
+                "path": &error.path,
+                "error": &error.error,
             })
         })
         .collect()
@@ -698,44 +698,44 @@ fn proposal_file_errors_json(errors: &[ProposalFileError]) -> Vec<serde_json::Va
 fn proposal_file_json(entry: &ProposalFileEntry, include_body: bool) -> serde_json::Value {
     let proposal = &entry.proposal;
     let mut value = json!({
-        "id": proposal.id,
-        "file_id": proposal.file_id,
-        "path": entry.path,
-        "kind": proposal.kind,
-        "version": proposal.version,
-        "profile": proposal.profile,
+        "id": &proposal.id,
+        "file_id": &proposal.file_id,
+        "path": &entry.path,
+        "kind": &proposal.kind,
+        "version": &proposal.version,
+        "profile": &proposal.profile,
         "type": proposal.memory_type.as_str(),
         "lane": proposal.lane.as_str(),
-        "title": proposal.title,
-        "description": proposal.description,
+        "title": &proposal.title,
+        "description": &proposal.description,
         "status": proposal.status.as_str(),
         "action": proposal.proposal.action.as_str(),
         "proposal": {
             "action": proposal.proposal.action.as_str(),
-            "proposed_by": proposal.proposal.proposed_by,
-            "proposed_at": proposal.proposal.proposed_at,
-            "reason": proposal.proposal.reason,
-            "confidence": proposal.proposal.confidence,
-            "target": proposal.proposal.target,
+            "proposed_by": &proposal.proposal.proposed_by,
+            "proposed_at": &proposal.proposal.proposed_at,
+            "reason": &proposal.proposal.reason,
+            "confidence": &proposal.proposal.confidence,
+            "target": &proposal.proposal.target,
         },
         "scope_kind": proposal.scope_kind.as_str(),
-        "scope_id": proposal.scope_id,
-        "applies_to": proposal.applies_to,
-        "tags": proposal.tags,
-        "timestamp": proposal.timestamp,
-        "created_by": proposal.created_by,
+        "scope_id": &proposal.scope_id,
+        "applies_to": &proposal.applies_to,
+        "tags": &proposal.tags,
+        "timestamp": &proposal.timestamp,
+        "created_by": &proposal.created_by,
         "sources": proposal.sources.iter().map(|source| {
             json!({
-                "path": source.path,
-                "url": source.url,
-                "ref": source.reference,
+                "path": &source.path,
+                "url": &source.url,
+                "ref": &source.reference,
             })
         }).collect::<Vec<_>>(),
-        "supersedes": proposal.supersedes,
+        "supersedes": &proposal.supersedes,
         "sensitivity": proposal.sensitivity.as_str(),
     });
     if include_body {
-        value["body"] = json!(proposal.body);
+        value["body"] = json!(&proposal.body);
     }
     value
 }
