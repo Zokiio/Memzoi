@@ -1,16 +1,24 @@
-use std::{path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
     ContextPackInput, ExportFormat, ExportInput, InitRequest, MemoryDraft, MemoryLane,
-    MemoryService, MemoryType, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalStatus,
-    ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, Visibility, discover_paths,
+    MemoryService, MemoryType, OkfProposalFile, PrecheckInput, Proposal, ProposalApprovalOverride,
+    ProposalStatus, ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, Visibility,
+    discover_paths, parse_okf_proposal_file,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 use crate::{
-    cli::{Cli, Commands, DraftCommand, IntegrateCommands, McpCommands, ProposalCommands},
+    cli::{
+        Cli, Commands, DraftCommand, IntegrateCommands, McpCommands, ProposalCommands,
+        ProposalFileCommands,
+    },
     integrate, mcp,
     output::print_json,
     update,
@@ -72,6 +80,13 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 actor,
                 json,
             } => proposals_apply_command(all_approved, &actor, json),
+        },
+        Commands::ProposalFiles { command } => match command {
+            ProposalFileCommands::List { json } => proposal_files_list_command(json),
+            ProposalFileCommands::Show { proposal_id, json } => {
+                proposal_files_show_command(&proposal_id, json)
+            }
+            ProposalFileCommands::Validate { json } => proposal_files_validate_command(json),
         },
         Commands::Supersede {
             record_id,
@@ -408,6 +423,324 @@ fn proposal_json(proposal: &Proposal) -> serde_json::Value {
         "payload": proposal.payload,
         "validation": proposal.validation,
     })
+}
+
+#[derive(Debug)]
+struct ProposalFileScan {
+    proposals_root: PathBuf,
+    proposals: Vec<ProposalFileEntry>,
+    errors: Vec<ProposalFileError>,
+}
+
+#[derive(Debug)]
+struct ProposalFileEntry {
+    path: PathBuf,
+    proposal: OkfProposalFile,
+}
+
+#[derive(Debug)]
+struct ProposalFileError {
+    path: PathBuf,
+    error: String,
+}
+
+fn proposal_files_list_command(as_json: bool) -> Result<()> {
+    let scan = scan_pending_proposal_files()?;
+    if as_json {
+        print_json(&proposal_file_scan_json(&scan))?;
+    } else {
+        for entry in &scan.proposals {
+            print_proposal_file_summary(entry);
+        }
+    }
+
+    if !scan.errors.is_empty() {
+        bail!("invalid proposal files found; run `memzoi proposal-files validate` for details");
+    }
+    Ok(())
+}
+
+fn proposal_files_show_command(proposal_id: &str, as_json: bool) -> Result<()> {
+    let scan = scan_pending_proposal_files()?;
+    let matches = scan
+        .proposals
+        .iter()
+        .filter(|entry| entry.proposal.id == proposal_id || entry.proposal.file_id == proposal_id)
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [] => {
+            if scan.errors.is_empty() {
+                bail!("proposal file not found: {proposal_id}");
+            }
+            bail!(
+                "proposal file not found or invalid: {proposal_id}; run `memzoi proposal-files validate` for details"
+            )
+        }
+        [entry] => {
+            if as_json {
+                print_json(&proposal_file_json(entry, true))
+            } else {
+                print_proposal_file_detail(entry);
+                Ok(())
+            }
+        }
+        _ => bail!("proposal file id {proposal_id:?} matched multiple files"),
+    }
+}
+
+fn proposal_files_validate_command(as_json: bool) -> Result<()> {
+    let scan = scan_pending_proposal_files()?;
+    if as_json {
+        print_json(&proposal_file_validation_json(&scan))?;
+    } else {
+        for entry in &scan.proposals {
+            println!("valid\t{}\t{}", entry.path.display(), &entry.proposal.id);
+        }
+        for error in &scan.errors {
+            println!("invalid\t{}\t{}", error.path.display(), &error.error);
+        }
+    }
+
+    if !scan.errors.is_empty() {
+        bail!(
+            "{} invalid proposal file{}",
+            scan.errors.len(),
+            if scan.errors.len() == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
+fn scan_pending_proposal_files() -> Result<ProposalFileScan> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let paths = discover_paths(&cwd)?;
+    let proposals_root = paths.proposals_dir().join("pending");
+    let mut files = Vec::new();
+    if proposals_root.exists() {
+        collect_markdown_files(&proposals_root, &mut files)?;
+    }
+
+    let mut proposals = Vec::new();
+    let mut errors = Vec::new();
+    for file in files {
+        match parse_okf_proposal_file(&proposals_root, &file) {
+            Ok(Some(proposal)) => proposals.push(ProposalFileEntry {
+                path: file,
+                proposal,
+            }),
+            Ok(None) => {}
+            Err(error) => errors.push(ProposalFileError {
+                path: file,
+                error: error.to_string(),
+            }),
+        }
+    }
+    proposals.sort_by(|left, right| {
+        left.proposal
+            .id
+            .cmp(&right.proposal.id)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    errors.sort_by(|left, right| left.path.cmp(&right.path));
+
+    Ok(ProposalFileScan {
+        proposals_root,
+        proposals,
+        errors,
+    })
+}
+
+fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if is_hidden(&path) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_markdown_files(&path, files)?;
+        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.') && name != ".")
+}
+
+fn print_proposal_file_summary(entry: &ProposalFileEntry) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        &entry.proposal.id,
+        entry.path.display(),
+        entry.proposal.proposal.action.as_str(),
+        entry.proposal.lane.as_str(),
+        entry.proposal.memory_type.as_str(),
+        entry.proposal.sensitivity.as_str(),
+        &entry.proposal.title,
+    );
+}
+
+fn print_proposal_file_detail(entry: &ProposalFileEntry) {
+    println!("id:\t{}", &entry.proposal.id);
+    println!("file_id:\t{}", &entry.proposal.file_id);
+    println!("path:\t{}", entry.path.display());
+    if let Some(kind) = &entry.proposal.kind {
+        println!("kind:\t{kind}");
+    }
+    if let Some(version) = &entry.proposal.version {
+        println!("version:\t{version}");
+    }
+    if let Some(profile) = &entry.proposal.profile {
+        println!("profile:\t{profile}");
+    }
+    println!("status:\t{}", entry.proposal.status.as_str());
+    println!("action:\t{}", entry.proposal.proposal.action.as_str());
+    println!("proposed_by:\t{}", &entry.proposal.proposal.proposed_by);
+    println!("proposed_at:\t{}", &entry.proposal.proposal.proposed_at);
+    if let Some(reason) = &entry.proposal.proposal.reason {
+        println!("reason:\t{reason}");
+    }
+    if let Some(confidence) = &entry.proposal.proposal.confidence {
+        println!("confidence:\t{confidence}");
+    }
+    if let Some(target) = &entry.proposal.proposal.target {
+        println!("target:\t{target}");
+    }
+    println!("lane:\t{}", entry.proposal.lane.as_str());
+    println!("type:\t{}", entry.proposal.memory_type.as_str());
+    println!("scope_kind:\t{}", entry.proposal.scope_kind.as_str());
+    if let Some(scope_id) = &entry.proposal.scope_id {
+        println!("scope_id:\t{scope_id}");
+    }
+    if !entry.proposal.applies_to.is_empty() {
+        println!("applies_to:\t{}", entry.proposal.applies_to.join(", "));
+    }
+    if !entry.proposal.tags.is_empty() {
+        println!("tags:\t{}", entry.proposal.tags.join(", "));
+    }
+    println!("timestamp:\t{}", &entry.proposal.timestamp);
+    if let Some(created_by) = &entry.proposal.created_by {
+        println!("created_by:\t{created_by}");
+    }
+    if !entry.proposal.sources.is_empty() {
+        println!(
+            "sources:\t{}",
+            entry
+                .proposal
+                .sources
+                .iter()
+                .map(|source| {
+                    source
+                        .path
+                        .as_deref()
+                        .or(source.url.as_deref())
+                        .or(source.reference.as_deref())
+                        .unwrap_or("(empty)")
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !entry.proposal.supersedes.is_empty() {
+        println!("supersedes:\t{}", entry.proposal.supersedes.join(", "));
+    }
+    println!("sensitivity:\t{}", entry.proposal.sensitivity.as_str());
+    println!("title:\t{}", &entry.proposal.title);
+    println!("description:\t{}", &entry.proposal.description);
+    println!("body:\t{}", &entry.proposal.body);
+}
+
+fn proposal_file_scan_json(scan: &ProposalFileScan) -> serde_json::Value {
+    json!({
+        "proposals_root": &scan.proposals_root,
+        "proposals": scan.proposals
+            .iter()
+            .map(|entry| proposal_file_json(entry, false))
+            .collect::<Vec<_>>(),
+        "errors": proposal_file_errors_json(&scan.errors),
+    })
+}
+
+fn proposal_file_validation_json(scan: &ProposalFileScan) -> serde_json::Value {
+    json!({
+        "valid": scan.errors.is_empty(),
+        "valid_count": scan.proposals.len(),
+        "invalid_count": scan.errors.len(),
+        "proposals_root": &scan.proposals_root,
+        "proposals": scan.proposals
+            .iter()
+            .map(|entry| proposal_file_json(entry, false))
+            .collect::<Vec<_>>(),
+        "errors": proposal_file_errors_json(&scan.errors),
+    })
+}
+
+fn proposal_file_errors_json(errors: &[ProposalFileError]) -> Vec<serde_json::Value> {
+    errors
+        .iter()
+        .map(|error| {
+            json!({
+                "path": &error.path,
+                "error": &error.error,
+            })
+        })
+        .collect()
+}
+
+fn proposal_file_json(entry: &ProposalFileEntry, include_body: bool) -> serde_json::Value {
+    let proposal = &entry.proposal;
+    let mut value = json!({
+        "id": &proposal.id,
+        "file_id": &proposal.file_id,
+        "path": &entry.path,
+        "kind": &proposal.kind,
+        "version": &proposal.version,
+        "profile": &proposal.profile,
+        "type": proposal.memory_type.as_str(),
+        "lane": proposal.lane.as_str(),
+        "title": &proposal.title,
+        "description": &proposal.description,
+        "status": proposal.status.as_str(),
+        "action": proposal.proposal.action.as_str(),
+        "proposal": {
+            "action": proposal.proposal.action.as_str(),
+            "proposed_by": &proposal.proposal.proposed_by,
+            "proposed_at": &proposal.proposal.proposed_at,
+            "reason": &proposal.proposal.reason,
+            "confidence": &proposal.proposal.confidence,
+            "target": &proposal.proposal.target,
+        },
+        "scope_kind": proposal.scope_kind.as_str(),
+        "scope_id": &proposal.scope_id,
+        "applies_to": &proposal.applies_to,
+        "tags": &proposal.tags,
+        "timestamp": &proposal.timestamp,
+        "created_by": &proposal.created_by,
+        "sources": proposal.sources.iter().map(|source| {
+            json!({
+                "path": &source.path,
+                "url": &source.url,
+                "ref": &source.reference,
+            })
+        }).collect::<Vec<_>>(),
+        "supersedes": &proposal.supersedes,
+        "sensitivity": proposal.sensitivity.as_str(),
+    });
+    if include_body {
+        value["body"] = json!(&proposal.body);
+    }
+    value
 }
 
 fn supersede_command(

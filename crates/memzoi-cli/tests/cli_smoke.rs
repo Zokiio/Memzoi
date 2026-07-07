@@ -983,6 +983,174 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
 }
 
 #[test]
+fn proposal_files_list_show_and_validate_valid_pending_files() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+
+    let listed = run_json_command(repo.path(), &["proposal-files", "list", "--json"]);
+    let listed_proposals = proposals_from_json(&listed);
+    assert_eq!(listed_proposals.len(), 1, "expected one proposal: {listed}");
+    let listed_proposal = &listed_proposals[0];
+    assert_eq!(proposal_id_from_value(listed_proposal), "mem_test_valid");
+    assert_json_string_field(listed_proposal, &["action"], "create");
+    assert_json_string_field(listed_proposal, &["lane"], "semantic");
+    assert_json_string_field(listed_proposal, &["type"], "decision");
+    assert_json_string_field(listed_proposal, &["sensitivity"], "repo-safe");
+    assert_json_string_field(listed_proposal, &["title"], "Valid proposal");
+    assert!(
+        listed
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "valid list should not include errors: {listed}"
+    );
+
+    let shown = run_json_command(
+        repo.path(),
+        &["proposal-files", "show", "mem_test_valid", "--json"],
+    );
+    assert_eq!(proposal_id_from_value(&shown), "mem_test_valid");
+    assert_json_string_field(&shown, &["body"], "This proposal body is valid.");
+    assert_json_string_field(&shown["proposal"], &["action"], "create");
+
+    let shown_by_file_id = run_json_command(
+        repo.path(),
+        &["proposal-files", "show", "valid-proposal", "--json"],
+    );
+    assert_eq!(proposal_id_from_value(&shown_by_file_id), "mem_test_valid");
+
+    let validated = run_json_command(repo.path(), &["proposal-files", "validate", "--json"]);
+    assert_eq!(validated.get("valid").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        validated.get("valid_count").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        validated.get("invalid_count").and_then(Value::as_u64),
+        Some(0)
+    );
+}
+
+#[test]
+fn proposal_files_missing_pending_directory_reports_empty_success() {
+    let repo = initialized_temp_repo();
+
+    let listed = run_json_command(repo.path(), &["proposal-files", "list", "--json"]);
+    assert!(
+        proposals_from_json(&listed).is_empty(),
+        "missing pending dir should list no proposals: {listed}"
+    );
+    assert!(
+        listed
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "missing pending dir should not report errors: {listed}"
+    );
+
+    let validated = run_json_command(repo.path(), &["proposal-files", "validate", "--json"]);
+    assert_eq!(validated.get("valid").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        validated.get("valid_count").and_then(Value::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        validated.get("invalid_count").and_then(Value::as_u64),
+        Some(0)
+    );
+}
+
+#[test]
+fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    write_pending_proposal_file(
+        repo.path(),
+        "invalid-lane.md",
+        proposal_markdown_with("mystery", "create", "supersedes: []", ""),
+    );
+    write_pending_proposal_file(
+        repo.path(),
+        "invalid-action.md",
+        proposal_markdown_with("semantic", "update", "supersedes: []", ""),
+    );
+    write_pending_proposal_file(
+        repo.path(),
+        "missing-supersedes.md",
+        proposal_markdown_with("semantic", "supersede", "supersedes: []", ""),
+    );
+    write_pending_proposal_file(
+        repo.path(),
+        "missing-target.md",
+        proposal_markdown_with("semantic", "tombstone", "supersedes: []", ""),
+    );
+
+    let validated =
+        run_json_command_failure(repo.path(), &["proposal-files", "validate", "--json"]);
+    assert_eq!(validated.get("valid").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        validated.get("valid_count").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        validated.get("invalid_count").and_then(Value::as_u64),
+        Some(4)
+    );
+    let rendered_errors = serde_json::to_string(validated.get("errors").expect("errors"))
+        .expect("serialize validation errors");
+    for expected in [
+        "unknown memory lane",
+        "unknown OKF proposal action",
+        "supersede proposals",
+        "proposal.target",
+    ] {
+        assert!(
+            rendered_errors.contains(expected),
+            "validate should report {expected:?}: {validated}"
+        );
+    }
+
+    let listed = run_json_command_failure(repo.path(), &["proposal-files", "list", "--json"]);
+    assert_eq!(proposals_from_json(&listed).len(), 1);
+    assert_eq!(
+        listed.get("errors").and_then(Value::as_array).map(Vec::len),
+        Some(4)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn proposal_files_skip_symlinks_under_pending_directory() {
+    let repo = initialized_temp_repo();
+    let pending = repo
+        .path()
+        .join(".memzoi")
+        .join("proposals")
+        .join("pending");
+    fs::create_dir_all(&pending).expect("create pending proposals dir");
+
+    let outside = repo.path().join("outside-proposals");
+    fs::create_dir_all(&outside).expect("create outside proposals dir");
+    fs::write(outside.join("external.md"), valid_proposal_markdown())
+        .expect("write external proposal fixture");
+    std::os::unix::fs::symlink(&outside, pending.join("linked-outside"))
+        .expect("create symlinked proposal dir");
+
+    let validated = run_json_command(repo.path(), &["proposal-files", "validate", "--json"]);
+    assert_eq!(validated.get("valid").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        validated.get("valid_count").and_then(Value::as_u64),
+        Some(0),
+        "symlinked proposal files should be skipped: {validated}"
+    );
+    assert_eq!(
+        validated.get("invalid_count").and_then(Value::as_u64),
+        Some(0),
+        "skipped symlinks should not become validation errors: {validated}"
+    );
+}
+
+#[test]
 fn reject_json_prevents_apply_from_creating_active_record() {
     let repo = initialized_temp_repo();
 
@@ -1731,6 +1899,64 @@ fn run_json_command(repo: &Path, args: &[&str]) -> Value {
     let mut cmd = memzoi();
     let assert = cmd.args(args).current_dir(repo).assert().success();
     json_from_stdout(&assert.get_output().stdout)
+}
+
+fn run_json_command_failure(repo: &Path, args: &[&str]) -> Value {
+    let mut cmd = memzoi();
+    let assert = cmd.args(args).current_dir(repo).assert().failure();
+    json_from_stdout(&assert.get_output().stdout)
+}
+
+fn write_pending_proposal_file(repo: &Path, name: &str, contents: String) {
+    let pending = repo.join(".memzoi").join("proposals").join("pending");
+    fs::create_dir_all(&pending).expect("create pending proposals dir");
+    fs::write(pending.join(name), contents).expect("write pending proposal fixture");
+}
+
+fn valid_proposal_markdown() -> String {
+    proposal_markdown_with("semantic", "create", "supersedes: []", "")
+}
+
+fn proposal_markdown_with(
+    lane: &str,
+    action: &str,
+    supersedes_yaml: &str,
+    target_yaml: &str,
+) -> String {
+    format!(
+        r#"---
+id: mem_test_valid
+kind: proposal
+version: okf/v0.1
+profile: memzoi/v0
+type: decision
+lane: {lane}
+title: Valid proposal
+description: Valid proposal description.
+status: proposed
+proposal:
+  action: {action}
+  proposed_by: agent
+  proposed_at: 2026-07-06T00:00:00Z
+{target_yaml}scope:
+  kind: repo
+  paths:
+    - src/**
+tags:
+  - testing
+timestamp: 2026-07-06T00:00:00Z
+created_by: agent
+sources:
+  - path: src/lib.rs
+{supersedes_yaml}
+sensitivity: repo-safe
+---
+
+# Valid proposal
+
+This proposal body is valid.
+"#
+    )
 }
 
 fn json_from_stdout(stdout: &[u8]) -> Value {
