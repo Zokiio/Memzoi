@@ -1118,6 +1118,38 @@ fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() 
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn proposal_files_skip_symlinks_under_pending_directory() {
+    let repo = initialized_temp_repo();
+    let pending = repo
+        .path()
+        .join(".memzoi")
+        .join("proposals")
+        .join("pending");
+    fs::create_dir_all(&pending).expect("create pending proposals dir");
+
+    let outside = repo.path().join("outside-proposals");
+    fs::create_dir_all(&outside).expect("create outside proposals dir");
+    fs::write(outside.join("external.md"), valid_proposal_markdown())
+        .expect("write external proposal fixture");
+    std::os::unix::fs::symlink(&outside, pending.join("linked-outside"))
+        .expect("create symlinked proposal dir");
+
+    let validated = run_json_command(repo.path(), &["proposal-files", "validate", "--json"]);
+    assert_eq!(validated.get("valid").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        validated.get("valid_count").and_then(Value::as_u64),
+        Some(0),
+        "symlinked proposal files should be skipped: {validated}"
+    );
+    assert_eq!(
+        validated.get("invalid_count").and_then(Value::as_u64),
+        Some(0),
+        "skipped symlinks should not become validation errors: {validated}"
+    );
+}
+
 #[test]
 fn reject_json_prevents_apply_from_creating_active_record() {
     let repo = initialized_temp_repo();
