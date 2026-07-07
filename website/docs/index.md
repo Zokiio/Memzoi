@@ -15,7 +15,7 @@ Memzoi v0 is local-first and intended for dogfooding and early experimentation. 
 - [Quickstart](./quickstart.md): run the first workflow in a demo repo.
 - [Install](./install.md): install the `memzoi` and `memzoi-mcp` binaries from this repo.
 - [Memory lifecycle](./memory-lifecycle.md): propose, review, apply, supersede, or tombstone records.
-- [OKF profile](./okf-profile.md): file-native record layout, proposal-state boundary, fields, and apply target flow.
+- [OKF profile](./okf-profile.md): file-native record and proposal layouts, schema fields, and apply target flow.
 - [Recall and precheck](./recall-and-precheck.md): search memory, build context packs, and check risky work.
 - [MCP and agent integration](./mcp-and-agent-integration.md): connect agents and install instruction prompts.
 - [Reference](./reference.md): CLI commands, MCP tools, schema values, and limitations.
@@ -23,6 +23,7 @@ Memzoi v0 is local-first and intended for dogfooding and early experimentation. 
 ## What works now
 
 - File-native canonical memory records under `.memzoi/records/`.
+- OKF-compatible proposal file schema under `.memzoi/proposals/pending/`.
 - Local runtime state under `~/.memzoi/projects/<project-key>/` for derived SQLite indexes,
   generated exports, and DB-local open proposal state.
 - Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
@@ -44,8 +45,9 @@ Memzoi v0 is local-first and intended for dogfooding and early experimentation. 
 Memzoi separates canonical memory files from derived runtime state.
 
 1. Typed, scoped, versioned durable memory records live under `.memzoi/records/`.
-2. A local runtime directory under `~/.memzoi/projects/<project-key>/` holds derived SQLite
+2. Verbose review packets can live under `.memzoi/proposals/pending/` before becoming compact records.
+3. A local runtime directory under `~/.memzoi/projects/<project-key>/` holds derived SQLite
    indexes, generated exports, and DB-local pending proposal state.
-3. Agent-facing APIs support recall, context building, proposed writes, exports, and pre-action checks.
+4. Agent-facing APIs support recall, context building, proposed writes, exports, and pre-action checks.
 
 The project keeps reviewability central: agent writes should be proposed first, human-readable exports should be diffable, and repo-shared memory must not contain secrets or private personal data.

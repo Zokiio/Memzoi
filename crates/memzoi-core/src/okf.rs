@@ -2,11 +2,12 @@ use std::{
     fs,
     fs::OpenOptions,
     path::{Component, Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
@@ -22,6 +23,142 @@ pub struct OkfRecordFile {
     pub updated: Option<String>,
     pub supersedes_id: Option<String>,
     pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OkfProposalFile {
+    pub file_id: String,
+    pub id: String,
+    pub kind: Option<String>,
+    pub version: Option<String>,
+    pub profile: Option<String>,
+    pub memory_type: MemoryType,
+    pub lane: MemoryLane,
+    pub title: String,
+    pub description: String,
+    pub body: String,
+    pub status: OkfProposalStatus,
+    pub proposal: OkfProposalMetadata,
+    pub scope_kind: ScopeKind,
+    pub scope_id: Option<String>,
+    pub applies_to: Vec<String>,
+    pub tags: Vec<String>,
+    pub timestamp: String,
+    pub created_by: Option<String>,
+    pub sources: Vec<OkfProposalSource>,
+    pub supersedes: Vec<String>,
+    pub sensitivity: OkfProposalSensitivity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OkfProposalMetadata {
+    pub action: OkfProposalAction,
+    pub proposed_by: String,
+    pub proposed_at: String,
+    pub reason: Option<String>,
+    pub confidence: Option<String>,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OkfProposalSource {
+    pub path: Option<String>,
+    pub url: Option<String>,
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OkfProposalAction {
+    Create,
+    Supersede,
+    Tombstone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OkfProposalStatus {
+    Proposed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OkfProposalSensitivity {
+    RepoSafe,
+    LocalOnly,
+    Sensitive,
+    Secret,
+    Unknown,
+}
+
+impl OkfProposalAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Supersede => "supersede",
+            Self::Tombstone => "tombstone",
+        }
+    }
+}
+
+impl OkfProposalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+        }
+    }
+}
+
+impl OkfProposalSensitivity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RepoSafe => "repo-safe",
+            Self::LocalOnly => "local-only",
+            Self::Sensitive => "sensitive",
+            Self::Secret => "secret",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl FromStr for OkfProposalAction {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "create" => Ok(Self::Create),
+            "supersede" => Ok(Self::Supersede),
+            "tombstone" => Ok(Self::Tombstone),
+            other => Err(format!("unknown OKF proposal action {other:?}")),
+        }
+    }
+}
+
+impl FromStr for OkfProposalStatus {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "proposed" => Ok(Self::Proposed),
+            other => Err(format!("unknown OKF proposal status {other:?}")),
+        }
+    }
+}
+
+impl FromStr for OkfProposalSensitivity {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "repo-safe" => Ok(Self::RepoSafe),
+            "local-only" => Ok(Self::LocalOnly),
+            "sensitive" => Ok(Self::Sensitive),
+            "secret" => Ok(Self::Secret),
+            "unknown" => Ok(Self::Unknown),
+            other => Err(format!("unknown OKF proposal sensitivity {other:?}")),
+        }
+    }
 }
 
 pub fn read_okf_record_files(bundle_root: impl AsRef<Path>) -> Result<Vec<OkfRecordFile>> {
@@ -41,6 +178,23 @@ pub fn read_okf_record_files(bundle_root: impl AsRef<Path>) -> Result<Vec<OkfRec
     Ok(records)
 }
 
+pub fn read_okf_proposal_files(proposals_root: impl AsRef<Path>) -> Result<Vec<OkfProposalFile>> {
+    let proposals_root = proposals_root.as_ref();
+    if !proposals_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    collect_markdown_files(proposals_root, &mut files)?;
+    let mut proposals = Vec::new();
+    for file in files {
+        if let Some(proposal) = parse_okf_proposal_file(proposals_root, &file)? {
+            proposals.push(proposal);
+        }
+    }
+    proposals.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(proposals)
+}
+
 pub fn parse_okf_record_file(
     bundle_root: impl AsRef<Path>,
     file_path: impl AsRef<Path>,
@@ -48,6 +202,19 @@ pub fn parse_okf_record_file(
     let markdown = fs::read_to_string(file_path.as_ref())
         .with_context(|| format!("failed to read OKF record {}", file_path.as_ref().display()))?;
     parse_okf_record_markdown(bundle_root, file_path, &markdown)
+}
+
+pub fn parse_okf_proposal_file(
+    proposals_root: impl AsRef<Path>,
+    file_path: impl AsRef<Path>,
+) -> Result<Option<OkfProposalFile>> {
+    let markdown = fs::read_to_string(file_path.as_ref()).with_context(|| {
+        format!(
+            "failed to read OKF proposal {}",
+            file_path.as_ref().display()
+        )
+    })?;
+    parse_okf_proposal_markdown(proposals_root, file_path, &markdown)
 }
 
 pub fn parse_okf_record_markdown(
@@ -112,6 +279,74 @@ pub fn parse_okf_record_markdown(
         updated,
         supersedes_id,
         expires_at,
+    }))
+}
+
+pub fn parse_okf_proposal_markdown(
+    proposals_root: impl AsRef<Path>,
+    file_path: impl AsRef<Path>,
+    markdown: &str,
+) -> Result<Option<OkfProposalFile>> {
+    let proposals_root = proposals_root.as_ref();
+    let file_path = file_path.as_ref();
+    if is_reserved_record_file(file_path) {
+        return Ok(None);
+    }
+
+    let file_id = proposal_file_id(proposals_root, file_path)?;
+    let (frontmatter, body) = split_frontmatter(markdown)?;
+    let frontmatter: OkfProposalFrontmatter = serde_yaml::from_str(frontmatter)
+        .with_context(|| format!("failed to parse OKF proposal frontmatter for {file_id}"))?;
+
+    let id = required_string(frontmatter.id, "id")?;
+    validate_proposal_identifier(&id)?;
+    let title = required_string(frontmatter.title, "title")?;
+    let description = required_string(frontmatter.description, "description")?;
+    let memory_type = parse_required_enum::<MemoryType>(frontmatter.memory_type, "type")?;
+    let lane = parse_required_enum::<MemoryLane>(frontmatter.lane, "lane")?;
+    let status = parse_required_enum::<OkfProposalStatus>(frontmatter.status, "status")?;
+    let timestamp = required_string(frontmatter.timestamp, "timestamp")?;
+    ensure_timestampish(&timestamp, "timestamp")?;
+    let sensitivity =
+        parse_required_enum::<OkfProposalSensitivity>(frontmatter.sensitivity, "sensitivity")?;
+    let (scope_kind, scope_id, applies_to) = parse_proposal_scope(
+        frontmatter.scope,
+        frontmatter.scope_kind,
+        frontmatter.scope_id,
+        frontmatter.applies_to,
+    )?;
+    let supersedes =
+        validate_string_list(frontmatter.supersedes.unwrap_or_default(), "supersedes")?;
+    let proposal = parse_proposal_metadata(frontmatter.proposal)?;
+    validate_proposal_action_shape(proposal.action, &proposal.target, &supersedes)?;
+    let sources = validate_proposal_sources(frontmatter.sources.unwrap_or_default())?;
+    let body = body_without_matching_h1(body, &title)?;
+    if body.trim().is_empty() {
+        bail!("OKF proposal body cannot be empty");
+    }
+
+    Ok(Some(OkfProposalFile {
+        file_id,
+        id,
+        kind: frontmatter.kind,
+        version: frontmatter.version,
+        profile: frontmatter.profile,
+        memory_type,
+        lane,
+        title,
+        description,
+        body,
+        status,
+        proposal,
+        scope_kind,
+        scope_id,
+        applies_to,
+        tags: frontmatter.tags.unwrap_or_default(),
+        timestamp,
+        created_by: frontmatter.created_by,
+        sources,
+        supersedes,
+        sensitivity,
     }))
 }
 
@@ -210,6 +445,75 @@ struct OkfFrontmatter {
     updated_at: Option<String>,
     applies_to: Option<Vec<String>>,
     tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OkfProposalFrontmatter {
+    id: Option<String>,
+    kind: Option<String>,
+    version: Option<String>,
+    profile: Option<String>,
+    #[serde(rename = "type")]
+    memory_type: Option<String>,
+    lane: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    proposal: Option<OkfProposalMetadataFrontmatter>,
+    scope: Option<OkfProposalScopeFrontmatter>,
+    scope_kind: Option<String>,
+    scope_id: Option<String>,
+    applies_to: Option<Vec<String>>,
+    tags: Option<Vec<String>>,
+    timestamp: Option<String>,
+    created_by: Option<String>,
+    sources: Option<Vec<OkfProposalSource>>,
+    supersedes: Option<StringList>,
+    sensitivity: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OkfProposalMetadataFrontmatter {
+    action: Option<String>,
+    proposed_by: Option<String>,
+    proposed_at: Option<String>,
+    reason: Option<String>,
+    confidence: Option<String>,
+    target: Option<String>,
+    target_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OkfProposalScopeFrontmatter {
+    Kind(String),
+    Object {
+        kind: Option<String>,
+        id: Option<String>,
+        paths: Option<Vec<String>>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StringList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Default for StringList {
+    fn default() -> Self {
+        Self::Many(Vec::new())
+    }
+}
+
+impl StringList {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -454,6 +758,69 @@ fn validate_concept_id(concept: &str) -> Result<()> {
     Ok(())
 }
 
+fn proposal_file_id(bundle_root: &Path, file_path: &Path) -> Result<String> {
+    if file_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("md")
+    {
+        bail!(
+            "OKF proposal files must use .md extension: {}",
+            file_path.display()
+        );
+    }
+    let relative = file_path.strip_prefix(bundle_root).with_context(|| {
+        format!(
+            "OKF proposal path {} is not under proposal root {}",
+            file_path.display(),
+            bundle_root.display()
+        )
+    })?;
+    let without_extension = strip_md_extension(relative);
+    for component in without_extension.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => bail!("OKF proposal path contains unsafe component"),
+        }
+    }
+    let file_id = without_extension
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    validate_proposal_identifier(&file_id)?;
+    Ok(file_id)
+}
+
+fn validate_proposal_identifier(identifier: &str) -> Result<()> {
+    if identifier.is_empty() {
+        bail!("OKF proposal id cannot be empty");
+    }
+    for segment in identifier.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            bail!("OKF proposal id contains invalid segment {segment:?}");
+        }
+        if !segment
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
+        {
+            bail!(
+                "OKF proposal id segments must use lowercase ASCII letters, digits, hyphens, and underscores"
+            );
+        }
+        let starts_and_ends_alnum = segment
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+            && segment
+                .chars()
+                .last()
+                .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit());
+        if !starts_and_ends_alnum {
+            bail!("OKF proposal id segments must start and end with a letter or digit");
+        }
+    }
+    Ok(())
+}
+
 fn split_frontmatter(markdown: &str) -> Result<(&str, &str)> {
     let rest = markdown
         .strip_prefix("---\n")
@@ -478,6 +845,17 @@ fn required_string(value: Option<String>, key: &str) -> Result<String> {
         bail!("OKF frontmatter field {key} cannot be empty");
     }
     Ok(trimmed.to_owned())
+}
+
+fn optional_string(value: Option<String>, key: &str) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("OKF frontmatter field {key} cannot be empty");
+    }
+    Ok(Some(trimmed.to_owned()))
 }
 
 fn parse_required_enum<T>(value: Option<String>, key: &str) -> Result<T>
@@ -533,6 +911,95 @@ fn parse_confidence(value: Option<ConfidenceValue>) -> Result<f64> {
         bail!("OKF confidence must be between 0.0 and 1.0");
     }
     Ok(confidence)
+}
+
+fn parse_proposal_metadata(
+    metadata: Option<OkfProposalMetadataFrontmatter>,
+) -> Result<OkfProposalMetadata> {
+    let metadata = metadata.context("OKF proposal frontmatter missing required field proposal")?;
+    let action = parse_required_enum::<OkfProposalAction>(metadata.action, "proposal.action")?;
+    let proposed_by = required_string(metadata.proposed_by, "proposal.proposed_by")?;
+    let proposed_at = required_string(metadata.proposed_at, "proposal.proposed_at")?;
+    ensure_timestampish(&proposed_at, "proposal.proposed_at")?;
+    let reason = optional_string(metadata.reason, "proposal.reason")?;
+    let confidence = optional_string(metadata.confidence, "proposal.confidence")?;
+    let target = optional_string(metadata.target.or(metadata.target_id), "proposal.target")?;
+    Ok(OkfProposalMetadata {
+        action,
+        proposed_by,
+        proposed_at,
+        reason,
+        confidence,
+        target,
+    })
+}
+
+fn parse_proposal_scope(
+    scope: Option<OkfProposalScopeFrontmatter>,
+    scope_kind: Option<String>,
+    scope_id: Option<String>,
+    applies_to: Option<Vec<String>>,
+) -> Result<(ScopeKind, Option<String>, Vec<String>)> {
+    let mut scope_paths = Vec::new();
+    let (scope_kind_from_scope, scope_id_from_scope) = match scope {
+        Some(OkfProposalScopeFrontmatter::Kind(kind)) => (Some(kind), None),
+        Some(OkfProposalScopeFrontmatter::Object { kind, id, paths }) => {
+            scope_paths = paths.unwrap_or_default();
+            (kind, id)
+        }
+        None => (None, None),
+    };
+    let scope_kind = parse_scope(scope_kind.or(scope_kind_from_scope))?;
+    let scope_id = optional_string(scope_id.or(scope_id_from_scope), "scope_id")?;
+    scope_paths.extend(applies_to.unwrap_or_default());
+    let applies_to = validate_applies_to(scope_paths)?;
+    Ok((scope_kind, scope_id, applies_to))
+}
+
+fn validate_proposal_action_shape(
+    action: OkfProposalAction,
+    target: &Option<String>,
+    supersedes: &[String],
+) -> Result<()> {
+    match action {
+        OkfProposalAction::Create => Ok(()),
+        OkfProposalAction::Supersede => {
+            if supersedes.is_empty() {
+                bail!("OKF supersede proposals must include at least one supersedes target");
+            }
+            Ok(())
+        }
+        OkfProposalAction::Tombstone => {
+            if target.as_deref().is_none_or(str::is_empty) {
+                bail!("OKF tombstone proposals must include proposal.target");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_string_list(values: StringList, key: &str) -> Result<Vec<String>> {
+    values
+        .into_vec()
+        .into_iter()
+        .map(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                bail!("OKF frontmatter field {key} cannot contain empty entries");
+            }
+            Ok(trimmed.to_owned())
+        })
+        .collect()
+}
+
+fn validate_proposal_sources(sources: Vec<OkfProposalSource>) -> Result<Vec<OkfProposalSource>> {
+    for source in &sources {
+        if let Some(path) = &source.path {
+            validate_applies_to(vec![path.clone()])
+                .with_context(|| format!("invalid proposal source path {path:?}"))?;
+        }
+    }
+    Ok(sources)
 }
 
 fn ensure_timestampish(value: &str, key: &str) -> Result<()> {

@@ -21,6 +21,20 @@ Proposal state is separate from canonical record state:
 
 Record state is stored on canonical record files. Applied records normally become `active`; later lifecycle commands can mark records `superseded`, `expired`, `tombstoned`, or `redacted`.
 
+## Proposal files
+
+The OKF-compatible proposal file schema is defined for review packets under:
+
+```text
+.memzoi/proposals/pending/<proposal-id>.md
+```
+
+Proposal files use `status: proposed` and one nested `proposal.action` value: `create`, `supersede`, or `tombstone`. They can include review-only context such as reason, confidence, evidence, and review notes. The applied canonical record under `.memzoi/records/**` should stay compact and does not need to copy proposal-only metadata.
+
+Current CLI/MCP proposal commands still use the runtime proposal inbox states listed above. File-backed proposal commands, accepted/rejected proposal directories, and automatic extraction are separate future lifecycle slices.
+
+Pending proposal files may be committed when they are explicitly intended for PR review and `sensitivity: repo-safe`. Keep `local-only`, `sensitive`, `secret`, and `unknown` proposals out of repo-shared commits until a human classifies them. Accepted/rejected proposal directories are reserved for a future lifecycle decision; for now, canonical records plus Git history are the durable outcome.
+
 ## Approval policy
 
 Effective proposal approval mode is resolved in this order:

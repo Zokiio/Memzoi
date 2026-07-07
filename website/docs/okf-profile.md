@@ -15,6 +15,9 @@ This page describes the target authored-memory shape. Runtime indexes are derive
   config.toml        # optional repo workflow policy
   index.md
   log.md
+  proposals/
+    pending/
+      <proposal-id>.md
   records/
     <path-concept-id>.md
 
@@ -28,9 +31,10 @@ This page describes the target authored-memory shape. Runtime indexes are derive
 Rules:
 
 - `.memzoi/records/*.md` is the canonical home for applied durable records.
+- `.memzoi/proposals/pending/*.md` is the review packet shape for proposed memory mutations before they become canonical records.
 - `.memzoi/config.toml` can set repo workflow policy, such as `[workflow] proposal_approval = "manual"`. It overrides the user-global `${MEMZOI_HOME:-~/.memzoi}/config.toml`.
-- Proposals are currently DB-local workflow state in `~/.memzoi/projects/<project-key>/memory.db`; file-backed `.memzoi/proposals/*.md` proposals are planned for a later profile slice.
-- `~/.memzoi/projects/<project-key>/memory.db` is derived runtime state for canonical records, plus current proposal state. `memzoi rebuild` refuses to discard readable open proposals; if the existing DB is corrupt or unreadable, rebuild treats it as derived-cache recovery and may discard DB-local proposal state.
+- Proposal files are schema-defined review packets. The current CLI/MCP proposal inbox is still DB-local workflow state until a later lifecycle slice wires file proposals into commands.
+- `~/.memzoi/projects/<project-key>/memory.db` is derived runtime state for canonical records, plus current CLI/MCP proposal state. `memzoi rebuild` refuses to discard readable open proposals; if the existing DB is corrupt or unreadable, rebuild treats it as derived-cache recovery and may discard DB-local proposal state.
 - `~/.memzoi/projects/<project-key>/exports/` contains generated projections such as OKF exports and agent instruction files. Do not author canonical records there.
 
 ## Path concept IDs
@@ -137,54 +141,121 @@ Importer compatibility:
 
 ## Proposal frontmatter
 
-A proposal is an intended memory mutation that has not yet been applied. Current CLI/MCP proposal state is DB-local in `~/.memzoi/projects/<project-key>/memory.db` and is not restored by `memzoi rebuild`; file-backed proposal Markdown under `.memzoi/proposals/` is planned for a later slice.
+A proposal file is an intended memory mutation that has not yet been applied. It is a verbose review packet, not durable memory itself.
+
+Pending proposal files live under:
+
+```text
+.memzoi/proposals/pending/<proposal-id>.md
+```
+
+The initial proposal status is always `proposed`. Do not confuse file proposal status with the operational CLI inbox states `pending`, `validated`, `approved`, `applied`, and `rejected`.
 
 ```md
 ---
-id: prop_use-react-query
+id: mem_2026_07_06_auth_001
 kind: proposal
 version: okf/v0.1
 profile: memzoi/v0
-operation: create
-status: pending
 type: decision
 lane: semantic
-title: Use React Query in apps/active
-description: apps/active should use React Query for server state.
-timestamp: 2026-07-05T00:00:00Z
-visibility: repo
-confidence: likely
-applies_to:
-  - apps/active/**
-source: agent
-source_ref: task://data-fetching-review
+title: Protected routes must validate sessions server-side
+description: Protected API routes must validate sessions server-side instead of trusting client auth state.
+status: proposed
+proposal:
+  action: create
+  proposed_by: agent
+  proposed_at: 2026-07-06T00:00:00Z
+  reason: Learned during auth middleware migration.
+  confidence: medium
+scope:
+  kind: project
+  paths:
+    - src/auth/**
+tags:
+  - auth
+  - middleware
+  - security
+timestamp: 2026-07-06T00:00:00Z
+created_by: agent
+sources:
+  - path: src/auth/session.ts
+supersedes: []
+sensitivity: repo-safe
 ---
-# Use React Query in apps/active
+# Protected routes must validate sessions server-side
 
-apps/active should use React Query for server state and avoid a second data-fetching cache.
+Protected API routes must validate the session server-side. Do not trust client-side auth state for authorization decisions.
 ```
 
-Proposal status values:
+Required proposal fields:
 
-- `pending`: proposal exists but has not been approved.
-- `validated`: validation passed, but approval is still required. This state remains supported even when most flows do not create it.
-- `approved`: proposal is approved for durable write, but canonical `.memzoi/records/*.md` has not been written.
-- `applied`: proposal produced an active canonical record and no longer blocks rebuilds.
-- `rejected`: proposal was intentionally closed without applying.
-- `open`: synthetic filter meaning `pending`, `validated`, or `approved`.
+- `id`
+- `type`
+- `title`
+- `description`
+- `lane`
+- `status`
+- `proposal`
+- `timestamp`
+- `sensitivity`
 
-Target flow:
+The nested `proposal` object requires:
 
-1. Agents and importers create proposed changes in DB-local proposal state.
-2. Review validates the proposal content, scope, privacy, and duplication risk.
-3. Approval marks the proposal `approved`.
-4. Applying an approved proposal writes or supersedes a canonical `.memzoi/records/*.md` file.
-5. The importer rebuilds or updates the local runtime database from canonical files.
-6. Export commands regenerate local runtime `exports/*` projections from the DB and canonical record state.
+- `action`
+- `proposed_by`
+- `proposed_at`
 
-The built-in proposal policy is `auto`, so valid CLI/MCP proposals can enter `approved` directly. Auto-approved is not applied; canonical records are written only by CLI apply flows such as `memzoi apply <proposal-id>`, `memzoi propose --apply`, or `memzoi proposals apply --all-approved`.
+Proposal actions:
 
-MCP tools may create proposals and can override one call with `approval_mode: "auto"` or `"manual"`, but durable apply remains an explicit CLI review/apply step.
+| Action | Meaning |
+| --- | --- |
+| `create` | Propose a new canonical memory record. |
+| `supersede` | Propose a new memory that replaces one or more existing memories. Requires `supersedes`. |
+| `tombstone` | Propose marking an existing memory intentionally inactive or removed. Requires `proposal.target`. |
+
+`update` is intentionally unsupported in the first file profile. Meaningful changes should usually create a superseding memory rather than silently editing an existing record in place.
+
+Proposal sensitivity values:
+
+| Sensitivity | Meaning |
+| --- | --- |
+| `repo-safe` | Safe to commit after review. |
+| `local-only` | Useful locally but should not become repo-shared memory. |
+| `sensitive` | Requires explicit human review before any sharing. |
+| `secret` | Must not be committed or applied into repo records. |
+| `unknown` | Conservative default requiring review. |
+
+Validation checks:
+
+- `status` must be `proposed`.
+- `proposal.action` must be `create`, `supersede`, or `tombstone`.
+- `lane` must be `session`, `semantic`, `episodic`, or `procedural`.
+- `type` must use current lowercase Memzoi values such as `decision`, `fact`, `procedure`, `risk`, or `failed_attempt`.
+- `sensitivity` must be one of the listed sensitivity values.
+- `supersede` proposals must include at least one `supersedes` target.
+- `tombstone` proposals must include `proposal.target`.
+- The body must be non-empty and should include enough review context to understand the intended memory change.
+
+Proposal-to-record mapping:
+
+```text
+.memzoi/proposals/pending/mem_2026_07_06_auth_001.md
+  -> approve/apply
+.memzoi/records/semantic/decisions/auth-session-validation.md
+```
+
+The resulting canonical record may be a compact projection of the proposal. Review-only fields such as `proposal.reason`, proposal confidence, and review notes do not need to be copied into canonical record frontmatter unless they remain durable project knowledge.
+
+Compactness policy:
+
+```text
+proposal = review packet
+record   = compact durable memory
+index    = generated machine projection
+```
+
+Prefer one canonical record per durable concept, decision, workflow, warning, handoff, or reusable cluster. Avoid generating one file per tiny observation.
 
 ## Generated exports
 

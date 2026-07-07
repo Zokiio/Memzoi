@@ -1,18 +1,20 @@
-use std::fs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use memzoi_core::{
     InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryRecord, MemoryService, MemoryStatus,
-    MemoryType, ScopeKind, Visibility, parse_okf_record_file, read_okf_record_files,
-    write_memory_record_file,
+    MemoryType, OkfProposalAction, OkfProposalSensitivity, OkfProposalStatus, ScopeKind,
+    Visibility, parse_okf_proposal_markdown, parse_okf_record_file, read_okf_proposal_files,
+    read_okf_record_files, write_memory_record_file,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
 
 #[test]
 fn parses_example_memory_as_memzoi_okf_profile_record() -> anyhow::Result<()> {
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("examples/example-memory.md");
+    let fixture = examples_root().join("example-memory.md");
     let bundle = fixture.parent().expect("example has parent");
 
     let record =
@@ -34,6 +36,191 @@ fn parses_example_memory_as_memzoi_okf_profile_record() -> anyhow::Result<()> {
     assert!(!record.draft.body.starts_with("# Swedish-first"));
 
     Ok(())
+}
+
+#[test]
+fn parses_okf_proposal_examples_as_review_packets() -> anyhow::Result<()> {
+    let proposals = read_okf_proposal_files(examples_root().join("proposals"))?;
+
+    assert!(
+        proposals.len() >= 5,
+        "expected at least the required proposal fixtures"
+    );
+    let semantic = proposals
+        .iter()
+        .find(|proposal| proposal.id == "mem_2026_07_06_auth_001")
+        .expect("semantic create proposal is present");
+    assert_eq!(semantic.file_id, "mem_2026_07_06_auth_001");
+    assert_eq!(semantic.status, OkfProposalStatus::Proposed);
+    assert_eq!(semantic.proposal.action, OkfProposalAction::Create);
+    assert_eq!(semantic.memory_type, MemoryType::Decision);
+    assert_eq!(semantic.lane, MemoryLane::Semantic);
+    assert_eq!(semantic.scope_kind, ScopeKind::Project);
+    assert_eq!(semantic.applies_to, vec!["src/auth/**"]);
+    assert_eq!(semantic.sensitivity, OkfProposalSensitivity::RepoSafe);
+    assert!(semantic.body.contains("## Review notes"));
+
+    let episodic = proposals
+        .iter()
+        .find(|proposal| proposal.id == "mem_2026_07_06_auth_handoff")
+        .expect("episodic handoff proposal is present");
+    assert_eq!(episodic.memory_type, MemoryType::Episode);
+    assert_eq!(episodic.lane, MemoryLane::Episodic);
+
+    let procedural = proposals
+        .iter()
+        .find(|proposal| proposal.id == "mem_2026_07_06_testing_procedure")
+        .expect("procedural proposal is present");
+    assert_eq!(procedural.memory_type, MemoryType::Procedure);
+    assert_eq!(procedural.lane, MemoryLane::Procedural);
+
+    let supersede = proposals
+        .iter()
+        .find(|proposal| proposal.proposal.action == OkfProposalAction::Supersede)
+        .expect("supersede proposal is present");
+    assert_eq!(
+        supersede.supersedes,
+        vec!["semantic/decisions/auth-client-validation"]
+    );
+
+    let tombstone = proposals
+        .iter()
+        .find(|proposal| proposal.proposal.action == OkfProposalAction::Tombstone)
+        .expect("tombstone proposal is present");
+    assert_eq!(
+        tombstone.proposal.target.as_deref(),
+        Some("semantic/decisions/auth-client-validation")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn compact_canonical_example_parses_without_proposal_metadata() -> anyhow::Result<()> {
+    let fixture = examples_root().join("compact-canonical-from-proposal.md");
+    let bundle = fixture.parent().expect("example has parent");
+
+    let record =
+        parse_okf_record_file(bundle, &fixture)?.expect("compact canonical example is a record");
+
+    assert_eq!(record.draft.memory_type, MemoryType::Decision);
+    assert_eq!(record.draft.lane, MemoryLane::Semantic);
+    assert_eq!(record.status, MemoryStatus::Active);
+    assert_eq!(
+        record.draft.source_ref.as_deref(),
+        Some("mem_2026_07_06_auth_001")
+    );
+    assert!(
+        !record.draft.body.contains("proposal:"),
+        "canonical record body should not carry proposal metadata"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn rejects_unknown_proposal_schema_values() {
+    for (field, markdown, expected) in [
+        (
+            "lane",
+            proposal_markdown(
+                "create",
+                "mystery",
+                "proposed",
+                "repo-safe",
+                "supersedes: []",
+                "",
+            ),
+            "unknown memory lane",
+        ),
+        (
+            "action",
+            proposal_markdown(
+                "update",
+                "semantic",
+                "proposed",
+                "repo-safe",
+                "supersedes: []",
+                "",
+            ),
+            "unknown OKF proposal action",
+        ),
+        (
+            "status",
+            proposal_markdown(
+                "create",
+                "semantic",
+                "approved",
+                "repo-safe",
+                "supersedes: []",
+                "",
+            ),
+            "unknown OKF proposal status",
+        ),
+        (
+            "sensitivity",
+            proposal_markdown(
+                "create",
+                "semantic",
+                "proposed",
+                "public",
+                "supersedes: []",
+                "",
+            ),
+            "unknown OKF proposal sensitivity",
+        ),
+    ] {
+        let error = parse_okf_proposal_markdown(
+            Path::new("/bundle"),
+            Path::new("/bundle/mem_test_proposal.md"),
+            &markdown,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains(expected),
+            "{field} error should contain {expected:?}, got {error:#}"
+        );
+    }
+}
+
+#[test]
+fn validates_action_specific_proposal_targets() {
+    let supersede_error = parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/mem_supersede.md"),
+        &proposal_markdown(
+            "supersede",
+            "semantic",
+            "proposed",
+            "repo-safe",
+            "supersedes: []",
+            "",
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        supersede_error.to_string().contains("supersede proposals"),
+        "got {supersede_error:#}"
+    );
+
+    let tombstone_error = parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/mem_tombstone.md"),
+        &proposal_markdown(
+            "tombstone",
+            "semantic",
+            "proposed",
+            "repo-safe",
+            "supersedes: []",
+            "",
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        tombstone_error.to_string().contains("proposal.target"),
+        "got {tombstone_error:#}"
+    );
 }
 
 #[test]
@@ -593,4 +780,54 @@ fn initialized_service(temp: &TempDir) -> anyhow::Result<MemoryService> {
     );
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
     MemoryService::open_paths(paths)
+}
+
+fn examples_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("examples")
+}
+
+fn proposal_markdown(
+    action: &str,
+    lane: &str,
+    status: &str,
+    sensitivity: &str,
+    supersedes_yaml: &str,
+    target_yaml: &str,
+) -> String {
+    format!(
+        r#"---
+id: mem_test_proposal
+kind: proposal
+version: okf/v0.1
+profile: memzoi/v0
+type: decision
+lane: {lane}
+title: Test proposal
+description: Test proposal description.
+status: {status}
+proposal:
+  action: {action}
+  proposed_by: agent
+  proposed_at: 2026-07-06T00:00:00Z
+{target_yaml}scope:
+  kind: repo
+  paths:
+    - crates/**
+tags:
+  - testing
+timestamp: 2026-07-06T00:00:00Z
+created_by: agent
+sources:
+  - path: crates/memzoi-core/src/okf.rs
+{supersedes_yaml}
+sensitivity: {sensitivity}
+---
+
+# Test proposal
+
+This proposal body is intentionally non-empty.
+"#
+    )
 }

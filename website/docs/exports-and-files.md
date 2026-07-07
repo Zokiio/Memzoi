@@ -5,12 +5,13 @@ title: Exports and Files
 # Exports and Files
 
 Memzoi keeps canonical authored memory under repo `.memzoi/records/` and keeps runtime state under
-`~/.memzoi/projects/<project-key>/`. Current proposals are DB-local workflow state until file-backed
-`.memzoi/proposals/` lands in a later slice. Valid proposals default to `approved`, but approved is
-not applied: canonical record files are written only by explicit CLI apply flows. Rebuild restores
-records from canonical files and refuses to discard readable open DB-local proposals. If the runtime
-database is corrupt or unreadable, rebuild treats it as a disposable derived cache and may discard
-DB-local proposal state. See the [OKF profile](./okf-profile.md) for the file-native source layout.
+`~/.memzoi/projects/<project-key>/`. OKF-compatible proposal files are schema-defined under
+`.memzoi/proposals/pending/`, while the current CLI/MCP proposal inbox is still DB-local workflow
+state. Valid CLI proposals default to `approved`, but approved is not applied: canonical record files
+are written only by explicit CLI apply flows. Rebuild restores records from canonical files and
+refuses to discard readable open DB-local proposals. If the runtime database is corrupt or unreadable,
+rebuild treats it as a disposable derived cache and may discard DB-local proposal state. See the
+[OKF profile](./okf-profile.md) for the file-native source layout.
 
 ## Bundle layout
 
@@ -20,6 +21,8 @@ After `memzoi init`, the repo-local memory directory contains:
 .memzoi/
   config.toml        # optional repo workflow policy
   index.md
+  proposals/
+    pending/
   records/
 ```
 
@@ -100,6 +103,7 @@ They intentionally skip background fact records that are useful for search but t
 ## Generated file policy
 
 - Commit `.memzoi/records/*` when the records are durable repo knowledge.
+- Commit `.memzoi/proposals/pending/*` only when the proposal is intentionally being reviewed in Git and has `sensitivity: repo-safe`.
 - Commit `.memzoi/config.toml` only when the repo intentionally overrides workflow policy.
 - Do not commit runtime `memory.db`; it lives under the local Memzoi home directory.
 - Keep generated runtime exports out of Git unless explicitly copied into reviewed agent instructions.
