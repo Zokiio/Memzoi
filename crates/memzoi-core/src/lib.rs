@@ -22,8 +22,9 @@ pub use config::{
 pub use context::ContextPackInput;
 pub use error::{CoreError, Result};
 pub use models::{
-    ContextPack, MemoryCitation, MemoryEvent, MemoryLane, MemoryPath, MemoryProposal, MemoryRecord,
-    MemoryStatus, MemoryType, PrecheckWarning, ScopeKind, SearchResult, Visibility,
+    ContextPack, MemoryCitation, MemoryDestination, MemoryDestinationClassification, MemoryEvent,
+    MemoryLane, MemoryPath, MemoryProposal, MemoryRecord, MemoryStatus, MemoryType,
+    PrecheckWarning, ScopeKind, SearchResult, Visibility,
 };
 pub use okf::{
     OkfProposalAction, OkfProposalApplyResult, OkfProposalFile, OkfProposalMetadata,

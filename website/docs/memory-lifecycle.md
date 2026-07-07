@@ -44,6 +44,35 @@ memzoi proposal-files apply <proposal-id>
 
 Pending proposal files may be committed when they are explicitly intended for PR review and `sensitivity: repo-safe`. Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals; there is no override flag. Keep blocked sensitivities out of repo-shared commits until a human classifies, sanitizes, or routes them to the future local/runtime plane. Accepted/rejected proposal directories are reserved for a future lifecycle decision; for now, canonical records plus Git history are the durable outcome.
 
+## Destination classification
+
+Destination is a pre-write routing decision for memory candidates. Lane is different: `lane` describes how stored memory is used and retained, while `destination` decides where a candidate is allowed to go before any write happens.
+
+Valid destination values are:
+
+| Destination | Meaning |
+| --- | --- |
+| `repo` | Durable project knowledge that must become a file-backed proposal before canonical repo memory. |
+| `local` | Future private runtime-plane memory that is not committed to the repo. |
+| `session` | Future local task-continuity or checkpoint memory. |
+| `discard` | Do not write the candidate. |
+| `needs_review` | Block automatic writes until a human decides the sharing boundary. |
+
+Examples:
+
+```text
+lane: semantic
+destination: repo
+
+lane: session
+destination: local
+
+lane: procedural
+destination: needs_review
+```
+
+`team` and `cloud` are reserved for future destination work and are not accepted values yet. Destination classification does not add fields to canonical records or proposal files in this slice.
+
 ## Approval policy
 
 Effective proposal approval mode is resolved in this order:

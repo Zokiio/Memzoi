@@ -162,6 +162,20 @@ memzoi proposal-files apply <proposal-id>
 
 Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals, and there is no override flag. Classify or sanitize blocked proposals before repo apply, or route `local-only` memory to the future local/runtime plane.
 
+## Memory destinations
+
+Destination is a pre-write classification for memory candidates. It is separate from `lane`: `destination` decides where a candidate may go, while `lane` describes how stored memory is used and retained.
+
+Valid destination values:
+
+- `repo`
+- `local`
+- `session`
+- `discard`
+- `needs_review`
+
+`repo` candidates must become file-backed proposals before canonical repo memory. `local` and `session` are runtime-plane destinations by default. `discard` means no write. `needs_review` blocks automatic writes until a human decides. `team` and `cloud` are future destinations and are not accepted values yet.
+
 ## Scope kinds
 
 Valid `--scope-kind`, `scope_kind`, and `scope` values:
