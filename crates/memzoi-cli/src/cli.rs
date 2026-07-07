@@ -85,6 +85,12 @@ pub(crate) enum Commands {
         command: ProposalCommands,
     },
 
+    /// Inspect OKF proposal files under .memzoi/proposals/pending.
+    ProposalFiles {
+        #[command(subcommand)]
+        command: ProposalFileCommands,
+    },
+
     /// Supersede an active memory record with new content.
     Supersede {
         record_id: String,
@@ -240,6 +246,28 @@ pub(crate) enum ProposalCommands {
         all_approved: bool,
         #[arg(long, default_value = "cli")]
         actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProposalFileCommands {
+    /// List valid proposal files.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show one proposal file.
+    Show {
+        proposal_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Validate proposal files and report every parsing error.
+    Validate {
         #[arg(long)]
         json: bool,
     },
