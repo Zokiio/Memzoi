@@ -2393,6 +2393,56 @@ candidates:
 }
 
 #[test]
+fn session_end_accepts_markdown_frontmatter_with_crlf_newlines() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+    let input_path = repo.join("session-end-crlf.md");
+    fs::write(
+        &input_path,
+        concat!(
+            "---\r\n",
+            "task: \"CRLF frontmatter\"\r\n",
+            "candidates:\r\n",
+            "  - destination: repo\r\n",
+            "    type: decision\r\n",
+            "    lane: semantic\r\n",
+            "    title: CRLF session-end zircon decision\r\n",
+            "    body: CRLF Markdown frontmatter should parse as structured input.\r\n",
+            "    sensitivity: repo-safe\r\n",
+            "---\r\n",
+            "\r\n",
+            "This Markdown body is not used for extraction.\r\n",
+        ),
+    )
+    .expect("write CRLF session-end markdown input");
+
+    let promoted = run_json_command(
+        repo,
+        &[
+            "session-end",
+            "--from-file",
+            input_path.to_str().expect("CRLF input path utf-8"),
+            "--json",
+        ],
+    );
+    assert_json_string_field(&promoted, &["task"], "CRLF frontmatter");
+    let candidates = promoted["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("session-end JSON should include candidates: {promoted}"));
+    assert_json_string_field(
+        &candidates[0]["write"],
+        &["proposal_id"],
+        "mem_session_crlf-session-end-zircon-decision",
+    );
+    let validated = run_json_command(repo, &["proposal-files", "validate", "--json"]);
+    assert_eq!(
+        validated.get("valid").and_then(Value::as_bool),
+        Some(true),
+        "CRLF session-end proposal should validate: {validated}"
+    );
+}
+
+#[test]
 fn session_end_rejects_invalid_structured_inputs() {
     let repo = initialized_temp_repo();
     let repo = repo.path();

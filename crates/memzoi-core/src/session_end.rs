@@ -173,11 +173,14 @@ fn session_end_yaml(input: &str) -> Result<&str> {
     }
 
     let document = input.trim_start();
-    if let Some(rest) = document.strip_prefix("---\n") {
+    if let Some(rest) = document
+        .strip_prefix("---\n")
+        .or_else(|| document.strip_prefix("---\r\n"))
+    {
         let Some(end) = rest.find("\n---") else {
             bail!("session-end Markdown input is missing closing frontmatter delimiter");
         };
-        return Ok(&rest[..end]);
+        return Ok(rest[..end].strip_suffix('\r').unwrap_or(&rest[..end]));
     }
 
     Ok(input)
