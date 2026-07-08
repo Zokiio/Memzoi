@@ -9,8 +9,9 @@ use memzoi_core::{
     CheckpointInput, ContextPackInput, ExportFormat, ExportInput, InitRequest, LocalMemoryInput,
     MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryService, MemoryType,
     OkfProposalFile, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalStatus,
-    ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult, Visibility,
-    apply_okf_create_proposal_file, discover_paths, parse_okf_proposal_file,
+    ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult,
+    SessionEndWrite, Visibility, apply_okf_create_proposal_file, discover_paths,
+    parse_okf_proposal_file, parse_session_end_document,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -115,6 +116,12 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             } => checkpoint_add_command(task, note, from_file, &actor, json),
             CheckpointCommands::List { json } => checkpoint_list_command(json),
         },
+        Commands::SessionEnd {
+            from_file,
+            from_checkpoint,
+            actor,
+            json,
+        } => session_end_command(from_file, from_checkpoint, &actor, json),
         Commands::Supersede {
             record_id,
             memory_type,
@@ -695,6 +702,85 @@ fn checkpoint_note_from_args(note: Option<String>, from_file: Option<PathBuf>) -
     }
 }
 
+fn session_end_command(
+    from_file: Option<PathBuf>,
+    from_checkpoint: Option<String>,
+    actor: &str,
+    as_json: bool,
+) -> Result<()> {
+    let service = open_service()?;
+    let (document, source) = match (from_file, from_checkpoint) {
+        (Some(_), Some(_)) => bail!("use either --from-file or --from-checkpoint, not both"),
+        (Some(path), None) => {
+            let body = fs::read_to_string(&path).with_context(|| {
+                format!("failed to read session-end input from {}", path.display())
+            })?;
+            (
+                parse_session_end_document(&body)?,
+                json!({
+                    "kind": "file",
+                    "path": path,
+                }),
+            )
+        }
+        (None, Some(record_id)) => {
+            let checkpoint = service.show_checkpoint(&record_id)?;
+            (
+                parse_session_end_document(&checkpoint.body)?,
+                json!({
+                    "kind": "checkpoint",
+                    "record_id": record_id,
+                }),
+            )
+        }
+        (None, None) => bail!("session-end requires --from-file or --from-checkpoint"),
+    };
+
+    let result = service.promote_session_end(actor, document)?;
+    if as_json {
+        let project_root = service.paths().project_root.as_path();
+        print_json(&session_end_result_json(&result, source, project_root))
+    } else {
+        for candidate in &result.candidates {
+            match &candidate.write {
+                Some(SessionEndWrite::ProposalFile { proposal_id, path }) => {
+                    let path = path
+                        .strip_prefix(service.paths().project_root.as_path())
+                        .unwrap_or(path);
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        candidate.status.as_str(),
+                        candidate.destination.as_str(),
+                        proposal_id,
+                        path.display()
+                    );
+                }
+                Some(SessionEndWrite::RuntimeRecord {
+                    record_id,
+                    destination,
+                }) => {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        candidate.status.as_str(),
+                        destination.as_str(),
+                        record_id,
+                        candidate.title
+                    );
+                }
+                None => {
+                    println!(
+                        "{}\t{}\t{}",
+                        candidate.status.as_str(),
+                        candidate.destination.as_str(),
+                        candidate.title
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn runtime_record_json(record: &MemoryRecord) -> serde_json::Value {
     json!({
         "id": &record.id,
@@ -722,6 +808,45 @@ fn local_search_result_json(result: &SearchResult) -> serde_json::Value {
         "rationale": &result.rationale,
         "paths": &result.paths,
         "citations": &result.citations,
+    })
+}
+
+fn session_end_result_json(
+    result: &SessionEndResult,
+    source: serde_json::Value,
+    project_root: &Path,
+) -> serde_json::Value {
+    json!({
+        "task": &result.task,
+        "source": source,
+        "candidates": result.candidates.iter().map(|candidate| {
+            let write = candidate.write.as_ref().map(|write| match write {
+                SessionEndWrite::ProposalFile { proposal_id, path } => {
+                    let path = path.strip_prefix(project_root).unwrap_or(path);
+                    json!({
+                        "kind": "proposal_file",
+                        "proposal_id": proposal_id,
+                        "path": path,
+                    })
+                }
+                SessionEndWrite::RuntimeRecord { record_id, destination } => {
+                    json!({
+                        "kind": "runtime_record",
+                        "record_id": record_id,
+                        "destination": destination.as_str(),
+                    })
+                }
+            });
+            json!({
+                "index": candidate.index,
+                "destination": candidate.destination.as_str(),
+                "type": candidate.memory_type.as_str(),
+                "lane": candidate.lane.as_str(),
+                "title": &candidate.title,
+                "status": candidate.status.as_str(),
+                "write": write,
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 

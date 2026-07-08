@@ -103,6 +103,18 @@ pub(crate) enum Commands {
         command: CheckpointCommands,
     },
 
+    /// Promote explicit session-end candidates into proposals or runtime memory.
+    SessionEnd {
+        #[arg(long = "from-file")]
+        from_file: Option<PathBuf>,
+        #[arg(long = "from-checkpoint")]
+        from_checkpoint: Option<String>,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Supersede an active memory record with new content.
     Supersede {
         record_id: String,
