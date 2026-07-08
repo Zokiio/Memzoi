@@ -40,7 +40,7 @@ memzoi proposal-files validate
 memzoi proposal-files apply <proposal-id>
 ```
 
-`list`, `show`, and `validate` are read-only. `apply` currently supports only repo-safe `create` proposals with `status: proposed`; it writes a compact canonical record under `.memzoi/records/**`, leaves the pending proposal file in place, and does not update the runtime SQLite index. Run `memzoi rebuild` when runtime search should pick up newly applied Git-plane records. Current CLI/MCP proposal commands still use the runtime proposal inbox states listed above. Accepted/rejected proposal directories, automatic extraction, and local-only runtime memory are separate future lifecycle slices.
+`list`, `show`, and `validate` are read-only. `apply` currently supports only repo-safe `create` proposals with `status: proposed`; it writes a compact canonical record under `.memzoi/records/**`, leaves the pending proposal file in place, and does not update the runtime SQLite index. Run `memzoi rebuild` when runtime search should pick up newly applied Git-plane records. Current CLI/MCP proposal commands still use the runtime proposal inbox states listed above. Accepted/rejected proposal directories, automatic extraction, and broader promotion workflows are separate future lifecycle slices.
 
 Pending proposal files may be committed when they are explicitly intended for PR review and `sensitivity: repo-safe`. Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals; there is no override flag. Keep blocked sensitivities out of repo-shared commits until a human classifies, sanitizes, or routes them to the future local/runtime plane. Accepted/rejected proposal directories are reserved for a future lifecycle decision; for now, canonical records plus Git history are the durable outcome.
 
@@ -53,8 +53,8 @@ Valid destination values are:
 | Destination | Meaning |
 | --- | --- |
 | `repo` | Durable project knowledge that must become a file-backed proposal before canonical repo memory. |
-| `local` | Future private runtime-plane memory that is not committed to the repo. |
-| `session` | Future local task-continuity or checkpoint memory. |
+| `local` | Private runtime-plane memory that is not committed to the repo. |
+| `session` | Local task-continuity or checkpoint memory. |
 | `discard` | Do not write the candidate. |
 | `needs_review` | Block automatic writes until a human decides the sharing boundary. |
 
@@ -88,6 +88,22 @@ memzoi local search <query>
 Local records are marked with `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output. They are not included in global `memzoi search`, `memzoi context`, or exports yet. Rebuild keeps local runtime rows while restoring canonical repo records from Git.
 
 Promotion from local memory into repo-shared memory must go through later proposal workflows. Local memory should not contain secrets, raw chat logs, or private personal data that should not be retained.
+
+## Session checkpoints
+
+Session checkpoints implement the `session` destination for active task continuity. They are stored in the project runtime database, not in `.memzoi/records/**`, and are intended for handoff or pickup context rather than durable repo truth.
+
+Use the checkpoint namespace for explicit continuity notes:
+
+```bash
+memzoi checkpoint add --task "..." --note "..."
+memzoi checkpoint add --task "..." --from-file notes.md
+memzoi checkpoint list
+```
+
+Checkpoint records are marked with `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output. Checkpoints only store explicit `--note` or `--from-file` content; Memzoi does not inspect shell history, raw chat logs, hidden agent state, or existing context packs.
+
+Checkpoints are not included in global `memzoi search`, `memzoi context`, or exports yet. Promotion from checkpoints into repo-shared memory should go through later session-end proposal workflows, not direct canonical writes.
 
 ## Approval policy
 
@@ -241,7 +257,7 @@ memzoi reject <proposal-id> --reason "not durable repo knowledge"
 memzoi rebuild
 ```
 
-If the runtime database is corrupt or unreadable, rebuild treats it as disposable derived state and may discard DB-local proposal state to recover from cache corruption.
+If the runtime database is corrupt or unreadable, rebuild fails before deleting it so local and session runtime rows are not silently discarded.
 
 ## Safety policy
 

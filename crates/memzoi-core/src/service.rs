@@ -104,6 +104,12 @@ pub struct LocalMemoryInput {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointInput {
+    pub task: String,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProposalApprovalOverride {
     Auto,
@@ -346,7 +352,7 @@ impl MemoryService {
         input: LocalMemoryInput,
     ) -> Result<MemoryRecord> {
         validate_local_memory_input(&input)?;
-        let id = next_local_record_id(&self.conn, &input.title)?;
+        let id = next_prefixed_record_id(&self.conn, "local", &input.title)?;
         let now = now_utc()?;
         let body = input.body.trim().to_owned();
         let record = MemoryRecord {
@@ -406,6 +412,55 @@ impl MemoryService {
         )
     }
 
+    pub fn create_checkpoint(&self, actor: &str, input: CheckpointInput) -> Result<MemoryRecord> {
+        validate_checkpoint_input(&input)?;
+        let id = next_prefixed_record_id(&self.conn, "session", &input.task)?;
+        let now = now_utc()?;
+        let body = input.note.trim().to_owned();
+        let record = MemoryRecord {
+            id,
+            memory_type: MemoryType::Episode,
+            lane: MemoryLane::Session,
+            destination: MemoryDestination::Session,
+            scope_kind: ScopeKind::Personal,
+            scope_id: None,
+            visibility: Visibility::Private,
+            title: input.task.trim().to_owned(),
+            body,
+            status: MemoryStatus::Active,
+            confidence: 1.0,
+            source_kind: Some("memzoi-checkpoint".to_owned()),
+            source_ref: None,
+            content_hash: blake3::hash(input.note.trim().as_bytes())
+                .to_hex()
+                .to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+            supersedes_id: None,
+            expires_at: None,
+        };
+        insert_memory_record_row(&self.conn, &record, InsertMode::Create)?;
+        append_event(
+            &self.conn,
+            AppendEvent {
+                event_type: "memory.checkpoint_created".to_owned(),
+                actor: actor.to_owned(),
+                payload: json!({
+                    "record_id": &record.id,
+                    "destination": record.destination.as_str(),
+                    "title": &record.title,
+                }),
+                record_id: Some(record.id.clone()),
+                proposal_id: None,
+            },
+        )?;
+        Ok(record)
+    }
+
+    pub fn list_checkpoints(&self) -> Result<Vec<MemoryRecord>> {
+        active_checkpoint_records(&self.conn)
+    }
+
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
         context::build_context_pack(&self.conn, input)
     }
@@ -454,13 +509,13 @@ impl MemoryService {
         let records_root = paths.records_dir();
         let records = okf::read_okf_record_files(&records_root)?;
         guard_no_open_proposals(&paths.db_path)?;
-        let local_records = load_local_records_for_rebuild(&paths.db_path)?;
-        guard_no_local_record_id_collisions(&records, &local_records)?;
+        let runtime_records = load_runtime_records_for_rebuild(&paths.db_path)?;
+        guard_no_runtime_record_id_collisions(&records, &runtime_records)?;
         remove_database_files(&paths.db_path)?;
         let conn = db::open_database(&paths.db_path)?;
         db::init_database(&conn)?;
         okf::import_okf_records(&conn, &records)?;
-        restore_local_records_after_rebuild(&conn, &local_records)?;
+        restore_runtime_records_after_rebuild(&conn, &runtime_records)?;
         Ok(RebuildResult {
             records_root,
             db_path: paths.db_path,
@@ -546,10 +601,20 @@ fn validate_local_memory_input(input: &LocalMemoryInput) -> Result<()> {
     Ok(())
 }
 
-fn next_local_record_id(conn: &Connection, title: &str) -> Result<String> {
+fn validate_checkpoint_input(input: &CheckpointInput) -> Result<()> {
+    if input.task.trim().is_empty() {
+        bail!("task is required");
+    }
+    if input.note.trim().is_empty() {
+        bail!("note is required");
+    }
+    Ok(())
+}
+
+fn next_prefixed_record_id(conn: &Connection, prefix: &str, title: &str) -> Result<String> {
     let slug = proposals::title_to_concept_slug(title)
         .unwrap_or_else(|| format!("memory-{}", Uuid::now_v7()));
-    let base = format!("local-{slug}");
+    let base = format!("{prefix}-{slug}");
     if !record_id_exists(conn, &base)? {
         return Ok(base);
     }
@@ -629,48 +694,60 @@ fn active_records_for_destination(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn records_for_destination(
-    conn: &Connection,
-    destination: MemoryDestination,
-) -> Result<Vec<MemoryRecord>> {
+fn active_checkpoint_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
                 supersedes_id, expires_at
          FROM memory_record
-         WHERE destination = ?1
-         ORDER BY updated_at DESC, id ASC",
+         WHERE status = 'active'
+           AND destination = 'session'
+           AND source_kind = 'memzoi-checkpoint'
+         ORDER BY created_at DESC, id ASC",
     )?;
-    let rows = stmt.query_map([destination.as_str()], search::record_from_row)?;
+    let rows = stmt.query_map([], search::record_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn load_local_records_for_rebuild(db_path: &Path) -> Result<Vec<MemoryRecord>> {
+fn records_for_runtime_preservation(conn: &Connection) -> Result<Vec<MemoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
+                supersedes_id, expires_at
+         FROM memory_record
+         WHERE destination IN ('local', 'session')
+         ORDER BY updated_at DESC, id ASC",
+    )?;
+    let rows = stmt.query_map([], search::record_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn load_runtime_records_for_rebuild(db_path: &Path) -> Result<Vec<MemoryRecord>> {
     if !db_path.exists() {
         return Ok(Vec::new());
     }
     let conn = db::open_database(db_path).with_context(|| {
         format!(
-            "rebuild refused because local runtime memory could not be preserved from {}",
+            "rebuild refused because local/session runtime memory could not be preserved from {}",
             db_path.display()
         )
     })?;
     db::init_database(&conn).with_context(|| {
         format!(
-            "rebuild refused because local runtime memory could not be migrated before preservation from {}",
+            "rebuild refused because local/session runtime memory could not be migrated before preservation from {}",
             db_path.display()
         )
     })?;
-    records_for_destination(&conn, MemoryDestination::Local).context(
-        "rebuild refused because local runtime memory could not be loaded for preservation",
+    records_for_runtime_preservation(&conn).context(
+        "rebuild refused because local/session runtime memory could not be loaded for preservation",
     )
 }
 
-fn guard_no_local_record_id_collisions(
+fn guard_no_runtime_record_id_collisions(
     records: &[okf::OkfRecordFile],
-    local_records: &[MemoryRecord],
+    runtime_records: &[MemoryRecord],
 ) -> Result<()> {
-    if local_records.is_empty() {
+    if runtime_records.is_empty() {
         return Ok(());
     }
 
@@ -678,7 +755,7 @@ fn guard_no_local_record_id_collisions(
         .iter()
         .map(|record| record.concept_id.as_str())
         .collect::<BTreeSet<_>>();
-    let collisions = local_records
+    let collisions = runtime_records
         .iter()
         .filter_map(|record| {
             repo_ids
@@ -691,14 +768,17 @@ fn guard_no_local_record_id_collisions(
     }
 
     bail!(
-        "rebuild refused because local runtime memory record id{} would collide with canonical repo record{}: {}",
+        "rebuild refused because local/session runtime memory record id{} would collide with canonical repo record{}: {}",
         if collisions.len() == 1 { "" } else { "s" },
         if collisions.len() == 1 { "" } else { "s" },
         collisions.join(", ")
     );
 }
 
-fn restore_local_records_after_rebuild(conn: &Connection, records: &[MemoryRecord]) -> Result<()> {
+fn restore_runtime_records_after_rebuild(
+    conn: &Connection,
+    records: &[MemoryRecord],
+) -> Result<()> {
     for record in records {
         insert_memory_record_row(conn, record, InsertMode::RestoreIfAbsent)?;
     }

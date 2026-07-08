@@ -41,7 +41,7 @@ pub use proposals::{
 };
 pub use search::SearchInput;
 pub use service::{
-    ExportFormat, ExportInput, ExportResult, InitBundleResult, InitRequest, InitResult,
-    LocalMemoryInput, MemoryService, ProposalApprovalOverride, ProposeOptions, ProposeResult,
-    RebuildResult, init_bundle,
+    CheckpointInput, ExportFormat, ExportInput, ExportResult, InitBundleResult, InitRequest,
+    InitResult, LocalMemoryInput, MemoryService, ProposalApprovalOverride, ProposeOptions,
+    ProposeResult, RebuildResult, init_bundle,
 };
