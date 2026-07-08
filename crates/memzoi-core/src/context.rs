@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, hash_map::Entry},
 };
 
 use anyhow::{Context, Result};
@@ -40,7 +40,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
         .filter(|path| !path.is_empty())
         .map(ToOwned::to_owned);
     let requested_destinations = requested_destinations(&input);
-    let mut candidates = HashMap::<String, SearchResult>::new();
+    let mut candidates = HashMap::<String, ContextCandidate>::new();
 
     for destination in &requested_destinations {
         for result in search_memory(
@@ -53,26 +53,26 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
                 ..SearchInput::default()
             },
         )? {
-            insert_candidate(&mut candidates, result);
+            insert_candidate(&mut candidates, ContextCandidate::fts(result));
         }
     }
 
     if let Some(path_prefix) = path_prefix.as_deref() {
         for destination in &requested_destinations {
             for result in path_candidates(conn, *destination, path_prefix, 50)? {
-                insert_candidate(&mut candidates, result);
+                insert_candidate(&mut candidates, ContextCandidate::path(result));
             }
         }
     }
 
     let ranked = candidates
         .into_values()
-        .map(|mut result| {
-            let ranking = rank_result(&result, path_prefix.as_deref());
-            result.score = ranking.score;
-            result.rationale = Some(ranking.reasons.join("; "));
-            result.ranking = Some(ranking);
-            result
+        .map(|mut candidate| {
+            let ranking = rank_candidate(&candidate, path_prefix.as_deref());
+            candidate.result.score = ranking.score;
+            candidate.result.rationale = Some(ranking.reasons.join("; "));
+            candidate.result.ranking = Some(ranking);
+            candidate.result
         })
         .collect::<Vec<_>>();
 
@@ -168,6 +168,32 @@ struct ContextSelection {
     omitted: Vec<SelectedContextItem>,
 }
 
+#[derive(Debug, Clone)]
+struct ContextCandidate {
+    result: SearchResult,
+    matched_fts: bool,
+}
+
+impl ContextCandidate {
+    fn fts(result: SearchResult) -> Self {
+        Self {
+            result,
+            matched_fts: true,
+        }
+    }
+
+    fn path(result: SearchResult) -> Self {
+        Self {
+            result,
+            matched_fts: false,
+        }
+    }
+
+    fn preferred_over(&self, existing: &Self) -> bool {
+        self.matched_fts && !existing.matched_fts
+    }
+}
+
 fn requested_destinations(input: &ContextPackInput) -> Vec<MemoryDestination> {
     let mut destinations = vec![MemoryDestination::Repo];
     if input.include_local {
@@ -179,15 +205,20 @@ fn requested_destinations(input: &ContextPackInput) -> Vec<MemoryDestination> {
     destinations
 }
 
-fn insert_candidate(candidates: &mut HashMap<String, SearchResult>, result: SearchResult) {
-    candidates
-        .entry(result.record.id.clone())
-        .and_modify(|existing| {
-            if result_has_fts_match(&result) && !result_has_fts_match(existing) {
-                *existing = result.clone();
+fn insert_candidate(
+    candidates: &mut HashMap<String, ContextCandidate>,
+    candidate: ContextCandidate,
+) {
+    match candidates.entry(candidate.result.record.id.clone()) {
+        Entry::Vacant(entry) => {
+            entry.insert(candidate);
+        }
+        Entry::Occupied(mut entry) => {
+            if candidate.preferred_over(entry.get()) {
+                entry.insert(candidate);
             }
-        })
-        .or_insert(result);
+        }
+    }
 }
 
 fn path_candidates(
@@ -273,8 +304,9 @@ fn path_candidates(
     Ok(results)
 }
 
-fn rank_result(result: &SearchResult, requested_path: Option<&str>) -> SearchRanking {
-    let fts_match = result_has_fts_match(result);
+fn rank_candidate(candidate: &ContextCandidate, requested_path: Option<&str>) -> SearchRanking {
+    let result = &candidate.result;
+    let fts_match = candidate.matched_fts;
     let fts_score = if fts_match {
         normalized_fts_score(result.score)
     } else {
@@ -328,13 +360,6 @@ fn rank_result(result: &SearchResult, requested_path: Option<&str>) -> SearchRan
         },
         reasons,
     }
-}
-
-fn result_has_fts_match(result: &SearchResult) -> bool {
-    result
-        .rationale
-        .as_deref()
-        .is_some_and(|rationale| rationale.contains("fts5"))
 }
 
 fn normalized_fts_score(score: f64) -> f64 {
@@ -660,10 +685,13 @@ mod tests {
     use serde_json::Value;
     use tempfile::TempDir;
 
-    use super::{ContextPackInput, build_context_pack};
+    use super::{ContextCandidate, ContextPackInput, build_context_pack, rank_candidate};
     use crate::{
         init_database,
-        models::{MemoryDestination, MemoryLane, MemoryStatus, MemoryType, ScopeKind},
+        models::{
+            MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind,
+            SearchResult, Visibility,
+        },
         open_database,
     };
 
@@ -742,6 +770,33 @@ mod tests {
         assert_json_string_field(citation, &["source_ref"], "issue://4242#decision");
 
         Ok(())
+    }
+
+    #[test]
+    fn ranking_uses_internal_fts_marker_not_rationale_text() {
+        let fts_candidate = ContextCandidate::fts(test_search_result(
+            "rec-fts-marker",
+            "title/body match",
+            12.5,
+        ));
+        let fts_ranking = rank_candidate(&fts_candidate, None);
+        assert!(
+            fts_ranking.signals.fts_match,
+            "FTS candidates should rank as FTS matches even when rationale text does not mention fts5"
+        );
+        assert_eq!(fts_ranking.signals.fts_score, 12.5);
+
+        let path_candidate = ContextCandidate::path(test_search_result(
+            "rec-path-marker",
+            "fts5 title/body match",
+            12.5,
+        ));
+        let path_ranking = rank_candidate(&path_candidate, None);
+        assert!(
+            !path_ranking.signals.fts_match,
+            "path candidates should not become FTS matches because explanatory text mentions fts5"
+        );
+        assert_eq!(path_ranking.signals.fts_score, 0.0);
     }
 
     #[test]
@@ -1280,6 +1335,37 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn test_search_result(id: &str, rationale: &str, score: f64) -> SearchResult {
+        SearchResult {
+            record: MemoryRecord {
+                id: id.to_owned(),
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                destination: MemoryDestination::Repo,
+                scope_kind: ScopeKind::Repo,
+                scope_id: None,
+                visibility: Visibility::Repo,
+                title: "Internal FTS marker fixture".to_owned(),
+                body: "Internal FTS marker fixture body.".to_owned(),
+                status: MemoryStatus::Active,
+                confidence: 0.88,
+                source_kind: Some("test".to_owned()),
+                source_ref: None,
+                content_hash: format!("hash-{id}"),
+                created_at: "2026-07-09T00:00:00Z".to_owned(),
+                updated_at: "2026-07-09T00:00:00Z".to_owned(),
+                supersedes_id: None,
+                expires_at: None,
+            },
+            score,
+            snippet: None,
+            rationale: Some(rationale.to_owned()),
+            ranking: None,
+            paths: Vec::new(),
+            citations: Vec::new(),
+        }
     }
 
     fn record_ids_from_pack(json: &Value) -> Vec<String> {
