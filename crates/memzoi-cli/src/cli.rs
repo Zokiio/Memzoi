@@ -170,6 +170,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         token_budget: Option<usize>,
         #[arg(long)]
+        include_local: bool,
+        #[arg(long)]
+        include_session: bool,
+        #[arg(long)]
         json: bool,
     },
 

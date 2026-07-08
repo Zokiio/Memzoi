@@ -161,8 +161,17 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             task,
             path,
             token_budget,
+            include_local,
+            include_session,
             json,
-        } => context_command(task, path, token_budget, json),
+        } => context_command(
+            task,
+            path,
+            token_budget,
+            include_local,
+            include_session,
+            json,
+        ),
         Commands::Precheck {
             path,
             action,
@@ -1186,6 +1195,8 @@ fn context_command(
     task: String,
     path: Option<String>,
     token_budget: Option<usize>,
+    include_local: bool,
+    include_session: bool,
     as_json: bool,
 ) -> Result<()> {
     let service = open_service()?;
@@ -1193,6 +1204,8 @@ fn context_command(
         task,
         path_prefix: path,
         token_budget,
+        include_local,
+        include_session,
     })?;
 
     if as_json {

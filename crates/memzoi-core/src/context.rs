@@ -1,5 +1,10 @@
-use anyhow::Result;
-use rusqlite::Connection;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap, hash_map::Entry},
+};
+
+use anyhow::{Context, Result};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -8,9 +13,12 @@ use crate::{
     events::{AppendEvent, append_event, now_utc},
     models::{
         ContextPack, ContextPackBudget, ContextPackIncludedItem, ContextPackOmittedItem,
-        ContextPackWarning, MemoryCitation, MemoryDestination, SearchResult,
+        ContextPackPolicy, ContextPackWarning, MemoryCitation, MemoryDestination, MemoryLane,
+        MemoryPath, MemoryRecord, MemoryType, SearchRanking, SearchRankingSignals, SearchResult,
     },
-    search::{SearchInput, count_matching_memory, path_matches_request, search_memory},
+    search::{
+        SearchInput, citation_for, load_paths, path_matches_request, record_from_row, search_memory,
+    },
 };
 
 const MAX_OMITTED_ITEMS: usize = 10;
@@ -20,32 +28,60 @@ pub struct ContextPackInput {
     pub task: String,
     pub path_prefix: Option<String>,
     pub token_budget: Option<usize>,
+    pub include_local: bool,
+    pub include_session: bool,
 }
 
 pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<ContextPack> {
-    let mut results = search_memory(
-        conn,
-        SearchInput {
-            query: input.task.clone(),
-            limit: 50,
-            include_inactive: false,
-            ..SearchInput::default()
-        },
-    )?;
+    let path_prefix = input
+        .path_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned);
+    let requested_destinations = requested_destinations(&input);
+    let mut candidates = HashMap::<String, ContextCandidate>::new();
 
-    if let Some(path_prefix) = input.path_prefix.as_deref() {
-        results.sort_by(|left, right| {
-            let left_match = result_matches_path(left, path_prefix);
-            let right_match = result_matches_path(right, path_prefix);
-            right_match
-                .cmp(&left_match)
-                .then_with(|| right.score.total_cmp(&left.score))
-                .then_with(|| left.record.id.cmp(&right.record.id))
-        });
+    for destination in &requested_destinations {
+        for result in search_memory(
+            conn,
+            SearchInput {
+                query: input.task.clone(),
+                destination: Some(*destination),
+                limit: 50,
+                include_inactive: false,
+                ..SearchInput::default()
+            },
+        )? {
+            insert_candidate(&mut candidates, ContextCandidate::fts(result));
+        }
     }
 
+    if let Some(path_prefix) = path_prefix.as_deref() {
+        for destination in &requested_destinations {
+            for result in path_candidates(conn, *destination, path_prefix, 50)? {
+                insert_candidate(&mut candidates, ContextCandidate::path(result));
+            }
+        }
+    }
+
+    let ranked = candidates
+        .into_values()
+        .map(|mut candidate| {
+            let ranking = rank_candidate(&candidate, path_prefix.as_deref());
+            candidate.result.score = ranking.score;
+            candidate.result.rationale = Some(ranking.reasons.join("; "));
+            candidate.result.ranking = Some(ranking);
+            candidate.result
+        })
+        .collect::<Vec<_>>();
+
+    let mut ranked = deduplicate_candidates(ranked);
+    ranked.sort_by(compare_ranked_results);
+
     let budget = input.token_budget.unwrap_or(400).max(1);
-    let selection = select_for_budget(results, budget);
+    let candidate_records = ranked.len();
+    let selection = select_for_budget(ranked, budget);
     let citations = selection
         .selected
         .iter()
@@ -56,11 +92,11 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
         .iter()
         .map(|item| item.result.clone())
         .collect::<Vec<_>>();
-    let prompt = render_prompt(&selected, &citations, budget);
-    let estimated_used = estimate_words(&prompt);
+    let (prompt, estimated_used, truncated) = render_prompt(&selected, &citations, budget);
     let included = included_items(&selection.selected, &citations);
     let omitted = omitted_items(&selection.omitted);
-    let warnings = runtime_exclusion_warnings(conn, &input)?;
+    let warnings: Vec<ContextPackWarning> = Vec::new();
+    let included_destinations = included_destinations(&selected, &requested_destinations);
 
     let pack = ContextPack {
         id: format!("ctx_{}", Uuid::now_v7()),
@@ -69,11 +105,21 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
         records: selected,
         citations,
         token_budget: input.token_budget,
+        policy: ContextPackPolicy {
+            include_local: input.include_local,
+            include_session: input.include_session,
+            requested_destinations: requested_destinations.clone(),
+            included_destinations,
+        },
         budget: ContextPackBudget {
             requested: input.token_budget,
             effective: budget,
             estimated_used,
             estimate_unit: "approx_words".to_owned(),
+            candidate_records,
+            selected_records: 0,
+            rendered_words: estimated_used,
+            truncated,
         },
         included,
         omitted,
@@ -81,6 +127,8 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
         next_queries: Vec::new(),
         created_at: now_utc()?,
     };
+    let mut pack = pack;
+    pack.budget.selected_records = pack.records.len();
 
     append_event(
         conn,
@@ -92,6 +140,12 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
                 "task": input.task,
                 "path_prefix": input.path_prefix,
                 "token_budget": input.token_budget,
+                "include_local": input.include_local,
+                "include_session": input.include_session,
+                "requested_destinations": pack.policy.requested_destinations.iter().map(|destination| destination.as_str()).collect::<Vec<_>>(),
+                "included_destinations": pack.policy.included_destinations.iter().map(|destination| destination.as_str()).collect::<Vec<_>>(),
+                "candidate_records": pack.budget.candidate_records,
+                "selected_records": pack.budget.selected_records,
                 "record_ids": pack.records.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
             }),
             record_id: None,
@@ -114,11 +168,354 @@ struct ContextSelection {
     omitted: Vec<SelectedContextItem>,
 }
 
-fn result_matches_path(result: &SearchResult, path_prefix: &str) -> bool {
-    result
-        .paths
+#[derive(Debug, Clone)]
+struct ContextCandidate {
+    result: SearchResult,
+    matched_fts: bool,
+}
+
+impl ContextCandidate {
+    fn fts(result: SearchResult) -> Self {
+        Self {
+            result,
+            matched_fts: true,
+        }
+    }
+
+    fn path(result: SearchResult) -> Self {
+        Self {
+            result,
+            matched_fts: false,
+        }
+    }
+
+    fn preferred_over(&self, existing: &Self) -> bool {
+        self.matched_fts && !existing.matched_fts
+    }
+}
+
+fn requested_destinations(input: &ContextPackInput) -> Vec<MemoryDestination> {
+    let mut destinations = vec![MemoryDestination::Repo];
+    if input.include_local {
+        destinations.push(MemoryDestination::Local);
+    }
+    if input.include_session {
+        destinations.push(MemoryDestination::Session);
+    }
+    destinations
+}
+
+fn insert_candidate(
+    candidates: &mut HashMap<String, ContextCandidate>,
+    candidate: ContextCandidate,
+) {
+    match candidates.entry(candidate.result.record.id.clone()) {
+        Entry::Vacant(entry) => {
+            entry.insert(candidate);
+        }
+        Entry::Occupied(mut entry) => {
+            if candidate.preferred_over(entry.get()) {
+                entry.insert(candidate);
+            }
+        }
+    }
+}
+
+fn path_candidates(
+    conn: &Connection,
+    destination: MemoryDestination,
+    path_prefix: &str,
+    limit: usize,
+) -> Result<Vec<SearchResult>> {
+    let requested_path = path_prefix.trim().trim_end_matches('/').to_owned();
+    if requested_path.is_empty() {
+        return Ok(Vec::new());
+    }
+    let path_like = format!("{}/%", requested_path);
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT memory_record.id, memory_record.type, memory_record.lane,
+                    memory_record.destination, memory_record.scope_kind, memory_record.scope_id,
+                    memory_record.visibility, memory_record.title, memory_record.body,
+                    memory_record.status, memory_record.confidence, memory_record.source_kind,
+                    memory_record.source_ref, memory_record.content_hash, memory_record.created_at,
+                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at
+             FROM memory_path
+             JOIN memory_record ON memory_record.id = memory_path.record_id
+             WHERE memory_record.status = 'active'
+               AND memory_record.destination = ?1
+               AND (
+                 memory_path.path = ?2
+                 OR memory_path.path LIKE ?3
+                 OR ?2 LIKE memory_path.path || '/%'
+                 OR (
+                     memory_path.path LIKE '%/**'
+                     AND (
+                         ?2 = substr(memory_path.path, 1, length(memory_path.path) - 3)
+                         OR ?2 LIKE substr(memory_path.path, 1, length(memory_path.path) - 2) || '%'
+                     )
+                 )
+                 OR (
+                     ?2 LIKE '%/**'
+                     AND (
+                         memory_path.path = substr(?2, 1, length(?2) - 3)
+                         OR memory_path.path LIKE substr(?2, 1, length(?2) - 2) || '%'
+                     )
+                 )
+               )
+             ORDER BY memory_record.updated_at DESC, memory_record.id ASC
+             LIMIT ?4",
+        )
+        .context("failed to prepare path-scoped context candidate query")?;
+    let rows = stmt
+        .query_map(
+            params![
+                destination.as_str(),
+                requested_path,
+                path_like,
+                limit as i64
+            ],
+            record_from_row,
+        )
+        .context("failed to execute path-scoped context candidate query")?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        let record = row.context("failed to read path-scoped context candidate")?;
+        let paths = load_paths(conn, record.id.as_str())?;
+        if !paths
+            .iter()
+            .any(|path| path_matches_request(&path.path, path_prefix))
+        {
+            continue;
+        }
+        let citation = citation_for(&record, paths.first());
+        results.push(SearchResult {
+            record,
+            score: 0.0,
+            snippet: None,
+            rationale: Some("path match".to_owned()),
+            ranking: None,
+            paths,
+            citations: vec![citation],
+        });
+    }
+
+    Ok(results)
+}
+
+fn rank_candidate(candidate: &ContextCandidate, requested_path: Option<&str>) -> SearchRanking {
+    let result = &candidate.result;
+    let fts_match = candidate.matched_fts;
+    let fts_score = if fts_match {
+        normalized_fts_score(result.score)
+    } else {
+        0.0
+    };
+    let path_score = requested_path
+        .map(|path| best_path_score(&result.paths, path))
+        .unwrap_or(0);
+    let type_priority = memory_type_priority(result.record.memory_type);
+    let lane_priority = lane_priority(result.record.lane);
+    let destination_priority = destination_priority(result.record.destination);
+    let confidence = normalized_confidence(result.record.confidence);
+    let score = path_score as f64 * 10_000.0
+        + type_priority as f64 * 1_000.0
+        + if fts_match { 500.0 } else { 0.0 }
+        + lane_priority as f64 * 100.0
+        + destination_priority as f64 * 10.0
+        + confidence * 25.0
+        + fts_score;
+
+    let mut reasons = Vec::new();
+    if fts_match {
+        reasons.push("task text matched title/body".to_owned());
+    }
+    if requested_path.is_some() {
+        if path_score > 0 {
+            reasons.push("path matched requested path".to_owned());
+        } else {
+            reasons.push("no path match".to_owned());
+        }
+    }
+    reasons.push(format!(
+        "{} memory type priority",
+        result.record.memory_type.as_str()
+    ));
+    reasons.push(format!(
+        "{} destination",
+        result.record.destination.as_str()
+    ));
+
+    SearchRanking {
+        score,
+        signals: SearchRankingSignals {
+            fts_match,
+            fts_score,
+            path_score,
+            type_priority,
+            lane_priority,
+            destination_priority,
+            confidence,
+        },
+        reasons,
+    }
+}
+
+fn normalized_fts_score(score: f64) -> f64 {
+    if score.is_finite() {
+        score.clamp(0.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
+fn normalized_confidence(confidence: f64) -> f64 {
+    if confidence.is_finite() {
+        confidence.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn best_path_score(paths: &[MemoryPath], requested_path: &str) -> i64 {
+    paths
         .iter()
-        .any(|path| path_matches_request(&path.path, path_prefix))
+        .map(|path| path_score(&path.path, requested_path))
+        .max()
+        .unwrap_or(0)
+}
+
+fn path_score(stored_path: &str, requested_path: &str) -> i64 {
+    let stored_path = stored_path.trim().trim_end_matches('/');
+    let requested_path = requested_path.trim().trim_end_matches('/');
+    if stored_path.is_empty() || requested_path.is_empty() {
+        return 0;
+    }
+    if stored_path == requested_path {
+        return 5;
+    }
+    if let Some(base) = stored_path.strip_suffix("/**") {
+        return if path_is_or_is_under(requested_path, base) {
+            4
+        } else {
+            0
+        };
+    }
+    if let Some(base) = requested_path.strip_suffix("/**") {
+        return if path_is_or_is_under(stored_path, base) {
+            4
+        } else {
+            0
+        };
+    }
+    if path_is_or_is_under(requested_path, stored_path) {
+        return 3;
+    }
+    if path_is_or_is_under(stored_path, requested_path) {
+        return 2;
+    }
+    0
+}
+
+fn path_is_or_is_under(path: &str, base: &str) -> bool {
+    path == base
+        || path
+            .strip_prefix(base)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn memory_type_priority(memory_type: MemoryType) -> i64 {
+    match memory_type {
+        MemoryType::Risk => 9,
+        MemoryType::Warning => 8,
+        MemoryType::FailedAttempt => 7,
+        MemoryType::Decision => 6,
+        MemoryType::Procedure => 5,
+        MemoryType::Preference => 4,
+        MemoryType::Fact => 3,
+        MemoryType::Episode | MemoryType::Relationship => 2,
+        MemoryType::InstructionProjection => 1,
+    }
+}
+
+fn lane_priority(lane: MemoryLane) -> i64 {
+    match lane {
+        MemoryLane::Procedural | MemoryLane::Session => 3,
+        MemoryLane::Semantic => 2,
+        MemoryLane::Episodic => 1,
+    }
+}
+
+fn destination_priority(destination: MemoryDestination) -> i64 {
+    match destination {
+        MemoryDestination::Repo => 3,
+        MemoryDestination::Local => 2,
+        MemoryDestination::Session => 1,
+        MemoryDestination::Discard | MemoryDestination::NeedsReview => 0,
+    }
+}
+
+fn deduplicate_candidates(results: Vec<SearchResult>) -> Vec<SearchResult> {
+    let by_hash = best_by_key(results, |result| {
+        Some(format!("hash:{}", result.record.content_hash))
+    });
+    best_by_key(by_hash, |result| {
+        Some(format!(
+            "text:{}\n{}",
+            normalize_text(&result.record.title),
+            normalize_text(&result.record.body)
+        ))
+    })
+}
+
+fn best_by_key<F>(results: Vec<SearchResult>, key_for: F) -> Vec<SearchResult>
+where
+    F: Fn(&SearchResult) -> Option<String>,
+{
+    let mut best = BTreeMap::<String, SearchResult>::new();
+    let mut unkeyed = Vec::new();
+    for result in results {
+        let Some(key) = key_for(&result) else {
+            unkeyed.push(result);
+            continue;
+        };
+        best.entry(key)
+            .and_modify(|existing| {
+                if compare_ranked_results(&result, existing) == Ordering::Less {
+                    *existing = result.clone();
+                }
+            })
+            .or_insert(result);
+    }
+    unkeyed.extend(best.into_values());
+    unkeyed
+}
+
+fn normalize_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn compare_ranked_results(left: &SearchResult, right: &SearchResult) -> Ordering {
+    ranking_score(right)
+        .total_cmp(&ranking_score(left))
+        .then_with(|| {
+            destination_priority(right.record.destination)
+                .cmp(&destination_priority(left.record.destination))
+        })
+        .then_with(|| right.record.updated_at.cmp(&left.record.updated_at))
+        .then_with(|| left.record.id.cmp(&right.record.id))
+}
+
+fn ranking_score(result: &SearchResult) -> f64 {
+    result
+        .ranking
+        .as_ref()
+        .map(|ranking| ranking.score)
+        .unwrap_or(result.score)
 }
 
 fn select_for_budget(results: Vec<SearchResult>, budget: usize) -> ContextSelection {
@@ -183,43 +580,14 @@ fn omitted_items(omitted: &[SelectedContextItem]) -> Vec<ContextPackOmittedItem>
         .collect()
 }
 
-fn runtime_exclusion_warnings(
-    conn: &Connection,
-    input: &ContextPackInput,
-) -> Result<Vec<ContextPackWarning>> {
-    let mut warnings = Vec::new();
-    for destination in [MemoryDestination::Local, MemoryDestination::Session] {
-        let count = count_matching_memory(
-            conn,
-            SearchInput {
-                query: input.task.clone(),
-                destination: Some(destination),
-                path_prefix: input.path_prefix.clone(),
-                include_inactive: false,
-                ..SearchInput::default()
-            },
-        )?;
-        if count > 0 {
-            warnings.push(ContextPackWarning {
-                code: "runtime_memory_excluded".to_owned(),
-                provenance: destination,
-                destination,
-                matching_count: count,
-                message: format!(
-                    "{count} matching {} memory record(s) excluded from global context by policy",
-                    destination.as_str()
-                ),
-            });
-        }
-    }
-    Ok(warnings)
-}
-
 fn primary_citation(result: &SearchResult) -> MemoryCitation {
     result.citations.first().cloned().unwrap_or(MemoryCitation {
         record_id: result.record.id.clone(),
         memory_type: result.record.memory_type,
         scope_kind: result.record.scope_kind,
+        destination: result.record.destination,
+        visibility: result.record.visibility,
+        source_kind: result.record.source_kind.clone(),
         source_ref: result.record.source_ref.clone(),
         path: result.paths.first().map(|path| path.path.clone()),
     })
@@ -229,23 +597,73 @@ fn estimate_result(result: &SearchResult) -> usize {
     estimate_words(&result.record.title) + estimate_words(&result.record.body) + 6
 }
 
-fn render_prompt(results: &[SearchResult], citations: &[MemoryCitation], budget: usize) -> String {
+fn render_prompt(
+    results: &[SearchResult],
+    citations: &[MemoryCitation],
+    budget: usize,
+) -> (String, usize, bool) {
     let mut lines = vec!["# Memzoi Context".to_owned()];
 
     for (result, citation) in results.iter().zip(citations) {
-        let line = format!(
-            "- [{}] ({}/{}) {}: {}\n  Source: {}",
-            citation.record_id,
-            result.record.memory_type.as_str(),
-            result.record.scope_kind.as_str(),
-            result.record.title,
-            result.record.body,
-            citation.source_ref.as_deref().unwrap_or("unknown"),
-        );
-        lines.push(line);
+        lines.push(render_line(result, citation));
     }
 
-    truncate_words(&lines.join("\n"), budget)
+    let rendered = lines.join("\n");
+    let rendered_words = estimate_words(&rendered);
+    if rendered_words <= budget {
+        return (rendered, rendered_words, false);
+    }
+    let truncated = truncate_words(&rendered, budget);
+    let truncated_words = estimate_words(&truncated);
+    (truncated, truncated_words, true)
+}
+
+fn render_line(result: &SearchResult, citation: &MemoryCitation) -> String {
+    let provenance = if result.record.destination == MemoryDestination::Repo {
+        result.record.scope_kind.as_str().to_owned()
+    } else {
+        format!(
+            "{}; destination={}",
+            result.record.scope_kind.as_str(),
+            result.record.destination.as_str()
+        )
+    };
+    format!(
+        "- [{}] ({}/{}) {}: {}\n  Source: {}",
+        citation.record_id,
+        result.record.memory_type.as_str(),
+        provenance,
+        result.record.title,
+        result.record.body,
+        citation
+            .source_ref
+            .as_deref()
+            .unwrap_or_else(|| source_label(&result.record)),
+    )
+}
+
+fn source_label(record: &MemoryRecord) -> &str {
+    match record.destination {
+        MemoryDestination::Repo => "unknown",
+        MemoryDestination::Local => "local memory",
+        MemoryDestination::Session => "session memory",
+        MemoryDestination::Discard | MemoryDestination::NeedsReview => "non-repo memory",
+    }
+}
+
+fn included_destinations(
+    results: &[SearchResult],
+    requested_destinations: &[MemoryDestination],
+) -> Vec<MemoryDestination> {
+    requested_destinations
+        .iter()
+        .copied()
+        .filter(|destination| {
+            results
+                .iter()
+                .any(|result| result.record.destination == *destination)
+        })
+        .collect()
 }
 
 fn estimate_words(text: &str) -> usize {
@@ -267,10 +685,13 @@ mod tests {
     use serde_json::Value;
     use tempfile::TempDir;
 
-    use super::{ContextPackInput, build_context_pack};
+    use super::{ContextCandidate, ContextPackInput, build_context_pack, rank_candidate};
     use crate::{
         init_database,
-        models::{MemoryDestination, MemoryLane, MemoryStatus, MemoryType, ScopeKind},
+        models::{
+            MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind,
+            SearchResult, Visibility,
+        },
         open_database,
     };
 
@@ -324,6 +745,8 @@ mod tests {
                 task: "Implement zircon routing context for the Rust indexer".to_owned(),
                 path_prefix: Some("crates/memzoi-core/src/context.rs".to_owned()),
                 token_budget: Some(160),
+                include_local: false,
+                include_session: false,
             },
         )?;
         let json = serde_json::to_value(&pack)?;
@@ -347,6 +770,33 @@ mod tests {
         assert_json_string_field(citation, &["source_ref"], "issue://4242#decision");
 
         Ok(())
+    }
+
+    #[test]
+    fn ranking_uses_internal_fts_marker_not_rationale_text() {
+        let fts_candidate = ContextCandidate::fts(test_search_result(
+            "rec-fts-marker",
+            "title/body match",
+            12.5,
+        ));
+        let fts_ranking = rank_candidate(&fts_candidate, None);
+        assert!(
+            fts_ranking.signals.fts_match,
+            "FTS candidates should rank as FTS matches even when rationale text does not mention fts5"
+        );
+        assert_eq!(fts_ranking.signals.fts_score, 12.5);
+
+        let path_candidate = ContextCandidate::path(test_search_result(
+            "rec-path-marker",
+            "fts5 title/body match",
+            12.5,
+        ));
+        let path_ranking = rank_candidate(&path_candidate, None);
+        assert!(
+            !path_ranking.signals.fts_match,
+            "path candidates should not become FTS matches because explanatory text mentions fts5"
+        );
+        assert_eq!(path_ranking.signals.fts_score, 0.0);
     }
 
     #[test]
@@ -399,6 +849,8 @@ mod tests {
                 task: "Need zircon context procedure while editing context.rs".to_owned(),
                 path_prefix: Some("crates/memzoi-core/src/context.rs".to_owned()),
                 token_budget: Some(40),
+                include_local: false,
+                include_session: false,
             },
         )?;
         let json = serde_json::to_value(&pack)?;
@@ -471,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn build_context_pack_warns_about_runtime_matches_without_exposing_content()
+    fn build_context_pack_excludes_runtime_matches_without_exposing_content_or_counts()
     -> anyhow::Result<()> {
         let (_temp, conn) = initialized_database()?;
         insert_memory(
@@ -524,6 +976,8 @@ mod tests {
                 task: "Need zircon context".to_owned(),
                 path_prefix: Some("crates/memzoi-core/src/context.rs".to_owned()),
                 token_budget: Some(160),
+                include_local: false,
+                include_session: false,
             },
         )?;
         let json = serde_json::to_value(&pack)?;
@@ -539,16 +993,10 @@ mod tests {
         let warnings = json["warnings"]
             .as_array()
             .unwrap_or_else(|| panic!("context JSON should include warnings: {json}"));
-        for destination in ["local", "session"] {
-            assert!(
-                warnings.iter().any(|warning| {
-                    warning.get("code").and_then(Value::as_str) == Some("runtime_memory_excluded")
-                        && warning.get("destination").and_then(Value::as_str) == Some(destination)
-                        && warning.get("matching_count").and_then(Value::as_u64) == Some(1)
-                }),
-                "context JSON should warn count-only for excluded {destination} memory: {json}"
-            );
-        }
+        assert!(
+            warnings.is_empty(),
+            "runtime memory must not be counted or exposed unless explicitly opted in: {json}"
+        );
         assert_eq!(
             record_ids_from_pack(&json),
             vec!["rec-repo-zircon".to_owned()],
@@ -587,6 +1035,8 @@ mod tests {
                 task: "Need webglob ranking guidance for App.tsx".to_owned(),
                 path_prefix: Some("apps/web/src/App.tsx".to_owned()),
                 token_budget: Some(80),
+                include_local: false,
+                include_session: false,
             },
         )?;
         let json = serde_json::to_value(&pack)?;
@@ -596,6 +1046,226 @@ mod tests {
             ids.first().map(String::as_str),
             Some("rec-z-web-glob"),
             "stored path apps/web/** should rank ahead of an otherwise equal distractor for apps/web/src/App.tsx: {json}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_context_pack_includes_local_and_session_only_when_explicitly_allowed()
+    -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "rec-layered-repo",
+                memory_type: MemoryType::Decision,
+                scope_kind: ScopeKind::Repo,
+                status: MemoryStatus::Active,
+                title: "Layered alpha repo decision",
+                body: "Layered alpha context includes repo memory by default.",
+                path: None,
+                source_ref: Some("issue://layered-repo"),
+            },
+        )?;
+        insert_memory_with_destination(
+            &conn,
+            MemoryFixture {
+                id: "rec-layered-local",
+                memory_type: MemoryType::Preference,
+                scope_kind: ScopeKind::Personal,
+                status: MemoryStatus::Active,
+                title: "Layered alpha local preference",
+                body: "Layered alpha context includes local memory only when requested.",
+                path: None,
+                source_ref: Some("local://layered"),
+            },
+            MemoryDestination::Local,
+            MemoryLane::Semantic,
+        )?;
+        insert_memory_with_destination(
+            &conn,
+            MemoryFixture {
+                id: "rec-layered-session",
+                memory_type: MemoryType::Episode,
+                scope_kind: ScopeKind::Personal,
+                status: MemoryStatus::Active,
+                title: "Layered alpha session checkpoint",
+                body: "Layered alpha context includes session memory only when requested.",
+                path: None,
+                source_ref: Some("session://layered"),
+            },
+            MemoryDestination::Session,
+            MemoryLane::Session,
+        )?;
+
+        let default_pack = build_context_pack(
+            &conn,
+            ContextPackInput {
+                task: "layered alpha context".to_owned(),
+                path_prefix: None,
+                token_budget: Some(200),
+                include_local: false,
+                include_session: false,
+            },
+        )?;
+        let default_json = serde_json::to_value(&default_pack)?;
+        assert_eq!(
+            record_ids_from_pack(&default_json),
+            vec!["rec-layered-repo".to_owned()],
+            "context should be repo-only by default: {default_json}"
+        );
+        assert_eq!(
+            default_json["policy"]["requested_destinations"],
+            serde_json::json!(["repo"])
+        );
+
+        let layered_pack = build_context_pack(
+            &conn,
+            ContextPackInput {
+                task: "layered alpha context".to_owned(),
+                path_prefix: None,
+                token_budget: Some(240),
+                include_local: true,
+                include_session: true,
+            },
+        )?;
+        let layered_json = serde_json::to_value(&layered_pack)?;
+        let ids = record_ids_from_pack(&layered_json);
+        assert!(ids.iter().any(|id| id == "rec-layered-repo"));
+        assert!(ids.iter().any(|id| id == "rec-layered-local"));
+        assert!(ids.iter().any(|id| id == "rec-layered-session"));
+        assert_eq!(
+            layered_json["policy"]["requested_destinations"],
+            serde_json::json!(["repo", "local", "session"])
+        );
+        let prompt = prompt_text(&layered_json).unwrap_or_else(|| {
+            panic!("context pack JSON should include prompt-ready text: {layered_json}")
+        });
+        assert!(
+            prompt.contains("destination=local") && prompt.contains("destination=session"),
+            "prompt should label non-repo memory provenance: {prompt:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_context_pack_surfaces_path_scoped_governance_memory_without_fts_match()
+    -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        for (id, memory_type, title) in [
+            ("rec-path-risk", MemoryType::Risk, "Tax calculation risk"),
+            (
+                "rec-path-warning",
+                MemoryType::Warning,
+                "Totals update warning",
+            ),
+            (
+                "rec-path-failed-attempt",
+                MemoryType::FailedAttempt,
+                "Previous totals attempt",
+            ),
+            ("rec-path-fact", MemoryType::Fact, "Invoice rounding fact"),
+        ] {
+            insert_memory(
+                &conn,
+                MemoryFixture {
+                    id,
+                    memory_type,
+                    scope_kind: ScopeKind::Repo,
+                    status: MemoryStatus::Active,
+                    title,
+                    body: "Changing this file previously broke production totals.",
+                    path: Some("apps/api/src/billing/invoice.rs"),
+                    source_ref: Some("issue://billing-governance"),
+                },
+            )?;
+        }
+
+        let pack = build_context_pack(
+            &conn,
+            ContextPackInput {
+                task: "change invoice rounding".to_owned(),
+                path_prefix: Some("apps/api/src/billing/invoice.rs".to_owned()),
+                token_budget: Some(240),
+                include_local: false,
+                include_session: false,
+            },
+        )?;
+        let json = serde_json::to_value(&pack)?;
+        let ids = record_ids_from_pack(&json);
+        assert_eq!(
+            ids.iter().take(3).map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "rec-path-risk",
+                "rec-path-warning",
+                "rec-path-failed-attempt"
+            ],
+            "path-scoped governance records should rank above lower-priority facts: {json}"
+        );
+        let first = json["records"]
+            .as_array()
+            .and_then(|records| records.first())
+            .unwrap_or_else(|| panic!("context records should include first record: {json}"));
+        assert_eq!(first["ranking"]["signals"]["path_score"].as_i64(), Some(5));
+        assert_eq!(
+            first["ranking"]["signals"]["type_priority"].as_i64(),
+            Some(9)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_context_pack_deduplicates_by_text_and_prefers_repo_on_tie() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        let title = "Duplicate beta context fact";
+        let body = "Duplicate beta context body should appear only once.";
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "rec-duplicate-repo",
+                memory_type: MemoryType::Fact,
+                scope_kind: ScopeKind::Repo,
+                status: MemoryStatus::Active,
+                title,
+                body,
+                path: None,
+                source_ref: Some("issue://duplicate-repo"),
+            },
+        )?;
+        insert_memory_with_destination(
+            &conn,
+            MemoryFixture {
+                id: "rec-duplicate-local",
+                memory_type: MemoryType::Fact,
+                scope_kind: ScopeKind::Personal,
+                status: MemoryStatus::Active,
+                title,
+                body,
+                path: None,
+                source_ref: Some("local://duplicate"),
+            },
+            MemoryDestination::Local,
+            MemoryLane::Semantic,
+        )?;
+
+        let pack = build_context_pack(
+            &conn,
+            ContextPackInput {
+                task: "duplicate beta context".to_owned(),
+                path_prefix: None,
+                token_budget: Some(120),
+                include_local: true,
+                include_session: false,
+            },
+        )?;
+        let json = serde_json::to_value(&pack)?;
+        assert_eq!(
+            record_ids_from_pack(&json),
+            vec!["rec-duplicate-repo".to_owned()],
+            "deduplication should keep canonical repo memory over duplicate local memory: {json}"
         );
 
         Ok(())
@@ -665,6 +1335,37 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn test_search_result(id: &str, rationale: &str, score: f64) -> SearchResult {
+        SearchResult {
+            record: MemoryRecord {
+                id: id.to_owned(),
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                destination: MemoryDestination::Repo,
+                scope_kind: ScopeKind::Repo,
+                scope_id: None,
+                visibility: Visibility::Repo,
+                title: "Internal FTS marker fixture".to_owned(),
+                body: "Internal FTS marker fixture body.".to_owned(),
+                status: MemoryStatus::Active,
+                confidence: 0.88,
+                source_kind: Some("test".to_owned()),
+                source_ref: None,
+                content_hash: format!("hash-{id}"),
+                created_at: "2026-07-09T00:00:00Z".to_owned(),
+                updated_at: "2026-07-09T00:00:00Z".to_owned(),
+                supersedes_id: None,
+                expires_at: None,
+            },
+            score,
+            snippet: None,
+            rationale: Some(rationale.to_owned()),
+            ranking: None,
+            paths: Vec::new(),
+            citations: Vec::new(),
+        }
     }
 
     fn record_ids_from_pack(json: &Value) -> Vec<String> {

@@ -85,7 +85,7 @@ memzoi local list
 memzoi local search <query>
 ```
 
-Local records are marked with `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output. They are not included in global `memzoi search`, `memzoi context`, or exports yet. Rebuild keeps local runtime rows while restoring canonical repo records from Git.
+Local records are marked with `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output. They are not included in global `memzoi search` or exports. `memzoi context` remains repo-only by default and includes local records only with `--include-local`. Rebuild keeps local runtime rows while restoring canonical repo records from Git.
 
 Promotion from local memory into repo-shared memory must go through later proposal workflows. Local memory should not contain secrets, raw chat logs, or private personal data that should not be retained.
 
@@ -103,7 +103,7 @@ memzoi checkpoint list
 
 Checkpoint records are marked with `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output. Checkpoints only store explicit `--note` or `--from-file` content; Memzoi does not inspect shell history, raw chat logs, hidden agent state, or existing context packs.
 
-Checkpoints are not included in global `memzoi search`, `memzoi context`, or exports yet. Promotion from checkpoints into repo-shared memory should go through later session-end proposal workflows, not direct canonical writes.
+Checkpoints are not included in global `memzoi search` or exports. `memzoi context` remains repo-only by default and includes checkpoints only with `--include-session`. Promotion from checkpoints into repo-shared memory should go through later session-end proposal workflows, not direct canonical writes.
 
 ## Session-end promotion
 

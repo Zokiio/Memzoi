@@ -166,8 +166,29 @@ pub struct MemoryCitation {
     pub record_id: String,
     pub memory_type: MemoryType,
     pub scope_kind: ScopeKind,
+    pub destination: MemoryDestination,
+    pub visibility: Visibility,
+    pub source_kind: Option<String>,
     pub source_ref: Option<String>,
     pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchRanking {
+    pub score: f64,
+    pub signals: SearchRankingSignals,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchRankingSignals {
+    pub fts_match: bool,
+    pub fts_score: f64,
+    pub path_score: i64,
+    pub type_priority: i64,
+    pub lane_priority: i64,
+    pub destination_priority: i64,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,6 +197,8 @@ pub struct SearchResult {
     pub score: f64,
     pub snippet: Option<String>,
     pub rationale: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ranking: Option<SearchRanking>,
     pub paths: Vec<MemoryPath>,
     pub citations: Vec<MemoryCitation>,
 }
@@ -186,6 +209,18 @@ pub struct ContextPackBudget {
     pub effective: usize,
     pub estimated_used: usize,
     pub estimate_unit: String,
+    pub candidate_records: usize,
+    pub selected_records: usize,
+    pub rendered_words: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPackPolicy {
+    pub include_local: bool,
+    pub include_session: bool,
+    pub requested_destinations: Vec<MemoryDestination>,
+    pub included_destinations: Vec<MemoryDestination>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -234,6 +269,7 @@ pub struct ContextPack {
     pub records: Vec<SearchResult>,
     pub citations: Vec<MemoryCitation>,
     pub token_budget: Option<usize>,
+    pub policy: ContextPackPolicy,
     pub budget: ContextPackBudget,
     pub included: Vec<ContextPackIncludedItem>,
     pub omitted: Vec<ContextPackOmittedItem>,

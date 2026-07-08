@@ -72,6 +72,9 @@ fn warning_from_result(result: SearchResult) -> PrecheckWarning {
             record_id: result.record.id.clone(),
             memory_type: result.record.memory_type,
             scope_kind: result.record.scope_kind,
+            destination: result.record.destination,
+            visibility: result.record.visibility,
+            source_kind: result.record.source_kind.clone(),
             source_ref: result.record.source_ref.clone(),
             path: result.paths.first().map(|path| path.path.clone()),
         });

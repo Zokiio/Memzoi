@@ -2651,11 +2651,122 @@ fn context_json_returns_prompt_ready_pack_records_and_citations() {
     assert_json_string_field(citation, &["record_id", "id"], &matching);
     assert_json_string_field(citation, &["type", "memory_type"], "procedure");
     assert_json_string_field(citation, &["scope", "scope_kind"], "repo");
+    assert_json_string_field(citation, &["destination"], "repo");
+    assert_json_string_field(citation, &["visibility"], "repo");
+    assert_json_string_field(citation, &["source_kind"], "cli");
     assert_json_string_field(citation, &["source_ref"], "issue://cli-context#procedure");
+    let first_record = pack["records"]
+        .as_array()
+        .and_then(|records| records.first())
+        .unwrap_or_else(|| panic!("context JSON should include selected records: {pack}"));
+    assert!(
+        first_record.get("ranking").is_some(),
+        "context JSON should expose ranking metadata per selected record: {pack}"
+    );
+    assert_eq!(
+        pack["policy"]["requested_destinations"],
+        serde_json::json!(["repo"])
+    );
+    assert_eq!(
+        pack["budget"]["selected_records"].as_u64(),
+        Some(ids.len() as u64)
+    );
 }
 
 #[test]
-fn context_json_warns_about_excluded_runtime_memory_without_leaking_content() {
+fn context_include_local_and_session_flags_are_explicit_opt_ins() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    let repo_record = create_applied_memory(
+        repo,
+        "decision",
+        "repo",
+        "Layered omega repo decision",
+        "Layered omega context should include repo memory by default.",
+    );
+    let local = run_json_command(
+        repo,
+        &[
+            "local",
+            "add",
+            "--type",
+            "preference",
+            "--title",
+            "Layered omega local preference",
+            "--body",
+            "Layered omega context should include local memory only with explicit opt-in.",
+            "--json",
+        ],
+    );
+    let local_id = json_string(&local, "record_id").to_owned();
+    let checkpoint = run_json_command(
+        repo,
+        &[
+            "checkpoint",
+            "add",
+            "--task",
+            "Layered omega session checkpoint",
+            "--note",
+            "Layered omega context should include session memory only with explicit opt-in.",
+            "--json",
+        ],
+    );
+    let checkpoint_id = json_string(&checkpoint, "record_id").to_owned();
+
+    let default_pack = run_json_command(
+        repo,
+        &["context", "--task", "layered omega context", "--json"],
+    );
+    let default_ids = record_ids_from_json(&default_pack);
+    assert_eq!(
+        default_ids,
+        vec![repo_record.as_str()],
+        "context should be repo-only by default: {default_pack}"
+    );
+    assert_json_does_not_reference_records(
+        &default_pack,
+        &[local_id.clone(), checkpoint_id.clone()],
+    );
+    assert_eq!(
+        default_pack["policy"]["requested_destinations"],
+        serde_json::json!(["repo"])
+    );
+
+    let layered_pack = run_json_command(
+        repo,
+        &[
+            "context",
+            "--task",
+            "layered omega context",
+            "--include-local",
+            "--include-session",
+            "--json",
+        ],
+    );
+    let layered_ids = record_ids_from_json(&layered_pack);
+    assert!(layered_ids.contains(&repo_record.as_str()));
+    assert!(layered_ids.contains(&local_id.as_str()));
+    assert!(layered_ids.contains(&checkpoint_id.as_str()));
+    assert_eq!(
+        layered_pack["policy"]["requested_destinations"],
+        serde_json::json!(["repo", "local", "session"])
+    );
+    let prompt = prompt_text(&layered_pack)
+        .unwrap_or_else(|| panic!("context JSON should include prompt text: {layered_pack}"));
+    assert!(
+        prompt.contains("destination=local") && prompt.contains("destination=session"),
+        "prompt should label non-repo memory provenance: {prompt:?}"
+    );
+    let local_citation = citation_for_record(&layered_pack, &local_id)
+        .unwrap_or_else(|| panic!("layered context should cite local memory: {layered_pack}"));
+    assert_json_string_field(local_citation, &["destination"], "local");
+    assert_json_string_field(local_citation, &["visibility"], "private");
+    assert_json_string_field(local_citation, &["source_kind"], "memzoi-local");
+}
+
+#[test]
+fn context_json_excludes_runtime_memory_without_leaking_content_or_counts() {
     let repo = initialized_temp_repo();
     let repo = repo.path();
 
@@ -2720,16 +2831,10 @@ fn context_json_warns_about_excluded_runtime_memory_without_leaking_content() {
     let warnings = pack["warnings"]
         .as_array()
         .unwrap_or_else(|| panic!("context JSON should include warnings: {pack}"));
-    for destination in ["local", "session"] {
-        assert!(
-            warnings.iter().any(|warning| {
-                warning.get("code").and_then(Value::as_str) == Some("runtime_memory_excluded")
-                    && warning.get("destination").and_then(Value::as_str) == Some(destination)
-                    && warning.get("matching_count").and_then(Value::as_u64) == Some(1)
-            }),
-            "context JSON should expose count-only {destination} exclusion warning: {pack}"
-        );
-    }
+    assert!(
+        warnings.is_empty(),
+        "context JSON must not count or expose local/session memory unless explicitly opted in: {pack}"
+    );
 }
 
 #[test]

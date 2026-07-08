@@ -65,6 +65,8 @@ fn bench_context_pack(c: &mut Criterion) {
                 task: "Implement routing recall token for Rust context packs".to_owned(),
                 path_prefix: Some("crates/memzoi-core/src/context.rs".to_owned()),
                 token_budget: Some(budget),
+                include_local: false,
+                include_session: false,
             };
             group.bench_with_input(
                 BenchmarkId::new(format!("budget_{budget}"), size),
