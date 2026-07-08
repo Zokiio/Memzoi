@@ -28,6 +28,16 @@ pub enum MemoryLane {
     Procedural,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryDestination {
+    Repo,
+    Local,
+    Session,
+    Discard,
+    NeedsReview,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
@@ -71,6 +81,12 @@ impl MemoryType {
 impl MemoryLane {
     pub fn as_str(self) -> &'static str {
         lane_to_str(self)
+    }
+}
+
+impl MemoryDestination {
+    pub fn as_str(self) -> &'static str {
+        destination_to_str(self)
     }
 }
 
@@ -184,6 +200,12 @@ pub struct PrecheckWarning {
     pub suggested_next_step: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryDestinationClassification {
+    pub destination: MemoryDestination,
+    pub reason: String,
+}
+
 impl fmt::Display for MemoryType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(enum_to_str(*self))
@@ -193,6 +215,12 @@ impl fmt::Display for MemoryType {
 impl fmt::Display for MemoryLane {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(lane_to_str(*self))
+    }
+}
+
+impl fmt::Display for MemoryDestination {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(destination_to_str(*self))
     }
 }
 
@@ -244,6 +272,21 @@ impl FromStr for MemoryLane {
             "episodic" => Ok(Self::Episodic),
             "procedural" => Ok(Self::Procedural),
             other => Err(format!("unknown memory lane {other:?}")),
+        }
+    }
+}
+
+impl FromStr for MemoryDestination {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "repo" => Ok(Self::Repo),
+            "local" => Ok(Self::Local),
+            "session" => Ok(Self::Session),
+            "discard" => Ok(Self::Discard),
+            "needs_review" => Ok(Self::NeedsReview),
+            other => Err(format!("unknown memory destination {other:?}")),
         }
     }
 }
@@ -321,6 +364,16 @@ pub fn lane_to_str(value: MemoryLane) -> &'static str {
     }
 }
 
+pub fn destination_to_str(value: MemoryDestination) -> &'static str {
+    match value {
+        MemoryDestination::Repo => "repo",
+        MemoryDestination::Local => "local",
+        MemoryDestination::Session => "session",
+        MemoryDestination::Discard => "discard",
+        MemoryDestination::NeedsReview => "needs_review",
+    }
+}
+
 pub fn status_to_str(value: MemoryStatus) -> &'static str {
     match value {
         MemoryStatus::Proposed => "proposed",
@@ -361,7 +414,10 @@ mod tests {
 
     use serde::{Serialize, de::DeserializeOwned};
 
-    use crate::models::{MemoryLane, MemoryStatus, MemoryType, ScopeKind, Visibility};
+    use crate::models::{
+        MemoryDestination, MemoryDestinationClassification, MemoryLane, MemoryStatus, MemoryType,
+        ScopeKind, Visibility,
+    };
 
     #[test]
     fn memory_model_enums_round_trip_as_stable_schema_strings() -> anyhow::Result<()> {
@@ -380,6 +436,12 @@ mod tests {
         assert_json_string_round_trip(MemoryLane::Semantic, "semantic")?;
         assert_json_string_round_trip(MemoryLane::Episodic, "episodic")?;
         assert_json_string_round_trip(MemoryLane::Procedural, "procedural")?;
+
+        assert_json_string_round_trip(MemoryDestination::Repo, "repo")?;
+        assert_json_string_round_trip(MemoryDestination::Local, "local")?;
+        assert_json_string_round_trip(MemoryDestination::Session, "session")?;
+        assert_json_string_round_trip(MemoryDestination::Discard, "discard")?;
+        assert_json_string_round_trip(MemoryDestination::NeedsReview, "needs_review")?;
 
         assert_json_string_round_trip(MemoryStatus::Proposed, "proposed")?;
         assert_json_string_round_trip(MemoryStatus::Active, "active")?;
@@ -410,9 +472,31 @@ mod tests {
     fn memory_model_enums_reject_unknown_schema_strings() {
         assert_invalid_json_string::<MemoryType>("note");
         assert_invalid_json_string::<MemoryLane>("memoir");
+        assert_invalid_json_string::<MemoryDestination>("cloud");
         assert_invalid_json_string::<MemoryStatus>("archived");
         assert_invalid_json_string::<ScopeKind>("workspace");
         assert_invalid_json_string::<Visibility>("friends");
+    }
+
+    #[test]
+    fn memory_destination_classification_serializes_as_json() -> anyhow::Result<()> {
+        let classification = MemoryDestinationClassification {
+            destination: MemoryDestination::NeedsReview,
+            reason: "sensitivity boundary is unclear".to_owned(),
+        };
+
+        let json = serde_json::to_value(&classification)?;
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "destination": "needs_review",
+                "reason": "sensitivity boundary is unclear"
+            })
+        );
+
+        let decoded: MemoryDestinationClassification = serde_json::from_value(json)?;
+        assert_eq!(decoded, classification);
+        Ok(())
     }
 
     fn assert_json_string_round_trip<T>(value: T, encoded: &str) -> anyhow::Result<()>
