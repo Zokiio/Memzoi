@@ -137,7 +137,7 @@ candidates:
       - security
 ```
 
-Memzoi validates every candidate before writing anything. `repo` candidates must use `sensitivity: repo-safe`; they become pending OKF proposal files under `.memzoi/proposals/pending/` and are never directly applied to `.memzoi/records/**`. `local` candidates become private runtime records. `session` candidates become runtime checkpoints and must use `type: episode` with `lane: session`. `discard` and `needs_review` candidates create no writes.
+Memzoi validates every candidate and prepares repo proposal files before writing anything. `repo` candidates must use `sensitivity: repo-safe`; they become pending OKF proposal files under `.memzoi/proposals/pending/` and are never directly applied to `.memzoi/records/**`. `local` candidates become private runtime records. `session` candidates become runtime checkpoints and must use `type: episode` with `lane: session`. Runtime row writes are committed transactionally, and created proposal files are cleaned up if a later promotion step fails. `discard` and `needs_review` candidates create no writes.
 
 Session-end promotion does not inspect shell history, transcripts, chat logs, hidden agent state, or context packs. Free-text notes and free-text checkpoint bodies fail until a later extraction workflow exists.
 

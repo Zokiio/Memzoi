@@ -101,6 +101,7 @@ pub enum SessionEndWrite {
 pub(crate) struct SessionEndRepoProposalPlan {
     pub proposal_id: String,
     pub path: PathBuf,
+    markdown: String,
 }
 
 pub fn parse_session_end_document(input: &str) -> Result<SessionEndDocument> {
@@ -126,41 +127,43 @@ pub(crate) fn validate_session_end_document(document: &SessionEndDocument) -> Re
 
 pub(crate) fn plan_repo_proposal(
     pending_root: &Path,
-    title: &str,
-    reserved_ids: &mut BTreeSet<String>,
-) -> Result<SessionEndRepoProposalPlan> {
-    let base_slug = title_to_concept_slug(title).unwrap_or_else(|| "memory".to_owned());
-    let base_id = format!("mem_session_{base_slug}");
-    let proposal_id = next_available_proposal_id(pending_root, &base_id, reserved_ids)?;
-    reserved_ids.insert(proposal_id.clone());
-    Ok(SessionEndRepoProposalPlan {
-        path: pending_root.join(format!("{proposal_id}.md")),
-        proposal_id,
-    })
-}
-
-pub(crate) fn write_repo_proposal_file(
-    pending_root: &Path,
-    proposal_id: &str,
     candidate: &SessionEndCandidate,
     actor: &str,
     timestamp: &str,
-) -> Result<PathBuf> {
+    reserved_ids: &mut BTreeSet<String>,
+) -> Result<SessionEndRepoProposalPlan> {
+    let base_slug = title_to_concept_slug(&candidate.title).unwrap_or_else(|| "memory".to_owned());
+    let base_id = format!("mem_session_{base_slug}");
+    let proposal_id = next_available_proposal_id(pending_root, &base_id, reserved_ids)?;
     let path = pending_root.join(format!("{proposal_id}.md"));
-    let markdown = render_repo_proposal_markdown(proposal_id, candidate, actor, timestamp)?;
+    let markdown = render_repo_proposal_markdown(&proposal_id, candidate, actor, timestamp)?;
     parse_okf_proposal_markdown(pending_root, &path, &markdown)?
         .with_context(|| format!("rendered session-end proposal {proposal_id} was ignored"))?;
-    if let Some(parent) = path.parent() {
+    reserved_ids.insert(proposal_id.clone());
+    Ok(SessionEndRepoProposalPlan {
+        proposal_id,
+        path,
+        markdown,
+    })
+}
+
+pub(crate) fn write_repo_proposal_file(plan: &SessionEndRepoProposalPlan) -> Result<PathBuf> {
+    if let Some(parent) = plan.path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create proposal directory {}", parent.display()))?;
     }
     OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, markdown.as_bytes()))
-        .with_context(|| format!("failed to create session-end proposal {}", path.display()))?;
-    Ok(path)
+        .open(&plan.path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, plan.markdown.as_bytes()))
+        .with_context(|| {
+            format!(
+                "failed to create session-end proposal {}",
+                plan.path.display()
+            )
+        })?;
+    Ok(plan.path.clone())
 }
 
 fn session_end_yaml(input: &str) -> Result<&str> {

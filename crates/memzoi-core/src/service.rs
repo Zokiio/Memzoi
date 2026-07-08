@@ -356,48 +356,8 @@ impl MemoryService {
         actor: &str,
         input: LocalMemoryInput,
     ) -> Result<MemoryRecord> {
-        validate_local_memory_input(&input)?;
-        let id = next_prefixed_record_id(&self.conn, "local", &input.title)?;
         let now = now_utc()?;
-        let body = input.body.trim().to_owned();
-        let record = MemoryRecord {
-            id,
-            memory_type: input.memory_type,
-            lane: input.lane,
-            destination: MemoryDestination::Local,
-            scope_kind: ScopeKind::Personal,
-            scope_id: None,
-            visibility: Visibility::Private,
-            title: input.title.trim().to_owned(),
-            body,
-            status: MemoryStatus::Active,
-            confidence: 1.0,
-            source_kind: Some("memzoi-local".to_owned()),
-            source_ref: None,
-            content_hash: blake3::hash(input.body.trim().as_bytes())
-                .to_hex()
-                .to_string(),
-            created_at: now.clone(),
-            updated_at: now,
-            supersedes_id: None,
-            expires_at: None,
-        };
-        insert_memory_record_row(&self.conn, &record, InsertMode::Create)?;
-        append_event(
-            &self.conn,
-            AppendEvent {
-                event_type: "memory.local_created".to_owned(),
-                actor: actor.to_owned(),
-                payload: json!({
-                    "record_id": &record.id,
-                    "destination": record.destination.as_str(),
-                    "title": &record.title,
-                }),
-                record_id: Some(record.id.clone()),
-                proposal_id: None,
-            },
-        )?;
-        Ok(record)
+        create_local_memory_with_conn(&self.conn, actor, &input, &now)
     }
 
     pub fn list_local_memory(&self) -> Result<Vec<MemoryRecord>> {
@@ -418,48 +378,8 @@ impl MemoryService {
     }
 
     pub fn create_checkpoint(&self, actor: &str, input: CheckpointInput) -> Result<MemoryRecord> {
-        validate_checkpoint_input(&input)?;
-        let id = next_prefixed_record_id(&self.conn, "session", &input.task)?;
         let now = now_utc()?;
-        let body = input.note.trim().to_owned();
-        let record = MemoryRecord {
-            id,
-            memory_type: MemoryType::Episode,
-            lane: MemoryLane::Session,
-            destination: MemoryDestination::Session,
-            scope_kind: ScopeKind::Personal,
-            scope_id: None,
-            visibility: Visibility::Private,
-            title: input.task.trim().to_owned(),
-            body,
-            status: MemoryStatus::Active,
-            confidence: 1.0,
-            source_kind: Some("memzoi-checkpoint".to_owned()),
-            source_ref: None,
-            content_hash: blake3::hash(input.note.trim().as_bytes())
-                .to_hex()
-                .to_string(),
-            created_at: now.clone(),
-            updated_at: now,
-            supersedes_id: None,
-            expires_at: None,
-        };
-        insert_memory_record_row(&self.conn, &record, InsertMode::Create)?;
-        append_event(
-            &self.conn,
-            AppendEvent {
-                event_type: "memory.checkpoint_created".to_owned(),
-                actor: actor.to_owned(),
-                payload: json!({
-                    "record_id": &record.id,
-                    "destination": record.destination.as_str(),
-                    "title": &record.title,
-                }),
-                record_id: Some(record.id.clone()),
-                proposal_id: None,
-            },
-        )?;
-        Ok(record)
+        create_checkpoint_with_conn(&self.conn, actor, &input, &now)
     }
 
     pub fn list_checkpoints(&self) -> Result<Vec<MemoryRecord>> {
@@ -467,8 +387,7 @@ impl MemoryService {
     }
 
     pub fn show_checkpoint(&self, record_id: &str) -> Result<MemoryRecord> {
-        checkpoint_record(&self.conn, record_id)
-            .with_context(|| format!("checkpoint not found: {record_id}"))?
+        checkpoint_record(&self.conn, record_id)?
             .with_context(|| format!("checkpoint not found: {record_id}"))
     }
 
@@ -487,7 +406,9 @@ impl MemoryService {
             if candidate.destination == MemoryDestination::Repo {
                 repo_plans.push(Some(plan_repo_proposal(
                     &pending_root,
-                    &candidate.title,
+                    candidate,
+                    actor,
+                    &timestamp,
                     &mut reserved_proposal_ids,
                 )?));
             } else {
@@ -495,53 +416,92 @@ impl MemoryService {
             }
         }
 
+        let mut repo_writes = vec![None::<(String, PathBuf)>; document.candidates.len()];
+        let mut runtime_writes =
+            vec![None::<(String, MemoryDestination)>; document.candidates.len()];
+        let mut created_proposal_files = Vec::new();
+        let write_result = (|| -> Result<()> {
+            for (index, plan) in repo_plans.iter().enumerate() {
+                let Some(plan) = plan else {
+                    continue;
+                };
+                let path = write_repo_proposal_file(plan)?;
+                created_proposal_files.push(path.clone());
+                repo_writes[index] = Some((plan.proposal_id.clone(), path));
+            }
+
+            let tx = self.conn.unchecked_transaction()?;
+            for (index, candidate) in document.candidates.iter().enumerate() {
+                match candidate.destination {
+                    MemoryDestination::Local => {
+                        let record = create_local_memory_with_conn(
+                            &tx,
+                            actor,
+                            &LocalMemoryInput {
+                                memory_type: candidate.memory_type,
+                                lane: candidate.lane,
+                                title: candidate.title.clone(),
+                                body: candidate.body.clone(),
+                            },
+                            &timestamp,
+                        )?;
+                        runtime_writes[index] = Some((record.id, MemoryDestination::Local));
+                    }
+                    MemoryDestination::Session => {
+                        let record = create_checkpoint_with_conn(
+                            &tx,
+                            actor,
+                            &CheckpointInput {
+                                task: candidate.title.clone(),
+                                note: candidate.body.clone(),
+                            },
+                            &timestamp,
+                        )?;
+                        runtime_writes[index] = Some((record.id, MemoryDestination::Session));
+                    }
+                    MemoryDestination::Repo
+                    | MemoryDestination::Discard
+                    | MemoryDestination::NeedsReview => {}
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            if let Err(cleanup_error) = remove_created_proposal_files(&created_proposal_files) {
+                return Err(error).context(format!(
+                    "session-end promotion failed; additionally failed to clean up created proposal files: {cleanup_error}"
+                ));
+            }
+            return Err(error);
+        }
+
         let mut results = Vec::with_capacity(document.candidates.len());
-        for (index, (candidate, repo_plan)) in
-            document.candidates.into_iter().zip(repo_plans).enumerate()
-        {
+        for (index, candidate) in document.candidates.into_iter().enumerate() {
             let title = candidate.title.trim().to_owned();
             let write = match candidate.destination {
                 MemoryDestination::Repo => {
-                    let plan = repo_plan
-                        .context("repo session-end candidate should have a proposal plan")?;
-                    let path = write_repo_proposal_file(
-                        &pending_root,
-                        &plan.proposal_id,
-                        &candidate,
-                        actor,
-                        &timestamp,
-                    )?;
-                    Some(SessionEndWrite::ProposalFile {
-                        proposal_id: plan.proposal_id,
-                        path,
-                    })
+                    let (proposal_id, path) = repo_writes[index]
+                        .clone()
+                        .context("repo session-end candidate should have a proposal write")?;
+                    Some(SessionEndWrite::ProposalFile { proposal_id, path })
                 }
                 MemoryDestination::Local => {
-                    let record = self.create_local_memory(
-                        actor,
-                        LocalMemoryInput {
-                            memory_type: candidate.memory_type,
-                            lane: candidate.lane,
-                            title: candidate.title.clone(),
-                            body: candidate.body.clone(),
-                        },
-                    )?;
+                    let (record_id, destination) = runtime_writes[index]
+                        .clone()
+                        .context("local session-end candidate should have a runtime write")?;
                     Some(SessionEndWrite::RuntimeRecord {
-                        record_id: record.id,
-                        destination: MemoryDestination::Local,
+                        record_id,
+                        destination,
                     })
                 }
                 MemoryDestination::Session => {
-                    let record = self.create_checkpoint(
-                        actor,
-                        CheckpointInput {
-                            task: candidate.title.clone(),
-                            note: candidate.body.clone(),
-                        },
-                    )?;
+                    let (record_id, destination) = runtime_writes[index]
+                        .clone()
+                        .context("session-end candidate should have a runtime write")?;
                     Some(SessionEndWrite::RuntimeRecord {
-                        record_id: record.id,
-                        destination: MemoryDestination::Session,
+                        record_id,
+                        destination,
                     })
                 }
                 MemoryDestination::Discard | MemoryDestination::NeedsReview => None,
@@ -700,6 +660,104 @@ enum InsertMode {
     RestoreIfAbsent,
 }
 
+fn create_local_memory_with_conn(
+    conn: &Connection,
+    actor: &str,
+    input: &LocalMemoryInput,
+    now: &str,
+) -> Result<MemoryRecord> {
+    validate_local_memory_input(input)?;
+    let id = next_prefixed_record_id(conn, "local", &input.title)?;
+    let body = input.body.trim().to_owned();
+    let record = MemoryRecord {
+        id,
+        memory_type: input.memory_type,
+        lane: input.lane,
+        destination: MemoryDestination::Local,
+        scope_kind: ScopeKind::Personal,
+        scope_id: None,
+        visibility: Visibility::Private,
+        title: input.title.trim().to_owned(),
+        body,
+        status: MemoryStatus::Active,
+        confidence: 1.0,
+        source_kind: Some("memzoi-local".to_owned()),
+        source_ref: None,
+        content_hash: blake3::hash(input.body.trim().as_bytes())
+            .to_hex()
+            .to_string(),
+        created_at: now.to_owned(),
+        updated_at: now.to_owned(),
+        supersedes_id: None,
+        expires_at: None,
+    };
+    insert_memory_record_row(conn, &record, InsertMode::Create)?;
+    append_event(
+        conn,
+        AppendEvent {
+            event_type: "memory.local_created".to_owned(),
+            actor: actor.to_owned(),
+            payload: json!({
+                "record_id": &record.id,
+                "destination": record.destination.as_str(),
+                "title": &record.title,
+            }),
+            record_id: Some(record.id.clone()),
+            proposal_id: None,
+        },
+    )?;
+    Ok(record)
+}
+
+fn create_checkpoint_with_conn(
+    conn: &Connection,
+    actor: &str,
+    input: &CheckpointInput,
+    now: &str,
+) -> Result<MemoryRecord> {
+    validate_checkpoint_input(input)?;
+    let id = next_prefixed_record_id(conn, "session", &input.task)?;
+    let body = input.note.trim().to_owned();
+    let record = MemoryRecord {
+        id,
+        memory_type: MemoryType::Episode,
+        lane: MemoryLane::Session,
+        destination: MemoryDestination::Session,
+        scope_kind: ScopeKind::Personal,
+        scope_id: None,
+        visibility: Visibility::Private,
+        title: input.task.trim().to_owned(),
+        body,
+        status: MemoryStatus::Active,
+        confidence: 1.0,
+        source_kind: Some("memzoi-checkpoint".to_owned()),
+        source_ref: None,
+        content_hash: blake3::hash(input.note.trim().as_bytes())
+            .to_hex()
+            .to_string(),
+        created_at: now.to_owned(),
+        updated_at: now.to_owned(),
+        supersedes_id: None,
+        expires_at: None,
+    };
+    insert_memory_record_row(conn, &record, InsertMode::Create)?;
+    append_event(
+        conn,
+        AppendEvent {
+            event_type: "memory.checkpoint_created".to_owned(),
+            actor: actor.to_owned(),
+            payload: json!({
+                "record_id": &record.id,
+                "destination": record.destination.as_str(),
+                "title": &record.title,
+            }),
+            record_id: Some(record.id.clone()),
+            proposal_id: None,
+        },
+    )?;
+    Ok(record)
+}
+
 fn validate_local_memory_input(input: &LocalMemoryInput) -> Result<()> {
     if input.title.trim().is_empty() {
         bail!("title is required");
@@ -716,6 +774,24 @@ fn validate_checkpoint_input(input: &CheckpointInput) -> Result<()> {
     }
     if input.note.trim().is_empty() {
         bail!("note is required");
+    }
+    Ok(())
+}
+
+fn remove_created_proposal_files(paths: &[PathBuf]) -> Result<()> {
+    for path in paths.iter().rev() {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to remove created session-end proposal {}",
+                        path.display()
+                    )
+                });
+            }
+        }
     }
     Ok(())
 }

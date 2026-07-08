@@ -2213,6 +2213,55 @@ candidates:
 }
 
 #[test]
+fn session_end_write_failure_does_not_leave_runtime_rows() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+    let proposals_dir = repo.join(".memzoi").join("proposals");
+    fs::create_dir_all(&proposals_dir).expect("create proposals dir");
+    fs::write(proposals_dir.join("pending"), "not a directory")
+        .expect("block pending proposal directory creation");
+    let input_path = repo.join("write-failure-session-end.yml");
+    fs::write(
+        &input_path,
+        r#"task: "Write failure rollback"
+candidates:
+  - destination: local
+    type: preference
+    lane: semantic
+    title: Runtime row must not survive write failure
+    body: This local row should not survive if the repo proposal cannot be written.
+  - destination: repo
+    type: decision
+    lane: semantic
+    title: Proposal cannot be written
+    body: This repo proposal cannot be written because pending is a file.
+    sensitivity: repo-safe
+"#,
+    )
+    .expect("write session-end input");
+
+    let stderr = run_command_failure_stderr(
+        repo,
+        &[
+            "session-end",
+            "--from-file",
+            input_path.to_str().expect("session-end path utf-8"),
+        ],
+    );
+    assert!(
+        stderr.contains("failed to create proposal directory")
+            || stderr.contains("failed to create session-end proposal")
+            || stderr.contains("failed to inspect pending proposal"),
+        "session-end should fail clearly on proposal file write errors: {stderr}"
+    );
+    let local = run_json_command(repo, &["local", "list", "--json"]);
+    assert!(
+        record_ids_from_json(&local).is_empty(),
+        "failed session-end writes must not leave earlier local rows behind: {local}"
+    );
+}
+
+#[test]
 fn session_end_uses_deterministic_proposal_id_suffixes() {
     let repo = initialized_temp_repo();
     let repo = repo.path();

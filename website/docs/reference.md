@@ -243,7 +243,7 @@ candidates:
       - security
 ```
 
-Memzoi validates the whole batch before writing. `repo` candidates must be `repo-safe` and become pending `.memzoi/proposals/pending/*.md` proposal files only; they are not applied and do not write canonical `.memzoi/records/*.md` files. `local` candidates create private runtime records. `session` candidates create runtime checkpoint records. `discard` and `needs_review` candidates create no writes.
+Memzoi validates the whole batch and prepares repo proposal files before writing. `repo` candidates must be `repo-safe` and become pending `.memzoi/proposals/pending/*.md` proposal files only; they are not applied and do not write canonical `.memzoi/records/*.md` files. `local` candidates create private runtime records. `session` candidates create runtime checkpoint records. Runtime row writes are transactional, and created proposal files are cleaned up if a later promotion step fails. `discard` and `needs_review` candidates create no writes.
 
 `session-end` does not inspect transcripts, chat logs, shell history, hidden agent state, or context packs. Free-text notes and checkpoints are rejected until a future extraction workflow exists.
 
