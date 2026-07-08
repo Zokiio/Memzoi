@@ -6,9 +6,14 @@ use uuid::Uuid;
 
 use crate::{
     events::{AppendEvent, append_event, now_utc},
-    models::{ContextPack, MemoryCitation, SearchResult},
-    search::{SearchInput, path_matches_request, search_memory},
+    models::{
+        ContextPack, ContextPackBudget, ContextPackIncludedItem, ContextPackOmittedItem,
+        ContextPackWarning, MemoryCitation, MemoryDestination, SearchResult,
+    },
+    search::{SearchInput, count_matching_memory, path_matches_request, search_memory},
 };
+
+const MAX_OMITTED_ITEMS: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ContextPackInput {
@@ -40,9 +45,22 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
     }
 
     let budget = input.token_budget.unwrap_or(400).max(1);
-    let selected = select_for_budget(results, budget);
-    let citations = selected.iter().map(primary_citation).collect::<Vec<_>>();
+    let selection = select_for_budget(results, budget);
+    let citations = selection
+        .selected
+        .iter()
+        .map(|item| primary_citation(&item.result))
+        .collect::<Vec<_>>();
+    let selected = selection
+        .selected
+        .iter()
+        .map(|item| item.result.clone())
+        .collect::<Vec<_>>();
     let prompt = render_prompt(&selected, &citations, budget);
+    let estimated_used = estimate_words(&prompt);
+    let included = included_items(&selection.selected, &citations);
+    let omitted = omitted_items(&selection.omitted);
+    let warnings = runtime_exclusion_warnings(conn, &input)?;
 
     let pack = ContextPack {
         id: format!("ctx_{}", Uuid::now_v7()),
@@ -51,6 +69,16 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
         records: selected,
         citations,
         token_budget: input.token_budget,
+        budget: ContextPackBudget {
+            requested: input.token_budget,
+            effective: budget,
+            estimated_used,
+            estimate_unit: "approx_words".to_owned(),
+        },
+        included,
+        omitted,
+        warnings,
+        next_queries: Vec::new(),
         created_at: now_utc()?,
     };
 
@@ -74,6 +102,18 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
     Ok(pack)
 }
 
+#[derive(Debug, Clone)]
+struct SelectedContextItem {
+    result: SearchResult,
+    estimated_size: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ContextSelection {
+    selected: Vec<SelectedContextItem>,
+    omitted: Vec<SelectedContextItem>,
+}
+
 fn result_matches_path(result: &SearchResult, path_prefix: &str) -> bool {
     result
         .paths
@@ -81,23 +121,98 @@ fn result_matches_path(result: &SearchResult, path_prefix: &str) -> bool {
         .any(|path| path_matches_request(&path.path, path_prefix))
 }
 
-fn select_for_budget(results: Vec<SearchResult>, budget: usize) -> Vec<SearchResult> {
+fn select_for_budget(results: Vec<SearchResult>, budget: usize) -> ContextSelection {
     let mut selected = Vec::new();
+    let mut omitted = Vec::new();
     let mut used = 0usize;
 
     for result in results {
-        let estimate =
-            estimate_words(&result.record.title) + estimate_words(&result.record.body) + 6;
+        let estimate = estimate_result(&result);
+        let item = SelectedContextItem {
+            result,
+            estimated_size: estimate,
+        };
         if selected.is_empty() || used + estimate <= budget {
             used += estimate;
-            selected.push(result);
-        }
-        if used >= budget {
-            break;
+            selected.push(item);
+        } else {
+            omitted.push(item);
         }
     }
 
+    ContextSelection { selected, omitted }
+}
+
+fn included_items(
+    selected: &[SelectedContextItem],
+    citations: &[MemoryCitation],
+) -> Vec<ContextPackIncludedItem> {
     selected
+        .iter()
+        .zip(citations)
+        .map(|(item, citation)| ContextPackIncludedItem {
+            record_id: item.result.record.id.clone(),
+            title: item.result.record.title.clone(),
+            memory_type: item.result.record.memory_type,
+            lane: item.result.record.lane,
+            scope_kind: item.result.record.scope_kind,
+            path: item.result.paths.first().map(|path| path.path.clone()),
+            citation: citation.clone(),
+            provenance: item.result.record.destination,
+            destination: item.result.record.destination,
+            score: item.result.score,
+            rationale: item.result.rationale.clone(),
+            estimated_size: item.estimated_size,
+        })
+        .collect()
+}
+
+fn omitted_items(omitted: &[SelectedContextItem]) -> Vec<ContextPackOmittedItem> {
+    omitted
+        .iter()
+        .take(MAX_OMITTED_ITEMS)
+        .map(|item| ContextPackOmittedItem {
+            record_id: item.result.record.id.clone(),
+            title: item.result.record.title.clone(),
+            memory_type: item.result.record.memory_type,
+            lane: item.result.record.lane,
+            destination: item.result.record.destination,
+            estimated_size: item.estimated_size,
+            reason: "budget_exceeded".to_owned(),
+        })
+        .collect()
+}
+
+fn runtime_exclusion_warnings(
+    conn: &Connection,
+    input: &ContextPackInput,
+) -> Result<Vec<ContextPackWarning>> {
+    let mut warnings = Vec::new();
+    for destination in [MemoryDestination::Local, MemoryDestination::Session] {
+        let count = count_matching_memory(
+            conn,
+            SearchInput {
+                query: input.task.clone(),
+                destination: Some(destination),
+                path_prefix: input.path_prefix.clone(),
+                include_inactive: false,
+                ..SearchInput::default()
+            },
+        )?;
+        if count > 0 {
+            warnings.push(ContextPackWarning {
+                code: "runtime_memory_excluded".to_owned(),
+                provenance: destination,
+                destination,
+                matching_count: count,
+                message: format!(
+                    "{count} matching {} memory record(s) excluded from global context by policy",
+                    destination.as_str()
+                ),
+            });
+        }
+    }
+    Ok(warnings)
 }
 
 fn primary_citation(result: &SearchResult) -> MemoryCitation {
@@ -108,6 +223,10 @@ fn primary_citation(result: &SearchResult) -> MemoryCitation {
         source_ref: result.record.source_ref.clone(),
         path: result.paths.first().map(|path| path.path.clone()),
     })
+}
+
+fn estimate_result(result: &SearchResult) -> usize {
+    estimate_words(&result.record.title) + estimate_words(&result.record.body) + 6
 }
 
 fn render_prompt(results: &[SearchResult], citations: &[MemoryCitation], budget: usize) -> String {
@@ -151,7 +270,7 @@ mod tests {
     use super::{ContextPackInput, build_context_pack};
     use crate::{
         init_database,
-        models::{MemoryStatus, MemoryType, ScopeKind},
+        models::{MemoryDestination, MemoryLane, MemoryStatus, MemoryType, ScopeKind},
         open_database,
     };
 
@@ -241,8 +360,8 @@ mod tests {
                 memory_type: MemoryType::Procedure,
                 scope_kind: ScopeKind::Repo,
                 status: MemoryStatus::Active,
-                title: "Zircon context path procedure",
-                body: "When editing context.rs, start from path-bound zircon guidance before global recall.",
+                title: "Need zircon context path procedure",
+                body: "When editing context.rs, start from path-bound zircon context procedure guidance before global recall.",
                 path: Some("crates/memzoi-core/src/context.rs"),
                 source_ref: Some("issue://path-relevant"),
             },
@@ -260,6 +379,19 @@ mod tests {
                 source_ref: Some("issue://global"),
             },
         )?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "rec-z-path-over-budget",
+                memory_type: MemoryType::Procedure,
+                scope_kind: ScopeKind::Repo,
+                status: MemoryStatus::Active,
+                title: "Zircon supplemental path note",
+                body: "Supplemental zircon recall guidance contains enough words to exceed the remaining context budget after the primary path-bound procedure has already been selected for rendering.",
+                path: Some("crates/memzoi-core/src/context.rs"),
+                source_ref: Some("issue://path-over-budget"),
+            },
+        )?;
 
         let pack = build_context_pack(
             &conn,
@@ -271,6 +403,49 @@ mod tests {
         )?;
         let json = serde_json::to_value(&pack)?;
         let ids = record_ids_from_pack(&json);
+
+        assert_eq!(json["budget"]["requested"], 40);
+        assert_eq!(json["budget"]["effective"], 40);
+        assert_eq!(json["budget"]["estimate_unit"], "approx_words");
+        assert!(
+            json["budget"]["estimated_used"]
+                .as_u64()
+                .is_some_and(|used| used > 0),
+            "context JSON should include estimated budget use: {json}"
+        );
+
+        let included = json["included"]
+            .as_array()
+            .unwrap_or_else(|| panic!("context JSON should include included metadata: {json}"));
+        assert_eq!(
+            included
+                .first()
+                .and_then(|item| item.get("record_id"))
+                .and_then(Value::as_str),
+            Some("rec-path-relevant"),
+            "included metadata should preserve selected record order: {json}"
+        );
+        assert_eq!(included[0]["type"], "procedure");
+        assert_eq!(included[0]["lane"], "semantic");
+        assert_eq!(included[0]["provenance"], "repo");
+        assert_eq!(included[0]["destination"], "repo");
+        assert_eq!(included[0]["citation"]["record_id"], "rec-path-relevant");
+        assert_eq!(
+            included[0]["path"], "crates/memzoi-core/src/context.rs",
+            "included metadata should expose selected path provenance: {json}"
+        );
+
+        let omitted = json["omitted"]
+            .as_array()
+            .unwrap_or_else(|| panic!("context JSON should include omitted metadata: {json}"));
+        assert!(
+            omitted.iter().any(|item| {
+                item.get("record_id").and_then(Value::as_str) == Some("rec-z-path-over-budget")
+                    && item.get("reason").and_then(Value::as_str) == Some("budget_exceeded")
+                    && item.get("destination").and_then(Value::as_str) == Some("repo")
+            }),
+            "budget-excluded repo records should be listed as omitted metadata: {json}"
+        );
 
         assert_eq!(
             ids.first().map(String::as_str),
@@ -287,9 +462,97 @@ mod tests {
             "token_budget should cap prompt-ready text approximately; got {approximate_tokens} words for budget 40: {prompt:?}"
         );
         assert!(
-            prompt.contains("path-bound zircon guidance")
-                || prompt.contains("Zircon context path procedure"),
+            prompt.contains("path-bound zircon context procedure guidance")
+                || prompt.contains("Need zircon context path procedure"),
             "prompt-ready text should include the path-relevant memory content: {prompt:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_context_pack_warns_about_runtime_matches_without_exposing_content()
+    -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "rec-repo-zircon",
+                memory_type: MemoryType::Decision,
+                scope_kind: ScopeKind::Repo,
+                status: MemoryStatus::Active,
+                title: "Zircon repo decision",
+                body: "Repo zircon memory may appear in global context.",
+                path: Some("crates/memzoi-core/src/context.rs"),
+                source_ref: Some("issue://repo"),
+            },
+        )?;
+        insert_memory_with_destination(
+            &conn,
+            MemoryFixture {
+                id: "rec-local-zircon",
+                memory_type: MemoryType::Fact,
+                scope_kind: ScopeKind::Personal,
+                status: MemoryStatus::Active,
+                title: "Local zircon private title",
+                body: "Local zircon private body must never leak into global context packs.",
+                path: Some("crates/memzoi-core/src/context.rs"),
+                source_ref: Some("local://private"),
+            },
+            MemoryDestination::Local,
+            MemoryLane::Semantic,
+        )?;
+        insert_memory_with_destination(
+            &conn,
+            MemoryFixture {
+                id: "rec-session-zircon",
+                memory_type: MemoryType::Episode,
+                scope_kind: ScopeKind::Personal,
+                status: MemoryStatus::Active,
+                title: "Session zircon private title",
+                body: "Session zircon checkpoint body must never leak into global context packs.",
+                path: Some("crates/memzoi-core/src/context.rs"),
+                source_ref: Some("session://private"),
+            },
+            MemoryDestination::Session,
+            MemoryLane::Session,
+        )?;
+
+        let pack = build_context_pack(
+            &conn,
+            ContextPackInput {
+                task: "Need zircon context".to_owned(),
+                path_prefix: Some("crates/memzoi-core/src/context.rs".to_owned()),
+                token_budget: Some(160),
+            },
+        )?;
+        let json = serde_json::to_value(&pack)?;
+        let rendered = serde_json::to_string(&json)?;
+
+        assert!(
+            !rendered.contains("Local zircon private")
+                && !rendered.contains("Session zircon private")
+                && !rendered.contains("local://private")
+                && !rendered.contains("session://private"),
+            "runtime memory content and refs must not leak into global context JSON: {json}"
+        );
+        let warnings = json["warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("context JSON should include warnings: {json}"));
+        for destination in ["local", "session"] {
+            assert!(
+                warnings.iter().any(|warning| {
+                    warning.get("code").and_then(Value::as_str) == Some("runtime_memory_excluded")
+                        && warning.get("destination").and_then(Value::as_str) == Some(destination)
+                        && warning.get("matching_count").and_then(Value::as_u64) == Some(1)
+                }),
+                "context JSON should warn count-only for excluded {destination} memory: {json}"
+            );
+        }
+        assert_eq!(
+            record_ids_from_pack(&json),
+            vec!["rec-repo-zircon".to_owned()],
+            "global context records should remain repo-only: {json}"
         );
 
         Ok(())
@@ -359,15 +622,32 @@ mod tests {
     }
 
     fn insert_memory(conn: &Connection, memory: MemoryFixture<'_>) -> anyhow::Result<()> {
+        insert_memory_with_destination(conn, memory, MemoryDestination::Repo, MemoryLane::Semantic)
+    }
+
+    fn insert_memory_with_destination(
+        conn: &Connection,
+        memory: MemoryFixture<'_>,
+        destination: MemoryDestination,
+        lane: MemoryLane,
+    ) -> anyhow::Result<()> {
+        let visibility = if destination == MemoryDestination::Repo {
+            "repo"
+        } else {
+            "private"
+        };
         conn.execute(
             "INSERT INTO memory_record(
-                id, type, scope_kind, visibility, title, body, status, confidence,
+                id, type, lane, destination, scope_kind, visibility, title, body, status, confidence,
                 source_kind, source_ref, content_hash
-             ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, 0.88, 'test', ?7, ?8)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0.88, 'test', ?10, ?11)",
             params![
                 memory.id,
                 memory.memory_type.as_str(),
+                lane.as_str(),
+                destination.as_str(),
                 memory.scope_kind.as_str(),
+                visibility,
                 memory.title,
                 memory.body,
                 memory.status.as_str(),

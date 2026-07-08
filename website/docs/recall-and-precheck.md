@@ -27,6 +27,8 @@ memzoi context --task "edit the frontend" --path apps/web --token-budget 1200
 
 Context packs are prompt-ready summaries of task-relevant active memory records. When `--path` is supplied, path-bound records are prioritized. `--token-budget` limits the rendered prompt text; when omitted, Memzoi uses its default budget.
 
+Global context content remains repo-only. Matching local or session runtime memory may be reported as count-only exclusion warnings in JSON output, but local/session titles, bodies, citations, and record ids are not included.
+
 The JSON output includes:
 
 - `id`: context pack id
@@ -35,6 +37,11 @@ The JSON output includes:
 - `records`: selected search results
 - `citations`: record citations
 - `token_budget`: requested token budget, if supplied
+- `budget`: requested budget, effective budget, approximate used budget, and estimate unit
+- `included`: compact metadata for selected records, including provenance and destination
+- `omitted`: capped metadata for relevant repo records excluded by budget
+- `warnings`: structured notices, including count-only local/session exclusion warnings
+- `next_queries`: targeted follow-up searches, currently empty
 - `created_at`: creation timestamp
 
 ## Run pre-action checks

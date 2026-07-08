@@ -180,6 +180,52 @@ pub struct SearchResult {
     pub citations: Vec<MemoryCitation>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPackBudget {
+    pub requested: Option<usize>,
+    pub effective: usize,
+    pub estimated_used: usize,
+    pub estimate_unit: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextPackIncludedItem {
+    pub record_id: String,
+    pub title: String,
+    #[serde(rename = "type")]
+    pub memory_type: MemoryType,
+    pub lane: MemoryLane,
+    pub scope_kind: ScopeKind,
+    pub path: Option<String>,
+    pub citation: MemoryCitation,
+    pub provenance: MemoryDestination,
+    pub destination: MemoryDestination,
+    pub score: f64,
+    pub rationale: Option<String>,
+    pub estimated_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPackOmittedItem {
+    pub record_id: String,
+    pub title: String,
+    #[serde(rename = "type")]
+    pub memory_type: MemoryType,
+    pub lane: MemoryLane,
+    pub destination: MemoryDestination,
+    pub estimated_size: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPackWarning {
+    pub code: String,
+    pub provenance: MemoryDestination,
+    pub destination: MemoryDestination,
+    pub matching_count: usize,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextPack {
     pub id: String,
@@ -188,6 +234,11 @@ pub struct ContextPack {
     pub records: Vec<SearchResult>,
     pub citations: Vec<MemoryCitation>,
     pub token_budget: Option<usize>,
+    pub budget: ContextPackBudget,
+    pub included: Vec<ContextPackIncludedItem>,
+    pub omitted: Vec<ContextPackOmittedItem>,
+    pub warnings: Vec<ContextPackWarning>,
+    pub next_queries: Vec<String>,
     pub created_at: String,
 }
 
