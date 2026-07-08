@@ -6,10 +6,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    ContextPackInput, ExportFormat, ExportInput, InitRequest, LocalMemoryInput, MemoryDestination,
-    MemoryDraft, MemoryLane, MemoryRecord, MemoryService, MemoryType, OkfProposalFile,
-    PrecheckInput, Proposal, ProposalApprovalOverride, ProposalStatus, ProposalStatusFilter,
-    ProposeOptions, ScopeKind, SearchInput, SearchResult, Visibility,
+    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, InitRequest, LocalMemoryInput,
+    MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryService, MemoryType,
+    OkfProposalFile, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalStatus,
+    ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult, Visibility,
     apply_okf_create_proposal_file, discover_paths, parse_okf_proposal_file,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -17,8 +17,8 @@ use serde_json::json;
 
 use crate::{
     cli::{
-        Cli, Commands, DraftCommand, IntegrateCommands, LocalCommands, McpCommands,
-        ProposalCommands, ProposalFileCommands,
+        CheckpointCommands, Cli, Commands, DraftCommand, IntegrateCommands, LocalCommands,
+        McpCommands, ProposalCommands, ProposalFileCommands,
     },
     integrate, mcp,
     output::print_json,
@@ -104,6 +104,16 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             LocalCommands::Search { query, limit, json } => {
                 local_search_command(query, limit, json)
             }
+        },
+        Commands::Checkpoint { command } => match command {
+            CheckpointCommands::Add {
+                task,
+                note,
+                from_file,
+                actor,
+                json,
+            } => checkpoint_add_command(task, note, from_file, &actor, json),
+            CheckpointCommands::List { json } => checkpoint_list_command(json),
         },
         Commands::Supersede {
             record_id,
@@ -581,7 +591,7 @@ fn local_add_command(
         },
     )?;
     if as_json {
-        print_json(&local_record_json(&record))
+        print_json(&runtime_record_json(&record))
     } else {
         println!("added\t{}\t{}", record.destination.as_str(), record.id);
         Ok(())
@@ -592,7 +602,7 @@ fn local_list_command(as_json: bool) -> Result<()> {
     let service = open_service()?;
     let records = service.list_local_memory()?;
     if as_json {
-        let records = records.iter().map(local_record_json).collect::<Vec<_>>();
+        let records = records.iter().map(runtime_record_json).collect::<Vec<_>>();
         print_json(&json!({
             "destination": MemoryDestination::Local.as_str(),
             "records": records,
@@ -634,7 +644,58 @@ fn local_search_command(query: String, limit: usize, as_json: bool) -> Result<()
     }
 }
 
-fn local_record_json(record: &MemoryRecord) -> serde_json::Value {
+fn checkpoint_add_command(
+    task: String,
+    note: Option<String>,
+    from_file: Option<PathBuf>,
+    actor: &str,
+    as_json: bool,
+) -> Result<()> {
+    let note = checkpoint_note_from_args(note, from_file)?;
+    let service = open_service()?;
+    let record = service.create_checkpoint(actor, CheckpointInput { task, note })?;
+    if as_json {
+        print_json(&runtime_record_json(&record))
+    } else {
+        println!("checkpoint\t{}\t{}", record.destination.as_str(), record.id);
+        Ok(())
+    }
+}
+
+fn checkpoint_list_command(as_json: bool) -> Result<()> {
+    let service = open_service()?;
+    let records = service.list_checkpoints()?;
+    if as_json {
+        let records = records.iter().map(runtime_record_json).collect::<Vec<_>>();
+        print_json(&json!({
+            "destination": MemoryDestination::Session.as_str(),
+            "records": records,
+        }))
+    } else {
+        for record in records {
+            println!(
+                "{}\t{}\t{}\t{}",
+                record.destination.as_str(),
+                record.id,
+                record.memory_type.as_str(),
+                record.title
+            );
+        }
+        Ok(())
+    }
+}
+
+fn checkpoint_note_from_args(note: Option<String>, from_file: Option<PathBuf>) -> Result<String> {
+    match (note, from_file) {
+        (Some(_), Some(_)) => bail!("use either --note or --from-file, not both"),
+        (Some(note), None) => Ok(note),
+        (None, Some(path)) => fs::read_to_string(&path)
+            .with_context(|| format!("failed to read checkpoint note from {}", path.display())),
+        (None, None) => bail!("checkpoint add requires --note or --from-file"),
+    }
+}
+
+fn runtime_record_json(record: &MemoryRecord) -> serde_json::Value {
     json!({
         "id": &record.id,
         "record_id": &record.id,
@@ -655,7 +716,7 @@ fn local_record_json(record: &MemoryRecord) -> serde_json::Value {
 
 fn local_search_result_json(result: &SearchResult) -> serde_json::Value {
     json!({
-        "record": local_record_json(&result.record),
+        "record": runtime_record_json(&result.record),
         "score": result.score,
         "snippet": &result.snippet,
         "rationale": &result.rationale,

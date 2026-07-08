@@ -97,6 +97,12 @@ pub(crate) enum Commands {
         command: LocalCommands,
     },
 
+    /// Manage runtime session checkpoints.
+    Checkpoint {
+        #[command(subcommand)]
+        command: CheckpointCommands,
+    },
+
     /// Supersede an active memory record with new content.
     Supersede {
         record_id: String,
@@ -313,6 +319,29 @@ pub(crate) enum LocalCommands {
         query: String,
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CheckpointCommands {
+    /// Add a runtime session checkpoint.
+    Add {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long = "from-file")]
+        from_file: Option<PathBuf>,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List runtime session checkpoints.
+    List {
         #[arg(long)]
         json: bool,
     },

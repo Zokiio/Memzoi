@@ -1735,6 +1735,266 @@ Canonical repo zircon memory should rebuild as repo destination.
 }
 
 #[test]
+fn checkpoint_commands_create_list_and_stay_out_of_repo_outputs() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    let first = run_json_command(
+        repo,
+        &[
+            "checkpoint",
+            "add",
+            "--task",
+            "Implement checkpoint workflow",
+            "--note",
+            "  Remember the checkpoint zircon state only as runtime continuity.  \n",
+            "--json",
+        ],
+    );
+    let first_id = json_string(&first, "record_id").to_owned();
+    assert_eq!(first_id, "session-implement-checkpoint-workflow");
+    assert_json_string_field(&first, &["type"], "episode");
+    assert_json_string_field(&first, &["lane"], "session");
+    assert_json_string_field(&first, &["destination"], "session");
+    assert_json_string_field(&first, &["scope_kind"], "personal");
+    assert_json_string_field(&first, &["visibility"], "private");
+    assert_json_string_field(&first, &["status"], "active");
+    assert_json_string_field(&first, &["source_kind"], "memzoi-checkpoint");
+    assert_json_string_field(
+        &first,
+        &["body"],
+        "Remember the checkpoint zircon state only as runtime continuity.",
+    );
+    assert!(
+        first.get("source_ref").is_some_and(Value::is_null),
+        "checkpoint source_ref should stay null: {first}"
+    );
+    assert!(
+        !test_paths(repo)
+            .records_dir()
+            .join(format!("{first_id}.md"))
+            .exists(),
+        "checkpoint add must not write canonical repo files"
+    );
+
+    let note_path = repo.join("checkpoint-notes.md");
+    fs::write(
+        &note_path,
+        "\n  File checkpoint body stays explicit only.  \n",
+    )
+    .expect("write checkpoint note file");
+    let from_file = run_json_command(
+        repo,
+        &[
+            "checkpoint",
+            "add",
+            "--task",
+            "File checkpoint workflow",
+            "--from-file",
+            note_path.to_str().expect("note path utf-8"),
+            "--json",
+        ],
+    );
+    let from_file_id = json_string(&from_file, "record_id").to_owned();
+    assert_eq!(from_file_id, "session-file-checkpoint-workflow");
+    assert_json_string_field(
+        &from_file,
+        &["body"],
+        "File checkpoint body stays explicit only.",
+    );
+    assert!(
+        from_file.get("source_ref").is_some_and(Value::is_null),
+        "checkpoint source_ref should not store the local source file path: {from_file}"
+    );
+    assert!(
+        !serde_json::to_string(&from_file)
+            .expect("serialize from-file checkpoint")
+            .contains(note_path.to_str().expect("note path utf-8")),
+        "from-file JSON should not include the local source path: {from_file}"
+    );
+
+    let duplicate = run_json_command(
+        repo,
+        &[
+            "checkpoint",
+            "add",
+            "--task",
+            "Implement checkpoint workflow",
+            "--note",
+            "Second checkpoint for the same task.",
+            "--json",
+        ],
+    );
+    let duplicate_id = json_string(&duplicate, "record_id").to_owned();
+    assert_eq!(duplicate_id, "session-implement-checkpoint-workflow-2");
+
+    let local = run_json_command(
+        repo,
+        &[
+            "local",
+            "add",
+            "--type",
+            "preference",
+            "--title",
+            "Checkpoint local zircon preference",
+            "--body",
+            "Local memory should survive rebuild beside session checkpoints.",
+            "--json",
+        ],
+    );
+    let local_id = json_string(&local, "record_id").to_owned();
+
+    let conn = Connection::open(memory_db_path(repo)).expect("open runtime db");
+    for (record_id, created_at) in [
+        (first_id.as_str(), "2026-07-08T00:00:00Z"),
+        (duplicate_id.as_str(), "2026-07-08T00:01:00Z"),
+        (from_file_id.as_str(), "2026-07-08T00:02:00Z"),
+    ] {
+        conn.execute(
+            "UPDATE memory_record SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![created_at, record_id],
+        )
+        .expect("pin checkpoint ordering fixture");
+    }
+    drop(conn);
+
+    let listed = run_json_command(repo, &["checkpoint", "list", "--json"]);
+    assert_json_string_field(&listed, &["destination"], "session");
+    assert_eq!(
+        record_ids_from_json(&listed),
+        vec![
+            from_file_id.as_str(),
+            duplicate_id.as_str(),
+            first_id.as_str()
+        ],
+        "checkpoint list should return newest checkpoints first: {listed}"
+    );
+
+    let global_search = run_json_command(repo, &["search", "zircon", "--json"]);
+    assert!(
+        record_ids_from_json(&global_search).is_empty(),
+        "global search should stay repo-only and exclude runtime checkpoints/local memory: {global_search}"
+    );
+
+    let context = run_json_command(repo, &["context", "--task", "checkpoint zircon", "--json"]);
+    assert_json_does_not_reference_records(
+        &context,
+        &[first_id.clone(), duplicate_id.clone(), from_file_id.clone()],
+    );
+
+    let export = run_json_command(repo, &["export", "okf", "--json"]);
+    assert!(
+        written_paths_from_json(&export).is_empty(),
+        "runtime checkpoints should not be exported as repo memory: {export}"
+    );
+
+    let rebuild = run_json_command(repo, &["rebuild", "--json"]);
+    assert!(
+        rebuild
+            .get("record_ids")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "empty canonical repo should rebuild without importing runtime checkpoints: {rebuild}"
+    );
+
+    let checkpoints_after_rebuild = run_json_command(repo, &["checkpoint", "list", "--json"]);
+    assert_eq!(
+        record_ids_from_json(&checkpoints_after_rebuild),
+        vec![
+            from_file_id.as_str(),
+            duplicate_id.as_str(),
+            first_id.as_str()
+        ],
+        "rebuild should preserve session checkpoint runtime rows: {checkpoints_after_rebuild}"
+    );
+    let local_after_rebuild = run_json_command(repo, &["local", "list", "--json"]);
+    assert_eq!(
+        record_ids_from_json(&local_after_rebuild),
+        vec![local_id.as_str()],
+        "rebuild should preserve local runtime rows beside checkpoints: {local_after_rebuild}"
+    );
+}
+
+#[test]
+fn checkpoint_add_rejects_invalid_explicit_inputs() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+    let empty_note_path = repo.join("empty-checkpoint-note.md");
+    fs::write(&empty_note_path, " \n ").expect("write empty checkpoint note");
+
+    let missing_note = run_command_failure_stderr(repo, &["checkpoint", "add", "--task", "Task"]);
+    assert!(
+        missing_note.contains("requires --note or --from-file"),
+        "missing checkpoint body should fail clearly: {missing_note}"
+    );
+
+    let both_inputs = run_command_failure_stderr(
+        repo,
+        &[
+            "checkpoint",
+            "add",
+            "--task",
+            "Task",
+            "--note",
+            "note",
+            "--from-file",
+            empty_note_path.to_str().expect("empty note path utf-8"),
+        ],
+    );
+    assert!(
+        both_inputs.contains("either --note or --from-file"),
+        "checkpoint add should reject ambiguous inputs: {both_inputs}"
+    );
+
+    let empty_note = run_command_failure_stderr(
+        repo,
+        &["checkpoint", "add", "--task", "Task", "--note", "  "],
+    );
+    assert!(
+        empty_note.contains("note is required"),
+        "empty checkpoint note should fail validation: {empty_note}"
+    );
+
+    let empty_task = run_command_failure_stderr(
+        repo,
+        &[
+            "checkpoint",
+            "add",
+            "--task",
+            "  ",
+            "--note",
+            "explicit note",
+        ],
+    );
+    assert!(
+        empty_task.contains("task is required"),
+        "empty checkpoint task should fail validation: {empty_task}"
+    );
+
+    let empty_file = run_command_failure_stderr(
+        repo,
+        &[
+            "checkpoint",
+            "add",
+            "--task",
+            "Task",
+            "--from-file",
+            empty_note_path.to_str().expect("empty note path utf-8"),
+        ],
+    );
+    assert!(
+        empty_file.contains("note is required"),
+        "empty checkpoint file should fail validation: {empty_file}"
+    );
+
+    let listed = run_json_command(repo, &["checkpoint", "list", "--json"]);
+    assert!(
+        record_ids_from_json(&listed).is_empty(),
+        "invalid checkpoint inputs should not create runtime records: {listed}"
+    );
+}
+
+#[test]
 fn rebuild_refuses_to_delete_unreadable_runtime_db() {
     let isolated_home = tempfile::tempdir().expect("isolated memzoi home");
     let repo = initialized_temp_repo_with_home(isolated_home.path());
@@ -1750,7 +2010,7 @@ fn rebuild_refuses_to_delete_unreadable_runtime_db() {
     let stderr =
         run_command_failure_stderr_with_home(repo, &["rebuild", "--json"], isolated_home.path());
     assert!(
-        stderr.contains("local runtime memory could not be"),
+        stderr.contains("local/session runtime memory could not be"),
         "rebuild should explain that local runtime memory could not be preserved: {stderr}"
     );
     assert_eq!(

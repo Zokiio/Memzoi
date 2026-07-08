@@ -15,6 +15,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi proposals` | List, show, and bulk-apply proposal inbox state. |
 | `memzoi proposal-files` | List, show, validate, and apply OKF proposal files under `.memzoi/proposals/pending/`. |
 | `memzoi local` | Add, list, and search local-only runtime memory records. |
+| `memzoi checkpoint` | Add and list runtime session checkpoints. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
@@ -49,6 +50,8 @@ Run `memzoi <command> --help` for exact options.
 | `local add` | `--type`, `--title`, `--body`, `--actor`, `--json` |
 | `local list` | `--json` |
 | `local search` | `<query>`, `--limit`, `--json` |
+| `checkpoint add` | `--task`, `--note` or `--from-file`, `--actor`, `--json` |
+| `checkpoint list` | `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
@@ -164,7 +167,7 @@ memzoi proposal-files apply <proposal-id>
 
 `list`, `show`, and `validate` are read-only. `apply` currently supports only `proposal.action: create` with `status: proposed` and `sensitivity: repo-safe`; it writes a compact canonical record under `.memzoi/records/`, leaves the pending proposal file in place, and does not update runtime SQLite state. Run `memzoi rebuild` when the runtime search/index needs to reflect newly applied Git-plane records.
 
-Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals, and there is no override flag. Classify or sanitize blocked proposals before repo apply, or route `local-only` memory to the future local/runtime plane.
+Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals, and there is no override flag. Classify or sanitize blocked proposals before repo apply, or route `local-only` memory to the local/runtime plane.
 
 ## Memory destinations
 
@@ -193,6 +196,20 @@ memzoi local search <query>
 Local records are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output.
 
 Local records are not written to `.memzoi/records/**`, are not returned by global `memzoi search` or `memzoi context`, and are not exported into repo-shared agent files. Use later proposal workflows to promote local memory into repo-shared memory.
+
+## Session checkpoints
+
+Checkpoint commands:
+
+```bash
+memzoi checkpoint add --task "..." --note "..."
+memzoi checkpoint add --task "..." --from-file notes.md
+memzoi checkpoint list
+```
+
+Checkpoints are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output.
+
+Checkpoints store only explicit `--note` or `--from-file` content. They are not written to `.memzoi/records/**`, are not returned by global `memzoi search` or `memzoi context`, and are not exported into repo-shared agent files. Use later session-end proposal workflows to promote durable findings into repo memory.
 
 ## Scope kinds
 
@@ -280,6 +297,6 @@ Valid `memzoi export <format>` values:
 - Source installs require a Rust/Cargo-capable environment; release binaries do not.
 - Search is text/FTS-first, not vector or semantic recall.
 - Memory is repo-local; global, personal, team, and org sync are future work.
-- `memzoi rebuild` restores approved records from `.memzoi/records/`. Current proposals are DB-local; rebuild refuses to discard readable open proposals and should be unblocked with `memzoi proposals list --status open`, `memzoi proposals apply --all-approved`, or `memzoi reject <proposal-id> --reason "..."`. A corrupt unreadable DB is treated as derived-cache recovery and may discard DB-local proposal state.
+- `memzoi rebuild` restores approved records from `.memzoi/records/`. Current proposals are DB-local; rebuild refuses to discard readable open proposals and should be unblocked with `memzoi proposals list --status open`, `memzoi proposals apply --all-approved`, or `memzoi reject <proposal-id> --reason "..."`. A corrupt unreadable DB causes rebuild to fail before deleting local or session runtime rows.
 - MCP is intentionally minimal and safe-by-default. It can create proposals under the effective approval policy, but it cannot apply canonical records.
 - Homebrew and package-manager installers are not available yet.
