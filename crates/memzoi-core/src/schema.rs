@@ -5,11 +5,12 @@ pub fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)
         .context("failed to initialize SQLite schema")?;
     ensure_memory_lane_column(conn)?;
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)",
-        [],
+    ensure_memory_destination_column(conn)?;
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);",
     )
-    .context("failed to record schema migration 2")?;
+    .context("failed to record schema migrations 2 and 3")?;
     Ok(())
 }
 
@@ -37,6 +38,32 @@ fn ensure_memory_lane_column(conn: &Connection) -> Result<()> {
         .context("failed to create memory lane index")
 }
 
+fn ensure_memory_destination_column(conn: &Connection) -> Result<()> {
+    let has_destination: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+              SELECT 1 FROM pragma_table_info('memory_record') WHERE name = 'destination'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to inspect memory_record destination schema")?;
+
+    if !has_destination {
+        conn.execute_batch(
+            "ALTER TABLE memory_record
+               ADD COLUMN destination TEXT NOT NULL DEFAULT 'repo'
+               CHECK (destination IN ('repo', 'local', 'session'));",
+        )
+        .context("failed to add memory_record.destination column")?;
+    }
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memory_record_destination ON memory_record(destination);",
+    )
+    .context("failed to create memory destination index")
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
@@ -58,6 +85,7 @@ CREATE TABLE IF NOT EXISTS memory_record (
   id TEXT NOT NULL UNIQUE,
   type TEXT NOT NULL CHECK (type IN ('fact', 'preference', 'decision', 'procedure', 'episode', 'relationship', 'warning', 'failed_attempt', 'risk', 'instruction_projection')),
   lane TEXT NOT NULL DEFAULT 'semantic' CHECK (lane IN ('session', 'semantic', 'episodic', 'procedural')),
+  destination TEXT NOT NULL DEFAULT 'repo' CHECK (destination IN ('repo', 'local', 'session')),
   scope_kind TEXT NOT NULL CHECK (scope_kind IN ('personal', 'repo', 'project', 'team', 'org', 'agent', 'imported_untrusted')),
   scope_id TEXT,
   visibility TEXT NOT NULL DEFAULT 'repo' CHECK (visibility IN ('public', 'private', 'repo', 'team', 'org')),

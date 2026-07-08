@@ -6,7 +6,9 @@ use std::{collections::BTreeMap, str::FromStr};
 use uuid::Uuid;
 
 use crate::events::{AppendEvent, append_event, now_utc};
-use crate::models::{MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility};
+use crate::models::{
+    MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -428,9 +430,9 @@ fn insert_record(
     let hash = content_hash(draft);
     conn.execute(
         "INSERT INTO memory_record (
-          id, type, lane, scope_kind, scope_id, visibility, title, body, status, confidence,
+          id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status, confidence,
           source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
+        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
         params![
             id,
             draft.memory_type.as_str(),
@@ -459,34 +461,37 @@ fn insert_record(
 
 fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
     conn.query_row(
-        "SELECT id, type, lane, scope_kind, scope_id, visibility, title, body, status, confidence,
-                source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id, expires_at
+        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
+                supersedes_id, expires_at
          FROM memory_record WHERE id = ?1",
         [id],
         |row| {
             let memory_type: String = row.get(1)?;
             let lane: String = row.get(2)?;
-            let scope_kind: String = row.get(3)?;
-            let visibility: String = row.get(5)?;
-            let status: String = row.get(8)?;
+            let destination: String = row.get(3)?;
+            let scope_kind: String = row.get(4)?;
+            let visibility: String = row.get(6)?;
+            let status: String = row.get(9)?;
             Ok(MemoryRecord {
                 id: row.get(0)?,
                 memory_type: parse_memory_type(&memory_type)?,
                 lane: parse_model_enum(&lane)?,
+                destination: parse_memory_destination(&destination)?,
                 scope_kind: parse_scope_kind(&scope_kind)?,
-                scope_id: row.get(4)?,
+                scope_id: row.get(5)?,
                 visibility: parse_visibility(&visibility)?,
-                title: row.get(6)?,
-                body: row.get(7)?,
+                title: row.get(7)?,
+                body: row.get(8)?,
                 status: parse_memory_status(&status)?,
-                confidence: row.get(9)?,
-                source_kind: row.get(10)?,
-                source_ref: row.get(11)?,
-                content_hash: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
-                supersedes_id: row.get(15)?,
-                expires_at: row.get(16)?,
+                confidence: row.get(10)?,
+                source_kind: row.get(11)?,
+                source_ref: row.get(12)?,
+                content_hash: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
+                supersedes_id: row.get(16)?,
+                expires_at: row.get(17)?,
             })
         },
     )
@@ -496,7 +501,11 @@ fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
 
 fn duplicate_record_ids(conn: &Connection, content_hash: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT id FROM memory_record WHERE content_hash = ?1 AND status NOT IN ('tombstoned', 'redacted') ORDER BY id",
+        "SELECT id FROM memory_record
+         WHERE content_hash = ?1
+           AND destination = 'repo'
+           AND status NOT IN ('tombstoned', 'redacted')
+         ORDER BY id",
     )?;
     let rows = stmt.query_map([content_hash], |row| row.get(0))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -557,6 +566,10 @@ fn parse_proposal_status(value: &str) -> rusqlite::Result<ProposalStatus> {
 }
 
 fn parse_memory_type(value: &str) -> rusqlite::Result<MemoryType> {
+    parse_model_enum(value)
+}
+
+fn parse_memory_destination(value: &str) -> rusqlite::Result<MemoryDestination> {
     parse_model_enum(value)
 }
 

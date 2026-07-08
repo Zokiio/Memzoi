@@ -14,6 +14,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi propose` | Propose a new memory record. Built-in default auto-approves valid proposals but does not apply them. |
 | `memzoi proposals` | List, show, and bulk-apply proposal inbox state. |
 | `memzoi proposal-files` | List, show, validate, and apply OKF proposal files under `.memzoi/proposals/pending/`. |
+| `memzoi local` | Add, list, and search local-only runtime memory records. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
@@ -45,6 +46,9 @@ Run `memzoi <command> --help` for exact options.
 | `proposal-files show` | `<proposal-id>`, `--json` |
 | `proposal-files validate` | `--json` |
 | `proposal-files apply` | `<proposal-id>`, `--json` |
+| `local add` | `--type`, `--title`, `--body`, `--actor`, `--json` |
+| `local list` | `--json` |
+| `local search` | `<query>`, `--limit`, `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
@@ -175,6 +179,20 @@ Valid destination values:
 - `needs_review`
 
 `repo` candidates must become file-backed proposals before canonical repo memory. `local` and `session` are runtime-plane destinations by default. `discard` means no write. `needs_review` blocks automatic writes until a human decides. `team` and `cloud` are future destinations and are not accepted values yet.
+
+## Local runtime memory
+
+Local memory commands:
+
+```bash
+memzoi local add --type preference --title "..." --body "..."
+memzoi local list
+memzoi local search <query>
+```
+
+Local records are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output.
+
+Local records are not written to `.memzoi/records/**`, are not returned by global `memzoi search` or `memzoi context`, and are not exported into repo-shared agent files. Use later proposal workflows to promote local memory into repo-shared memory.
 
 ## Scope kinds
 

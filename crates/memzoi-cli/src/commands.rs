@@ -6,9 +6,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    ContextPackInput, ExportFormat, ExportInput, InitRequest, MemoryDraft, MemoryLane,
-    MemoryService, MemoryType, OkfProposalFile, PrecheckInput, Proposal, ProposalApprovalOverride,
-    ProposalStatus, ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, Visibility,
+    ContextPackInput, ExportFormat, ExportInput, InitRequest, LocalMemoryInput, MemoryDestination,
+    MemoryDraft, MemoryLane, MemoryRecord, MemoryService, MemoryType, OkfProposalFile,
+    PrecheckInput, Proposal, ProposalApprovalOverride, ProposalStatus, ProposalStatusFilter,
+    ProposeOptions, ScopeKind, SearchInput, SearchResult, Visibility,
     apply_okf_create_proposal_file, discover_paths, parse_okf_proposal_file,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -16,8 +17,8 @@ use serde_json::json;
 
 use crate::{
     cli::{
-        Cli, Commands, DraftCommand, IntegrateCommands, McpCommands, ProposalCommands,
-        ProposalFileCommands,
+        Cli, Commands, DraftCommand, IntegrateCommands, LocalCommands, McpCommands,
+        ProposalCommands, ProposalFileCommands,
     },
     integrate, mcp,
     output::print_json,
@@ -89,6 +90,19 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             ProposalFileCommands::Validate { json } => proposal_files_validate_command(json),
             ProposalFileCommands::Apply { proposal_id, json } => {
                 proposal_files_apply_command(&proposal_id, json)
+            }
+        },
+        Commands::Local { command } => match command {
+            LocalCommands::Add {
+                memory_type,
+                title,
+                body,
+                actor,
+                json,
+            } => local_add_command(&memory_type, title, body, &actor, json),
+            LocalCommands::List { json } => local_list_command(json),
+            LocalCommands::Search { query, limit, json } => {
+                local_search_command(query, limit, json)
             }
         },
         Commands::Supersede {
@@ -549,6 +563,107 @@ fn proposal_files_apply_command(proposal_id: &str, as_json: bool) -> Result<()> 
     Ok(())
 }
 
+fn local_add_command(
+    memory_type: &str,
+    title: String,
+    body: String,
+    actor: &str,
+    as_json: bool,
+) -> Result<()> {
+    let service = open_service()?;
+    let record = service.create_local_memory(
+        actor,
+        LocalMemoryInput {
+            memory_type: parse_memory_type(memory_type)?,
+            lane: MemoryLane::Semantic,
+            title,
+            body,
+        },
+    )?;
+    if as_json {
+        print_json(&local_record_json(&record))
+    } else {
+        println!("added\t{}\t{}", record.destination.as_str(), record.id);
+        Ok(())
+    }
+}
+
+fn local_list_command(as_json: bool) -> Result<()> {
+    let service = open_service()?;
+    let records = service.list_local_memory()?;
+    if as_json {
+        let records = records.iter().map(local_record_json).collect::<Vec<_>>();
+        print_json(&json!({
+            "destination": MemoryDestination::Local.as_str(),
+            "records": records,
+        }))
+    } else {
+        for record in records {
+            println!(
+                "{}\t{}\t{}\t{}",
+                record.destination.as_str(),
+                record.id,
+                record.memory_type.as_str(),
+                record.title
+            );
+        }
+        Ok(())
+    }
+}
+
+fn local_search_command(query: String, limit: usize, as_json: bool) -> Result<()> {
+    let service = open_service()?;
+    let results = service.search_local_memory(query.clone(), limit)?;
+    if as_json {
+        print_json(&json!({
+            "query": query,
+            "destination": MemoryDestination::Local.as_str(),
+            "records": results.iter().map(local_search_result_json).collect::<Vec<_>>(),
+        }))
+    } else {
+        for result in results {
+            println!(
+                "{}\t{}\t{}\t{}",
+                result.record.destination.as_str(),
+                result.record.id,
+                result.record.memory_type.as_str(),
+                result.record.title
+            );
+        }
+        Ok(())
+    }
+}
+
+fn local_record_json(record: &MemoryRecord) -> serde_json::Value {
+    json!({
+        "id": &record.id,
+        "record_id": &record.id,
+        "type": record.memory_type.as_str(),
+        "lane": record.lane.as_str(),
+        "destination": record.destination.as_str(),
+        "scope_kind": record.scope_kind.as_str(),
+        "visibility": record.visibility.as_str(),
+        "status": record.status.as_str(),
+        "title": &record.title,
+        "body": &record.body,
+        "source_kind": &record.source_kind,
+        "source_ref": &record.source_ref,
+        "created_at": &record.created_at,
+        "updated_at": &record.updated_at,
+    })
+}
+
+fn local_search_result_json(result: &SearchResult) -> serde_json::Value {
+    json!({
+        "record": local_record_json(&result.record),
+        "score": result.score,
+        "snippet": &result.snippet,
+        "rationale": &result.rationale,
+        "paths": &result.paths,
+        "citations": &result.citations,
+    })
+}
+
 fn require_proposal_file_entry<'a>(
     scan: &'a ProposalFileScan,
     proposal_id: &str,
@@ -856,6 +971,7 @@ fn search_command(
         scope_kind: scope_kind.as_deref().map(parse_scope_kind).transpose()?,
         scope_id: None,
         memory_type: memory_type.as_deref().map(parse_memory_type).transpose()?,
+        destination: Some(MemoryDestination::Repo),
         path_prefix: path,
         limit,
         include_inactive: false,
@@ -1175,6 +1291,7 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
         scope_kind: Some(ScopeKind::Repo),
         scope_id: None,
         memory_type: Some(MemoryType::Decision),
+        destination: Some(MemoryDestination::Repo),
         path_prefix: None,
         limit: 10,
         include_inactive: false,
@@ -1210,6 +1327,7 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
             scope_kind: Some(ScopeKind::Repo),
             scope_id: None,
             memory_type: Some(MemoryType::Decision),
+            destination: Some(MemoryDestination::Repo),
             path_prefix: None,
             limit: 10,
             include_inactive: false,

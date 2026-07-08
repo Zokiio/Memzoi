@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -9,17 +9,22 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use uuid::Uuid;
 
 use crate::{
-    ContextPack, ContextPackInput, MemoryDraft, MemoryPaths, MemoryRecord, PrecheckInput,
-    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput,
-    SearchResult, SupersedeResult, ValidationResult,
+    ContextPack, ContextPackInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryPaths,
+    MemoryRecord, MemoryStatus, MemoryType, PrecheckInput, PrecheckWarning, Proposal,
+    ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput, SearchResult, SupersedeResult,
+    ValidationResult, Visibility,
 };
 use crate::{
     config::{
         ProposalApprovalPolicy, discover_existing_paths, discover_paths, load_effective_config,
     },
-    context, db, exporters, okf, precheck, proposals, search,
+    context, db,
+    events::{AppendEvent, append_event, now_utc},
+    exporters, okf, precheck, proposals, search,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +94,14 @@ pub struct RebuildResult {
     pub records_root: PathBuf,
     pub db_path: PathBuf,
     pub record_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalMemoryInput {
+    pub memory_type: MemoryType,
+    pub lane: MemoryLane,
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +340,72 @@ impl MemoryService {
         search::search_memory(&self.conn, input)
     }
 
+    pub fn create_local_memory(
+        &self,
+        actor: &str,
+        input: LocalMemoryInput,
+    ) -> Result<MemoryRecord> {
+        validate_local_memory_input(&input)?;
+        let id = next_local_record_id(&self.conn, &input.title)?;
+        let now = now_utc()?;
+        let body = input.body.trim().to_owned();
+        let record = MemoryRecord {
+            id,
+            memory_type: input.memory_type,
+            lane: input.lane,
+            destination: MemoryDestination::Local,
+            scope_kind: ScopeKind::Personal,
+            scope_id: None,
+            visibility: Visibility::Private,
+            title: input.title.trim().to_owned(),
+            body,
+            status: MemoryStatus::Active,
+            confidence: 1.0,
+            source_kind: Some("memzoi-local".to_owned()),
+            source_ref: None,
+            content_hash: blake3::hash(input.body.trim().as_bytes())
+                .to_hex()
+                .to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+            supersedes_id: None,
+            expires_at: None,
+        };
+        insert_memory_record_row(&self.conn, &record, InsertMode::Create)?;
+        append_event(
+            &self.conn,
+            AppendEvent {
+                event_type: "memory.local_created".to_owned(),
+                actor: actor.to_owned(),
+                payload: json!({
+                    "record_id": &record.id,
+                    "destination": record.destination.as_str(),
+                    "title": &record.title,
+                }),
+                record_id: Some(record.id.clone()),
+                proposal_id: None,
+            },
+        )?;
+        Ok(record)
+    }
+
+    pub fn list_local_memory(&self) -> Result<Vec<MemoryRecord>> {
+        active_records_for_destination(&self.conn, MemoryDestination::Local)
+    }
+
+    pub fn search_local_memory(&self, query: String, limit: usize) -> Result<Vec<SearchResult>> {
+        search::search_memory(
+            &self.conn,
+            SearchInput {
+                query,
+                destination: Some(MemoryDestination::Local),
+                limit,
+                include_inactive: false,
+                ..SearchInput::default()
+            },
+        )
+    }
+
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
         context::build_context_pack(&self.conn, input)
     }
@@ -375,10 +454,13 @@ impl MemoryService {
         let records_root = paths.records_dir();
         let records = okf::read_okf_record_files(&records_root)?;
         guard_no_open_proposals(&paths.db_path)?;
+        let local_records = load_local_records_for_rebuild(&paths.db_path)?;
+        guard_no_local_record_id_collisions(&records, &local_records)?;
         remove_database_files(&paths.db_path)?;
         let conn = db::open_database(&paths.db_path)?;
         db::init_database(&conn)?;
         okf::import_okf_records(&conn, &records)?;
+        restore_local_records_after_rebuild(&conn, &local_records)?;
         Ok(RebuildResult {
             records_root,
             db_path: paths.db_path,
@@ -446,6 +528,181 @@ fn record_tags(conn: &Connection, record_id: &str) -> Result<Vec<String>> {
         conn.prepare("SELECT tag FROM memory_tag WHERE record_id = ?1 ORDER BY tag ASC")?;
     let rows = stmt.query_map([record_id], |row| row.get(0))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsertMode {
+    Create,
+    RestoreIfAbsent,
+}
+
+fn validate_local_memory_input(input: &LocalMemoryInput) -> Result<()> {
+    if input.title.trim().is_empty() {
+        bail!("title is required");
+    }
+    if input.body.trim().is_empty() {
+        bail!("body is required");
+    }
+    Ok(())
+}
+
+fn next_local_record_id(conn: &Connection, title: &str) -> Result<String> {
+    let slug = proposals::title_to_concept_slug(title)
+        .unwrap_or_else(|| format!("memory-{}", Uuid::now_v7()));
+    let base = format!("local-{slug}");
+    if !record_id_exists(conn, &base)? {
+        return Ok(base);
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base}-{suffix}");
+        if !record_id_exists(conn, &candidate)? {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("unbounded suffix search returns")
+}
+
+fn record_id_exists(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM memory_record WHERE id = ?1)",
+        [id],
+        |row| row.get(0),
+    )?)
+}
+
+fn insert_memory_record_row(
+    conn: &Connection,
+    record: &MemoryRecord,
+    mode: InsertMode,
+) -> Result<()> {
+    let verb = match mode {
+        InsertMode::Create => "INSERT INTO",
+        InsertMode::RestoreIfAbsent => "INSERT OR IGNORE INTO",
+    };
+    let sql = format!(
+        "{verb} memory_record (
+          id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+          confidence, source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id,
+          expires_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"
+    );
+    conn.execute(
+        &sql,
+        rusqlite::params![
+            &record.id,
+            record.memory_type.as_str(),
+            record.lane.as_str(),
+            record.destination.as_str(),
+            record.scope_kind.as_str(),
+            &record.scope_id,
+            record.visibility.as_str(),
+            &record.title,
+            &record.body,
+            record.status.as_str(),
+            record.confidence,
+            &record.source_kind,
+            &record.source_ref,
+            &record.content_hash,
+            &record.created_at,
+            &record.updated_at,
+            &record.supersedes_id,
+            &record.expires_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn active_records_for_destination(
+    conn: &Connection,
+    destination: MemoryDestination,
+) -> Result<Vec<MemoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
+                supersedes_id, expires_at
+         FROM memory_record
+         WHERE status = 'active'
+           AND destination = ?1
+         ORDER BY updated_at DESC, id ASC",
+    )?;
+    let rows = stmt.query_map([destination.as_str()], search::record_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn records_for_destination(
+    conn: &Connection,
+    destination: MemoryDestination,
+) -> Result<Vec<MemoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
+                supersedes_id, expires_at
+         FROM memory_record
+         WHERE destination = ?1
+         ORDER BY updated_at DESC, id ASC",
+    )?;
+    let rows = stmt.query_map([destination.as_str()], search::record_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn load_local_records_for_rebuild(db_path: &Path) -> Result<Vec<MemoryRecord>> {
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = db::open_database(db_path).with_context(|| {
+        format!(
+            "rebuild refused because local runtime memory could not be preserved from {}",
+            db_path.display()
+        )
+    })?;
+    db::init_database(&conn).with_context(|| {
+        format!(
+            "rebuild refused because local runtime memory could not be migrated before preservation from {}",
+            db_path.display()
+        )
+    })?;
+    records_for_destination(&conn, MemoryDestination::Local).context(
+        "rebuild refused because local runtime memory could not be loaded for preservation",
+    )
+}
+
+fn guard_no_local_record_id_collisions(
+    records: &[okf::OkfRecordFile],
+    local_records: &[MemoryRecord],
+) -> Result<()> {
+    if local_records.is_empty() {
+        return Ok(());
+    }
+
+    let repo_ids = records
+        .iter()
+        .map(|record| record.concept_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let collisions = local_records
+        .iter()
+        .filter_map(|record| {
+            repo_ids
+                .contains(record.id.as_str())
+                .then_some(record.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    if collisions.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "rebuild refused because local runtime memory record id{} would collide with canonical repo record{}: {}",
+        if collisions.len() == 1 { "" } else { "s" },
+        if collisions.len() == 1 { "" } else { "s" },
+        collisions.join(", ")
+    );
+}
+
+fn restore_local_records_after_rebuild(conn: &Connection, records: &[MemoryRecord]) -> Result<()> {
+    for record in records {
+        insert_memory_record_row(conn, record, InsertMode::RestoreIfAbsent)?;
+    }
+    Ok(())
 }
 
 fn guard_no_open_proposals(db_path: &Path) -> Result<()> {

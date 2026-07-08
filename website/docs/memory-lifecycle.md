@@ -73,6 +73,22 @@ destination: needs_review
 
 `team` and `cloud` are reserved for future destination work and are not accepted values yet. Destination classification does not add fields to canonical records or proposal files in this slice.
 
+## Local runtime memory
+
+Local-only records implement the `local` destination in runtime state. They are stored in the project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`, not in `.memzoi/records/**`.
+
+Use the local namespace for private runtime memory:
+
+```bash
+memzoi local add --type preference --title "..." --body "..."
+memzoi local list
+memzoi local search <query>
+```
+
+Local records are marked with `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output. They are not included in global `memzoi search`, `memzoi context`, or exports yet. Rebuild keeps local runtime rows while restoring canonical repo records from Git.
+
+Promotion from local memory into repo-shared memory must go through later proposal workflows. Local memory should not contain secrets, raw chat logs, or private personal data that should not be retained.
+
 ## Approval policy
 
 Effective proposal approval mode is resolved in this order:

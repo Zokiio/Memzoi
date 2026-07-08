@@ -91,6 +91,12 @@ pub(crate) enum Commands {
         command: ProposalFileCommands,
     },
 
+    /// Manage local-only runtime memory records.
+    Local {
+        #[command(subcommand)]
+        command: LocalCommands,
+    },
+
     /// Supersede an active memory record with new content.
     Supersede {
         record_id: String,
@@ -275,6 +281,38 @@ pub(crate) enum ProposalFileCommands {
     /// Apply one repo-safe create proposal file into canonical records.
     Apply {
         proposal_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum LocalCommands {
+    /// Add a local-only runtime memory record.
+    Add {
+        #[arg(long = "type")]
+        memory_type: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List local-only runtime memory records.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search local-only runtime memory records.
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },
