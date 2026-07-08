@@ -374,6 +374,7 @@ fn integrate_prompt_prints_memzoi_protocol() {
         .stdout(
             predicate::str::contains("Before non-trivial work")
                 .and(predicate::str::contains("memzoi context --task"))
+                .and(predicate::str::contains("memzoi handoff --task"))
                 .and(predicate::str::contains("memzoi precheck --command"))
                 .and(predicate::str::contains("memzoi propose"))
                 .and(predicate::str::contains("Do not store secrets")),
@@ -398,6 +399,7 @@ fn integrate_instructions_creates_and_updates_marked_block() {
     let first = fs::read_to_string(&instructions).expect("read created instructions");
     assert!(first.contains("<!-- memzoi:start -->"));
     assert!(first.contains("memzoi context --task"));
+    assert!(first.contains("memzoi handoff --task"));
     assert!(first.contains("memzoi propose --type"));
     assert!(first.contains("<!-- memzoi:end -->"));
 
@@ -421,6 +423,7 @@ fn integrate_instructions_creates_and_updates_marked_block() {
     assert_eq!(updated.matches("<!-- memzoi:start -->").count(), 1);
     assert!(!updated.contains("stale-memory context --task"));
     assert!(updated.contains("memzoi context --task"));
+    assert!(updated.contains("memzoi handoff --task"));
 }
 
 #[test]
@@ -2838,6 +2841,236 @@ fn context_json_excludes_runtime_memory_without_leaking_content_or_counts() {
 }
 
 #[test]
+fn handoff_json_wraps_context_and_reports_proposal_inbox() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    let record = create_applied_memory(
+        repo,
+        "decision",
+        "repo",
+        "Handoff delta repo decision",
+        "Handoff delta context should be wrapped under the handoff JSON context field.",
+    );
+    let proposal = run_json_command(
+        repo,
+        &[
+            "propose",
+            "--type",
+            "fact",
+            "--title",
+            "Handoff delta pending proposal",
+            "--body",
+            "Handoff delta proposal inbox count should come from the DB inbox.",
+            "--manual",
+            "--json",
+        ],
+    );
+    assert_eq!(proposal_status(&proposal), Some("pending"));
+
+    let handoff = run_json_command(
+        repo,
+        &[
+            "handoff",
+            "--task",
+            "handoff delta context",
+            "--token-budget",
+            "100",
+            "--json",
+        ],
+    );
+
+    assert_eq!(json_string(&handoff, "task"), "handoff delta context");
+    assert_eq!(handoff["proposal_inbox"]["source"], "db");
+    assert_eq!(handoff["proposal_inbox"]["open_total"].as_u64(), Some(1));
+    assert_eq!(handoff["proposal_inbox"]["pending"].as_u64(), Some(1));
+    assert_eq!(
+        record_ids_from_json(&handoff["context"]),
+        vec![record.as_str()],
+        "handoff should wrap selected context records under context: {handoff}"
+    );
+    assert!(
+        handoff["context"]["included"].as_array().is_some(),
+        "handoff context should expose included metadata: {handoff}"
+    );
+    assert!(
+        handoff["context"]["omitted"].as_array().is_some(),
+        "handoff context should expose omitted metadata: {handoff}"
+    );
+    assert_eq!(
+        handoff["context"]["policy"]["requested_destinations"],
+        serde_json::json!(["repo"])
+    );
+}
+
+#[test]
+fn handoff_path_only_uses_stable_task_fallback() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    let matching = create_applied_memory(
+        repo,
+        "warning",
+        "repo",
+        "Handoff path-only warning",
+        "Path-only handoff should include this path-scoped memory.",
+    );
+    attach_memory_path(repo, &matching, "crates/memzoi-core/src/handoff.rs");
+
+    let handoff = run_json_command(
+        repo,
+        &[
+            "handoff",
+            "--path",
+            "crates/memzoi-core/src/handoff.rs",
+            "--token-budget",
+            "90",
+            "--json",
+        ],
+    );
+
+    assert_eq!(
+        json_string(&handoff, "task"),
+        "Handoff for path crates/memzoi-core/src/handoff.rs"
+    );
+    assert_eq!(
+        handoff["context"]["task"].as_str(),
+        Some("Handoff for path crates/memzoi-core/src/handoff.rs")
+    );
+    assert_eq!(
+        record_ids_from_json(&handoff["context"]),
+        vec![matching.as_str()],
+        "path-only handoff should include path-scoped records: {handoff}"
+    );
+}
+
+#[test]
+fn handoff_runtime_memory_requires_explicit_opt_in() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    let repo_record = create_applied_memory(
+        repo,
+        "decision",
+        "repo",
+        "Layered handoff repo decision",
+        "Layered handoff should include repo memory by default.",
+    );
+    let local = run_json_command(
+        repo,
+        &[
+            "local",
+            "add",
+            "--type",
+            "preference",
+            "--title",
+            "Layered handoff local preference",
+            "--body",
+            "Layered handoff should include local memory only with explicit opt-in.",
+            "--json",
+        ],
+    );
+    let local_id = json_string(&local, "record_id").to_owned();
+    let checkpoint = run_json_command(
+        repo,
+        &[
+            "checkpoint",
+            "add",
+            "--task",
+            "Layered handoff session checkpoint",
+            "--note",
+            "Layered handoff should include session memory only with explicit opt-in.",
+            "--json",
+        ],
+    );
+    let checkpoint_id = json_string(&checkpoint, "record_id").to_owned();
+
+    let default_handoff =
+        run_json_command(repo, &["handoff", "--task", "layered handoff", "--json"]);
+    assert_eq!(
+        record_ids_from_json(&default_handoff["context"]),
+        vec![repo_record.as_str()],
+        "handoff should be repo-only by default: {default_handoff}"
+    );
+    assert_json_does_not_reference_records(
+        &default_handoff,
+        &[local_id.clone(), checkpoint_id.clone()],
+    );
+
+    let layered_handoff = run_json_command(
+        repo,
+        &[
+            "handoff",
+            "--task",
+            "layered handoff",
+            "--include-local",
+            "--include-session",
+            "--json",
+        ],
+    );
+    let layered_ids = record_ids_from_json(&layered_handoff["context"]);
+    assert!(layered_ids.contains(&repo_record.as_str()));
+    assert!(layered_ids.contains(&local_id.as_str()));
+    assert!(layered_ids.contains(&checkpoint_id.as_str()));
+    assert_eq!(
+        layered_handoff["context"]["policy"]["requested_destinations"],
+        serde_json::json!(["repo", "local", "session"])
+    );
+}
+
+#[test]
+fn handoff_text_labels_proposal_inbox_and_stays_repo_only_by_default() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    create_applied_memory(
+        repo,
+        "procedure",
+        "repo",
+        "Text handoff repo procedure",
+        "Text handoff should render this repo memory.",
+    );
+    run_json_command(
+        repo,
+        &[
+            "local",
+            "add",
+            "--type",
+            "fact",
+            "--title",
+            "Text handoff local private title",
+            "--body",
+            "Text handoff local private body must not leak.",
+            "--json",
+        ],
+    );
+
+    let stdout = run_command_stdout(repo, &["handoff", "--task", "text handoff"]);
+    assert!(stdout.contains("# Memzoi Handoff"), "{stdout}");
+    assert!(
+        stdout.contains("Proposal inbox: 0 open DB proposals"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Text handoff repo procedure"), "{stdout}");
+    assert!(
+        !stdout.contains("Text handoff local private"),
+        "default text handoff should not leak local memory: {stdout}"
+    );
+}
+
+#[test]
+fn handoff_requires_task_or_path_at_cli_boundary() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    let stderr = run_command_failure_stderr(repo, &["handoff"]);
+    assert!(
+        stderr.contains("handoff requires --task or --path"),
+        "handoff should explain missing required task/path input: {stderr}"
+    );
+}
+
+#[test]
 fn precheck_json_warns_for_risky_path_and_cites_memory() {
     let repo = initialized_temp_repo();
     let repo = repo.path();
@@ -3346,6 +3579,14 @@ fn run_json_command_failure(repo: &Path, args: &[&str]) -> Value {
     let mut cmd = memzoi();
     let assert = cmd.args(args).current_dir(repo).assert().failure();
     json_from_stdout(&assert.get_output().stdout)
+}
+
+fn run_command_stdout(repo: &Path, args: &[&str]) -> String {
+    let mut cmd = memzoi();
+    let assert = cmd.args(args).current_dir(repo).assert().success();
+    std::str::from_utf8(&assert.get_output().stdout)
+        .expect("stdout is utf-8")
+        .to_owned()
 }
 
 fn run_command_failure_stderr(repo: &Path, args: &[&str]) -> String {

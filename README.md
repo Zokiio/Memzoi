@@ -21,6 +21,7 @@ Memzoi is currently a local-first v0 for dogfooding and early experimentation. T
 - Separate canonical repo memory from generated SQLite indexes and exports.
 - Require proposed, reviewable writes before durable memory changes are applied.
 - Build prompt-ready context packs for the task at hand.
+- Build compact handoff packs when switching agents or harnesses.
 - Check risky paths, actions, and shell commands against known warnings.
 - Expose safe recall and proposal workflows through a minimal stdio MCP server.
 
@@ -88,6 +89,7 @@ memzoi doctor
 memzoi quickstart --apply-sample
 memzoi search quickstart
 memzoi context --task "remember quickstart setup"
+memzoi handoff --task "switch agents after quickstart"
 memzoi precheck --command "rm -rf .memzoi"
 memzoi export agents-md
 memzoi mcp config --project-root .
@@ -132,7 +134,7 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
 - Local runtime state under `~/.memzoi/projects/<project-key>/` for derived SQLite indexes, generated exports, and DB-local open proposal state.
 - Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
 - Rebuild from canonical records with `memzoi rebuild` when the derived runtime index needs to be regenerated.
-- Text search and prompt-ready context packs.
+- Text search, prompt-ready context packs, and CLI handoff packs.
 - Pre-action governance checks with citations and suggested next steps.
 - Deterministic generated exports: OKF Markdown projections, `AGENTS.memory.md`, and `CLAUDE.memory.md`.
 - Minimal stdio MCP server with safe tools:

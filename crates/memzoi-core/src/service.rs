@@ -13,10 +13,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    ContextPack, ContextPackInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryPaths,
-    MemoryRecord, MemoryStatus, MemoryType, PrecheckInput, PrecheckWarning, Proposal,
-    ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput, SearchResult, SupersedeResult,
-    ValidationResult, Visibility,
+    ContextPack, ContextPackInput, HandoffInput, HandoffPack, MemoryDestination, MemoryDraft,
+    MemoryLane, MemoryPaths, MemoryRecord, MemoryStatus, MemoryType, PrecheckInput,
+    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput,
+    SearchResult, SupersedeResult, ValidationResult, Visibility,
 };
 use crate::{
     config::{
@@ -24,7 +24,7 @@ use crate::{
     },
     context, db,
     events::{AppendEvent, append_event, now_utc},
-    exporters, okf, precheck, proposals, search,
+    exporters, handoff, okf, precheck, proposals, search,
     session_end::{
         SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument, SessionEndResult,
         SessionEndWrite, plan_repo_proposal, validate_session_end_document,
@@ -532,6 +532,10 @@ impl MemoryService {
 
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
         context::build_context_pack(&self.conn, input)
+    }
+
+    pub fn build_handoff_pack(&self, input: HandoffInput) -> Result<HandoffPack> {
+        handoff::build_handoff_pack(&self.conn, input)
     }
 
     pub fn precheck(&self, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {

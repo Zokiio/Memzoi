@@ -51,6 +51,8 @@ The server exposes:
 
 The server does not expose lifecycle mutation tools such as approve, reject, apply, supersede, tombstone, or export. Those stay CLI-side so durable memory writes remain reviewable.
 
+The CLI-only `memzoi handoff` command is not exposed as a separate MCP tool in this slice. MCP clients that need handoff-style context should call `build_context_pack` with the same task, path, token budget, and explicit local/session opt-in policy, then add any client-specific handoff framing outside Memzoi.
+
 ## `propose_memory` contract
 
 Required arguments:
@@ -95,6 +97,7 @@ memzoi integrate prompt
 The prompt tells agents to:
 
 - Run `memzoi context --task "<task>"` before non-trivial work.
+- Use `memzoi handoff --task "<task>"` when switching CLI agents or harnesses.
 - Add `--path <relative/path>` when editing specific files.
 - Add `--include-local` or `--include-session` only when private runtime memory or explicit checkpoints should be part of the context.
 - Run `memzoi precheck` before risky actions.
