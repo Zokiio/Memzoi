@@ -4,10 +4,10 @@ use std::{
 };
 
 use memzoi_core::{
-    InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryRecord, MemoryService, MemoryStatus,
-    MemoryType, OkfProposalAction, OkfProposalSensitivity, OkfProposalStatus, ScopeKind,
-    Visibility, parse_okf_proposal_markdown, parse_okf_record_file, read_okf_proposal_files,
-    read_okf_record_files, write_memory_record_file,
+    InitRequest, MemoryDestination, MemoryDraft, MemoryLane, MemoryPaths, MemoryRecord,
+    MemoryService, MemoryStatus, MemoryType, OkfProposalAction, OkfProposalSensitivity,
+    OkfProposalStatus, ScopeKind, Visibility, parse_okf_proposal_markdown, parse_okf_record_file,
+    read_okf_proposal_files, read_okf_record_files, write_memory_record_file,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -313,6 +313,7 @@ fn rendered_records_are_valid_yaml_and_preserve_core_fields() -> anyhow::Result<
         id: "team/install-risk".to_owned(),
         memory_type: MemoryType::Risk,
         lane: MemoryLane::Semantic,
+        destination: MemoryDestination::Repo,
         scope_kind: ScopeKind::Team,
         scope_id: Some("platform".to_owned()),
         visibility: Visibility::Team,

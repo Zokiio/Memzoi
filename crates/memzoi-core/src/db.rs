@@ -73,11 +73,11 @@ mod tests {
         }
 
         let migrations: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2)",
+            "SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3)",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(migrations, 2);
+        assert_eq!(migrations, 3);
 
         let records: i64 = conn.query_row(
             "SELECT COUNT(*) FROM memory_record WHERE id = 'rec-existing'",
@@ -92,6 +92,13 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(lane, "semantic");
+
+        let destination: String = conn.query_row(
+            "SELECT destination FROM memory_record WHERE id = 'rec-existing'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(destination, "repo");
 
         Ok(())
     }
@@ -143,6 +150,63 @@ mod tests {
 
         let migration: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 2)",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(migration);
+
+        Ok(())
+    }
+
+    #[test]
+    fn init_database_migrates_existing_records_without_destination_to_repo() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("memory.db");
+        let conn = open_database(&db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_migrations (
+              version INTEGER PRIMARY KEY,
+              applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+            INSERT INTO schema_migrations(version) VALUES (1);
+            INSERT INTO schema_migrations(version) VALUES (2);
+            CREATE TABLE memory_record (
+              rowid INTEGER PRIMARY KEY,
+              id TEXT NOT NULL UNIQUE,
+              type TEXT NOT NULL,
+              lane TEXT NOT NULL DEFAULT 'semantic',
+              scope_kind TEXT NOT NULL,
+              scope_id TEXT,
+              visibility TEXT NOT NULL DEFAULT 'repo',
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              status TEXT NOT NULL,
+              confidence REAL NOT NULL DEFAULT 1.0,
+              source_kind TEXT,
+              source_ref TEXT,
+              content_hash TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+              updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+              supersedes_id TEXT,
+              expires_at TEXT
+            );
+            INSERT INTO memory_record(id, type, lane, scope_kind, title, body, status, content_hash)
+            VALUES ('legacy-destination-record', 'decision', 'semantic', 'repo', 'Legacy destination', 'Legacy destination body', 'active', 'legacy-destination-hash');
+            "#,
+        )?;
+
+        init_database(&conn)?;
+
+        let destination: String = conn.query_row(
+            "SELECT destination FROM memory_record WHERE id = 'legacy-destination-record'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(destination, "repo");
+
+        let migration: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 3)",
             [],
             |row| row.get(0),
         )?;

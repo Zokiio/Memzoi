@@ -110,11 +110,12 @@ fn active_records_for_scope(
     memory_types: Option<&[MemoryType]>,
 ) -> Result<Vec<MemoryRecord>> {
     let mut sql = String::from(
-        "SELECT id, type, lane, scope_kind, scope_id, visibility, title, body, status, confidence,
-                source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id,
-                expires_at
+        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
+                supersedes_id, expires_at
          FROM memory_record
          WHERE status = 'active'
+           AND destination = 'repo'
            AND scope_kind = ?1
            AND visibility != 'private'",
     );

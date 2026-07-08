@@ -2,8 +2,8 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
-    ContextPackInput, MemoryDraft, MemoryLane, MemoryService, MemoryType, PrecheckInput,
-    ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, Visibility,
+    ContextPackInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryService, MemoryType,
+    PrecheckInput, ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, Visibility,
 };
 use serde_json::{Value, json};
 
@@ -290,6 +290,7 @@ fn search_input(arguments: &Value) -> Result<SearchInput> {
         scope_kind: optional_scope_kind(arguments)?,
         scope_id: optional_string(arguments, "scope_id"),
         memory_type: optional_memory_type(arguments)?,
+        destination: Some(MemoryDestination::Repo),
         path_prefix: optional_string(arguments, "path_prefix")
             .or_else(|| optional_string(arguments, "path")),
         limit: optional_usize(arguments, "limit")?.unwrap_or(10),

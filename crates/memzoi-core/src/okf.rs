@@ -10,8 +10,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
-    proposals::title_to_concept_slug,
+    MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind,
+    Visibility, proposals::title_to_concept_slug,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -424,6 +424,7 @@ pub fn apply_okf_create_proposal_file(
             .unwrap_or_else(|| proposal.file_id.replace('_', "-")),
         memory_type: proposal.memory_type,
         lane: proposal.lane,
+        destination: MemoryDestination::Repo,
         scope_kind: proposal.scope_kind,
         scope_id: proposal.scope_id.clone(),
         visibility: Visibility::Repo,
@@ -631,9 +632,9 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
     let updated = record.updated.as_deref().unwrap_or(record.created.as_str());
     conn.execute(
         "INSERT OR REPLACE INTO memory_record (
-          id, type, lane, scope_kind, scope_id, visibility, title, body, status, confidence,
+          id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status, confidence,
           source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id, expires_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             record.concept_id,
             record.draft.memory_type.as_str(),

@@ -1573,6 +1573,124 @@ fn search_json_filters_scope_type_path_limit_and_excludes_inactive_records() {
 }
 
 #[test]
+fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    let added = run_json_command(
+        repo,
+        &[
+            "local",
+            "add",
+            "--type",
+            "preference",
+            "--title",
+            "Local zircon preference",
+            "--body",
+            "Remember the private local zircon preference only in runtime memory.",
+            "--json",
+        ],
+    );
+    let record_id = json_string(&added, "record_id").to_owned();
+    assert_eq!(record_id, "local-local-zircon-preference");
+    assert_json_string_field(&added, &["destination"], "local");
+    assert_json_string_field(&added, &["visibility"], "private");
+    assert_json_string_field(&added, &["status"], "active");
+
+    assert!(
+        !test_paths(repo)
+            .records_dir()
+            .join(format!("{record_id}.md"))
+            .exists(),
+        "local add must not write canonical repo files"
+    );
+
+    let conn = Connection::open(memory_db_path(repo)).expect("open runtime db");
+    let destination: String = conn
+        .query_row(
+            "SELECT destination FROM memory_record WHERE id = ?1",
+            [&record_id],
+            |row| row.get(0),
+        )
+        .expect("read local record destination");
+    assert_eq!(destination, "local");
+
+    let listed = run_json_command(repo, &["local", "list", "--json"]);
+    assert_json_string_field(&listed, &["destination"], "local");
+    assert_eq!(record_ids_from_json(&listed), vec![record_id.as_str()]);
+    assert_json_string_field(&listed["records"][0], &["destination"], "local");
+
+    let local_search = run_json_command(repo, &["local", "search", "zircon", "--json"]);
+    assert_eq!(
+        record_ids_from_json(&local_search),
+        vec![record_id.as_str()]
+    );
+    assert_json_string_field(&local_search, &["destination"], "local");
+    assert_json_string_field(
+        &local_search["records"][0]["record"],
+        &["destination"],
+        "local",
+    );
+
+    let global_search = run_json_command(repo, &["search", "zircon", "--json"]);
+    assert!(
+        record_ids_from_json(&global_search).is_empty(),
+        "global search should stay repo-only: {global_search}"
+    );
+
+    let export = run_json_command(repo, &["export", "okf", "--json"]);
+    assert!(
+        written_paths_from_json(&export).is_empty(),
+        "local memory should not be exported as repo memory: {export}"
+    );
+
+    fs::create_dir_all(test_paths(repo).records_dir()).expect("create records dir");
+    fs::write(
+        test_paths(repo)
+            .records_dir()
+            .join("repo-zircon-decision.md"),
+        r#"---
+type: decision
+title: Repo zircon decision
+description: Canonical repo memory imported during rebuild.
+timestamp: 2026-07-08T00:00:00Z
+status: active
+visibility: repo
+confidence: 1
+source: test
+source_ref: test://repo-zircon
+---
+
+# Repo zircon decision
+
+Canonical repo zircon memory should rebuild as repo destination.
+"#,
+    )
+    .expect("write canonical repo record");
+    let rebuild = run_json_command(repo, &["rebuild", "--json"]);
+    assert_json_array_contains(&rebuild, "record_ids", "repo-zircon-decision");
+
+    let local_after_rebuild = run_json_command(repo, &["local", "search", "zircon", "--json"]);
+    assert_eq!(
+        record_ids_from_json(&local_after_rebuild),
+        vec![record_id.as_str()],
+        "rebuild should preserve local runtime memory: {local_after_rebuild}"
+    );
+
+    let repo_after_rebuild = run_json_command(repo, &["search", "zircon", "--json"]);
+    assert_eq!(
+        record_ids_from_json(&repo_after_rebuild),
+        vec!["repo-zircon-decision"],
+        "rebuild should import canonical repo records as repo destination: {repo_after_rebuild}"
+    );
+    assert_json_string_field(
+        &repo_after_rebuild["records"][0]["record"],
+        &["destination"],
+        "repo",
+    );
+}
+
+#[test]
 fn context_json_returns_prompt_ready_pack_records_and_citations() {
     let repo = initialized_temp_repo();
     let repo = repo.path();

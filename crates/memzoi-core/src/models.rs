@@ -113,6 +113,7 @@ pub struct MemoryRecord {
     pub id: String,
     pub memory_type: MemoryType,
     pub lane: MemoryLane,
+    pub destination: MemoryDestination,
     pub scope_kind: ScopeKind,
     pub scope_id: Option<String>,
     pub visibility: Visibility,

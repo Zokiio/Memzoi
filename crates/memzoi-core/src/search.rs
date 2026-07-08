@@ -5,7 +5,10 @@ use serde_json::json;
 
 use crate::{
     events::{AppendEvent, append_event},
-    models::{MemoryCitation, MemoryPath, MemoryRecord, MemoryType, ScopeKind, SearchResult},
+    models::{
+        MemoryCitation, MemoryDestination, MemoryPath, MemoryRecord, MemoryType, ScopeKind,
+        SearchResult,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -14,6 +17,7 @@ pub struct SearchInput {
     pub scope_kind: Option<ScopeKind>,
     pub scope_id: Option<String>,
     pub memory_type: Option<MemoryType>,
+    pub destination: Option<MemoryDestination>,
     pub path_prefix: Option<String>,
     pub limit: usize,
     pub include_inactive: bool,
@@ -52,6 +56,8 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
     } else {
         "1 = 1"
     };
+    let destination = input.destination.unwrap_or(MemoryDestination::Repo);
+    let destination_filter = "memory_record.destination = ?7";
     let path_filter = if path_prefix.is_some() {
         "EXISTS (
             SELECT 1 FROM memory_path
@@ -81,26 +87,28 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
     };
 
     let sql = format!(
-        "SELECT memory_record.id, memory_record.type, memory_record.lane, memory_record.scope_kind,
-                memory_record.scope_id, memory_record.visibility, memory_record.title,
-                memory_record.body, memory_record.status, memory_record.confidence,
-                memory_record.source_kind, memory_record.source_ref, memory_record.content_hash,
-                memory_record.created_at, memory_record.updated_at, memory_record.supersedes_id,
-                memory_record.expires_at, bm25(memory_fts) AS rank
+        "SELECT memory_record.id, memory_record.type, memory_record.lane, memory_record.destination,
+                memory_record.scope_kind, memory_record.scope_id, memory_record.visibility,
+                memory_record.title, memory_record.body, memory_record.status,
+                memory_record.confidence, memory_record.source_kind, memory_record.source_ref,
+                memory_record.content_hash, memory_record.created_at, memory_record.updated_at,
+                memory_record.supersedes_id, memory_record.expires_at, bm25(memory_fts) AS rank
          FROM memory_fts
          JOIN memory_record ON memory_record.rowid = memory_fts.rowid
          WHERE memory_fts MATCH ?1
            AND {status_filter}
+           AND {destination_filter}
            AND {scope_filter}
            AND {scope_id_filter}
            AND {type_filter}
            AND {path_filter}
          ORDER BY rank ASC, memory_record.updated_at DESC, memory_record.id ASC
-         LIMIT ?7"
+         LIMIT ?8"
     );
 
     let scope_kind = input.scope_kind.map(|value| value.as_str().to_owned());
     let memory_type = input.memory_type.map(|value| value.as_str().to_owned());
+    let destination = destination.as_str().to_owned();
     let path_like = path_prefix
         .as_ref()
         .map(|path| format!("{}/%", path.trim_end_matches('/')));
@@ -116,11 +124,12 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
                 memory_type,
                 path_prefix,
                 path_like,
+                destination,
                 limit as i64,
             ],
             |row| {
                 let record = record_from_row(row)?;
-                let rank: f64 = row.get(17)?;
+                let rank: f64 = row.get(18)?;
                 Ok((record, rank))
             },
         )
@@ -150,6 +159,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
                 "query": input.query,
                 "scope_kind": scope_kind,
                 "type": memory_type,
+                "destination": destination,
                 "path_prefix": input.path_prefix,
                 "limit": limit,
                 "result_ids": results.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
@@ -195,20 +205,21 @@ pub(crate) fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memor
         id: row.get(0)?,
         memory_type: parse_cell(row, 1)?,
         lane: parse_cell(row, 2)?,
-        scope_kind: parse_cell(row, 3)?,
-        scope_id: row.get(4)?,
-        visibility: parse_cell(row, 5)?,
-        title: row.get(6)?,
-        body: row.get(7)?,
-        status: parse_cell(row, 8)?,
-        confidence: row.get(9)?,
-        source_kind: row.get(10)?,
-        source_ref: row.get(11)?,
-        content_hash: row.get(12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
-        supersedes_id: row.get(15)?,
-        expires_at: row.get(16)?,
+        destination: parse_cell(row, 3)?,
+        scope_kind: parse_cell(row, 4)?,
+        scope_id: row.get(5)?,
+        visibility: parse_cell(row, 6)?,
+        title: row.get(7)?,
+        body: row.get(8)?,
+        status: parse_cell(row, 9)?,
+        confidence: row.get(10)?,
+        source_kind: row.get(11)?,
+        source_ref: row.get(12)?,
+        content_hash: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+        supersedes_id: row.get(16)?,
+        expires_at: row.get(17)?,
     })
 }
 
