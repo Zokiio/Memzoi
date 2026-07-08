@@ -50,6 +50,16 @@ Run `memzoi <command> --help` for exact options.
 | `mcp config` | `--project-root` |
 | `integrate instructions` | `--file`, `--json` |
 
+## Context JSON
+
+`memzoi context --json` and MCP `build_context_pack` return the prompt-ready pack plus metadata. Existing fields such as `prompt`, `records`, `citations`, and `token_budget` remain available. The additive metadata fields are:
+
+- `budget`: requested budget, effective budget, approximate used budget, and estimate unit.
+- `included`: selected records with compact citation, provenance, destination, score, rationale, and estimated size metadata.
+- `omitted`: capped repo-record metadata for relevant records excluded by budget.
+- `warnings`: structured notices. Local/session runtime matches are reported only as counts because global context content remains repo-only.
+- `next_queries`: targeted follow-up queries, currently empty.
+
 ## MCP tools
 
 | Tool | Required arguments | Optional arguments |

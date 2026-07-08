@@ -812,6 +812,53 @@ mod tests {
     }
 
     #[test]
+    fn build_context_pack_tool_returns_budget_and_provenance_metadata() {
+        let (_temp, service) = test_service();
+        let proposal = service
+            .propose_memory(
+                "fixture",
+                draft(
+                    "Zircon MCP context decision",
+                    "Zircon MCP context metadata should include budget and provenance.",
+                ),
+            )
+            .unwrap();
+        service.approve_proposal(&proposal.id, "fixture").unwrap();
+        let record = service.apply_proposal(&proposal.id, "fixture").unwrap();
+
+        let response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "build_context_pack",
+                    "arguments": {
+                        "task": "zircon context metadata",
+                        "token_budget": 80
+                    }
+                }
+            }),
+        );
+
+        let pack = &response["result"]["structuredContent"];
+        assert_eq!(pack["budget"]["requested"], 80);
+        assert_eq!(pack["budget"]["effective"], 80);
+        assert_eq!(pack["budget"]["estimate_unit"], "approx_words");
+        assert!(
+            pack["budget"]["estimated_used"]
+                .as_u64()
+                .is_some_and(|used| used > 0),
+            "MCP context pack should expose estimated budget use: {pack}"
+        );
+        assert_eq!(pack["included"][0]["record_id"], record.id);
+        assert_eq!(pack["included"][0]["provenance"], "repo");
+        assert_eq!(pack["included"][0]["destination"], "repo");
+        assert_eq!(pack["next_queries"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
     fn unknown_method_returns_json_rpc_method_not_found() {
         let (_temp, service) = test_service();
 

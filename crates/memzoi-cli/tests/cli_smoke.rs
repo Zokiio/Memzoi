@@ -2617,12 +2617,119 @@ fn context_json_returns_prompt_ready_pack_records_and_citations() {
         "context --token-budget should cap prompt-ready output approximately: {prompt:?}"
     );
 
+    assert_eq!(pack["budget"]["requested"].as_u64(), Some(60));
+    assert_eq!(pack["budget"]["effective"].as_u64(), Some(60));
+    assert_eq!(
+        pack["budget"]["estimate_unit"].as_str(),
+        Some("approx_words")
+    );
+    assert!(
+        pack["budget"]["estimated_used"]
+            .as_u64()
+            .is_some_and(|used| used > 0),
+        "context JSON should expose estimated budget use: {pack}"
+    );
+    let included = pack["included"]
+        .as_array()
+        .unwrap_or_else(|| panic!("context JSON should expose included metadata: {pack}"));
+    assert!(
+        included.iter().any(|item| {
+            item.get("record_id").and_then(Value::as_str) == Some(matching.as_str())
+                && item.get("type").and_then(Value::as_str) == Some("procedure")
+                && item.get("provenance").and_then(Value::as_str) == Some("repo")
+                && item.get("destination").and_then(Value::as_str) == Some("repo")
+        }),
+        "context JSON should expose included record provenance metadata: {pack}"
+    );
+    assert!(
+        pack["next_queries"].as_array().is_some_and(Vec::is_empty),
+        "context JSON should include an empty next_queries array for now: {pack}"
+    );
+
     let citation = citation_for_record(&pack, &matching)
         .unwrap_or_else(|| panic!("context JSON should cite {matching}: {pack}"));
     assert_json_string_field(citation, &["record_id", "id"], &matching);
     assert_json_string_field(citation, &["type", "memory_type"], "procedure");
     assert_json_string_field(citation, &["scope", "scope_kind"], "repo");
     assert_json_string_field(citation, &["source_ref"], "issue://cli-context#procedure");
+}
+
+#[test]
+fn context_json_warns_about_excluded_runtime_memory_without_leaking_content() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    let repo_record = create_applied_memory(
+        repo,
+        "decision",
+        "repo",
+        "Runtime zircon repo decision",
+        "Repo runtime zircon memory may appear in global context.",
+    );
+    run_json_command(
+        repo,
+        &[
+            "local",
+            "add",
+            "--type",
+            "fact",
+            "--title",
+            "Runtime zircon local private title",
+            "--body",
+            "Runtime zircon local private body must not leak.",
+            "--json",
+        ],
+    );
+    run_json_command(
+        repo,
+        &[
+            "checkpoint",
+            "add",
+            "--task",
+            "Runtime zircon session private title",
+            "--note",
+            "Runtime zircon session private body must not leak.",
+            "--json",
+        ],
+    );
+
+    let pack = run_json_command(
+        repo,
+        &[
+            "context",
+            "--task",
+            "runtime zircon",
+            "--token-budget",
+            "120",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        record_ids_from_json(&pack),
+        vec![repo_record.as_str()],
+        "global context records should remain repo-only: {pack}"
+    );
+    let rendered = serde_json::to_string(&pack).expect("serialize context JSON");
+    assert!(
+        !rendered.contains("local private")
+            && !rendered.contains("session private")
+            && !rendered.contains("must not leak"),
+        "context JSON should not leak local/session titles or bodies: {pack}"
+    );
+
+    let warnings = pack["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("context JSON should include warnings: {pack}"));
+    for destination in ["local", "session"] {
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.get("code").and_then(Value::as_str) == Some("runtime_memory_excluded")
+                    && warning.get("destination").and_then(Value::as_str) == Some(destination)
+                    && warning.get("matching_count").and_then(Value::as_u64) == Some(1)
+            }),
+            "context JSON should expose count-only {destination} exclusion warning: {pack}"
+        );
+    }
 }
 
 #[test]
