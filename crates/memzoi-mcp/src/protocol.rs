@@ -143,7 +143,9 @@ fn tools_list_result() -> Value {
                         "task": { "type": "string" },
                         "path": { "type": "string" },
                         "path_prefix": { "type": "string" },
-                        "token_budget": { "type": "integer", "minimum": 1 }
+                        "token_budget": { "type": "integer", "minimum": 1 },
+                        "include_local": { "type": "boolean" },
+                        "include_session": { "type": "boolean" }
                     },
                     "required": ["task"]
                 })
@@ -304,6 +306,8 @@ fn context_input(arguments: &Value) -> Result<ContextPackInput> {
         path_prefix: optional_string(arguments, "path_prefix")
             .or_else(|| optional_string(arguments, "path")),
         token_budget: optional_usize(arguments, "token_budget")?,
+        include_local: optional_bool(arguments, "include_local")?.unwrap_or(false),
+        include_session: optional_bool(arguments, "include_session")?.unwrap_or(false),
     })
 }
 
@@ -410,6 +414,16 @@ fn optional_usize(value: &Value, key: &str) -> Result<Option<usize>> {
                     .context("integer argument is too large")?,
             ))
         }
+        None => Ok(None),
+    }
+}
+
+fn optional_bool(value: &Value, key: &str) -> Result<Option<bool>> {
+    match value.get(key) {
+        Some(raw) => raw
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| anyhow!("argument {key} must be a boolean")),
         None => Ok(None),
     }
 }
@@ -584,6 +598,13 @@ mod tests {
                 "unsafe tool containing {forbidden:?} was exposed"
             );
         }
+        let context_tool = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("build_context_pack"))
+            .unwrap_or_else(|| panic!("build_context_pack tool should be exposed: {tools:?}"));
+        let properties = &context_tool["inputSchema"]["properties"];
+        assert_eq!(properties["include_local"]["type"], "boolean");
+        assert_eq!(properties["include_session"]["type"], "boolean");
     }
 
     #[test]
@@ -859,6 +880,104 @@ mod tests {
     }
 
     #[test]
+    fn build_context_pack_tool_honors_layered_opt_in() {
+        use memzoi_core::{CheckpointInput, LocalMemoryInput};
+
+        let (_temp, service) = test_service();
+        let proposal = service
+            .propose_memory(
+                "fixture",
+                draft(
+                    "Layered sigma repo context",
+                    "Layered sigma context includes repo memory by default.",
+                ),
+            )
+            .unwrap();
+        service.approve_proposal(&proposal.id, "fixture").unwrap();
+        let repo_record = service.apply_proposal(&proposal.id, "fixture").unwrap();
+        let local_record = service
+            .create_local_memory(
+                "fixture",
+                LocalMemoryInput {
+                    memory_type: MemoryType::Preference,
+                    lane: MemoryLane::Semantic,
+                    title: "Layered sigma local context".to_owned(),
+                    body: "Layered sigma context includes local memory only when requested."
+                        .to_owned(),
+                },
+            )
+            .unwrap();
+        let session_record = service
+            .create_checkpoint(
+                "fixture",
+                CheckpointInput {
+                    task: "Layered sigma session context".to_owned(),
+                    note: "Layered sigma context includes session memory only when requested."
+                        .to_owned(),
+                },
+            )
+            .unwrap();
+
+        let default_response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "context-default",
+                "method": "tools/call",
+                "params": {
+                    "name": "build_context_pack",
+                    "arguments": {
+                        "task": "layered sigma context",
+                        "token_budget": 200
+                    }
+                }
+            }),
+        );
+        let default_structured = &default_response["result"]["structuredContent"];
+        let default_ids = context_record_ids(default_structured);
+        assert_eq!(default_ids, vec![repo_record.id.as_str()]);
+        let default_rendered =
+            serde_json::to_string(default_structured).expect("serialize default context");
+        assert!(!default_rendered.contains(&local_record.id));
+        assert!(!default_rendered.contains(&session_record.id));
+        assert_eq!(
+            default_structured["policy"]["requested_destinations"],
+            json!(["repo"])
+        );
+
+        let layered_response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "context-layered",
+                "method": "tools/call",
+                "params": {
+                    "name": "build_context_pack",
+                    "arguments": {
+                        "task": "layered sigma context",
+                        "token_budget": 240,
+                        "include_local": true,
+                        "include_session": true
+                    }
+                }
+            }),
+        );
+        let layered_structured = &layered_response["result"]["structuredContent"];
+        let layered_ids = context_record_ids(layered_structured);
+        assert!(layered_ids.contains(&repo_record.id.as_str()));
+        assert!(layered_ids.contains(&local_record.id.as_str()));
+        assert!(layered_ids.contains(&session_record.id.as_str()));
+        assert_eq!(
+            layered_structured["policy"]["requested_destinations"],
+            json!(["repo", "local", "session"])
+        );
+        assert!(
+            layered_structured["records"][0].get("ranking").is_some(),
+            "context tool should expose ranking metadata: {layered_structured}"
+        );
+    }
+
+    #[test]
     fn unknown_method_returns_json_rpc_method_not_found() {
         let (_temp, service) = test_service();
 
@@ -912,5 +1031,18 @@ mod tests {
                 format!("unknown tool: {name}")
             );
         }
+    }
+
+    fn context_record_ids(value: &Value) -> Vec<&str> {
+        value["records"]
+            .as_array()
+            .unwrap_or_else(|| panic!("context response should include records: {value}"))
+            .iter()
+            .map(|record| {
+                record["record"]["id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("context record should expose id: {record}"))
+            })
+            .collect()
     }
 }

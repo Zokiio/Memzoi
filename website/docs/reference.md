@@ -60,7 +60,7 @@ Run `memzoi <command> --help` for exact options.
 | `supersede` | `<record-id>`, `--type`, `--scope-kind`, `--visibility`, `--title`, `--body`, `--actor`, `--json` |
 | `tombstone` | `<record-id>`, `--reason`, `--actor`, `--json` |
 | `search` | `<query>`, `--scope-kind`, `--type`, `--path`, `--limit`, `--json` |
-| `context` | `--task`, `--path`, `--token-budget`, `--json` |
+| `context` | `--task`, `--path`, `--token-budget`, `--include-local`, `--include-session`, `--json` |
 | `precheck` | `--path`, `--action`, `--command`, `--scope-kind`, `--json` |
 | `export` | `<format>`, `--scope-kind`, `--json` |
 | `rebuild` | `--json` |
@@ -108,7 +108,7 @@ JSON status values:
 | Tool | Required arguments | Optional arguments |
 | --- | --- | --- |
 | `search_memory` | `query` | `scope_kind`, `scope`, `type`, `memory_type`, `path`, `path_prefix`, `limit` |
-| `build_context_pack` | `task` | `path`, `path_prefix`, `token_budget` |
+| `build_context_pack` | `task` | `path`, `path_prefix`, `token_budget`, `include_local`, `include_session` |
 | `propose_memory` | `title`, `body` | `type`, `memory_type`, `scope_kind`, `scope`, `scope_id`, `visibility`, `tags`, `source_kind`, `source_ref`, `confidence`, `actor`, `approval_mode` |
 | `precheck_path` | `path` | `scope_kind`, `scope` |
 | `precheck_action` | `action` | `path`, `scope_kind`, `scope` |
@@ -207,7 +207,7 @@ memzoi local search <query>
 
 Local records are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output.
 
-Local records are not written to `.memzoi/records/**`, are not returned by global `memzoi search` or `memzoi context`, and are not exported into repo-shared agent files. Use later proposal workflows to promote local memory into repo-shared memory.
+Local records are not written to `.memzoi/records/**`, are not returned by global `memzoi search`, and are not exported into repo-shared agent files. `memzoi context` is repo-only by default and includes local records only with `--include-local`. Use later proposal workflows to promote local memory into repo-shared memory.
 
 ## Session checkpoints
 
@@ -221,7 +221,7 @@ memzoi checkpoint list
 
 Checkpoints are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output.
 
-Checkpoints store only explicit `--note` or `--from-file` content. They are not written to `.memzoi/records/**`, are not returned by global `memzoi search` or `memzoi context`, and are not exported into repo-shared agent files. Use later session-end proposal workflows to promote durable findings into repo memory.
+Checkpoints store only explicit `--note` or `--from-file` content. They are not written to `.memzoi/records/**`, are not returned by global `memzoi search`, and are not exported into repo-shared agent files. `memzoi context` is repo-only by default and includes checkpoints only with `--include-session`. Use later session-end proposal workflows to promote durable findings into repo memory.
 
 ## Session-end promotion
 

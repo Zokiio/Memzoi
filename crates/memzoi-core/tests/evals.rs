@@ -50,6 +50,8 @@ fn context_eval_prioritizes_path_relevant_records_with_budget() -> anyhow::Resul
         task: "Implement routing recall token for Rust context packs".to_owned(),
         path_prefix: Some("crates/memzoi-core/src/context.rs".to_owned()),
         token_budget: Some(80),
+        include_local: false,
+        include_session: false,
     })?;
 
     assert!(

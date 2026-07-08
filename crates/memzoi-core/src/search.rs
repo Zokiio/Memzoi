@@ -144,6 +144,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
             score: -rank,
             snippet: Some(snippet(&record, &input.query)),
             rationale: Some("fts5 title/body match".to_owned()),
+            ranking: None,
             citations: vec![citation],
             paths,
             record,
@@ -172,105 +173,6 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
     Ok(results)
 }
 
-pub(crate) fn count_matching_memory(conn: &Connection, input: SearchInput) -> Result<usize> {
-    let fts_query = fts_query(&input.query);
-    if fts_query.is_empty() {
-        return Ok(0);
-    }
-    let path_prefix = input
-        .path_prefix
-        .as_deref()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(ToOwned::to_owned);
-
-    let status_filter = if input.include_inactive {
-        "1 = 1"
-    } else {
-        "memory_record.status = 'active'"
-    };
-    let scope_filter = if input.scope_kind.is_some() {
-        "memory_record.scope_kind = ?2"
-    } else {
-        "1 = 1"
-    };
-    let scope_id_filter = if input.scope_id.is_some() {
-        "memory_record.scope_id = ?3"
-    } else {
-        "1 = 1"
-    };
-    let type_filter = if input.memory_type.is_some() {
-        "memory_record.type = ?4"
-    } else {
-        "1 = 1"
-    };
-    let destination = input.destination.unwrap_or(MemoryDestination::Repo);
-    let destination_filter = "memory_record.destination = ?7";
-    let path_filter = if path_prefix.is_some() {
-        "EXISTS (
-            SELECT 1 FROM memory_path
-            WHERE memory_path.record_id = memory_record.id
-              AND (
-                memory_path.path = ?5
-                OR memory_path.path LIKE ?6
-                OR ?5 LIKE memory_path.path || '/%'
-                OR (
-                    memory_path.path LIKE '%/**'
-                    AND (
-                        ?5 = substr(memory_path.path, 1, length(memory_path.path) - 3)
-                        OR ?5 LIKE substr(memory_path.path, 1, length(memory_path.path) - 2) || '%'
-                    )
-                )
-                OR (
-                    ?5 LIKE '%/**'
-                    AND (
-                        memory_path.path = substr(?5, 1, length(?5) - 3)
-                        OR memory_path.path LIKE substr(?5, 1, length(?5) - 2) || '%'
-                    )
-                )
-              )
-        )"
-    } else {
-        "1 = 1"
-    };
-
-    let sql = format!(
-        "SELECT COUNT(DISTINCT memory_record.id)
-         FROM memory_fts
-         JOIN memory_record ON memory_record.rowid = memory_fts.rowid
-         WHERE memory_fts MATCH ?1
-           AND {status_filter}
-           AND {destination_filter}
-           AND {scope_filter}
-           AND {scope_id_filter}
-           AND {type_filter}
-           AND {path_filter}"
-    );
-
-    let scope_kind = input.scope_kind.map(|value| value.as_str().to_owned());
-    let memory_type = input.memory_type.map(|value| value.as_str().to_owned());
-    let destination = destination.as_str().to_owned();
-    let path_like = path_prefix
-        .as_ref()
-        .map(|path| format!("{}/%", path.trim_end_matches('/')));
-    let count = conn
-        .query_row(
-            &sql,
-            params![
-                fts_query,
-                scope_kind,
-                input.scope_id,
-                memory_type,
-                path_prefix,
-                path_like,
-                destination,
-            ],
-            |row| row.get::<_, i64>(0),
-        )
-        .context("failed to count matching memory")?;
-    Ok(count as usize)
-}
-
 pub(crate) fn load_paths(conn: &Connection, record_id: &str) -> Result<Vec<MemoryPath>> {
     let mut stmt = conn.prepare(
         "SELECT path, symbol, line_start, line_end
@@ -294,6 +196,9 @@ pub(crate) fn citation_for(record: &MemoryRecord, path: Option<&MemoryPath>) -> 
         record_id: record.id.clone(),
         memory_type: record.memory_type,
         scope_kind: record.scope_kind,
+        destination: record.destination,
+        visibility: record.visibility,
+        source_kind: record.source_kind.clone(),
         source_ref: record.source_ref.clone(),
         path: path.map(|path| path.path.clone()),
     }

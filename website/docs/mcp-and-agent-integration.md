@@ -43,7 +43,7 @@ The server exposes:
 | Tool | Purpose |
 | --- | --- |
 | `search_memory` | Search active memory records by text with optional scope, type, path, and limit filters. |
-| `build_context_pack` | Build a prompt-ready context pack for a task. |
+| `build_context_pack` | Build a prompt-ready context pack for a task, with optional local/session memory opt-in. |
 | `propose_memory` | Create a memory proposal using the effective approval policy or an `approval_mode` override. |
 | `precheck_path` | Check a path against warnings, risks, and failed attempts. |
 | `precheck_action` | Check a planned action, optionally scoped to a path. |
@@ -96,6 +96,7 @@ The prompt tells agents to:
 
 - Run `memzoi context --task "<task>"` before non-trivial work.
 - Add `--path <relative/path>` when editing specific files.
+- Add `--include-local` or `--include-session` only when private runtime memory or explicit checkpoints should be part of the context.
 - Run `memzoi precheck` before risky actions.
 - Propose durable repo knowledge with `memzoi propose`.
 - Avoid secrets, raw chat logs, temporary task progress, and private user facts.
