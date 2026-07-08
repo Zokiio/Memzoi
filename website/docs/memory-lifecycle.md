@@ -105,6 +105,42 @@ Checkpoint records are marked with `destination: session`, `lane: session`, `typ
 
 Checkpoints are not included in global `memzoi search`, `memzoi context`, or exports yet. Promotion from checkpoints into repo-shared memory should go through later session-end proposal workflows, not direct canonical writes.
 
+## Session-end promotion
+
+Session-end promotion turns explicit structured findings into routed memory writes. It is not automatic extraction: Memzoi reads only a structured YAML file or the explicit body of a checkpoint.
+
+Use the session-end command with one source:
+
+```bash
+memzoi session-end --from-file notes.yml
+memzoi session-end --from-checkpoint <checkpoint-id>
+```
+
+The input must contain `task` and `candidates`:
+
+```yaml
+task: "Implement auth middleware"
+candidates:
+  - destination: repo
+    type: decision
+    lane: semantic
+    title: Protected routes validate sessions server-side
+    body: Protected routes must validate sessions server-side.
+    sensitivity: repo-safe
+    reason: Learned while implementing middleware.
+    scope:
+      kind: repo
+      paths:
+        - src/auth/**
+    tags:
+      - auth
+      - security
+```
+
+Memzoi validates every candidate before writing anything. `repo` candidates must use `sensitivity: repo-safe`; they become pending OKF proposal files under `.memzoi/proposals/pending/` and are never directly applied to `.memzoi/records/**`. `local` candidates become private runtime records. `session` candidates become runtime checkpoints and must use `type: episode` with `lane: session`. `discard` and `needs_review` candidates create no writes.
+
+Session-end promotion does not inspect shell history, transcripts, chat logs, hidden agent state, or context packs. Free-text notes and free-text checkpoint bodies fail until a later extraction workflow exists.
+
 ## Approval policy
 
 Effective proposal approval mode is resolved in this order:

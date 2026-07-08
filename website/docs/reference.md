@@ -16,6 +16,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi proposal-files` | List, show, validate, and apply OKF proposal files under `.memzoi/proposals/pending/`. |
 | `memzoi local` | Add, list, and search local-only runtime memory records. |
 | `memzoi checkpoint` | Add and list runtime session checkpoints. |
+| `memzoi session-end` | Promote explicit structured session-end candidates into proposal files or runtime memory. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
@@ -52,6 +53,7 @@ Run `memzoi <command> --help` for exact options.
 | `local search` | `<query>`, `--limit`, `--json` |
 | `checkpoint add` | `--task`, `--note` or `--from-file`, `--actor`, `--json` |
 | `checkpoint list` | `--json` |
+| `session-end` | `--from-file <path>` or `--from-checkpoint <checkpoint-id>`, `--actor`, `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
@@ -210,6 +212,40 @@ memzoi checkpoint list
 Checkpoints are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output.
 
 Checkpoints store only explicit `--note` or `--from-file` content. They are not written to `.memzoi/records/**`, are not returned by global `memzoi search` or `memzoi context`, and are not exported into repo-shared agent files. Use later session-end proposal workflows to promote durable findings into repo memory.
+
+## Session-end promotion
+
+Session-end promotion reads only explicit structured YAML, either from a file or from an existing checkpoint body:
+
+```bash
+memzoi session-end --from-file notes.yml
+memzoi session-end --from-checkpoint <checkpoint-id>
+```
+
+The input must include a `task` and a `candidates` list:
+
+```yaml
+task: "Implement auth middleware"
+candidates:
+  - destination: repo
+    type: decision
+    lane: semantic
+    title: Protected routes validate sessions server-side
+    body: Protected routes must validate sessions server-side.
+    sensitivity: repo-safe
+    reason: Learned while implementing middleware.
+    scope:
+      kind: repo
+      paths:
+        - src/auth/**
+    tags:
+      - auth
+      - security
+```
+
+Memzoi validates the whole batch before writing. `repo` candidates must be `repo-safe` and become pending `.memzoi/proposals/pending/*.md` proposal files only; they are not applied and do not write canonical `.memzoi/records/*.md` files. `local` candidates create private runtime records. `session` candidates create runtime checkpoint records. `discard` and `needs_review` candidates create no writes.
+
+`session-end` does not inspect transcripts, chat logs, shell history, hidden agent state, or context packs. Free-text notes and checkpoints are rejected until a future extraction workflow exists.
 
 ## Scope kinds
 

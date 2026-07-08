@@ -11,6 +11,7 @@ mod proposals;
 mod schema;
 mod search;
 mod service;
+mod session_end;
 
 #[cfg(test)]
 pub(crate) use db::{init_database, open_database};
@@ -44,4 +45,8 @@ pub use service::{
     CheckpointInput, ExportFormat, ExportInput, ExportResult, InitBundleResult, InitRequest,
     InitResult, LocalMemoryInput, MemoryService, ProposalApprovalOverride, ProposeOptions,
     ProposeResult, RebuildResult, init_bundle,
+};
+pub use session_end::{
+    SessionEndCandidate, SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument,
+    SessionEndResult, SessionEndScope, SessionEndWrite, parse_session_end_document,
 };

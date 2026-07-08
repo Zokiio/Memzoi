@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -25,6 +25,11 @@ use crate::{
     context, db,
     events::{AppendEvent, append_event, now_utc},
     exporters, okf, precheck, proposals, search,
+    session_end::{
+        SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument, SessionEndResult,
+        SessionEndWrite, plan_repo_proposal, validate_session_end_document,
+        write_repo_proposal_file,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,6 +466,110 @@ impl MemoryService {
         active_checkpoint_records(&self.conn)
     }
 
+    pub fn show_checkpoint(&self, record_id: &str) -> Result<MemoryRecord> {
+        checkpoint_record(&self.conn, record_id)
+            .with_context(|| format!("checkpoint not found: {record_id}"))?
+            .with_context(|| format!("checkpoint not found: {record_id}"))
+    }
+
+    pub fn promote_session_end(
+        &self,
+        actor: &str,
+        document: SessionEndDocument,
+    ) -> Result<SessionEndResult> {
+        validate_session_end_document(&document)?;
+        let timestamp = now_utc()?;
+        let pending_root = self.paths.proposals_dir().join("pending");
+        let mut reserved_proposal_ids = BTreeSet::new();
+        let mut repo_plans = Vec::with_capacity(document.candidates.len());
+
+        for candidate in &document.candidates {
+            if candidate.destination == MemoryDestination::Repo {
+                repo_plans.push(Some(plan_repo_proposal(
+                    &pending_root,
+                    &candidate.title,
+                    &mut reserved_proposal_ids,
+                )?));
+            } else {
+                repo_plans.push(None);
+            }
+        }
+
+        let mut results = Vec::with_capacity(document.candidates.len());
+        for (index, (candidate, repo_plan)) in
+            document.candidates.into_iter().zip(repo_plans).enumerate()
+        {
+            let title = candidate.title.trim().to_owned();
+            let write = match candidate.destination {
+                MemoryDestination::Repo => {
+                    let plan = repo_plan
+                        .context("repo session-end candidate should have a proposal plan")?;
+                    let path = write_repo_proposal_file(
+                        &pending_root,
+                        &plan.proposal_id,
+                        &candidate,
+                        actor,
+                        &timestamp,
+                    )?;
+                    Some(SessionEndWrite::ProposalFile {
+                        proposal_id: plan.proposal_id,
+                        path,
+                    })
+                }
+                MemoryDestination::Local => {
+                    let record = self.create_local_memory(
+                        actor,
+                        LocalMemoryInput {
+                            memory_type: candidate.memory_type,
+                            lane: candidate.lane,
+                            title: candidate.title.clone(),
+                            body: candidate.body.clone(),
+                        },
+                    )?;
+                    Some(SessionEndWrite::RuntimeRecord {
+                        record_id: record.id,
+                        destination: MemoryDestination::Local,
+                    })
+                }
+                MemoryDestination::Session => {
+                    let record = self.create_checkpoint(
+                        actor,
+                        CheckpointInput {
+                            task: candidate.title.clone(),
+                            note: candidate.body.clone(),
+                        },
+                    )?;
+                    Some(SessionEndWrite::RuntimeRecord {
+                        record_id: record.id,
+                        destination: MemoryDestination::Session,
+                    })
+                }
+                MemoryDestination::Discard | MemoryDestination::NeedsReview => None,
+            };
+            let status = match candidate.destination {
+                MemoryDestination::Discard => SessionEndCandidateStatus::Skipped,
+                MemoryDestination::NeedsReview => SessionEndCandidateStatus::Blocked,
+                MemoryDestination::Repo | MemoryDestination::Local | MemoryDestination::Session => {
+                    SessionEndCandidateStatus::Written
+                }
+            };
+            results.push(SessionEndCandidateResult {
+                index,
+                destination: candidate.destination,
+                memory_type: candidate.memory_type,
+                lane: candidate.lane,
+                title,
+                status,
+                write,
+            });
+        }
+
+        Ok(SessionEndResult {
+            task: document.task.trim().to_owned(),
+            candidates: results,
+        })
+    }
+
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
         context::build_context_pack(&self.conn, input)
     }
@@ -707,6 +816,22 @@ fn active_checkpoint_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
     )?;
     let rows = stmt.query_map([], search::record_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn checkpoint_record(conn: &Connection, record_id: &str) -> Result<Option<MemoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
+                supersedes_id, expires_at
+         FROM memory_record
+         WHERE id = ?1
+           AND status = 'active'
+           AND destination = 'session'
+           AND source_kind = 'memzoi-checkpoint'",
+    )?;
+    stmt.query_row([record_id], search::record_from_row)
+        .optional()
+        .map_err(Into::into)
 }
 
 fn records_for_runtime_preservation(conn: &Connection) -> Result<Vec<MemoryRecord>> {
