@@ -581,13 +581,7 @@ fn local_add_command(
         },
     )?;
     if as_json {
-        print_json(&json!({
-            "record_id": record.id,
-            "destination": record.destination.as_str(),
-            "visibility": record.visibility.as_str(),
-            "status": record.status.as_str(),
-            "title": record.title,
-        }))
+        print_json(&local_record_json(&record))
     } else {
         println!("added\t{}\t{}", record.destination.as_str(), record.id);
         Ok(())

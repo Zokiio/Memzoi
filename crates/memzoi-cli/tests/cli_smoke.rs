@@ -14,8 +14,12 @@ use semver::Version;
 use serde_json::Value;
 
 fn memzoi() -> Command {
+    memzoi_with_home(&test_memzoi_home())
+}
+
+fn memzoi_with_home(memzoi_home: &Path) -> Command {
     let mut command = Command::cargo_bin("memzoi").expect("memzoi binary");
-    command.env("MEMZOI_HOME", test_memzoi_home());
+    command.env("MEMZOI_HOME", memzoi_home);
     command
 }
 
@@ -1596,6 +1600,7 @@ fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
     assert_json_string_field(&added, &["destination"], "local");
     assert_json_string_field(&added, &["visibility"], "private");
     assert_json_string_field(&added, &["status"], "active");
+    assert_json_string_field(&added, &["source_kind"], "memzoi-local");
 
     assert!(
         !test_paths(repo)
@@ -1619,6 +1624,7 @@ fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
     assert_json_string_field(&listed, &["destination"], "local");
     assert_eq!(record_ids_from_json(&listed), vec![record_id.as_str()]);
     assert_json_string_field(&listed["records"][0], &["destination"], "local");
+    assert_json_string_field(&listed["records"][0], &["source_kind"], "memzoi-local");
 
     let local_search = run_json_command(repo, &["local", "search", "zircon", "--json"]);
     assert_eq!(
@@ -1630,6 +1636,11 @@ fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
         &local_search["records"][0]["record"],
         &["destination"],
         "local",
+    );
+    assert_json_string_field(
+        &local_search["records"][0]["record"],
+        &["source_kind"],
+        "memzoi-local",
     );
 
     let global_search = run_json_command(repo, &["search", "zircon", "--json"]);
@@ -1643,6 +1654,28 @@ fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
         written_paths_from_json(&export).is_empty(),
         "local memory should not be exported as repo memory: {export}"
     );
+
+    let inactive = run_json_command(
+        repo,
+        &[
+            "local",
+            "add",
+            "--type",
+            "fact",
+            "--title",
+            "Inactive local zircon archive",
+            "--body",
+            "This inactive local zircon row should survive rebuild even though local list hides it.",
+            "--json",
+        ],
+    );
+    let inactive_id = json_string(&inactive, "record_id").to_owned();
+    conn.execute(
+        "UPDATE memory_record SET status = 'tombstoned' WHERE id = ?1",
+        [&inactive_id],
+    )
+    .expect("mark local row inactive");
+    drop(conn);
 
     fs::create_dir_all(test_paths(repo).records_dir()).expect("create records dir");
     fs::write(
@@ -1687,6 +1720,43 @@ Canonical repo zircon memory should rebuild as repo destination.
         &repo_after_rebuild["records"][0]["record"],
         &["destination"],
         "repo",
+    );
+
+    let conn = Connection::open(memory_db_path(repo)).expect("open runtime db after rebuild");
+    let (inactive_destination, inactive_status): (String, String) = conn
+        .query_row(
+            "SELECT destination, status FROM memory_record WHERE id = ?1",
+            [&inactive_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("inactive local record should survive rebuild");
+    assert_eq!(inactive_destination, "local");
+    assert_eq!(inactive_status, "tombstoned");
+}
+
+#[test]
+fn rebuild_refuses_to_delete_unreadable_runtime_db() {
+    let isolated_home = tempfile::tempdir().expect("isolated memzoi home");
+    let repo = initialized_temp_repo_with_home(isolated_home.path());
+    let repo = repo.path();
+    let db_path = MemoryPaths::with_runtime_home(
+        repo.canonicalize().expect("canonical repo path"),
+        isolated_home.path().to_path_buf(),
+    )
+    .db_path;
+    let original_bytes = b"not a sqlite database with local runtime memory";
+    fs::write(&db_path, original_bytes).expect("corrupt runtime db");
+
+    let stderr =
+        run_command_failure_stderr_with_home(repo, &["rebuild", "--json"], isolated_home.path());
+    assert!(
+        stderr.contains("local runtime memory could not be"),
+        "rebuild should explain that local runtime memory could not be preserved: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&db_path).expect("runtime db should remain after failed rebuild"),
+        original_bytes,
+        "failed rebuild must not delete an unreadable runtime db"
     );
 }
 
@@ -1923,13 +1993,6 @@ Changing rebuild sentinel precheck command handling previously hid destructive c
 "#,
     )
     .expect("write canonical risk record");
-
-    let db_path = memory_db_path(repo);
-    fs::write(&db_path, "corrupt derived cache").expect("corrupt old derived memory db");
-    fs::write(db_path.with_extension("db-wal"), "stale wal sidecar")
-        .expect("write stale WAL sidecar");
-    fs::write(db_path.with_extension("db-shm"), "stale shm sidecar")
-        .expect("write stale SHM sidecar");
 
     let rebuild = run_json_command(repo, &["rebuild", "--json"]);
     assert_json_array_contains(&rebuild, "record_ids", "core/canonical-rebuild-decision");
@@ -2278,10 +2341,14 @@ fn export_instruction_markdown_json_writes_agent_files_and_filters_non_projectab
 }
 
 fn initialized_temp_repo() -> tempfile::TempDir {
+    initialized_temp_repo_with_home(&test_memzoi_home())
+}
+
+fn initialized_temp_repo_with_home(memzoi_home: &Path) -> tempfile::TempDir {
     let repo = tempfile::tempdir().expect("temp repo");
     fs::create_dir(repo.path().join(".git")).expect("create git marker");
 
-    let mut init = memzoi();
+    let mut init = memzoi_with_home(memzoi_home);
     init.args(["init", "--json"])
         .current_dir(repo.path())
         .assert()
@@ -2303,7 +2370,11 @@ fn run_json_command_failure(repo: &Path, args: &[&str]) -> Value {
 }
 
 fn run_command_failure_stderr(repo: &Path, args: &[&str]) -> String {
-    let mut cmd = memzoi();
+    run_command_failure_stderr_with_home(repo, args, &test_memzoi_home())
+}
+
+fn run_command_failure_stderr_with_home(repo: &Path, args: &[&str], memzoi_home: &Path) -> String {
+    let mut cmd = memzoi_with_home(memzoi_home);
     let assert = cmd.args(args).current_dir(repo).assert().failure();
     std::str::from_utf8(&assert.get_output().stderr)
         .expect("stderr is utf-8")

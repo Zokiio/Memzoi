@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -455,6 +455,7 @@ impl MemoryService {
         let records = okf::read_okf_record_files(&records_root)?;
         guard_no_open_proposals(&paths.db_path)?;
         let local_records = load_local_records_for_rebuild(&paths.db_path)?;
+        guard_no_local_record_id_collisions(&records, &local_records)?;
         remove_database_files(&paths.db_path)?;
         let conn = db::open_database(&paths.db_path)?;
         db::init_database(&conn)?;
@@ -628,17 +629,73 @@ fn active_records_for_destination(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn records_for_destination(
+    conn: &Connection,
+    destination: MemoryDestination,
+) -> Result<Vec<MemoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
+                supersedes_id, expires_at
+         FROM memory_record
+         WHERE destination = ?1
+         ORDER BY updated_at DESC, id ASC",
+    )?;
+    let rows = stmt.query_map([destination.as_str()], search::record_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn load_local_records_for_rebuild(db_path: &Path) -> Result<Vec<MemoryRecord>> {
     if !db_path.exists() {
         return Ok(Vec::new());
     }
-    let Ok(conn) = db::open_database(db_path) else {
-        return Ok(Vec::new());
-    };
-    if db::init_database(&conn).is_err() {
-        return Ok(Vec::new());
+    let conn = db::open_database(db_path).with_context(|| {
+        format!(
+            "rebuild refused because local runtime memory could not be preserved from {}",
+            db_path.display()
+        )
+    })?;
+    db::init_database(&conn).with_context(|| {
+        format!(
+            "rebuild refused because local runtime memory could not be migrated before preservation from {}",
+            db_path.display()
+        )
+    })?;
+    records_for_destination(&conn, MemoryDestination::Local).context(
+        "rebuild refused because local runtime memory could not be loaded for preservation",
+    )
+}
+
+fn guard_no_local_record_id_collisions(
+    records: &[okf::OkfRecordFile],
+    local_records: &[MemoryRecord],
+) -> Result<()> {
+    if local_records.is_empty() {
+        return Ok(());
     }
-    active_records_for_destination(&conn, MemoryDestination::Local)
+
+    let repo_ids = records
+        .iter()
+        .map(|record| record.concept_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let collisions = local_records
+        .iter()
+        .filter_map(|record| {
+            repo_ids
+                .contains(record.id.as_str())
+                .then_some(record.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    if collisions.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "rebuild refused because local runtime memory record id{} would collide with canonical repo record{}: {}",
+        if collisions.len() == 1 { "" } else { "s" },
+        if collisions.len() == 1 { "" } else { "s" },
+        collisions.join(", ")
+    );
 }
 
 fn restore_local_records_after_rebuild(conn: &Connection, records: &[MemoryRecord]) -> Result<()> {
