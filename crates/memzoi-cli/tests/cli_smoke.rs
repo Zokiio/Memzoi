@@ -2914,7 +2914,7 @@ fn context_json_returns_prompt_ready_pack_records_and_citations() {
         included.iter().any(|item| {
             item.get("record_id").and_then(Value::as_str) == Some(matching.as_str())
                 && item.get("type").and_then(Value::as_str) == Some("procedure")
-                && item.get("provenance").and_then(Value::as_str) == Some("repo")
+                && item.get("provenance").and_then(Value::as_str) == Some("git")
                 && item.get("destination").and_then(Value::as_str) == Some("repo")
         }),
         "context JSON should expose included record provenance metadata: {pack}"

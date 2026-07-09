@@ -5,6 +5,7 @@ mod error;
 mod events;
 mod exporters;
 mod handoff;
+mod memory_policy;
 mod models;
 mod okf;
 mod precheck;
@@ -24,6 +25,10 @@ pub use config::{
 pub use context::ContextPackInput;
 pub use error::{CoreError, Result};
 pub use handoff::HandoffInput;
+pub use memory_policy::{
+    MemoryDestinationPolicy, MemoryPlane, MemoryReviewRequirement, MemoryWriteRoute,
+    RepoMemoryExclusion, TWO_PLANE_MEMORY_POLICY, TwoPlaneMemoryPolicy,
+};
 pub use models::{
     ContextPack, ContextPackBudget, ContextPackIncludedItem, ContextPackOmittedItem,
     ContextPackPolicy, ContextPackWarning, HandoffPack, MemoryCitation, MemoryDestination,

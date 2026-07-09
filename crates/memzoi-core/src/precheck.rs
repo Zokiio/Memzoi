@@ -39,7 +39,7 @@ pub fn precheck(conn: &Connection, input: PrecheckInput) -> Result<Vec<PrecheckW
         .into_iter()
         .filter(is_governance_memory)
         .map(warning_from_result)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     append_precheck_event(conn, &input, &warnings)?;
     Ok(warnings)
@@ -62,22 +62,27 @@ fn is_governance_memory(result: &SearchResult) -> bool {
     )
 }
 
-fn warning_from_result(result: SearchResult) -> PrecheckWarning {
+fn warning_from_result(result: SearchResult) -> Result<PrecheckWarning> {
     let severity = severity_for(result.record.memory_type).to_owned();
-    let citation = result
-        .citations
-        .first()
-        .cloned()
-        .unwrap_or_else(|| MemoryCitation {
+    let citation = match result.citations.first().cloned() {
+        Some(citation) => citation,
+        None => MemoryCitation {
             record_id: result.record.id.clone(),
             memory_type: result.record.memory_type,
             scope_kind: result.record.scope_kind,
+            provenance: result.record.destination.policy().plane.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "precheck result '{}' has a destination without a memory plane",
+                    result.record.id
+                )
+            })?,
             destination: result.record.destination,
             visibility: result.record.visibility,
             source_kind: result.record.source_kind.clone(),
             source_ref: result.record.source_ref.clone(),
             path: result.paths.first().map(|path| path.path.clone()),
-        });
+        },
+    };
     let suggested_next_step = match result.record.memory_type {
         MemoryType::Risk => "Review the cited risk before editing and consider a targeted test.",
         MemoryType::Warning => "Review the cited warning before proceeding.",
@@ -88,14 +93,14 @@ fn warning_from_result(result: SearchResult) -> PrecheckWarning {
     }
     .to_owned();
 
-    PrecheckWarning {
+    Ok(PrecheckWarning {
         id: format!("warn_{}", result.record.id),
         record_id: result.record.id,
         message: format!("{}: {}", result.record.title, result.record.body),
         severity,
         citations: vec![citation],
         suggested_next_step,
-    }
+    })
 }
 
 fn severity_for(memory_type: MemoryType) -> &'static str {

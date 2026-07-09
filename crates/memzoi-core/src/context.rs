@@ -86,7 +86,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
         .selected
         .iter()
         .map(|item| primary_citation(&item.result))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let selected = selection
         .selected
         .iter()
@@ -289,7 +289,7 @@ fn path_candidates(
         {
             continue;
         }
-        let citation = citation_for(&record, paths.first());
+        let citation = citation_for(&record, paths.first())?;
         results.push(SearchResult {
             record,
             score: 0.0,
@@ -555,7 +555,7 @@ fn included_items(
             scope_kind: item.result.record.scope_kind,
             path: item.result.paths.first().map(|path| path.path.clone()),
             citation: citation.clone(),
-            provenance: item.result.record.destination,
+            provenance: citation.provenance,
             destination: item.result.record.destination,
             score: item.result.score,
             rationale: item.result.rationale.clone(),
@@ -580,17 +580,30 @@ fn omitted_items(omitted: &[SelectedContextItem]) -> Vec<ContextPackOmittedItem>
         .collect()
 }
 
-fn primary_citation(result: &SearchResult) -> MemoryCitation {
-    result.citations.first().cloned().unwrap_or(MemoryCitation {
-        record_id: result.record.id.clone(),
-        memory_type: result.record.memory_type,
-        scope_kind: result.record.scope_kind,
-        destination: result.record.destination,
-        visibility: result.record.visibility,
-        source_kind: result.record.source_kind.clone(),
-        source_ref: result.record.source_ref.clone(),
-        path: result.paths.first().map(|path| path.path.clone()),
-    })
+fn primary_citation(result: &SearchResult) -> Result<MemoryCitation> {
+    let expected_provenance = result.record.destination.policy().plane.ok_or_else(|| {
+        anyhow::anyhow!(
+            "memory recall invariant violated: destination {} has no memory plane",
+            result.record.destination
+        )
+    })?;
+    match result.citations.first().cloned() {
+        Some(citation)
+            if citation.provenance == expected_provenance
+                && citation.destination == result.record.destination =>
+        {
+            Ok(citation)
+        }
+        Some(citation) => Err(anyhow::anyhow!(
+            "memory recall invariant violated: citation for {} has provenance={} and destination={}, expected provenance={} and destination={}",
+            result.record.id,
+            citation.provenance,
+            citation.destination,
+            expected_provenance,
+            result.record.destination,
+        )),
+        None => citation_for(&result.record, result.paths.first()),
+    }
 }
 
 fn estimate_result(result: &SearchResult) -> usize {
@@ -619,20 +632,14 @@ fn render_prompt(
 }
 
 fn render_line(result: &SearchResult, citation: &MemoryCitation) -> String {
-    let provenance = if result.record.destination == MemoryDestination::Repo {
-        result.record.scope_kind.as_str().to_owned()
-    } else {
-        format!(
-            "{}; destination={}",
-            result.record.scope_kind.as_str(),
-            result.record.destination.as_str()
-        )
-    };
+    let provenance = citation.provenance;
     format!(
-        "- [{}] ({}/{}) {}: {}\n  Source: {}",
+        "- [{}] ({}/provenance={}/destination={}/scope={}) {}: {}\n  Source: {}",
         citation.record_id,
         result.record.memory_type.as_str(),
         provenance,
+        citation.destination,
+        result.record.scope_kind,
         result.record.title,
         result.record.body,
         citation
@@ -879,7 +886,7 @@ mod tests {
         );
         assert_eq!(included[0]["type"], "procedure");
         assert_eq!(included[0]["lane"], "semantic");
-        assert_eq!(included[0]["provenance"], "repo");
+        assert_eq!(included[0]["provenance"], "git");
         assert_eq!(included[0]["destination"], "repo");
         assert_eq!(included[0]["citation"]["record_id"], "rec-path-relevant");
         assert_eq!(

@@ -4,80 +4,157 @@ title: Memory Lifecycle
 
 # Memory Lifecycle
 
-Memzoi separates agent discovery from durable mutation. New memories are proposed first, then approved, applied, or rejected. In v0.1.1, proposal creation is low-friction: the built-in policy auto-approves valid proposals, but auto-approved still means `approved`, not `applied`. Canonical `.memzoi/records/*.md` files are written only by an explicit apply step.
+This page is the normative, human-readable statement of Memzoi's two-plane memory
+policy. The executable contract is exposed by `MemoryDestination::ALL`,
+`MemoryDestination::policy()`, `MemoryPlane`, and `TWO_PLANE_MEMORY_POLICY` in
+`memzoi-core`; this page explains what that contract means for users and agents.
 
-## Proposal states
+## The two planes
 
-Proposal state is separate from canonical record state:
+Memzoi deliberately separates shared Git truth from local runtime continuity:
 
-| State | Meaning |
-| --- | --- |
-| `pending` | Proposal exists but has not been approved. |
-| `validated` | Validation passed, but approval is still required. Most flows do not create this state yet, but it remains part of the model. |
-| `approved` | Proposal is approved for durable write, but no canonical `.memzoi/records/*.md` file has been written. |
-| `applied` | Proposal produced an active canonical record and no longer blocks rebuilds. |
-| `rejected` | Proposal was intentionally closed without applying. |
-| `open` | Synthetic inbox filter covering `pending`, `validated`, and `approved`. |
+| Plane | Responsibility | Canonical location and authority |
+| --- | --- | --- |
+| **Git** | Reviewed, durable, repo-shared project knowledge: facts, decisions, procedures, warnings, risks, and failed attempts that belong in the repository. | `.memzoi/records/*.md` is the canonical source. These compact Markdown records are diffable and are restored into runtime indexes by `memzoi rebuild`. |
+| **Runtime** | Fast local recall, private preferences, task continuity, checkpoints, and derived operational state. | `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/` contains the project runtime state, including `memory.db` and generated exports. It is noncanonical and must not be treated as Git truth. |
 
-Record state is stored on canonical record files. Applied records normally become `active`; later lifecycle commands can mark records `superseded`, `expired`, `tombstoned`, or `redacted`.
+The Git plane may also contain a pending file-backed proposal at
+`.memzoi/proposals/pending/<proposal-id>.md` when it is intentionally being
+reviewed in Git and is `sensitivity: repo-safe`. A pending proposal is a review
+packet, not a canonical record. Applying it explicitly creates the compact
+record under `.memzoi/records/`; the pending file is not itself the durable
+memory source.
 
-## Proposal files
+Runtime rows are not a second canonical source for repo memory. Rebuild reads
+the Git records, recreates derived runtime state, and preserves compatible
+local/session runtime rows; it does not promote runtime rows or make SQLite
+canonical. See [Exports and files](./exports-and-files.md) for file layout and
+commit guidance.
 
-The OKF-compatible proposal file schema is defined for review packets under:
+## Destination, plane, lane, and provenance
 
-```text
-.memzoi/proposals/pending/<proposal-id>.md
+**Destination** is the pre-write answer to “where may this candidate go?”
+**Lane** is the knowledge-use/retention shape (`session`, `semantic`,
+`episodic`, or `procedural`). A lane never grants permission to write to a
+plane. **Provenance** reports the plane from which recalled or prechecked
+memory came (`git` or `runtime`); it is intentionally distinct from
+destination. Recall and context output should therefore be read as separate
+`provenance=...` and `destination=...` fields. See
+[Recall and precheck](./recall-and-precheck.md) for output details.
+
+The current destination set is exactly the five values in
+`MemoryDestination::ALL`:
+
+| Destination | Plane | Write route | Review requirement | Meaning |
+| --- | --- | --- | --- | --- |
+| `repo` | `git` | `file_backed_proposal` | `proposal_review` | Repo-shared durable knowledge; write a pending file-backed proposal before a canonical record. |
+| `local` | `runtime` | `runtime_local` | `no_review` | Private local runtime memory; never a repo record by this route. |
+| `session` | `runtime` | `runtime_session` | `no_review` | Task continuity/checkpoint state; never a repo record by this route. |
+| `discard` | none | `no_write` | `no_review` | Do not retain the candidate. |
+| `needs_review` | none | `no_write` | `human_decision` | Do not write it yet; a human must decide the sharing boundary. |
+
+`team` and `cloud` are future-only labels. They are not accepted
+`MemoryDestination` values, do not have a current plane or write route, and
+must not be presented as available destinations. There is no team runtime
+plane, hosted storage, or sync implementation in this MVP.
+
+## Git-plane responsibilities and exclusions
+
+Git-plane memory must be human-readable, reviewable, scoped to the repository,
+and safe to share with repository collaborators. A repo candidate is eligible
+for the Git plane only after the proposal review boundary and, for OKF proposal
+files, with `sensitivity: repo-safe`.
+
+The following categories are excluded from canonical repo records:
+
+- `secrets` (including credentials);
+- `raw_chat_transcripts`;
+- `private_personal_data`;
+- `temporary_task_state`; and
+- `local_only_state`.
+
+Do not put these categories in `.memzoi/records/*.md` or a repo-shared pending proposal.
+A blocked sensitivity is not made safe by auto-approval. Classify or sanitize
+the candidate, or use `needs_review`; do not add an override that bypasses the
+boundary.
+
+Memzoi does **not** ingest raw transcripts. It does not inspect shell history,
+chat logs, hidden agent state, or context packs. `memzoi checkpoint add` stores
+only the explicit `--note` or `--from-file` content supplied by the caller as
+runtime continuity. `memzoi session-end` accepts explicit structured input
+(`task` plus `candidates`) from `--from-file` or a checkpoint; free-text notes
+and free-text checkpoint bodies are not an extraction source. See
+[OKF profile](./okf-profile.md) for the file-native proposal/record details.
+
+## Command boundary
+
+The following is the authoritative boundary for current CLI behavior. A
+command's JSON output, event, or database row does not change what it writes.
+
+| Boundary | Commands | What is written (or not written) |
+| --- | --- | --- |
+| **Canonical Git record writers** | `memzoi apply <proposal-id>`; `memzoi proposals apply --all-approved` | Apply approved DB proposals and write canonical `.memzoi/records/*.md`. |
+|  | `memzoi propose --apply` | Create, validate, approve, and then explicitly apply one proposal. The flag supplies an `auto` per-call approval override and writes a canonical record only because `--apply` was requested; `--manual --apply` is invalid. |
+|  | `memzoi proposal-files apply <proposal-id>` | Explicitly apply one valid repo-safe OKF `create` proposal file to `.memzoi/records/*.md`. It leaves the pending file in place and does not update the runtime SQLite index; run `memzoi rebuild` for derived search state. |
+|  | `memzoi supersede <record-id>`; `memzoi tombstone <record-id>` | Explicitly update canonical record files and their lifecycle status. |
+|  | `memzoi quickstart --apply-sample` | Explicitly creates the quickstart sample as a canonical repo record (and also generates an export). |
+| **Pending file proposal writers** | `memzoi session-end --from-file <path>`; `memzoi session-end --from-checkpoint <id>` with a `repo` candidate | Write `.memzoi/proposals/pending/*.md` review packets. They do **not** write `.memzoi/records/*.md`; review and an explicit proposal-file apply are separate steps. |
+| **DB proposal-state writers (not file/canonical writers)** | `memzoi propose`; `memzoi approve <proposal-id>`; `memzoi reject <proposal-id>` | Create or change proposal state in the runtime database. `propose` without `--apply` never writes a canonical record; approval alone never writes one. |
+| **Runtime local/session writers** | `memzoi local add`; `memzoi checkpoint add`; `memzoi session-end ...` with `local` or `session` candidates | Write private runtime rows under the project runtime directory. Session candidates become checkpoints and require `type: episode` plus `lane: session`; neither route writes a Git record. |
+| **No-write outcomes** | `discard` or `needs_review` candidates in `memzoi session-end` | Write neither a canonical record, pending proposal file, nor runtime memory row. `discard` is skipped; `needs_review` is blocked until a human decides. |
+| **Operational runtime state** | `memzoi init`; `memzoi rebuild`; `memzoi export`; event recording used by normal operations | Initialize/update bundle directories including `.memzoi/` and `.memzoi/records/`, runtime SQLite/configuration, derived indexes, event rows, and generated files under the runtime project directory. These are operational or derived state, not canonical memory records. `rebuild` reads canonical Git records; it does not write them. |
+| **Non-memory integration-file writes** | `memzoi integrate instructions [--file <path>]` | Update or create an agent instruction file such as `AGENTS.md` or `CLAUDE.md` (or the explicit file). This is an integration-file write, not a canonical memory or proposal write. `memzoi integrate prompt` and `integrate list` print information only. |
+
+`memzoi export` writes generated projections (for example,
+`AGENTS.memory.md`, `CLAUDE.memory.md`, or an `okf` export) under runtime
+exports. Those projections are not canonical records. If a generated file is
+copied into a repository instruction file, that copy is an explicit
+integration/documentation change, not an implicit memory write.
+
+## Approval, review, and promotion
+
+The effective DB-proposal approval policy is resolved from the built-in
+default (`auto`), then the user-global config, repo config, and a per-call CLI
+override. Configure it as:
+
+```toml
+[workflow]
+proposal_approval = "manual" # or "auto"
 ```
 
-Proposal files use `status: proposed` and one nested `proposal.action` value: `create`, `supersede`, or `tombstone`. They can include review-only context such as reason, confidence, evidence, and review notes. The applied canonical record under `.memzoi/records/**` should stay compact and does not need to copy proposal-only metadata.
+**Auto-approval is not application.** `auto` validates and approves a valid
+proposal; it does not write `.memzoi/records/*.md` by itself. Application is a
+separate explicit operation (`apply`, `proposals apply --all-approved`,
+`proposal-files apply`, or the explicit `propose --apply` shortcut). With
+`manual`, proposals remain pending until an explicit approval and apply when no
+per-call `auto` override is supplied (for example, a plain `propose` call).
+`reject` closes a proposal without creating a canonical record.
 
-Review file-backed proposals with:
+The Git review rule is:
 
-```bash
-memzoi proposal-files list
-memzoi proposal-files show <proposal-id>
-memzoi proposal-files validate
-memzoi proposal-files apply <proposal-id>
-```
+1. Classify a candidate as `repo` only when it is durable, repo-safe knowledge.
+2. Create or receive the file-backed proposal (`.memzoi/proposals/pending/`).
+3. Validate and review the proposal, including its sensitivity and scope.
+4. Explicitly apply it to create/update `.memzoi/records/*.md`.
+5. Rebuild derived runtime search state when the record came from a proposal
+   file apply.
 
-`list`, `show`, and `validate` are read-only. `apply` currently supports only repo-safe `create` proposals with `status: proposed`; it writes a compact canonical record under `.memzoi/records/**`, leaves the pending proposal file in place, and does not update the runtime SQLite index. Run `memzoi rebuild` when runtime search should pick up newly applied Git-plane records. Current CLI/MCP proposal commands still use the runtime proposal inbox states listed above. Accepted/rejected proposal directories, automatic extraction, and broader promotion workflows are separate future lifecycle slices.
+Runtime promotion follows the same boundary: local/session rows are not
+directly promoted to canonical files. To promote an explicit durable finding,
+provide a structured candidate to `memzoi session-end` with destination `repo`,
+then review and explicitly apply the resulting pending proposal. There is no
+automatic promotion, automatic classification, automatic scanning, or
+automatic write from runtime state. A `needs_review` candidate stops before
+any write and requires a human decision; a `discard` candidate is intentionally
+lost.
 
-Pending proposal files may be committed when they are explicitly intended for PR review and `sensitivity: repo-safe`. Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals; there is no override flag. Keep blocked sensitivities out of repo-shared commits until a human classifies, sanitizes, or routes them to the future local/runtime plane. Accepted/rejected proposal directories are reserved for a future lifecycle decision; for now, canonical records plus Git history are the durable outcome.
+MCP clients can propose and recall memory but cannot apply canonical records.
+Use the CLI-side review/apply workflow for durable Git writes. See
+[MCP and agent integration](./mcp-and-agent-integration.md) for that boundary.
 
-## Destination classification
+## Runtime local and session continuity
 
-Destination is a pre-write routing decision for memory candidates. Lane is different: `lane` describes how stored memory is used and retained, while `destination` decides where a candidate is allowed to go before any write happens.
-
-Valid destination values are:
-
-| Destination | Meaning |
-| --- | --- |
-| `repo` | Durable project knowledge that must become a file-backed proposal before canonical repo memory. |
-| `local` | Private runtime-plane memory that is not committed to the repo. |
-| `session` | Local task-continuity or checkpoint memory. |
-| `discard` | Do not write the candidate. |
-| `needs_review` | Block automatic writes until a human decides the sharing boundary. |
-
-Examples:
-
-```text
-lane: semantic
-destination: repo
-
-lane: session
-destination: local
-
-lane: procedural
-destination: needs_review
-```
-
-`team` and `cloud` are reserved for future destination work and are not accepted values yet. Destination classification does not add fields to canonical records or proposal files in this slice.
-
-## Local runtime memory
-
-Local-only records implement the `local` destination in runtime state. They are stored in the project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`, not in `.memzoi/records/**`.
-
-Use the local namespace for private runtime memory:
+Use the local namespace for explicit private runtime memory:
 
 ```bash
 memzoi local add --type preference --title "..." --body "..."
@@ -85,15 +162,7 @@ memzoi local list
 memzoi local search <query>
 ```
 
-Local records are marked with `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output. They are not included in global `memzoi search` or exports. `memzoi context` remains repo-only by default and includes local records only with `--include-local`. Rebuild keeps local runtime rows while restoring canonical repo records from Git.
-
-Promotion from local memory into repo-shared memory must go through later proposal workflows. Local memory should not contain secrets, raw chat logs, or private personal data that should not be retained.
-
-## Session checkpoints
-
-Session checkpoints implement the `session` destination for active task continuity. They are stored in the project runtime database, not in `.memzoi/records/**`, and are intended for handoff or pickup context rather than durable repo truth.
-
-Use the checkpoint namespace for explicit continuity notes:
+Use checkpoints for explicit task continuity:
 
 ```bash
 memzoi checkpoint add --task "..." --note "..."
@@ -101,22 +170,17 @@ memzoi checkpoint add --task "..." --from-file notes.md
 memzoi checkpoint list
 ```
 
-Checkpoint records are marked with `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output. Checkpoints only store explicit `--note` or `--from-file` content; Memzoi does not inspect shell history, raw chat logs, hidden agent state, or existing context packs.
+These rows remain in the runtime project database, are not included in global
+repo search or exports by default, and are included in context/handoff only
+with explicit `--include-local` or `--include-session`. Their recall and
+precheck citations carry `provenance: runtime`; Git records carry
+`provenance: git`. A runtime row never becomes shared repo truth merely
+because it was recalled, exported, or included in a context pack.
 
-Checkpoints are not included in global `memzoi search` or exports. `memzoi context` remains repo-only by default and includes checkpoints only with `--include-session`. Promotion from checkpoints into repo-shared memory should go through later session-end proposal workflows, not direct canonical writes.
+## Explicit session-end routing
 
-## Session-end promotion
-
-Session-end promotion turns explicit structured findings into routed memory writes. It is not automatic extraction: Memzoi reads only a structured YAML file or the explicit body of a checkpoint.
-
-Use the session-end command with one source:
-
-```bash
-memzoi session-end --from-file notes.yml
-memzoi session-end --from-checkpoint <checkpoint-id>
-```
-
-The input must contain `task` and `candidates`:
+`session-end` is a routing operation over explicit structured candidates, not
+an extractor:
 
 ```yaml
 task: "Implement auth middleware"
@@ -127,174 +191,37 @@ candidates:
     title: Protected routes validate sessions server-side
     body: Protected routes must validate sessions server-side.
     sensitivity: repo-safe
-    reason: Learned while implementing middleware.
-    scope:
-      kind: repo
-      paths:
-        - src/auth/**
-    tags:
-      - auth
-      - security
 ```
 
-Memzoi validates every candidate and prepares repo proposal files before writing anything. `repo` candidates must use `sensitivity: repo-safe`; they become pending OKF proposal files under `.memzoi/proposals/pending/` and are never directly applied to `.memzoi/records/**`. `local` candidates become private runtime records. `session` candidates become runtime checkpoints and must use `type: episode` with `lane: session`. Runtime row writes are committed transactionally, and created proposal files are cleaned up if a later promotion step fails. `discard` and `needs_review` candidates create no writes.
+For each candidate, the current behavior is deterministic:
 
-Session-end promotion does not inspect shell history, transcripts, chat logs, hidden agent state, or context packs. Free-text notes and free-text checkpoint bodies fail until a later extraction workflow exists.
+- `repo` writes a pending OKF proposal file and never directly writes a
+  canonical record;
+- `local` writes a private runtime-local row;
+- `session` writes a runtime checkpoint (with `type: episode` and
+  `lane: session`);
+- `discard` writes nothing and reports `skipped`; and
+- `needs_review` writes nothing and reports `blocked`.
 
-## Approval policy
+Promotion is transactional across the session-end operation: if a runtime
+write or proposal-file write fails, created proposal files are cleaned up. A
+successful `repo` route still requires the separate review/apply step above.
 
-Effective proposal approval mode is resolved in this order:
+## MVP scope and non-goals
 
-1. Built-in default: `auto`.
-2. User-global config: `${MEMZOI_HOME:-~/.memzoi}/config.toml`.
-3. Repo config: `.memzoi/config.toml`.
-4. CLI or MCP per-call override.
+The current MVP includes the two explicit planes, five current destinations,
+file-backed repo proposals, canonical record apply/lifecycle commands, local
+runtime records, session checkpoints, structured session-end routing, and
+recall/precheck provenance reporting.
 
-Config uses:
+The two-plane policy does **not** include:
 
-```toml
-[workflow]
-proposal_approval = "manual" # or "auto"
-```
+- `team` or `cloud` destinations, hosted storage, or runtime sync;
+- automatic classification, scanning, extraction, promotion, or writes;
+- raw transcript/chat-log ingestion;
+- making SQLite or any runtime state canonical for repo memory;
+- vector recall as part of this policy; or
+- an MCP capability to apply canonical records.
 
-`auto` approves valid proposals. It never applies canonical records by itself. Use `manual` when a repo wants every proposal to stay pending until review.
-
-## Create a proposal
-
-```bash
-memzoi propose \
-  --type decision \
-  --scope-kind repo \
-  --visibility repo \
-  --title "Use pnpm" \
-  --body "This repo uses pnpm for package management." \
-  --actor "agent:codex" \
-  --json
-```
-
-Default JSON shape under the built-in `auto` policy:
-
-```json
-{
-  "proposal_id": "prop_...",
-  "status": "approved",
-  "validation": {
-    "is_valid": true,
-    "issues": []
-  },
-  "applied": false
-}
-```
-
-Use short, typed, scoped records. Prefer durable project facts, decisions, procedures, warnings, risks, and failed attempts over raw conversation dumps.
-
-## Manual and apply shortcuts
-
-Force a proposal to stay pending:
-
-```bash
-memzoi propose --manual \
-  --type fact \
-  --title "Use pnpm" \
-  --body "This repo uses pnpm for package management." \
-  --json
-```
-
-Create, approve, and immediately apply from the CLI:
-
-```bash
-memzoi propose --apply \
-  --type decision \
-  --title "Use pnpm" \
-  --body "This repo uses pnpm for package management." \
-  --json
-```
-
-`--apply` is a CLI-only shortcut. MCP clients cannot apply canonical records.
-
-## Proposal inbox
-
-Inspect open proposal state before rebuilding or applying:
-
-```bash
-memzoi proposals list --status open
-memzoi proposals show <proposal-id>
-memzoi proposals apply --all-approved
-```
-
-The `open` filter includes `pending`, `validated`, and `approved` proposals. `memzoi proposals apply --all-approved` applies only proposals already in `approved`.
-
-## Approve and apply
-
-Manual review can still use explicit lifecycle commands:
-
-```bash
-memzoi approve <proposal-id> --actor "reviewer:human" --json
-memzoi apply <proposal-id> --actor "agent:applier" --json
-```
-
-After `apply`, the proposal becomes an active memory record:
-
-```json
-{
-  "proposal_id": "prop_...",
-  "record_id": "use-pnpm",
-  "record_status": "active"
-}
-```
-
-## Reject
-
-```bash
-memzoi reject <proposal-id> \
-  --reason "not true for this repo" \
-  --actor "reviewer:human" \
-  --json
-```
-
-Reject proposals that are stale, too broad, duplicated, private, or not actually durable.
-
-## Supersede
-
-```bash
-memzoi supersede <record-id> \
-  --type decision \
-  --scope-kind repo \
-  --visibility repo \
-  --title "Use pnpm with frozen lockfiles" \
-  --body "This repo uses pnpm, and CI should install with the lockfile frozen." \
-  --actor "reviewer:human" \
-  --json
-```
-
-Supersede when the memory is still relevant but needs a replacement record. This preserves lineage instead of silently overwriting the previous record.
-
-## Tombstone
-
-```bash
-memzoi tombstone <record-id> \
-  --reason "obsolete after package-manager migration" \
-  --actor "reviewer:human" \
-  --json
-```
-
-Tombstone when a record should no longer participate in recall, context packs, prechecks, or exports.
-
-## Rebuild safety
-
-`memzoi rebuild` restores runtime indexes from canonical `.memzoi/records/*.md` files. Because proposal state is DB-local in v0.1.1, rebuild refuses to discard readable open proposals.
-
-Unblock rebuild by closing the proposal inbox:
-
-```bash
-memzoi proposals list --status open
-memzoi proposals apply --all-approved
-memzoi reject <proposal-id> --reason "not durable repo knowledge"
-memzoi rebuild
-```
-
-If the runtime database is corrupt or unreadable, rebuild fails before deleting it so local and session runtime rows are not silently discarded.
-
-## Safety policy
-
-Do not store secrets, credentials, raw chat logs, temporary task progress, or private personal data in repo-shared memory. Agent writes should stay proposed and reviewable before they become active records.
+Do not add a new destination, plane, route, or repository exclusion in docs
+without changing the executable policy contract first.

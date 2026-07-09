@@ -874,7 +874,7 @@ mod tests {
             "MCP context pack should expose estimated budget use: {pack}"
         );
         assert_eq!(pack["included"][0]["record_id"], record.id);
-        assert_eq!(pack["included"][0]["provenance"], "repo");
+        assert_eq!(pack["included"][0]["provenance"], "git");
         assert_eq!(pack["included"][0]["destination"], "repo");
         assert_eq!(pack["next_queries"].as_array().unwrap().len(), 0);
     }

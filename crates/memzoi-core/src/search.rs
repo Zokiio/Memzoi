@@ -138,8 +138,8 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
     let mut results = Vec::new();
     for row in rows {
         let (record, rank) = row.context("failed to read memory search row")?;
-        let paths = load_paths(conn, record.id.as_str())?;
-        let citation = citation_for(&record, paths.first());
+        let paths = load_paths(conn, &record.id)?;
+        let citation = citation_for(&record, paths.first())?;
         results.push(SearchResult {
             score: -rank,
             snippet: Some(snippet(&record, &input.query)),
@@ -191,17 +191,27 @@ pub(crate) fn load_paths(conn: &Connection, record_id: &str) -> Result<Vec<Memor
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-pub(crate) fn citation_for(record: &MemoryRecord, path: Option<&MemoryPath>) -> MemoryCitation {
-    MemoryCitation {
+pub(crate) fn citation_for(
+    record: &MemoryRecord,
+    path: Option<&MemoryPath>,
+) -> Result<MemoryCitation> {
+    let provenance = record.destination.policy().plane.ok_or_else(|| {
+        anyhow::anyhow!(
+            "memory recall invariant violated: destination {} has no memory plane",
+            record.destination
+        )
+    })?;
+    Ok(MemoryCitation {
         record_id: record.id.clone(),
         memory_type: record.memory_type,
         scope_kind: record.scope_kind,
+        provenance,
         destination: record.destination,
         visibility: record.visibility,
         source_kind: record.source_kind.clone(),
         source_ref: record.source_ref.clone(),
         path: path.map(|path| path.path.clone()),
-    }
+    })
 }
 
 pub(crate) fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
