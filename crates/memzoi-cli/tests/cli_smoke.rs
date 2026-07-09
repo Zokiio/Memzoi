@@ -1493,6 +1493,321 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
 }
 
 #[test]
+fn import_plan_and_apply_mixed_destinations_preserve_boundaries() {
+    let repo = initialized_temp_repo();
+    let repo_path = repo.path();
+    let manifest_path = repo_path.join("mixed-import.yml");
+    fs::write(
+        &manifest_path,
+        r#"version: memzoi/import-v1
+sources:
+  - path: imports/safe-source.yml
+candidates:
+  - destination: repo
+    reason: durable project convention
+    type: decision
+    lane: semantic
+    title: Repository convention
+    body: The repository uses explicit review before durable memory changes.
+    sensitivity: repo-safe
+    scope:
+      kind: repo
+    tags: [workflow]
+  - destination: local
+    reason: private developer preference
+    type: fact
+    title: Local preference
+    body: Keep this preference in local runtime memory only.
+    sensitivity: local-only
+  - destination: session
+    reason: current handoff continuity
+    type: episode
+    lane: session
+    title: Session continuity
+    body: Resume the import review in the next session.
+    sensitivity: local-only
+  - destination: discard
+    reason: stale transient note
+    type: fact
+    title: Transient note
+    body: This note is no longer useful.
+    sensitivity: unknown
+  - destination: needs_review
+    reason: ambiguous privacy boundary
+    type: fact
+    title: Ambiguous note
+    body: Decide whether this content is safe to retain.
+    sensitivity: unknown
+"#,
+    )
+    .expect("write mixed import manifest");
+
+    let paths = test_paths(repo_path);
+    let directory_entries = |directory: &Path| -> Vec<String> {
+        if !directory.is_dir() {
+            return Vec::new();
+        }
+        let mut entries = fs::read_dir(directory)
+            .expect("read directory")
+            .map(|entry| {
+                entry
+                    .expect("read directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    };
+    let records_before = directory_entries(&paths.records_dir());
+    let proposals_before = directory_entries(&paths.proposals_dir());
+    let database_before = fs::read(&paths.db_path).expect("read initialized runtime db");
+
+    let planned = run_json_command(
+        repo_path,
+        &[
+            "import",
+            "plan",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--json",
+        ],
+    );
+    assert_json_string_field(&planned, &["mode"], "plan");
+    assert_json_string_field(&planned, &["schema"], "memzoi/import-plan-v1");
+    let source_file = json_string(&planned, "source_file");
+    assert!(
+        !source_file.is_empty(),
+        "plan should report a source manifest: {planned}"
+    );
+    assert!(
+        source_file.ends_with("mixed-import.yml"),
+        "plan should report the mixed-import.yml manifest: {planned}"
+    );
+    let plan_id = json_string(&planned, "plan_id").to_owned();
+    assert!(
+        !plan_id.is_empty(),
+        "plan should expose a plan id: {planned}"
+    );
+    assert_eq!(
+        planned["summary"],
+        serde_json::json!({
+            "total": 5,
+            "create_proposals": 1,
+            "deferred_local": 1,
+            "deferred_session": 1,
+            "duplicates": 0,
+            "discarded": 1,
+            "needs_review": 1,
+        }),
+        "plan should summarize every destination: {planned}"
+    );
+    let planned_candidates = planned["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("plan should include candidates: {planned}"));
+    assert_eq!(planned_candidates.len(), 5);
+    for (candidate, (destination, action)) in planned_candidates.iter().zip([
+        ("repo", "create_proposal"),
+        ("local", "deferred"),
+        ("session", "deferred"),
+        ("discard", "no_write"),
+        ("needs_review", "blocked"),
+    ]) {
+        assert_json_string_field(&candidate["classification"], &["destination"], destination);
+        assert_json_string_field(&candidate["action"], &["kind"], action);
+    }
+    assert!(
+        planned.get("writes").is_none(),
+        "plan mode must not report writes: {planned}"
+    );
+    assert_eq!(
+        directory_entries(&paths.records_dir()),
+        records_before,
+        "plan must not create canonical records"
+    );
+    assert_eq!(
+        directory_entries(&paths.proposals_dir()),
+        proposals_before,
+        "plan must not create proposal files"
+    );
+    assert_eq!(
+        fs::read(&paths.db_path).expect("read runtime db after plan"),
+        database_before,
+        "plan must not mutate runtime state"
+    );
+
+    let repo_proposal_id = json_string(&planned_candidates[0]["action"], "proposal_id").to_owned();
+    let applied = run_json_command(
+        repo_path,
+        &[
+            "import",
+            "apply",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--plan-id",
+            plan_id.as_str(),
+            "--json",
+        ],
+    );
+    assert_json_string_field(&applied, &["mode"], "apply");
+    assert_json_string_field(&applied, &["expected_plan_id"], &plan_id);
+    assert_json_string_field(&applied, &["schema"], "memzoi/import-plan-v1");
+    let writes = applied["writes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("apply should include writes: {applied}"));
+    assert_eq!(
+        writes.len(),
+        1,
+        "only repo should produce a write: {applied}"
+    );
+    assert_eq!(writes[0]["index"], 0);
+    assert_json_string_field(&writes[0], &["proposal_id"], &repo_proposal_id);
+    assert_json_string_field(
+        &writes[0],
+        &["path"],
+        &format!(".memzoi/proposals/pending/{repo_proposal_id}.md"),
+    );
+    let applied_candidates = applied["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("apply should include candidates: {applied}"));
+    assert_eq!(applied_candidates.len(), 5);
+    for (candidate, (destination, action)) in applied_candidates.iter().zip([
+        ("repo", "create_proposal"),
+        ("local", "deferred"),
+        ("session", "deferred"),
+        ("discard", "no_write"),
+        ("needs_review", "blocked"),
+    ]) {
+        assert_json_string_field(&candidate["classification"], &["destination"], destination);
+        assert_json_string_field(&candidate["action"], &["kind"], action);
+    }
+    assert_json_string_field(
+        &applied_candidates[1]["action"],
+        &["route"],
+        "runtime_local",
+    );
+    assert_json_string_field(
+        &applied_candidates[2]["action"],
+        &["route"],
+        "runtime_session",
+    );
+    assert_eq!(
+        directory_entries(&paths.records_dir()),
+        records_before,
+        "import apply must not create canonical records"
+    );
+    assert_eq!(
+        fs::read(&paths.db_path).expect("read runtime db after apply"),
+        database_before,
+        "import apply must not write runtime memory"
+    );
+    let pending_path = paths
+        .proposals_dir()
+        .join("pending")
+        .join(format!("{repo_proposal_id}.md"));
+    assert!(
+        pending_path.is_file(),
+        "repo candidate should create pending OKF proposal"
+    );
+    let rendered_proposal = fs::read_to_string(&pending_path).expect("read pending proposal");
+    assert!(
+        rendered_proposal
+            .contains("The repository uses explicit review before durable memory changes."),
+        "pending proposal should contain only repo candidate content: {rendered_proposal}"
+    );
+    for private_content in [
+        "Keep this preference in local runtime memory only.",
+        "Resume the import review in the next session.",
+        "Decide whether this content is safe to retain.",
+    ] {
+        assert!(
+            !rendered_proposal.contains(private_content),
+            "pending proposal must not contain non-repo content {private_content:?}"
+        );
+    }
+
+    let local = run_json_command(repo_path, &["local", "list", "--json"]);
+    assert!(
+        local["records"].as_array().is_some_and(Vec::is_empty),
+        "local destination must remain deferred: {local}"
+    );
+    let session = run_json_command(repo_path, &["checkpoint", "list", "--json"]);
+    assert!(
+        session["records"].as_array().is_some_and(Vec::is_empty),
+        "session destination must remain deferred: {session}"
+    );
+
+    let validated = run_json_command(repo_path, &["proposal-files", "validate", "--json"]);
+    assert_eq!(
+        validated["valid"], true,
+        "generated proposal should validate: {validated}"
+    );
+    assert_eq!(validated["valid_count"], 1);
+    assert_eq!(validated["invalid_count"], 0);
+    let shown = run_json_command(
+        repo_path,
+        &[
+            "proposal-files",
+            "show",
+            repo_proposal_id.as_str(),
+            "--json",
+        ],
+    );
+    assert_eq!(proposal_id_from_value(&shown), repo_proposal_id);
+    assert_json_string_field(&shown, &["action"], "create");
+    assert_json_string_field(&shown, &["status"], "proposed");
+    assert_json_string_field(&shown, &["sensitivity"], "repo-safe");
+    assert_json_string_field(
+        &shown["proposal"],
+        &["reason"],
+        "durable project convention",
+    );
+    assert_json_string_field(
+        &shown,
+        &["body"],
+        "The repository uses explicit review before durable memory changes.",
+    );
+    assert_json_string_field(&shown["sources"][0], &["path"], "imports/safe-source.yml");
+
+    let pending_after_apply = directory_entries(&paths.proposals_dir());
+    assert_eq!(pending_after_apply, vec!["pending".to_owned()]);
+    let proposal_files_before_stale = directory_entries(&paths.proposals_dir().join("pending"));
+    let stale_id = format!("{plan_id}-stale");
+    let stale_error = run_command_failure_stderr(
+        repo_path,
+        &[
+            "import",
+            "apply",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--plan-id",
+            stale_id.as_str(),
+            "--json",
+        ],
+    );
+    assert!(
+        stale_error.contains("stale import plan"),
+        "stale plan failure should identify the plan mismatch: {stale_error}"
+    );
+    assert_eq!(
+        directory_entries(&paths.proposals_dir().join("pending")),
+        proposal_files_before_stale,
+        "stale plan must not create a second proposal"
+    );
+    assert_eq!(
+        directory_entries(&paths.records_dir()),
+        records_before,
+        "stale plan must not create canonical records"
+    );
+    assert_eq!(
+        fs::read(&paths.db_path).expect("read runtime db after stale plan"),
+        database_before,
+        "stale plan must not mutate runtime state"
+    );
+}
+
+#[test]
 fn proposal_files_apply_uses_file_id_fallback_for_titles_without_ascii_slug() {
     let repo = initialized_temp_repo();
     write_pending_proposal_file(

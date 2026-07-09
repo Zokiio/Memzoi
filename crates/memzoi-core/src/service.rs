@@ -12,11 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::import::{self, ExistingDuplicate};
 use crate::{
-    ContextPack, ContextPackInput, HandoffInput, HandoffPack, MemoryDestination, MemoryDraft,
-    MemoryEvent, MemoryLane, MemoryPaths, MemoryRecord, MemoryStatus, MemoryType, PrecheckInput,
-    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput,
-    SearchResult, SupersedeResult, ValidationResult, Visibility,
+    ContextPack, ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult, ImportDocument,
+    ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryLane, MemoryPaths, MemoryRecord,
+    MemoryStatus, MemoryType, PrecheckInput, PrecheckWarning, Proposal, ProposalStatus,
+    ProposalStatusFilter, ScopeKind, SearchInput, SearchResult, SupersedeResult, ValidationResult,
+    Visibility,
 };
 use crate::{
     config::{
@@ -27,8 +29,7 @@ use crate::{
     exporters, handoff, okf, precheck, proposals, search,
     session_end::{
         SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument, SessionEndResult,
-        SessionEndWrite, plan_repo_proposal, validate_session_end_document,
-        write_repo_proposal_file,
+        SessionEndWrite, session_end_proposal_draft, validate_session_end_document,
     },
 };
 
@@ -408,13 +409,16 @@ impl MemoryService {
 
         for candidate in &document.candidates {
             if candidate.destination == MemoryDestination::Repo {
-                repo_plans.push(Some(plan_repo_proposal(
+                let base_slug = proposals::title_to_concept_slug(&candidate.title)
+                    .unwrap_or_else(|| "memory".to_owned());
+                let base_id = format!("mem_session_{base_slug}");
+                let proposal_id = okf::reserve_okf_proposal_id(
                     &pending_root,
-                    candidate,
-                    actor,
-                    &timestamp,
+                    &base_id,
                     &mut reserved_proposal_ids,
-                )?));
+                )?;
+                let draft = session_end_proposal_draft(candidate, actor, &timestamp, proposal_id)?;
+                repo_plans.push(Some(okf::plan_okf_create_proposal(&pending_root, &draft)?));
             } else {
                 repo_plans.push(None);
             }
@@ -429,11 +433,10 @@ impl MemoryService {
                 let Some(plan) = plan else {
                     continue;
                 };
-                let path = write_repo_proposal_file(plan)?;
+                let path = okf::create_okf_proposal_file(plan)?;
                 created_proposal_files.push(path.clone());
                 repo_writes[index] = Some((plan.proposal_id.clone(), path));
             }
-
             let tx = self.conn.unchecked_transaction()?;
             for (index, candidate) in document.candidates.iter().enumerate() {
                 match candidate.destination {
@@ -472,10 +475,8 @@ impl MemoryService {
             Ok(())
         })();
         if let Err(error) = write_result {
-            if let Err(cleanup_error) = remove_created_proposal_files(&created_proposal_files) {
-                return Err(error).context(format!(
-                    "session-end promotion failed; additionally failed to clean up created proposal files: {cleanup_error}"
-                ));
+            if let Err(cleanup_error) = okf::cleanup_okf_proposal_files(&created_proposal_files) {
+                return Err(error).context(format!("session-end promotion failed; additionally failed to clean up created proposal files: {cleanup_error}"));
             }
             return Err(error);
         }
@@ -532,6 +533,109 @@ impl MemoryService {
             task: document.task.trim().to_owned(),
             candidates: results,
         })
+    }
+    pub fn plan_import(&self, actor: &str, document: ImportDocument) -> Result<ImportPlan> {
+        import::validate_document(&document)?;
+        let existing = self.load_import_duplicates()?;
+        import::build_plan(
+            actor,
+            &document,
+            &existing,
+            &self.paths.proposals_dir().join("pending"),
+        )
+    }
+
+    pub fn apply_import(
+        &self,
+        actor: &str,
+        document: ImportDocument,
+        expected_plan_id: &str,
+    ) -> Result<ImportApplyResult> {
+        let plan = self.plan_import(actor, document.clone())?;
+        if plan.plan_id != expected_plan_id {
+            bail!(
+                "stale import plan: expected {expected_plan_id}, recomputed {}",
+                plan.plan_id
+            );
+        }
+        let timestamp = now_utc()?;
+        let pending_root = self.paths.proposals_dir().join("pending");
+        let mut planned = Vec::new();
+        for candidate in &plan.candidates {
+            let import::ImportCandidateAction::CreateProposal { proposal_id, .. } =
+                &candidate.action
+            else {
+                continue;
+            };
+            let draft =
+                import::proposal_draft(candidate, actor, &timestamp, proposal_id, &plan.sources);
+            planned.push(okf::plan_okf_create_proposal(&pending_root, &draft)?);
+        }
+        let mut writes = Vec::new();
+        let mut created = Vec::new();
+        let result = (|| -> Result<()> {
+            for (idx, proposal) in planned.iter().enumerate() {
+                let path = okf::create_okf_proposal_file(proposal)?;
+                created.push(path.clone());
+                let candidate_plan = plan.candidates.iter().find(|c| matches!(&c.action, import::ImportCandidateAction::CreateProposal { proposal_id, .. } if proposal_id == &proposal.proposal_id));
+                let candidate_index = candidate_plan.map(|c| c.index).unwrap_or(idx);
+                let display_path = candidate_plan
+                    .and_then(|c| match &c.action {
+                        import::ImportCandidateAction::CreateProposal { path, .. } => {
+                            Some(path.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| path.clone());
+                writes.push(crate::ImportProposalWrite {
+                    index: candidate_index,
+                    proposal_id: proposal.proposal_id.clone(),
+                    path: display_path,
+                });
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if let Err(cleanup) = okf::cleanup_okf_proposal_files(&created) {
+                return Err(error)
+                    .context(format!("import apply failed; cleanup failed: {cleanup}"));
+            }
+            return Err(error);
+        }
+        Ok(ImportApplyResult { plan, writes })
+    }
+
+    fn load_import_duplicates(&self) -> Result<Vec<ExistingDuplicate>> {
+        let mut entries = Vec::new();
+        for record in okf::read_okf_record_files(self.paths.records_dir())? {
+            entries.push(ExistingDuplicate {
+                kind: import::ImportDuplicateKind::CanonicalRecord,
+                id: record.concept_id,
+                destination: Some(MemoryDestination::Repo),
+                hash: import::content_hash(&record.draft.body),
+            });
+        }
+        for proposal in okf::read_okf_proposal_files(self.paths.proposals_dir().join("pending"))? {
+            entries.push(ExistingDuplicate {
+                kind: import::ImportDuplicateKind::PendingProposal,
+                id: proposal.id,
+                destination: Some(MemoryDestination::Repo),
+                hash: import::content_hash(&proposal.body),
+            });
+        }
+        let mut runtime = records_for_runtime_preservation(&self.conn)?;
+        runtime.retain(|record| record.status == MemoryStatus::Active);
+        runtime.sort_by(|a, b| a.id.cmp(&b.id));
+        for record in runtime {
+            entries.push(ExistingDuplicate {
+                kind: import::ImportDuplicateKind::RuntimeRecord,
+                id: record.id,
+                destination: Some(record.destination),
+                hash: import::content_hash(&record.body),
+            });
+        }
+        entries.sort_by(|a, b| (a.kind, a.id.as_str()).cmp(&(b.kind, b.id.as_str())));
+        Ok(entries)
     }
 
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
@@ -782,24 +886,6 @@ fn validate_checkpoint_input(input: &CheckpointInput) -> Result<()> {
     }
     if input.note.trim().is_empty() {
         bail!("note is required");
-    }
-    Ok(())
-}
-
-fn remove_created_proposal_files(paths: &[PathBuf]) -> Result<()> {
-    for path in paths.iter().rev() {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to remove created session-end proposal {}",
-                        path.display()
-                    )
-                });
-            }
-        }
     }
     Ok(())
 }

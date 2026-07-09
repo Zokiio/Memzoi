@@ -76,6 +76,141 @@ Run `memzoi <command> --help` for exact options.
 | `integrate prompt` | `--profile` |
 | `integrate instructions` | `--profile`, `--file`, `--json` |
 
+## Classified import
+
+The import workflow accepts a compact, explicit manifest. It does not discover or parse
+agent instruction files, chat transcripts, ADRs, or other source formats, and it does not
+infer a destination from prose. Each candidate already carries its intended destination
+and a reason for that classification. The lifecycle policy that governs the destination
+boundary is documented in [Destination classification in the lifecycle policy](./memory-lifecycle.md#destination-plane-lane-and-provenance).
+
+### Commands and options
+
+```bash
+memzoi import plan --from-file <manifest.yml> [--actor cli] [--json]
+memzoi import apply --from-file <manifest.yml> --plan-id <import_…> [--actor cli] [--json]
+```
+
+`--from-file` is required for both commands. `--actor` defaults to `cli` and is part of
+the plan fingerprint; use the same actor when applying a plan. `--json` emits one JSON
+object instead of the human-readable summary. `plan` is the review step and is
+mutation-free. `apply` recomputes the plan from the manifest and current memory state,
+then requires the supplied `--plan-id` to match before it writes anything.
+
+### Manifest (`memzoi/import-v1`)
+
+The YAML document has exactly these top-level keys; unknown keys are rejected:
+
+```yaml
+version: memzoi/import-v1
+sources:
+  - path: imports/source.yml       # or url: https://… or ref: issue://123
+candidates:
+  - destination: repo              # repo | local | session | discard | needs_review
+    reason: durable project convention
+    type: decision                  # optional when it can be inferred
+    lane: semantic                  # optional
+    title: Explicit candidate title
+    body: Explicit candidate body
+    sensitivity: repo-safe          # repo-safe | local-only | sensitive | secret | unknown
+    scope:
+      kind: repo                    # optional; defaults to repo
+      id: null                      # optional
+      paths: [src/**]               # optional; project-relative paths
+    tags: [workflow]                # optional; defaults to []
+```
+
+There must be at least one source and one candidate. Each source needs a non-empty
+`path`, `url`, or `ref`; a `path` must be a POSIX project-relative path and cannot be
+absolute or contain `.`/`..` components, backslashes, or a drive prefix. Candidate
+`destination`, `reason`, `title`, and `body` are required and are trimmed before use.
+`repo` candidates must declare `sensitivity: repo-safe`. Scope paths have the same
+project-relative validation, and tags cannot be empty.
+
+The parser is strict at every manifest object (`version`, `sources`, `candidates`,
+source fields, candidate fields, and scope fields). It rejects malformed YAML, an empty
+document, unsupported versions, missing required values, empty source locators, invalid
+paths, an empty candidate list, and candidates whose type cannot be inferred.
+
+Inference is deliberately narrow and deterministic:
+
+- Without `type`, `lane: episodic` or `lane: session` infers `type: episode`, and
+  `lane: procedural` infers `type: procedure`. Other non-session candidates must provide
+  `type`.
+- Without `lane`, `type: procedure` infers `procedural`, `type: episode` infers
+  `episodic`, and other types infer `semantic`.
+- A `session` destination is always normalized to `type: episode` and `lane: session`,
+  regardless of a conflicting input value.
+- Missing `scope` means `{kind: repo, id: null, paths: []}`. Tags and scope paths are
+  trimmed, sorted, and deduplicated; source locators are trimmed and sorted.
+
+### Plan and apply semantics
+
+`import plan` returns schema `memzoi/import-plan-v1`, a deterministic `plan_id`, the
+normalized `sources`, a `summary`, and one normalized result per candidate. With `--json`,
+the plan envelope also includes `mode: "plan"`, the effective `actor`, and the manifest
+`source_file`; the plan envelope has no `writes` field.
+
+The plan fingerprint uses the trimmed actor and normalized plan (including the current
+duplicate scan), so it is stable for the same actor, manifest, and current memory state.
+Planning does not create proposal files, canonical records, local/session records, or
+runtime database writes. A plan may contain private/local candidates; do not blindly
+commit plan output.
+
+The summary always contains these counters: `total`, `create_proposals`,
+`deferred_local`, `deferred_session`, `duplicates`, `discarded`, and `needs_review`.
+Each candidate includes `index`, `classification`, `policy`, normalized `type`, `lane`,
+`title`, `body`, optional `sensitivity`, `scope`, `tags`, a trimmed-body BLAKE3
+`content_hash`, `duplicates`, and `action`.
+
+Action JSON is tagged by `action.kind`:
+
+```json
+{"kind":"create_proposal","proposal_id":"mem_import_example","path":".memzoi/proposals/pending/mem_import_example.md"}
+{"kind":"deferred","route":"runtime_local","reason":"runtime import writes are unavailable in this slice"}
+{"kind":"deferred","route":"runtime_session","reason":"runtime import writes are unavailable in this slice"}
+{"kind":"duplicate","matches":[{"kind":"canonical_record","id":"mem_…","destination":"repo","candidate_index":null}]}
+{"kind":"no_write","reason":"stale transient note"}
+{"kind":"blocked","reason":"ambiguous privacy boundary"}
+```
+
+`repo` is the only currently writable import route: its action is
+`create_proposal`. `local` and `session` are reported as deferred (`runtime_local` and
+`runtime_session`) and are not written by import. `discard` is `no_write`; `needs_review`
+is `blocked`. A duplicate action takes precedence over destination handling and also
+does not write.
+
+`import apply` returns the same plan plus `mode: "apply"`, `actor`, `source_file`,
+`expected_plan_id`, and `writes`. It recomputes the plan and fails with a stale-plan
+error when the ID differs; that guard makes a wrong or stale ID a zero-write operation.
+Only `create_proposal` actions produce entries in `writes`:
+
+```json
+{"index":0,"proposal_id":"mem_import_example","path":".memzoi/proposals/pending/mem_import_example.md"}
+```
+
+Those writes create `status: proposed` OKF proposal files under
+`.memzoi/proposals/pending/`. **They do not create canonical records** under
+`.memzoi/records/`, do not write local/session runtime memory, and do not update the
+runtime SQLite index. Review and explicitly apply the pending proposal with the
+proposal-file workflow when it is appropriate; rebuild the derived index afterward if
+needed.
+
+### Duplicate and no-write behavior
+
+Duplicate detection hashes the trimmed candidate body with BLAKE3 and compares it with
+canonical records, pending proposal files, active runtime records, and earlier candidates
+in the same input. Matches are reported as `canonical_record`, `pending_proposal`,
+`runtime_record`, or `earlier_candidate`, with their ID and (when applicable) destination
+or candidate index. Duplicate matches are sorted deterministically; the duplicate action
+prevents another proposal file.
+
+No files or runtime rows are created when planning, when a candidate is deferred,
+discarded, blocked, or duplicated, when the manifest fails validation, or when apply
+receives a wrong/stale plan ID. If proposal-file creation fails partway through apply,
+the command cleans up files created by that attempt and returns an error. Import apply
+never promotes a candidate implicitly and never writes a canonical record directly.
+
 ## Context JSON
 
 `memzoi context --json` and MCP `build_context_pack` return the prompt-ready pack plus metadata. Existing fields such as `prompt`, `records`, `citations`, and `token_budget` remain available. Recalled citation JSON uses four separate fields: `provenance` (plane), `destination`, optional `source_kind`, and optional `source_ref`.

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     fs::OpenOptions,
     path::{Component, Path, PathBuf},
@@ -67,14 +68,224 @@ pub struct OkfProposalMetadata {
     pub target: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OkfProposalSource {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(rename = "ref")]
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OkfCreateProposalDraft {
+    pub(crate) proposal_id: String,
+    pub(crate) memory_type: MemoryType,
+    pub(crate) lane: MemoryLane,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) actor: String,
+    pub(crate) timestamp: String,
+    pub(crate) reason: Option<String>,
+    pub(crate) scope_kind: ScopeKind,
+    pub(crate) scope_id: Option<String>,
+    pub(crate) applies_to: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) sources: Vec<OkfProposalSource>,
+    pub(crate) sensitivity: OkfProposalSensitivity,
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OkfCreateProposalPlan {
+    pub(crate) proposal_id: String,
+    pub(crate) path: PathBuf,
+    pub(crate) markdown: String,
+    pub(crate) parsed: OkfProposalFile,
+}
+
+pub(crate) fn reserve_okf_proposal_id(
+    pending_root: &Path,
+    base_id: &str,
+    reserved_ids: &mut BTreeSet<String>,
+) -> Result<String> {
+    validate_proposal_identifier(base_id)?;
+    for suffix in 1.. {
+        let candidate = if suffix == 1 {
+            base_id.to_owned()
+        } else {
+            format!("{base_id}-{suffix}")
+        };
+        if reserved_ids.contains(&candidate) {
+            continue;
+        }
+        let path = pending_root.join(format!("{candidate}.md"));
+        if !path
+            .try_exists()
+            .with_context(|| format!("failed to inspect pending proposal {}", path.display()))?
+        {
+            reserved_ids.insert(candidate.clone());
+            return Ok(candidate);
+        }
+    }
+    unreachable!("unbounded proposal id search returns")
+}
+
+pub(crate) fn render_okf_create_proposal_markdown(
+    draft: &OkfCreateProposalDraft,
+) -> Result<String> {
+    validate_okf_create_proposal_draft(draft)?;
+    let frontmatter = OkfCreateProposalFrontmatter {
+        id: draft.proposal_id.trim().to_owned(),
+        kind: "proposal".to_owned(),
+        version: "okf/v0.1".to_owned(),
+        profile: "memzoi/v0".to_owned(),
+        memory_type: draft.memory_type,
+        lane: draft.lane,
+        title: draft.title.trim().to_owned(),
+        description: first_non_empty_line(&draft.body).to_owned(),
+        status: "proposed".to_owned(),
+        proposal: OkfCreateProposalMetadata {
+            action: "create".to_owned(),
+            proposed_by: draft.actor.trim().to_owned(),
+            proposed_at: draft.timestamp.trim().to_owned(),
+            reason: trimmed_optional(draft.reason.as_deref()),
+        },
+        scope: OkfCreateProposalScope {
+            kind: draft.scope_kind,
+            id: trimmed_optional(draft.scope_id.as_deref()),
+            paths: draft
+                .applies_to
+                .iter()
+                .map(|path| path.trim().to_owned())
+                .collect(),
+        },
+        tags: draft.tags.iter().map(|tag| tag.trim().to_owned()).collect(),
+        timestamp: draft.timestamp.trim().to_owned(),
+        created_by: draft.actor.trim().to_owned(),
+        sources: draft
+            .sources
+            .iter()
+            .map(|source| OkfProposalSource {
+                path: trimmed_optional(source.path.as_deref()),
+                url: trimmed_optional(source.url.as_deref()),
+                reference: trimmed_optional(source.reference.as_deref()),
+            })
+            .collect(),
+        supersedes: Vec::new(),
+        sensitivity: draft.sensitivity,
+    };
+    let yaml =
+        serde_yaml::to_string(&frontmatter).context("failed to render OKF proposal frontmatter")?;
+    Ok(format!(
+        "---\n{}---\n\n# {}\n\n{}\n",
+        yaml,
+        draft.title.trim(),
+        draft.body.trim()
+    ))
+}
+
+fn trimmed_optional(value: Option<&str>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
+}
+
+pub(crate) fn plan_okf_create_proposal(
+    pending_root: &Path,
+    draft: &OkfCreateProposalDraft,
+) -> Result<OkfCreateProposalPlan> {
+    validate_okf_create_proposal_draft(draft)?;
+    let proposal_id = draft.proposal_id.trim();
+    let path = pending_root.join(format!("{proposal_id}.md"));
+    if path
+        .try_exists()
+        .with_context(|| format!("failed to inspect pending proposal {}", path.display()))?
+    {
+        bail!("pending proposal {} already exists", path.display());
+    }
+    let markdown = render_okf_create_proposal_markdown(draft)?;
+    let parsed = parse_okf_proposal_markdown(pending_root, &path, &markdown)?
+        .with_context(|| format!("rendered OKF proposal {proposal_id} was ignored"))?;
+    if parsed.id != proposal_id {
+        bail!("rendered OKF proposal id does not match draft id {proposal_id}");
+    }
+    Ok(OkfCreateProposalPlan {
+        proposal_id: proposal_id.to_owned(),
+        path,
+        markdown,
+        parsed,
+    })
+}
+
+pub(crate) fn create_okf_proposal_file(plan: &OkfCreateProposalPlan) -> Result<PathBuf> {
+    if let Some(parent) = plan.path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create proposal directory {}", parent.display()))?;
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&plan.path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, plan.markdown.as_bytes()))
+        .with_context(|| format!("failed to create OKF proposal {}", plan.path.display()))?;
+    Ok(plan.path.clone())
+}
+
+pub(crate) fn cleanup_okf_proposal_files(paths: &[PathBuf]) -> Result<()> {
+    for path in paths.iter().rev() {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to remove proposal {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_okf_create_proposal_draft(draft: &OkfCreateProposalDraft) -> Result<()> {
+    validate_proposal_identifier(draft.proposal_id.trim())?;
+    if draft.title.trim().is_empty() {
+        bail!("OKF proposal title cannot be empty");
+    }
+    if draft.body.trim().is_empty() {
+        bail!("OKF proposal body cannot be empty");
+    }
+    if draft.actor.trim().is_empty() {
+        bail!("OKF proposal actor cannot be empty");
+    }
+    if draft.timestamp.trim().is_empty() {
+        bail!("OKF proposal timestamp cannot be empty");
+    }
+    ensure_timestampish(draft.timestamp.trim(), "timestamp")?;
+    if draft
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.trim().is_empty())
+    {
+        bail!("OKF proposal reason cannot be empty");
+    }
+    if draft
+        .scope_id
+        .as_deref()
+        .is_some_and(|id| id.trim().is_empty())
+    {
+        bail!("OKF proposal scope id cannot be empty");
+    }
+    validate_applies_to(draft.applies_to.clone())?;
+    if draft.tags.iter().any(|tag| tag.trim().is_empty()) {
+        bail!("OKF proposal tags cannot contain empty entries");
+    }
+    validate_proposal_sources(draft.sources.clone())?;
+    if draft.sensitivity != OkfProposalSensitivity::RepoSafe {
+        bail!("OKF create proposal sensitivity must be repo-safe");
+    }
+    Ok(())
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OkfProposalAction {
@@ -501,6 +712,48 @@ fn write_memory_record_file_internal(
             .with_context(|| format!("failed to write memory record {}", destination.display()))?,
     }
     Ok(destination)
+}
+
+#[derive(Debug, Serialize)]
+struct OkfCreateProposalFrontmatter {
+    id: String,
+    kind: String,
+    version: String,
+    profile: String,
+    #[serde(rename = "type")]
+    memory_type: MemoryType,
+    lane: MemoryLane,
+    title: String,
+    description: String,
+    status: String,
+    proposal: OkfCreateProposalMetadata,
+    scope: OkfCreateProposalScope,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    timestamp: String,
+    created_by: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<OkfProposalSource>,
+    supersedes: Vec<String>,
+    sensitivity: OkfProposalSensitivity,
+}
+
+#[derive(Debug, Serialize)]
+struct OkfCreateProposalMetadata {
+    action: String,
+    proposed_by: String,
+    proposed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OkfCreateProposalScope {
+    kind: ScopeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1078,9 +1331,38 @@ fn validate_string_list(values: StringList, key: &str) -> Result<Vec<String>> {
 
 fn validate_proposal_sources(sources: Vec<OkfProposalSource>) -> Result<Vec<OkfProposalSource>> {
     for source in &sources {
+        let has_value = source
+            .path
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || source
+                .url
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || source
+                .reference
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+        if !has_value {
+            bail!("proposal sources must include a non-empty path, url, or ref");
+        }
         if let Some(path) = &source.path {
             validate_applies_to(vec![path.clone()])
                 .with_context(|| format!("invalid proposal source path {path:?}"))?;
+        }
+        if source
+            .url
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!("proposal source url cannot be empty");
+        }
+        if source
+            .reference
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!("proposal source ref cannot be empty");
         }
     }
     Ok(sources)
