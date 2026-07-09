@@ -515,6 +515,57 @@ fn integrate_instructions_profile_defaults_report_resolved_file_and_reason() {
 }
 
 #[test]
+fn integrate_instructions_claude_prefers_existing_agents_memzoi_block_over_claude_file() {
+    let repo = initialized_temp_repo();
+    let agents = repo.path().join("AGENTS.md");
+    let claude_file = repo.path().join("CLAUDE.md");
+
+    run_json_command(
+        repo.path(),
+        &["integrate", "instructions", "--profile", "codex", "--json"],
+    );
+    fs::write(&claude_file, "# Claude instructions\n").expect("write CLAUDE.md");
+
+    let claude = run_json_command(
+        repo.path(),
+        &["integrate", "instructions", "--profile", "claude", "--json"],
+    );
+
+    assert_json_string_field(&claude, &["file"], "AGENTS.md");
+    assert_json_string_field(&claude, &["reason"], "existing_memzoi_block");
+    let updated_agents = fs::read_to_string(&agents).expect("read AGENTS.md");
+    assert!(updated_agents.contains("You are Claude"));
+    let unchanged_claude = fs::read_to_string(&claude_file).expect("read CLAUDE.md");
+    assert_eq!(unchanged_claude, "# Claude instructions\n");
+}
+
+#[test]
+fn integrate_instructions_fails_without_overwriting_unreadable_existing_file() {
+    let repo = initialized_temp_repo();
+    let instructions = repo.path().join("AGENTS.md");
+    let invalid_utf8 = vec![0xff, 0xfe, 0xfd];
+    fs::write(&instructions, &invalid_utf8).expect("write invalid utf-8 instructions");
+
+    let stderr = run_command_failure_stderr(
+        repo.path(),
+        &[
+            "integrate",
+            "instructions",
+            "--profile",
+            "codex",
+            "--file",
+            instructions.to_str().expect("utf-8 path"),
+        ],
+    );
+
+    assert!(stderr.contains("failed to read"));
+    assert_eq!(
+        fs::read(&instructions).expect("read instructions after failed update"),
+        invalid_utf8
+    );
+}
+
+#[test]
 fn integrate_rejects_unknown_profile() {
     let repo = initialized_temp_repo();
     let stderr =

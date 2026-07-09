@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io::ErrorKind, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -45,8 +45,14 @@ pub(crate) fn integrate_instructions_command(
     as_json: bool,
 ) -> Result<()> {
     let selection = resolve_instruction_file(profile, file)?;
-    let existed = selection.file.exists();
-    let original = fs::read_to_string(&selection.file).unwrap_or_default();
+    let (original, existed) = match fs::read_to_string(&selection.file) {
+        Ok(original) => (original, true),
+        Err(error) if error.kind() == ErrorKind::NotFound => (String::new(), false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {}", selection.file.display()));
+        }
+    };
     let updated = upsert_memzoi_block(&original, profile);
     if let Some(parent) = selection
         .file
@@ -105,15 +111,15 @@ fn resolve_instruction_file(
             reason: "default_profile_file",
         }),
         IntegrateProfile::Claude => {
-            if claude.exists() {
-                Ok(InstructionFileSelection {
-                    file: claude,
-                    reason: "default_profile_file",
-                })
-            } else if agents.exists() && file_contains_memzoi_block(&agents)? {
+            if agents.exists() && file_contains_memzoi_block(&agents)? {
                 Ok(InstructionFileSelection {
                     file: agents,
                     reason: "existing_memzoi_block",
+                })
+            } else if claude.exists() {
+                Ok(InstructionFileSelection {
+                    file: claude,
+                    reason: "default_profile_file",
                 })
             } else {
                 Ok(InstructionFileSelection {
