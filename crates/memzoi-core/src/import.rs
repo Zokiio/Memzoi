@@ -86,11 +86,49 @@ pub struct ImportDuplicate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImportCandidateAction {
-    CreateProposal { proposal_id: String, path: PathBuf },
-    Deferred { route: String, reason: String },
-    Duplicate { matches: Vec<ImportDuplicate> },
-    NoWrite { reason: String },
-    Blocked { reason: String },
+    CreateProposal {
+        proposal_id: String,
+        #[serde(serialize_with = "serialize_posix_relative_path")]
+        path: PathBuf,
+    },
+    Deferred {
+        route: String,
+        reason: String,
+    },
+    Duplicate {
+        matches: Vec<ImportDuplicate>,
+    },
+    NoWrite {
+        reason: String,
+    },
+    Blocked {
+        reason: String,
+    },
+}
+
+fn serialize_posix_relative_path<S>(
+    path: &PathBuf,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut text = String::new();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            return Err(serde::ser::Error::custom(
+                "import action path must contain only normal relative components",
+            ));
+        };
+        let component = component
+            .to_str()
+            .ok_or_else(|| serde::ser::Error::custom("import action path must be valid UTF-8"))?;
+        if !text.is_empty() {
+            text.push('/');
+        }
+        text.push_str(component);
+    }
+    serializer.serialize_str(&text)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -147,6 +147,28 @@ fn mixed_manifest_is_review_first_and_respects_all_destination_boundaries() -> a
 }
 
 #[test]
+fn serialized_repo_import_plan_uses_posix_relative_proposal_path() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let service = initialized_service(&temp)?;
+    let document = parse_import_document(MIXED_MANIFEST)?;
+
+    let plan = service.plan_import("test", document)?;
+    let plan_json = serde_json::to_value(&plan)?;
+    let action = &plan_json["candidates"][0]["action"];
+    let proposal_id = action["proposal_id"]
+        .as_str()
+        .expect("create-proposal action should serialize a proposal id");
+    let path = action["path"]
+        .as_str()
+        .expect("create-proposal action should serialize a path");
+
+    assert_eq!(action["kind"], "create_proposal");
+    assert_eq!(path, format!(".memzoi/proposals/pending/{proposal_id}.md"));
+    assert!(!path.contains('\\'));
+    Ok(())
+}
+
+#[test]
 fn wrong_or_stale_plan_id_is_a_zero_write_guard() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let service = initialized_service(&temp)?;

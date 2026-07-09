@@ -1485,6 +1485,7 @@ mod tests {
         Ok(())
     }
 
+    #[test]
     fn parses_example_memory_into_importable_draft() -> anyhow::Result<()> {
         let bundle_root = Path::new("/bundle");
         let file_path = bundle_root.join("memories/repo/frontend/swedish-first.md");

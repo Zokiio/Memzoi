@@ -150,6 +150,8 @@ Inference is deliberately narrow and deterministic:
 normalized `sources`, a `summary`, and one normalized result per candidate. With `--json`,
 the plan envelope also includes `mode: "plan"`, the effective `actor`, and the manifest
 `source_file`; the plan envelope has no `writes` field.
+`source_file` is project-relative when the manifest resolves under the project root; it is
+`null` when the manifest is outside that root or either path cannot be resolved.
 
 The plan fingerprint uses the trimmed actor and normalized plan (including the current
 duplicate scan), so it is stable for the same actor, manifest, and current memory state.

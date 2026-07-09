@@ -278,17 +278,17 @@ fn import_plan_command(from_file: PathBuf, actor: &str, as_json: bool) -> Result
         .with_context(|| format!("failed to parse import manifest {}", from_file.display()))?;
     let service = open_service()?;
     let plan = service.plan_import(actor, document)?;
-    let output = import_plan_json(
-        &plan,
-        &from_file,
-        service.paths().project_root.as_path(),
-        actor,
-    )?;
     if as_json {
+        let output = import_plan_json(
+            &plan,
+            &from_file,
+            service.paths().project_root.as_path(),
+            actor,
+        )?;
         print_json(&output)
     } else {
         println!("plan\t{}", plan.plan_id);
-        print_import_plan_human(&plan, &output);
+        print_import_plan_human(&plan);
         Ok(())
     }
 }
@@ -312,18 +312,18 @@ fn import_apply_command(
         .with_context(|| format!("failed to parse import manifest {}", from_file.display()))?;
     let service = open_service()?;
     let result = service.apply_import(actor, document, plan_id)?;
-    let output = import_apply_json(
-        &result,
-        &from_file,
-        service.paths().project_root.as_path(),
-        actor,
-        plan_id,
-    )?;
     if as_json {
+        let output = import_apply_json(
+            &result,
+            &from_file,
+            service.paths().project_root.as_path(),
+            actor,
+            plan_id,
+        )?;
         print_json(&output)
     } else {
         println!("applied\t{}", result.plan.plan_id);
-        print_import_plan_human(&result.plan, &output);
+        print_import_plan_human(&result.plan);
         Ok(())
     }
 }
@@ -374,7 +374,7 @@ fn safe_import_source_file(from_file: &Path, project_root: &Path) -> Option<Path
     manifest.strip_prefix(root).ok().map(Path::to_path_buf)
 }
 
-fn print_import_plan_human(plan: &ImportPlan, output: &serde_json::Value) {
+fn print_import_plan_human(plan: &ImportPlan) {
     println!(
         "summary\t{}",
         serde_json::to_string(&plan.summary).unwrap_or_default()
@@ -388,9 +388,6 @@ fn print_import_plan_human(plan: &ImportPlan, output: &serde_json::Value) {
             serde_json::to_string(&candidate.action).unwrap_or_default()
         );
         println!("body\t{}", candidate.body);
-    }
-    if let Ok(pretty) = serde_json::to_string_pretty(output) {
-        println!("{}", pretty);
     }
 }
 
