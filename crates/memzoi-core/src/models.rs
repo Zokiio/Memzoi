@@ -3,6 +3,8 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::memory_policy::MemoryPlane;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryType {
@@ -166,6 +168,7 @@ pub struct MemoryCitation {
     pub record_id: String,
     pub memory_type: MemoryType,
     pub scope_kind: ScopeKind,
+    pub provenance: MemoryPlane,
     pub destination: MemoryDestination,
     pub visibility: Visibility,
     pub source_kind: Option<String>,
@@ -233,7 +236,7 @@ pub struct ContextPackIncludedItem {
     pub scope_kind: ScopeKind,
     pub path: Option<String>,
     pub citation: MemoryCitation,
-    pub provenance: MemoryDestination,
+    pub provenance: MemoryPlane,
     pub destination: MemoryDestination,
     pub score: f64,
     pub rationale: Option<String>,
@@ -255,7 +258,7 @@ pub struct ContextPackOmittedItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextPackWarning {
     pub code: String,
-    pub provenance: MemoryDestination,
+    pub provenance: MemoryPlane,
     pub destination: MemoryDestination,
     pub matching_count: usize,
     pub message: String,

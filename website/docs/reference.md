@@ -78,13 +78,44 @@ Run `memzoi <command> --help` for exact options.
 
 ## Context JSON
 
-`memzoi context --json` and MCP `build_context_pack` return the prompt-ready pack plus metadata. Existing fields such as `prompt`, `records`, `citations`, and `token_budget` remain available. The additive metadata fields are:
+`memzoi context --json` and MCP `build_context_pack` return the prompt-ready pack plus metadata. Existing fields such as `prompt`, `records`, `citations`, and `token_budget` remain available. Recalled citation JSON uses four separate fields: `provenance` (plane), `destination`, optional `source_kind`, and optional `source_ref`.
+
+The serialized `provenance` values are `git` and `runtime`. `git` identifies ownership by canonical `.memzoi/records/*.md` files; it does not mean the record bypassed SQLite, because SQLite is a derived runtime index/cache. For recalled records, serialized `destination` remains `repo`, `local`, or `session`; destination is routing, not provenance. `source_kind` and `source_ref` are nullable source metadata and remain independent of one another.
+
+The additive metadata fields are:
 
 - `budget`: requested budget, effective budget, approximate used budget, and estimate unit.
 - `included`: selected records with compact citation, provenance, destination, score, rationale, and estimated size metadata.
 - `omitted`: capped repo-record metadata for relevant records excluded by budget.
 - `warnings`: structured notices, currently empty for context ranking.
 - `next_queries`: targeted follow-up queries, currently empty.
+
+## Memory planes and destinations
+
+The policy API accepts these serialized storage-plane values for `provenance` (and `MemoryPlane`):
+
+- `git`
+- `runtime`
+
+`MemoryDestination::ALL` accepts these serialized destination values:
+
+- `repo`
+- `local`
+- `session`
+- `discard`
+- `needs_review`
+
+The policy mapping is:
+
+| Destination | Plane | Write route | Review |
+| --- | --- | --- | --- |
+| `repo` | `git` | `file_backed_proposal` | `proposal_review` |
+| `local` | `runtime` | `runtime_local` | `no_review` |
+| `session` | `runtime` | `runtime_session` | `no_review` |
+| `discard` | `null` (no plane) | `no_write` | `no_review` |
+| `needs_review` | `null` (no plane) | `no_write` | `human_decision` |
+
+`team` and `cloud` are future-only destination labels; they are not accepted serialized values in the current policy. Recalled records can have only the plane-backed destinations `repo`, `local`, or `session`. See [Destination classification in the lifecycle policy](./memory-lifecycle.md#destination-plane-lane-and-provenance) for destination behavior and lifecycle commands; this reference page intentionally does not duplicate that command matrix.
 
 ## Handoff JSON
 
@@ -221,20 +252,6 @@ memzoi proposal-files apply <proposal-id>
 `list`, `show`, and `validate` are read-only. `apply` currently supports only `proposal.action: create` with `status: proposed` and `sensitivity: repo-safe`; it writes a compact canonical record under `.memzoi/records/`, leaves the pending proposal file in place, and does not update runtime SQLite state. Run `memzoi rebuild` when the runtime search/index needs to reflect newly applied Git-plane records.
 
 Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals, and there is no override flag. Classify or sanitize blocked proposals before repo apply, or route `local-only` memory to the local/runtime plane.
-
-## Memory destinations
-
-Destination is a pre-write classification for memory candidates. It is separate from `lane`: `destination` decides where a candidate may go, while `lane` describes how stored memory is used and retained.
-
-Valid destination values:
-
-- `repo`
-- `local`
-- `session`
-- `discard`
-- `needs_review`
-
-`repo` candidates must become file-backed proposals before canonical repo memory. `local` and `session` are runtime-plane destinations by default. `discard` means no write. `needs_review` blocks automatic writes until a human decides. `team` and `cloud` are future destinations and are not accepted values yet.
 
 ## Local runtime memory
 

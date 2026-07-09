@@ -14,7 +14,7 @@ memzoi search pnpm --type decision --scope-kind repo --limit 5
 memzoi search billing --path apps/api/src/billing --json
 ```
 
-Search is backed by SQLite FTS over active record titles and bodies. It supports optional filters for memory type, scope kind, path prefix, and limit.
+Search is backed by SQLite FTS over active record titles and bodies. It supports optional filters for memory type, scope kind, path prefix, and limit. JSON search results return records with nullable `source_kind`/`source_ref` and citations carrying the four-part provenance metadata described below.
 
 Path filtering matches records bound to the exact path, descendants of the path, or ancestors of the path. That lets a record attached to `apps/web` apply when the user is working in `apps/web/src/App.tsx`.
 
@@ -26,9 +26,20 @@ memzoi context --task "edit the frontend" --path apps/web --token-budget 1200
 memzoi context --task "resume this task" --include-local --include-session --json
 ```
 
-Context packs are prompt-ready summaries of task-relevant active memory records. Repo memory is the default and is the only destination queried unless `--include-local` or `--include-session` is supplied. When `--path` is supplied, path-bound records are prioritized. `--token-budget` limits selection before prompt rendering; when omitted, Memzoi uses its default budget.
+Context packs are prompt-ready summaries of task-relevant active memory records. Repo memory (`destination: repo`) is the default and is the only destination queried unless `--include-local` or `--include-session` is supplied. When `--path` is supplied, path-bound records are prioritized. `--token-budget` limits selection before prompt rendering; when omitted, Memzoi uses its default budget.
 
-Local and session memory is not queried, counted, rendered, or exposed unless the caller explicitly opts in. When local or session memory is included, prompt lines label that provenance so private/runtime continuity is not mistaken for canonical repo truth.
+Local and session memory is not queried, counted, rendered, or exposed unless the caller explicitly opts in. Use `--include-local` and/or `--include-session` only when private runtime continuity should be part of the pack. These flags change the query policy; they do not change the provenance meaning of any returned record.
+
+### Provenance in recall and precheck
+
+Recall and precheck expose four independent pieces of provenance metadata:
+
+- `provenance` is the storage-plane owner, serialized as `git` or `runtime`. `git` means the record is owned by canonical, reviewable `.memzoi/records/*.md` truth; `runtime` means it is runtime-only local or session state. Plane ownership is independent of transport: Git-plane records may be indexed and queried through the derived SQLite database, and SQLite is not canonical memory.
+- `destination` is the pre-write routing classification. Recalled records use `repo`, `local`, or `session`: `repo` maps to the Git plane, while `local` and `session` map to the runtime plane. `discard` and `needs_review` are no-write classifications and therefore do not appear as recalled records.
+- `source_kind` is optional short source metadata (for example, `human`, `issue`, or `memzoi-local`). It is `null` when the record has no source kind.
+- `source_ref` is an optional durable locator for that source (for example, an issue, PR, commit, or URL). It is independent of `source_kind` and is `null` when no reference was recorded.
+
+In JSON, `records[].citations`, top-level `citations`, and `included[].citation` carry this metadata; `included[].provenance` and `included[].destination` repeat the plane and destination for the selected item. `precheck --json` exposes the same citation metadata under each warning. Text prompt lines use the same `provenance=<plane>` and `destination=<destination>` labels, while source metadata remains optional.
 
 The JSON output includes:
 
@@ -36,7 +47,7 @@ The JSON output includes:
 - `task`: requested task
 - `prompt`: rendered prompt text
 - `records`: selected search results, including context `ranking` metadata
-- `citations`: record citations with destination, visibility, and source provenance
+- `citations`: record citations with plane provenance, destination, visibility, and optional `source_kind`/`source_ref`
 - `token_budget`: requested token budget, if supplied
 - `policy`: requested and included memory destinations
 - `budget`: requested budget, effective budget, approximate used budget, and selection/rendering metadata
