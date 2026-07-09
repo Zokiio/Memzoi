@@ -107,7 +107,7 @@ pub enum ImportCandidateAction {
 }
 
 fn serialize_posix_relative_path<S>(
-    path: &PathBuf,
+    path: &Path,
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error>
 where

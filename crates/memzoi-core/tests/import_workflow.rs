@@ -56,10 +56,10 @@ fn initialized_service(temp: &TempDir) -> anyhow::Result<MemoryService> {
         temp.path().join("runtime-home"),
     );
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
-    Ok(MemoryService::open_paths(paths)?)
+    MemoryService::open_paths(paths)
 }
 
-fn candidate<'a>(plan: &'a Value, index: usize) -> &'a Value {
+fn candidate(plan: &Value, index: usize) -> &Value {
     &plan["candidates"][index]
 }
 

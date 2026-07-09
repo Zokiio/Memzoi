@@ -1459,10 +1459,7 @@ mod tests {
 
         let error = super::create_okf_proposal_file_with_writer(&target, |file| {
             std::io::Write::write_all(file, b"partial proposal bytes")?;
-            Err(std::io::Error::new(
-                ErrorKind::Other,
-                "forced writer failure",
-            ))
+            Err(std::io::Error::other("forced writer failure"))
         })
         .expect_err("forced writer failure should fail proposal creation");
 
