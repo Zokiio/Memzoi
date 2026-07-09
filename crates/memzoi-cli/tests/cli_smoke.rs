@@ -446,8 +446,8 @@ fn integrate_prompt_profiles_include_two_plane_policy_and_mcp_guidance() {
     let mcp = run_command_stdout(repo.path(), &["integrate", "prompt", "--profile", "mcp"]);
     assert!(mcp.contains("Memzoi MCP setup and usage guidance"));
     assert!(mcp.contains("memzoi mcp config --project-root ."));
-    assert!(mcp.contains("Apply proposals") || mcp.contains("Apply"));
-    assert!(mcp.contains("must not"));
+    assert!(mcp.contains("MCP clients must not:"));
+    assert!(mcp.contains("Apply proposals or write durable repo records directly."));
     assert!(mcp.contains("Git-plane repo memory"));
 }
 
