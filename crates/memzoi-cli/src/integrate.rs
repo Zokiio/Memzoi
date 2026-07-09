@@ -1,7 +1,9 @@
 use std::{fs, io::ErrorKind, path::PathBuf};
 
 use anyhow::{Context, Result};
-use memzoi_core::discover_paths;
+use memzoi_core::{
+    MemoryDestination, RepoMemoryExclusion, TWO_PLANE_MEMORY_POLICY, discover_paths,
+};
 use serde_json::json;
 
 use crate::{cli::IntegrateProfile, output::print_json};
@@ -214,21 +216,70 @@ fn profile_selection_policy(profile: IntegrateProfile) -> &'static str {
     }
 }
 
-fn memzoi_protocol_prompt(profile: IntegrateProfile) -> &'static str {
+fn memzoi_protocol_prompt(profile: IntegrateProfile) -> String {
+    let policy = memzoi_policy_block();
     match profile {
-        IntegrateProfile::Codex => CODEX_PROMPT,
-        IntegrateProfile::Claude => CLAUDE_PROMPT,
-        IntegrateProfile::Mcp => MCP_PROMPT,
+        IntegrateProfile::Codex => {
+            format!("{CODEX_PROMPT_PREFIX}\n\n{policy}\n\n{CODEX_PROMPT_SUFFIX}")
+        }
+        IntegrateProfile::Claude => {
+            format!("{CLAUDE_PROMPT_PREFIX}\n\n{policy}\n\n{CLAUDE_PROMPT_SUFFIX}")
+        }
+        IntegrateProfile::Mcp => format!("{MCP_PROMPT_PREFIX}\n\n{policy}\n\n{MCP_PROMPT_SUFFIX}"),
     }
 }
 
-const CODEX_PROMPT: &str = r#"You are working in a repo that uses Memzoi.
+fn memzoi_policy_block() -> String {
+    let destinations = MemoryDestination::ALL
+        .into_iter()
+        .map(|destination| {
+            let policy = destination.policy();
+            format!(
+                "- `{}`: plane `{}`, route `{}`, review `{}`.",
+                destination.as_str(),
+                policy.plane.map(|plane| plane.as_str()).unwrap_or("none"),
+                policy.write_route.as_str(),
+                policy.review.as_str(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let repo_plane = MemoryDestination::Repo
+        .policy()
+        .plane
+        .map(|plane| plane.as_str())
+        .unwrap_or("none");
+    let runtime_plane = MemoryDestination::Local
+        .policy()
+        .plane
+        .map(|plane| plane.as_str())
+        .unwrap_or("none");
+    let exclusions = TWO_PLANE_MEMORY_POLICY
+        .repo_exclusions
+        .iter()
+        .map(|exclusion: &RepoMemoryExclusion| exclusion.as_str().replace('_', " "))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let future_destinations = TWO_PLANE_MEMORY_POLICY.future_destinations.join(", ");
 
-Memzoi has two memory planes:
-- Git-plane repo memory is reviewed durable project truth. Treat `.memzoi/records/*.md` as the canonical shared source.
-- Runtime-plane local/session memory is for private or task continuity. Include it only with `--include-local` or `--include-session`.
+    format!(
+        "Memzoi's canonical two-plane memory policy:\n\
+- Git-plane repo memory (`{repo_plane}`) is reviewed, durable project truth in `{}`.\n\
+- Runtime-plane local/session memory (`{runtime_plane}`) is local continuity under `{}` and is not canonical shared repo truth.\n\
+- Destination policy (destination → plane, write route, review boundary):\n\
+{destinations}\n\
+- `memzoi propose` and MCP proposals are reviewable operational state, not canonical records.\n\
+- Canonical repo writes require an explicit CLI apply route: DB proposals use `memzoi apply <proposal-id>` or `memzoi proposals apply --all-approved` after approval, or the one-shot `memzoi propose --apply` route; file-backed proposal packets require review followed by `memzoi proposal-files apply <proposal-id>`. DB proposal state and packet review alone are not canonical.\n\
+- Do not commit {exclusions} to canonical repo records.\n\
+- Future destinations not enabled by this integration: {future_destinations}.",
+        TWO_PLANE_MEMORY_POLICY.canonical_records_glob,
+        TWO_PLANE_MEMORY_POLICY.runtime_project_root_template,
+    )
+}
 
-Before non-trivial work:
+const CODEX_PROMPT_PREFIX: &str = "You are working in a repo that uses Memzoi.";
+
+const CODEX_PROMPT_SUFFIX: &str = r#"Before non-trivial work:
 - Run `memzoi context --task "<task>"` before non-trivial work, especially before broad repo scans.
 - If editing specific files, include `--path <relative/path>`.
 
@@ -242,19 +293,17 @@ Before risky actions:
 - Run `memzoi precheck --command "<command>"` before destructive or broad commands.
 
 When durable repo knowledge is discovered:
-- Propose it with `memzoi propose --type <type> --title "<title>" --body "<body>"`.
+- Search Memzoi memory before broad scans.
+- Use `memzoi propose --type <type> --title "<title>" --body "<body>"` to create reviewable operational state.
+- Use the policy block's supported route before durable knowledge becomes a canonical record.
 - Use types like fact, decision, procedure, preference, warning, risk, or failed_attempt.
-- Prefer proposals over silent durable mutation.
+- Prefer reviewable proposals over silent durable mutation.
 
-Do not commit secrets, raw chat logs, temporary task progress, private personal data, local-only memory, or session-only memory into repo records."#;
+The policy block defines the canonical route; DB-local and MCP proposal state are not canonical before an explicit CLI apply."#;
 
-const CLAUDE_PROMPT: &str = r#"You are Claude working in a repo that uses Memzoi.
+const CLAUDE_PROMPT_PREFIX: &str = "You are Claude working in a repo that uses Memzoi.";
 
-Memzoi has two memory planes:
-- Git-plane repo memory is reviewed durable project truth. Treat `.memzoi/records/*.md` as the canonical shared source.
-- Runtime-plane local/session memory is for private or task continuity. Include it only with `--include-local` or `--include-session`.
-
-Before non-trivial work:
+const CLAUDE_PROMPT_SUFFIX: &str = r#"Before non-trivial work:
 - Run `memzoi context --task "<task>"` before non-trivial work, especially before broad repo scans.
 - If editing specific files, include `--path <relative/path>`.
 
@@ -268,31 +317,31 @@ Before risky actions:
 - Run `memzoi precheck --command "<command>"` before destructive or broad commands.
 
 When durable repo knowledge is discovered:
-- Propose it with `memzoi propose --type <type> --title "<title>" --body "<body>"`.
+- Search Memzoi memory before broad scans.
+- Use `memzoi propose --type <type> --title "<title>" --body "<body>"` to create reviewable operational state.
+- Use the policy block's supported route before durable knowledge becomes a canonical record.
 - Use types like fact, decision, procedure, preference, warning, risk, or failed_attempt.
-- Prefer proposals over silent durable mutation.
+- Prefer reviewable proposals over silent durable mutation.
 
-Do not commit secrets, raw chat logs, temporary task progress, private personal data, local-only memory, or session-only memory into repo records."#;
+The policy block defines the canonical route; DB-local and MCP proposal state are not canonical before an explicit CLI apply."#;
 
-const MCP_PROMPT: &str = r#"Memzoi MCP setup and usage guidance for this repo.
+const MCP_PROMPT_PREFIX: &str = r#"Memzoi MCP setup and usage guidance for this repo.
 
 To configure an MCP client, generate a copy-pasteable server config with:
-- `memzoi mcp config --project-root .`
+- `memzoi mcp config --project-root .`"#;
 
-Memzoi has two memory planes:
-- Git-plane repo memory is reviewed durable project truth. Treat `.memzoi/records/*.md` as the canonical shared source.
-- Runtime-plane local/session memory is for private or task continuity. Include it only with explicit local/session options.
-
-MCP clients should use Memzoi tools to:
-- Search repo memory before broad repo scans.
+const MCP_PROMPT_SUFFIX: &str = r#"MCP clients should use Memzoi tools to:
+- Search Memzoi memory before broad repo scans.
 - Build context packs for the current task.
+- Request local/session continuity only with explicit local/session options.
 - Run precheck tools before risky path, action, or command work.
-- Propose durable repo memories for review.
+- Create reviewable proposal requests for durable repo memories.
 
 MCP clients must not:
-- Apply proposals or write durable repo records directly.
-- Commit secrets, raw chat logs, temporary task progress, private personal data, local-only memory, or session-only memory into repo records.
-- Treat runtime/local/session memory as reviewed shared project truth."#;
+- Apply proposals or write canonical repo records.
+- Treat DB-local or MCP proposal state as canonical records.
+- Commit excluded or runtime-only material into canonical repo records.
+- Claim that MCP can apply canonical records; canonical writes require an explicit CLI apply route described in the policy block."#;
 
 fn memzoi_instruction_block(profile: IntegrateProfile) -> String {
     format!(
