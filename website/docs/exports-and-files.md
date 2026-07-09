@@ -13,6 +13,14 @@ refuses to discard readable open DB-local proposals. If the runtime database is 
 rebuild treats it as a disposable derived cache and may discard DB-local proposal state. See the
 [OKF profile](./okf-profile.md) for the file-native source layout.
 
+## Format roles
+
+- Markdown with YAML frontmatter under `.memzoi/records/` is the canonical durable memory source.
+- Runtime SQLite under `~/.memzoi/projects/<project-key>/memory.db` stores query, event-log, and other runtime workflow state.
+- JSON is for single command responses and MCP payloads, including existing `--json` output.
+- JSONL/NDJSON is opt-in for append-only or bulk streams. It is not canonical memory and is not rebuild input.
+
+
 ## Bundle layout
 
 After `memzoi init`, the repo-local memory directory contains:
@@ -99,6 +107,19 @@ Instruction projections include active, non-private records of these types:
 - `risk`
 
 They intentionally skip background fact records that are useful for search but too noisy for always-on agent instructions.
+
+## Event-log JSONL
+
+```bash
+memzoi events export --jsonl
+```
+
+`memzoi events export --jsonl` streams runtime event-log rows from the SQLite `event_log`
+table as JSONL: one compact event object per physical line, with no wrapper and no pretty
+multi-line JSON. This operational stream is not canonical memory, is not consumed by
+`memzoi rebuild`, and does not replace `.memzoi/records/*.md` records or OKF proposal
+files under `.memzoi/proposals/pending/*.md`.
+
 
 ## Generated file policy
 

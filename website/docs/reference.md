@@ -16,6 +16,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi proposal-files` | List, show, validate, and apply OKF proposal files under `.memzoi/proposals/pending/`. |
 | `memzoi local` | Add, list, and search local-only runtime memory records. |
 | `memzoi checkpoint` | Add and list runtime session checkpoints. |
+| `memzoi events` | Export runtime event-log rows. |
 | `memzoi session-end` | Promote explicit structured session-end candidates into proposal files or runtime memory. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
@@ -54,6 +55,7 @@ Run `memzoi <command> --help` for exact options.
 | `local search` | `<query>`, `--limit`, `--json` |
 | `checkpoint add` | `--task`, `--note` or `--from-file`, `--actor`, `--json` |
 | `checkpoint list` | `--json` |
+| `events export` | `--jsonl` |
 | `session-end` | `--from-file <path>` or `--from-checkpoint <checkpoint-id>`, `--actor`, `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
@@ -97,6 +99,27 @@ Top-level fields include:
 - `proposal_inbox`: DB-backed open proposal counts from the proposal inbox, not `.memzoi/proposals/pending`.
 - `context`: full context pack JSON, including `records`, `citations`, `policy`, `budget`, `included`, `omitted`, and `warnings`.
 - `created_at`: creation timestamp.
+
+## Event JSONL export
+
+`memzoi events export --jsonl` emits runtime event-log rows from SQLite as JSONL. Each
+non-empty line is one compact standalone JSON object; there is no top-level array, wrapper,
+or pretty multi-line JSON. An empty event log succeeds with empty stdout.
+
+Event objects include:
+
+- `id`
+- `event_type`
+- `actor`
+- `payload`
+- `record_id`
+- `proposal_id`
+- `created_at`
+
+The JSONL stream is operational runtime state for bulk or append-only consumption. It is
+not canonical memory, not rebuild input, and does not replace `.memzoi/records/*.md` or
+`.memzoi/proposals/pending/*.md` files.
+
 
 ## Update Command
 

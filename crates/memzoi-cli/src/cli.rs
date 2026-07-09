@@ -103,6 +103,12 @@ pub(crate) enum Commands {
         command: CheckpointCommands,
     },
 
+    /// Inspect runtime event log rows.
+    Events {
+        #[command(subcommand)]
+        command: EventCommands,
+    },
+
     /// Promote explicit session-end candidates into proposals or runtime memory.
     SessionEnd {
         #[arg(long = "from-file")]
@@ -376,6 +382,16 @@ pub(crate) enum CheckpointCommands {
     List {
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum EventCommands {
+    /// Export runtime event log rows.
+    Export {
+        /// Emit compact JSON Lines: one JSON object per event row.
+        #[arg(long)]
+        jsonl: bool,
     },
 }
 
