@@ -3707,6 +3707,84 @@ fn export_okf_json_writes_active_repo_records_and_filters_inactive_private_perso
 }
 
 #[test]
+fn events_export_jsonl_emits_compact_standalone_event_objects() {
+    let repo = initialized_temp_repo();
+    let repo = repo.path();
+
+    create_applied_memory(
+        repo,
+        "decision",
+        "repo",
+        "JSONL event export decision",
+        "JSONL event export must emit one compact event object per line.",
+    );
+
+    let stdout = run_command_stdout(repo, &["events", "export", "--jsonl"]);
+
+    assert!(
+        !stdout.is_empty(),
+        "JSONL export stdout should not be empty"
+    );
+    assert!(
+        stdout.ends_with('\n'),
+        "JSONL export should terminate the final row with a newline: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("\n  \""),
+        "JSONL export should be compact, not pretty/multiline JSON: {stdout}"
+    );
+
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert!(
+        !lines.is_empty(),
+        "JSONL export should emit at least one row"
+    );
+
+    let mut saw_memory_proposed = false;
+    for (index, line) in lines.iter().copied().enumerate() {
+        assert_eq!(
+            line,
+            line.trim(),
+            "JSONL row {} should not have leading/trailing whitespace: {line:?}",
+            index + 1
+        );
+        assert!(
+            line.starts_with('{') && line.ends_with('}'),
+            "JSONL row {} should be a standalone object line: {line}",
+            index + 1
+        );
+
+        let value = serde_json::from_str::<Value>(line).unwrap_or_else(|error| {
+            panic!("JSONL row {} should parse: {error}: {line}", index + 1)
+        });
+        let object = value
+            .as_object()
+            .unwrap_or_else(|| panic!("JSONL row {} should parse to an object: {line}", index + 1));
+
+        for field in ["id", "event_type", "actor", "created_at"] {
+            assert!(
+                object.get(field).and_then(Value::as_str).is_some(),
+                "JSONL row {} should include string field {field:?}: {line}",
+                index + 1
+            );
+        }
+        assert!(
+            object.contains_key("payload"),
+            "JSONL row {} should include a payload field: {line}",
+            index + 1
+        );
+
+        saw_memory_proposed |=
+            object.get("event_type").and_then(Value::as_str) == Some("memory.proposed");
+    }
+
+    assert!(
+        saw_memory_proposed,
+        "JSONL export should include the memory.proposed event: {stdout}"
+    );
+}
+
+#[test]
 fn export_instruction_markdown_json_writes_agent_files_and_filters_non_projectable_records() {
     let repo = initialized_temp_repo();
     let repo = repo.path();

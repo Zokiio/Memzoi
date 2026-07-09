@@ -1,4 +1,7 @@
-use crate::error::{CoreError, Result};
+use crate::{
+    error::{CoreError, Result},
+    models::MemoryEvent,
+};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,17 +15,6 @@ pub struct AppendEvent {
     pub payload: Value,
     pub record_id: Option<String>,
     pub proposal_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MemoryEvent {
-    pub id: String,
-    pub event_type: String,
-    pub actor: String,
-    pub payload: Value,
-    pub record_id: Option<String>,
-    pub proposal_id: Option<String>,
-    pub created_at: String,
 }
 
 pub fn append_event(conn: &Connection, input: AppendEvent) -> Result<MemoryEvent> {
@@ -57,7 +49,6 @@ pub fn append_event(conn: &Connection, input: AppendEvent) -> Result<MemoryEvent
     Ok(event)
 }
 
-#[cfg(test)]
 pub(crate) fn list_events(conn: &Connection) -> Result<Vec<MemoryEvent>> {
     let mut stmt = conn.prepare(
         "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at

@@ -19,11 +19,11 @@ use serde_json::json;
 
 use crate::{
     cli::{
-        CheckpointCommands, Cli, Commands, DraftCommand, IntegrateCommands, LocalCommands,
-        McpCommands, ProposalCommands, ProposalFileCommands,
+        CheckpointCommands, Cli, Commands, DraftCommand, EventCommands, IntegrateCommands,
+        LocalCommands, McpCommands, ProposalCommands, ProposalFileCommands,
     },
     integrate, mcp,
-    output::print_json,
+    output::{print_json, print_jsonl_row},
     update,
 };
 
@@ -116,6 +116,9 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 json,
             } => checkpoint_add_command(task, note, from_file, &actor, json),
             CheckpointCommands::List { json } => checkpoint_list_command(json),
+        },
+        Commands::Events { command } => match command {
+            EventCommands::Export { jsonl } => events_export_command(jsonl),
         },
         Commands::SessionEnd {
             from_file,
@@ -1303,6 +1306,26 @@ fn export_command(format: &str, scope_kind: &str, as_json: bool) -> Result<()> {
         }
         Ok(())
     }
+}
+
+fn events_export_command(jsonl: bool) -> Result<()> {
+    let service = open_service()?;
+    let events = service.list_events()?;
+
+    if jsonl {
+        for event in &events {
+            print_jsonl_row(event)?;
+        }
+    } else {
+        for event in events {
+            println!(
+                "{}\t{}\t{}\t{}",
+                event.created_at, event.id, event.event_type, event.actor
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn rebuild_command(as_json: bool) -> Result<()> {

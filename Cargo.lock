@@ -801,6 +801,7 @@ dependencies = [
  "predicates",
  "rusqlite",
  "semver",
+ "serde",
  "serde_json",
  "sha2",
  "tar",
