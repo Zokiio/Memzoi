@@ -24,6 +24,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi tombstone` | Tombstone an active memory record. |
 | `memzoi search` | Search active memory records. |
 | `memzoi context` | Build a prompt-ready context pack for a task. |
+| `memzoi handoff` | Build a compact context pack for switching agents or harnesses. |
 | `memzoi precheck` | Check planned work against risky memories before acting. |
 | `memzoi export` | Export active repo memory into reviewable files. |
 | `memzoi rebuild` | Rebuild the derived SQLite database from canonical `.memzoi/records/` files. |
@@ -61,6 +62,7 @@ Run `memzoi <command> --help` for exact options.
 | `tombstone` | `<record-id>`, `--reason`, `--actor`, `--json` |
 | `search` | `<query>`, `--scope-kind`, `--type`, `--path`, `--limit`, `--json` |
 | `context` | `--task`, `--path`, `--token-budget`, `--include-local`, `--include-session`, `--json` |
+| `handoff` | `--task` or `--path`, `--token-budget`, `--include-local`, `--include-session`, `--json` |
 | `precheck` | `--path`, `--action`, `--command`, `--scope-kind`, `--json` |
 | `export` | `<format>`, `--scope-kind`, `--json` |
 | `rebuild` | `--json` |
@@ -77,8 +79,22 @@ Run `memzoi <command> --help` for exact options.
 - `budget`: requested budget, effective budget, approximate used budget, and estimate unit.
 - `included`: selected records with compact citation, provenance, destination, score, rationale, and estimated size metadata.
 - `omitted`: capped repo-record metadata for relevant records excluded by budget.
-- `warnings`: structured notices. Local/session runtime matches are reported only as counts because global context content remains repo-only.
+- `warnings`: structured notices, currently empty for context ranking.
 - `next_queries`: targeted follow-up queries, currently empty.
+
+## Handoff JSON
+
+`memzoi handoff --json` returns handoff metadata plus the full context pack under `context`. It requires `--task` or `--path`; path-only handoff uses the stable effective task `Handoff for path <path>`.
+
+Top-level fields include:
+
+- `id`: handoff pack id.
+- `task`: effective task.
+- `path_prefix`: requested path, if supplied.
+- `token_budget`, `include_local`, `include_session`: requested handoff options.
+- `proposal_inbox`: DB-backed open proposal counts from the proposal inbox, not `.memzoi/proposals/pending`.
+- `context`: full context pack JSON, including `records`, `citations`, `policy`, `budget`, `included`, `omitted`, and `warnings`.
+- `created_at`: creation timestamp.
 
 ## Update Command
 

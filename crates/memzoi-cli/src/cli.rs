@@ -177,6 +177,22 @@ pub(crate) enum Commands {
         json: bool,
     },
 
+    /// Build a compact context pack for switching agents or harnesses.
+    Handoff {
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        token_budget: Option<usize>,
+        #[arg(long)]
+        include_local: bool,
+        #[arg(long)]
+        include_session: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Check planned work against risky memories before acting.
     Precheck {
         #[arg(long)]

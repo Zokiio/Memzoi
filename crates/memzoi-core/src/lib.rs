@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod events;
 mod exporters;
+mod handoff;
 mod models;
 mod okf;
 mod precheck;
@@ -22,12 +23,13 @@ pub use config::{
 };
 pub use context::ContextPackInput;
 pub use error::{CoreError, Result};
+pub use handoff::HandoffInput;
 pub use models::{
     ContextPack, ContextPackBudget, ContextPackIncludedItem, ContextPackOmittedItem,
-    ContextPackPolicy, ContextPackWarning, MemoryCitation, MemoryDestination,
+    ContextPackPolicy, ContextPackWarning, HandoffPack, MemoryCitation, MemoryDestination,
     MemoryDestinationClassification, MemoryEvent, MemoryLane, MemoryPath, MemoryProposal,
-    MemoryRecord, MemoryStatus, MemoryType, PrecheckWarning, ScopeKind, SearchRanking,
-    SearchRankingSignals, SearchResult, Visibility,
+    MemoryRecord, MemoryStatus, MemoryType, PrecheckWarning, ProposalInboxSummary, ScopeKind,
+    SearchRanking, SearchRankingSignals, SearchResult, Visibility,
 };
 pub use okf::{
     OkfProposalAction, OkfProposalApplyResult, OkfProposalFile, OkfProposalMetadata,

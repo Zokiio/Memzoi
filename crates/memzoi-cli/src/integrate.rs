@@ -40,6 +40,10 @@ Before non-trivial work:
 - Run `memzoi context --task "<task>"`.
 - If editing specific files, include `--path <relative/path>`.
 
+When switching agents or harnesses:
+- Run `memzoi handoff --task "<task>"`.
+- If the handoff is path-specific, include `--path <relative/path>`.
+
 Before risky actions:
 - Run `memzoi precheck --path <relative/path>`.
 - Run `memzoi precheck --command "<command>"` before destructive or broad commands.

@@ -6,12 +6,13 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, InitRequest, LocalMemoryInput,
-    MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryService, MemoryType,
-    OkfProposalFile, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalStatus,
-    ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult,
-    SessionEndWrite, Visibility, apply_okf_create_proposal_file, discover_paths,
-    parse_okf_proposal_file, parse_session_end_document,
+    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, HandoffInput, InitRequest,
+    LocalMemoryInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryService,
+    MemoryType, OkfProposalFile, PrecheckInput, Proposal, ProposalApprovalOverride,
+    ProposalInboxSummary, ProposalStatus, ProposalStatusFilter, ProposeOptions, ScopeKind,
+    SearchInput, SearchResult, SessionEndResult, SessionEndWrite, Visibility,
+    apply_okf_create_proposal_file, discover_paths, parse_okf_proposal_file,
+    parse_session_end_document,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -165,6 +166,21 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             include_session,
             json,
         } => context_command(
+            task,
+            path,
+            token_budget,
+            include_local,
+            include_session,
+            json,
+        ),
+        Commands::Handoff {
+            task,
+            path,
+            token_budget,
+            include_local,
+            include_session,
+            json,
+        } => handoff_command(
             task,
             path,
             token_budget,
@@ -1214,6 +1230,55 @@ fn context_command(
         println!("{}", pack.prompt);
         Ok(())
     }
+}
+
+fn handoff_command(
+    task: Option<String>,
+    path: Option<String>,
+    token_budget: Option<usize>,
+    include_local: bool,
+    include_session: bool,
+    as_json: bool,
+) -> Result<()> {
+    let service = open_service()?;
+    let pack = service.build_handoff_pack(HandoffInput {
+        task,
+        path_prefix: path,
+        token_budget,
+        include_local,
+        include_session,
+    })?;
+
+    if as_json {
+        print_json(&serde_json::to_value(&pack)?)
+    } else {
+        println!("# Memzoi Handoff");
+        println!();
+        println!("Task: {}", pack.task);
+        if let Some(path_prefix) = pack.path_prefix.as_deref() {
+            println!("Path: {path_prefix}");
+        }
+        println!(
+            "Proposal inbox: {}",
+            proposal_inbox_text(&pack.proposal_inbox)
+        );
+        println!();
+        println!("{}", pack.context.prompt);
+        Ok(())
+    }
+}
+
+fn proposal_inbox_text(proposal_inbox: &ProposalInboxSummary) -> String {
+    if proposal_inbox.open_total == 0 {
+        return "0 open DB proposals".to_owned();
+    }
+    format!(
+        "{} open DB proposals (pending={}, validated={}, approved={})",
+        proposal_inbox.open_total,
+        proposal_inbox.pending,
+        proposal_inbox.validated,
+        proposal_inbox.approved
+    )
 }
 
 fn export_command(format: &str, scope_kind: &str, as_json: bool) -> Result<()> {

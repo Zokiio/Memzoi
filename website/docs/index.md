@@ -16,7 +16,7 @@ Memzoi v0 is local-first and intended for dogfooding and early experimentation. 
 - [Install](./install.md): install the `memzoi` and `memzoi-mcp` binaries from this repo.
 - [Memory lifecycle](./memory-lifecycle.md): propose, review, apply, supersede, or tombstone records.
 - [OKF profile](./okf-profile.md): file-native record and proposal layouts, schema fields, and apply target flow.
-- [Recall and precheck](./recall-and-precheck.md): search memory, build context packs, and check risky work.
+- [Recall and precheck](./recall-and-precheck.md): search memory, build context and handoff packs, and check risky work.
 - [MCP and agent integration](./mcp-and-agent-integration.md): connect agents and install instruction prompts.
 - [Reference](./reference.md): CLI commands, MCP tools, schema values, and limitations.
 
@@ -29,7 +29,7 @@ Memzoi v0 is local-first and intended for dogfooding and early experimentation. 
 - Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
 - Rebuild from canonical records with `memzoi rebuild` when the derived runtime index
   needs to be regenerated.
-- Text search and prompt-ready context packs.
+- Text search, prompt-ready context packs, and CLI handoff packs.
 - Pre-action governance checks with citations and suggested next steps.
 - Deterministic generated exports: OKF Markdown projections, `AGENTS.memory.md`, and `CLAUDE.memory.md`.
 - Minimal stdio MCP server with safe tools:

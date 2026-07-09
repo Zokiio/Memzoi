@@ -53,6 +53,7 @@ memzoi doctor
 memzoi quickstart --apply-sample
 memzoi search quickstart
 memzoi context --task "remember quickstart setup"
+memzoi handoff --task "switch agents after quickstart"
 memzoi precheck --command "rm -rf .memzoi"
 memzoi export agents-md
 memzoi mcp config --project-root .

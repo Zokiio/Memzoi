@@ -278,6 +278,28 @@ pub struct ContextPack {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalInboxSummary {
+    pub source: String,
+    pub open_total: usize,
+    pub pending: usize,
+    pub validated: usize,
+    pub approved: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandoffPack {
+    pub id: String,
+    pub task: String,
+    pub path_prefix: Option<String>,
+    pub token_budget: Option<usize>,
+    pub include_local: bool,
+    pub include_session: bool,
+    pub proposal_inbox: ProposalInboxSummary,
+    pub context: ContextPack,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrecheckWarning {
     pub id: String,

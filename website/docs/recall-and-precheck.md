@@ -4,7 +4,7 @@ title: Recall and Precheck
 
 # Recall and Precheck
 
-Memzoi has two read-side workflows: recall memory for context, and check planned work against risky memories before acting.
+Memzoi has three read-side workflows: recall memory for context, build handoff packs for agent switching, and check planned work against risky memories before acting.
 
 ## Search active memory
 
@@ -45,6 +45,32 @@ The JSON output includes:
 - `warnings`: structured notices, currently empty for context ranking
 - `next_queries`: targeted follow-up searches, currently empty
 - `created_at`: creation timestamp
+
+## Build a handoff pack
+
+```bash
+memzoi handoff --task "switch agents during auth work"
+memzoi handoff --path crates/memzoi-core --token-budget 800 --json
+memzoi handoff --task "resume local task" --include-local --include-session --json
+```
+
+Handoff packs are CLI wrappers around context packs for switching agents or harnesses. They reuse the same deterministic context ranking, budget selection, deduplication, provenance, and explicit local/session opt-in policy as `memzoi context`.
+
+`memzoi handoff` requires `--task` or `--path`. When only `--path` is supplied, Memzoi derives the deterministic internal task string `Handoff for path <path>` before building the context pack.
+
+Text output starts with `# Memzoi Handoff`, prints the effective task, optional path, and `Proposal inbox`, then renders the existing context prompt. `Proposal inbox` is backed by the DB-local proposal inbox used by `memzoi proposals` and `memzoi doctor`; it does not scan `.memzoi/proposals/pending`.
+
+JSON output wraps the full context pack under `context`:
+
+- `id`: handoff pack id
+- `task`: effective task, including the path-only fallback when used
+- `path_prefix`: requested path, if supplied
+- `token_budget`, `include_local`, `include_session`: requested handoff options
+- `proposal_inbox`: DB-backed open proposal counts with `source: "db"`
+- `context`: the full context pack JSON, including `records` with per-record `ranking`, `citations`, `policy`, `budget`, `included`, `omitted`, and `warnings`
+- `created_at`: creation timestamp
+
+Local and session memory remains repo-excluded by default. It is not queried, counted, rendered, or exposed in handoff output unless `--include-local` or `--include-session` is supplied.
 
 ## Run pre-action checks
 
