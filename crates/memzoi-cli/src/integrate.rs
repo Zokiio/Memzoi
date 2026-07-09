@@ -147,7 +147,10 @@ fn resolve_instruction_file(
 fn file_contains_memzoi_block(file: &PathBuf) -> Result<bool> {
     let contents =
         fs::read_to_string(file).with_context(|| format!("failed to read {}", file.display()))?;
-    Ok(contents.contains(MEMZOI_START) && contents.contains(MEMZOI_END))
+    Ok(contents
+        .find(MEMZOI_START)
+        .and_then(|start| contents[start..].find(MEMZOI_END))
+        .is_some())
 }
 
 fn profile_json(profile: IntegrateProfile) -> serde_json::Value {
@@ -210,7 +213,7 @@ Memzoi has two memory planes:
 - Runtime-plane local/session memory is for private or task continuity. Include it only with `--include-local` or `--include-session`.
 
 Before non-trivial work:
-- Run `memzoi context --task "<task>"` before broad repo scans.
+- Run `memzoi context --task "<task>"` before non-trivial work, especially before broad repo scans.
 - If editing specific files, include `--path <relative/path>`.
 
 When switching agents or harnesses:
@@ -236,7 +239,7 @@ Memzoi has two memory planes:
 - Runtime-plane local/session memory is for private or task continuity. Include it only with `--include-local` or `--include-session`.
 
 Before non-trivial work:
-- Run `memzoi context --task "<task>"` before broad repo scans.
+- Run `memzoi context --task "<task>"` before non-trivial work, especially before broad repo scans.
 - If editing specific files, include `--path <relative/path>`.
 
 When switching agents or harnesses:

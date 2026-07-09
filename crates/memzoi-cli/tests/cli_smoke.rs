@@ -557,6 +557,29 @@ fn integrate_instructions_claude_prefers_existing_agents_memzoi_block_over_claud
 }
 
 #[test]
+fn integrate_instructions_claude_ignores_reversed_agents_markers() {
+    let repo = initialized_temp_repo();
+    let agents = repo.path().join("AGENTS.md");
+    fs::write(
+        &agents,
+        "# Agent instructions\n\n<!-- memzoi:end -->\nstale\n<!-- memzoi:start -->\n",
+    )
+    .expect("write reversed markers");
+
+    let claude = run_json_command(
+        repo.path(),
+        &["integrate", "instructions", "--profile", "claude", "--json"],
+    );
+
+    assert_json_string_field(&claude, &["file"], "CLAUDE.md");
+    assert_json_string_field(&claude, &["reason"], "default_profile_file");
+    let unchanged_agents = fs::read_to_string(&agents).expect("read AGENTS.md");
+    assert!(unchanged_agents.contains("<!-- memzoi:end -->"));
+    let claude_file = fs::read_to_string(repo.path().join("CLAUDE.md")).expect("read CLAUDE.md");
+    assert!(claude_file.contains("You are Claude"));
+}
+
+#[test]
 fn integrate_instructions_fails_without_overwriting_unreadable_existing_file() {
     let repo = initialized_temp_repo();
     let instructions = repo.path().join("AGENTS.md");

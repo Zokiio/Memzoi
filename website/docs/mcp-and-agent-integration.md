@@ -109,7 +109,7 @@ and instruction generation. The `mcp` profile is setup and usage guidance for an
 
 Profile prompts tell agents to:
 
-- Run `memzoi context --task "<task>"` before non-trivial work.
+- Run `memzoi context --task "<task>"` before non-trivial work, especially before broad repo scans.
 - Use `memzoi handoff --task "<task>"` when switching CLI agents or harnesses.
 - Add `--path <relative/path>` when editing specific files.
 - Add `--include-local` or `--include-session` only when private runtime memory or explicit checkpoints should be part of the context.
