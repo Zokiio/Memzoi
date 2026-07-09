@@ -396,7 +396,7 @@ fn integrate_prompt_prints_memzoi_protocol() {
     let repo = initialized_temp_repo();
     let mut cmd = memzoi();
 
-    cmd.args(["integrate", "prompt"])
+    cmd.args(["integrate", "prompt", "--profile", "codex"])
         .current_dir(repo.path())
         .assert()
         .success()
@@ -444,6 +444,8 @@ fn integrate_instructions_creates_and_updates_marked_block() {
         &[
             "integrate",
             "instructions",
+            "--profile",
+            "codex",
             "--file",
             instructions.to_str().expect("utf-8 path"),
             "--json",
@@ -471,6 +473,8 @@ fn integrate_instructions_creates_and_updates_marked_block() {
         &[
             "integrate",
             "instructions",
+            "--profile",
+            "codex",
             "--file",
             instructions.to_str().expect("utf-8 path"),
             "--json",
@@ -518,6 +522,20 @@ fn integrate_rejects_unknown_profile() {
 
     assert!(stderr.contains("invalid value"));
     assert!(stderr.contains("cursor"));
+}
+
+#[test]
+fn integrate_requires_explicit_profile_for_prompt_and_instructions() {
+    let repo = initialized_temp_repo();
+
+    let prompt_stderr = run_command_failure_stderr(repo.path(), &["integrate", "prompt"]);
+    assert!(prompt_stderr.contains("required"));
+    assert!(prompt_stderr.contains("--profile"));
+
+    let instructions_stderr =
+        run_command_failure_stderr(repo.path(), &["integrate", "instructions", "--json"]);
+    assert!(instructions_stderr.contains("required"));
+    assert!(instructions_stderr.contains("--profile"));
 }
 
 #[test]

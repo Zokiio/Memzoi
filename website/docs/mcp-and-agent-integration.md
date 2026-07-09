@@ -91,7 +91,7 @@ Structured output includes the proposal ID, status, validation details when avai
 Print a one-shot prompt that teaches an agent how to use Memzoi:
 
 ```bash
-memzoi integrate prompt
+memzoi integrate prompt --profile codex
 memzoi integrate prompt --profile claude
 memzoi integrate prompt --profile mcp
 ```
@@ -103,8 +103,8 @@ memzoi integrate list
 memzoi integrate list --json
 ```
 
-Profiles currently include `codex`, `claude`, and `mcp`. The `mcp` profile is setup and usage
-guidance for an instruction file; it does not write an MCP config file. Use
+Profiles currently include `codex`, `claude`, and `mcp`, and `--profile` is required for prompt
+and instruction generation. The `mcp` profile is setup and usage guidance for an instruction file; it does not write an MCP config file. Use
 `memzoi mcp config --project-root .` for the copy-pasteable MCP server configuration.
 
 Profile prompts tell agents to:
@@ -124,7 +124,7 @@ Profile prompts tell agents to:
 Create or update a marked Memzoi block in an instruction file:
 
 ```bash
-memzoi integrate instructions --file AGENTS.md
+memzoi integrate instructions --profile codex --file AGENTS.md
 memzoi integrate instructions --profile claude
 memzoi integrate instructions --profile mcp --file AGENTS.md
 ```
@@ -132,7 +132,7 @@ memzoi integrate instructions --profile mcp --file AGENTS.md
 Use `--json` for scriptable output:
 
 ```bash
-memzoi integrate instructions --file AGENTS.md --json
+memzoi integrate instructions --profile codex --file AGENTS.md --json
 ```
 
 When `--file` is omitted, `codex` defaults to `AGENTS.md`, `claude` defaults to `CLAUDE.md`

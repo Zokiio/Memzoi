@@ -400,14 +400,14 @@ pub(crate) enum IntegrateCommands {
     /// Print a one-shot prompt that teaches an agent to use Memzoi.
     Prompt {
         /// Agent or integration profile to generate.
-        #[arg(long, value_enum, default_value_t = IntegrateProfile::Codex)]
+        #[arg(long, value_enum)]
         profile: IntegrateProfile,
     },
 
     /// Create or update a marked Memzoi block in an instruction file.
     Instructions {
         /// Agent or integration profile to generate.
-        #[arg(long, value_enum, default_value_t = IntegrateProfile::Codex)]
+        #[arg(long, value_enum)]
         profile: IntegrateProfile,
         #[arg(long)]
         file: Option<PathBuf>,
