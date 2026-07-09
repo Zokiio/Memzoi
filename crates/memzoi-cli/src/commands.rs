@@ -212,10 +212,13 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             McpCommands::Config { project_root } => mcp::mcp_config_command(project_root),
         },
         Commands::Integrate { command } => match command {
-            IntegrateCommands::Prompt => integrate::integrate_prompt_command(),
-            IntegrateCommands::Instructions { file, json } => {
-                integrate::integrate_instructions_command(file, json)
-            }
+            IntegrateCommands::List { json } => integrate::integrate_list_command(json),
+            IntegrateCommands::Prompt { profile } => integrate::integrate_prompt_command(profile),
+            IntegrateCommands::Instructions {
+                profile,
+                file,
+                json,
+            } => integrate::integrate_instructions_command(profile, file, json),
         },
     }
 }

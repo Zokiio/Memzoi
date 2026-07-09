@@ -363,6 +363,35 @@ fn mcp_config_json_uses_absolute_project_root() {
 }
 
 #[test]
+fn integrate_list_shows_supported_profiles() {
+    let repo = initialized_temp_repo();
+    let output = run_command_stdout(repo.path(), &["integrate", "list"]);
+
+    assert!(output.contains("codex"));
+    assert!(output.contains("claude"));
+    assert!(output.contains("mcp"));
+
+    let listed = run_json_command(repo.path(), &["integrate", "list", "--json"]);
+    let profiles = listed["profiles"]
+        .as_array()
+        .expect("profiles should be an array");
+    assert!(
+        profiles.iter().any(|profile| profile["profile"] == "codex"),
+        "list should include codex: {listed}"
+    );
+    assert!(
+        profiles
+            .iter()
+            .any(|profile| profile["profile"] == "claude"),
+        "list should include claude: {listed}"
+    );
+    assert!(
+        profiles.iter().any(|profile| profile["profile"] == "mcp"),
+        "list should include mcp: {listed}"
+    );
+}
+
+#[test]
 fn integrate_prompt_prints_memzoi_protocol() {
     let repo = initialized_temp_repo();
     let mut cmd = memzoi();
@@ -375,10 +404,34 @@ fn integrate_prompt_prints_memzoi_protocol() {
             predicate::str::contains("Before non-trivial work")
                 .and(predicate::str::contains("memzoi context --task"))
                 .and(predicate::str::contains("memzoi handoff --task"))
+                .and(predicate::str::contains("Git-plane repo memory"))
+                .and(predicate::str::contains(
+                    "Runtime-plane local/session memory",
+                ))
+                .and(predicate::str::contains(".memzoi/records/*.md"))
+                .and(predicate::str::contains("--include-local"))
                 .and(predicate::str::contains("memzoi precheck --command"))
                 .and(predicate::str::contains("memzoi propose"))
-                .and(predicate::str::contains("Do not store secrets")),
+                .and(predicate::str::contains("Do not commit secrets")),
         );
+}
+
+#[test]
+fn integrate_prompt_profiles_include_two_plane_policy_and_mcp_guidance() {
+    let repo = initialized_temp_repo();
+    let claude = run_command_stdout(repo.path(), &["integrate", "prompt", "--profile", "claude"]);
+    assert!(claude.contains("You are Claude"));
+    assert!(claude.contains("Git-plane repo memory"));
+    assert!(claude.contains("Runtime-plane local/session memory"));
+    assert!(claude.contains("memzoi precheck --command"));
+    assert!(claude.contains("Do not commit secrets"));
+
+    let mcp = run_command_stdout(repo.path(), &["integrate", "prompt", "--profile", "mcp"]);
+    assert!(mcp.contains("Memzoi MCP setup and usage guidance"));
+    assert!(mcp.contains("memzoi mcp config --project-root ."));
+    assert!(mcp.contains("Apply proposals") || mcp.contains("Apply"));
+    assert!(mcp.contains("must not"));
+    assert!(mcp.contains("Git-plane repo memory"));
 }
 
 #[test]
@@ -386,7 +439,7 @@ fn integrate_instructions_creates_and_updates_marked_block() {
     let repo = initialized_temp_repo();
     let instructions = repo.path().join("AGENTS.md");
 
-    run_json_command(
+    let created = run_json_command(
         repo.path(),
         &[
             "integrate",
@@ -396,6 +449,10 @@ fn integrate_instructions_creates_and_updates_marked_block() {
             "--json",
         ],
     );
+    assert_json_string_field(&created, &["profile"], "codex");
+    assert_json_string_field(&created, &["status"], "created");
+    assert_json_string_field(&created, &["marker"], "memzoi");
+    assert_json_string_field(&created, &["reason"], "explicit_file");
     let first = fs::read_to_string(&instructions).expect("read created instructions");
     assert!(first.contains("<!-- memzoi:start -->"));
     assert!(first.contains("memzoi context --task"));
@@ -409,7 +466,7 @@ fn integrate_instructions_creates_and_updates_marked_block() {
     )
     .expect("stale instructions");
 
-    run_json_command(
+    let updated_json = run_json_command(
         repo.path(),
         &[
             "integrate",
@@ -419,11 +476,48 @@ fn integrate_instructions_creates_and_updates_marked_block() {
             "--json",
         ],
     );
+    assert_json_string_field(&updated_json, &["status"], "updated");
     let updated = fs::read_to_string(&instructions).expect("read updated instructions");
     assert_eq!(updated.matches("<!-- memzoi:start -->").count(), 1);
     assert!(!updated.contains("stale-memory context --task"));
     assert!(updated.contains("memzoi context --task"));
     assert!(updated.contains("memzoi handoff --task"));
+}
+
+#[test]
+fn integrate_instructions_profile_defaults_report_resolved_file_and_reason() {
+    let repo = initialized_temp_repo();
+    let agents = repo.path().join("AGENTS.md");
+
+    let codex = run_json_command(
+        repo.path(),
+        &["integrate", "instructions", "--profile", "codex", "--json"],
+    );
+    assert_json_string_field(&codex, &["file"], "AGENTS.md");
+    assert_json_string_field(&codex, &["profile"], "codex");
+    assert_json_string_field(&codex, &["status"], "created");
+    assert_json_string_field(&codex, &["reason"], "default_profile_file");
+
+    let claude = run_json_command(
+        repo.path(),
+        &["integrate", "instructions", "--profile", "claude", "--json"],
+    );
+    assert_json_string_field(&claude, &["file"], "AGENTS.md");
+    assert_json_string_field(&claude, &["profile"], "claude");
+    assert_json_string_field(&claude, &["status"], "updated");
+    assert_json_string_field(&claude, &["reason"], "existing_memzoi_block");
+    let updated_agents = fs::read_to_string(&agents).expect("read AGENTS.md");
+    assert!(updated_agents.contains("You are Claude"));
+}
+
+#[test]
+fn integrate_rejects_unknown_profile() {
+    let repo = initialized_temp_repo();
+    let stderr =
+        run_command_failure_stderr(repo.path(), &["integrate", "prompt", "--profile", "cursor"]);
+
+    assert!(stderr.contains("invalid value"));
+    assert!(stderr.contains("cursor"));
 }
 
 #[test]
