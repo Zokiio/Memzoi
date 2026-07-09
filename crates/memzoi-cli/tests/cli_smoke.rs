@@ -7,7 +7,7 @@ use std::{
 };
 
 use assert_cmd::Command;
-use memzoi_core::MemoryPaths;
+use memzoi_core::{MemoryDestination, MemoryPaths, TWO_PLANE_MEMORY_POLICY};
 use predicates::prelude::*;
 use rusqlite::Connection;
 use semver::Version;
@@ -362,28 +362,97 @@ fn mcp_config_json_uses_absolute_project_root() {
     );
 }
 
+fn assert_two_plane_policy(output: &str) {
+    assert!(
+        output.contains("Memzoi's canonical two-plane memory policy:"),
+        "missing canonical policy heading: {output}"
+    );
+    let repo_plane = MemoryDestination::Repo
+        .policy()
+        .plane
+        .map(|plane| plane.as_str())
+        .unwrap_or("none");
+    let runtime_plane = MemoryDestination::Local
+        .policy()
+        .plane
+        .map(|plane| plane.as_str())
+        .unwrap_or("none");
+    assert!(
+        output.contains(&format!(
+            "Git-plane repo memory (`{repo_plane}`) is reviewed, durable project truth in `{}`.",
+            TWO_PLANE_MEMORY_POLICY.canonical_records_glob
+        )),
+        "missing canonical Git-plane path: {output}"
+    );
+    assert!(
+        output.contains(&format!(
+            "Runtime-plane local/session memory (`{runtime_plane}`) is local continuity under `{}` and is not canonical shared repo truth.",
+            TWO_PLANE_MEMORY_POLICY.runtime_project_root_template
+        )),
+        "missing canonical runtime-plane path: {output}"
+    );
+
+    for destination in MemoryDestination::ALL {
+        let policy = destination.policy();
+        let row = format!(
+            "- `{}`: plane `{}`, route `{}`, review `{}`.",
+            destination.as_str(),
+            policy.plane.map(|plane| plane.as_str()).unwrap_or("none"),
+            policy.write_route.as_str(),
+            policy.review.as_str(),
+        );
+        assert!(
+            output.contains(&row),
+            "missing destination policy row: {row}\n{output}"
+        );
+    }
+
+    for exclusion in TWO_PLANE_MEMORY_POLICY.repo_exclusions {
+        let wording = exclusion.as_str().replace('_', " ");
+        assert!(
+            output.contains(&wording),
+            "missing canonical repo exclusion {wording:?}: {output}"
+        );
+    }
+    assert!(
+        output.contains("raw chat transcripts"),
+        "canonical repo exclusions must use raw chat transcript wording: {output}"
+    );
+    assert!(
+        output.contains(
+            "- `memzoi propose` and MCP proposals are reviewable operational state, not canonical records."
+        ),
+        "missing proposal operational-state boundary: {output}"
+    );
+}
+
 #[test]
 fn integrate_list_shows_supported_profiles() {
     let repo = initialized_temp_repo();
     let output = run_command_stdout(repo.path(), &["integrate", "list"]);
 
-    assert!(output.contains("codex"));
-    assert!(output.contains("claude"));
-    assert!(output.contains("mcp"));
+    assert_eq!(
+        output.lines().collect::<Vec<_>>(),
+        vec![
+            "codex\tCodex agent instructions\tinstruction-file",
+            "claude\tClaude agent instructions\tinstruction-file",
+            "mcp\tMCP setup and usage guidance\tsetup-guidance",
+        ]
+    );
 
     let listed = run_json_command(repo.path(), &["integrate", "list", "--json"]);
     let profiles = listed["profiles"]
         .as_array()
         .expect("profiles should be an array");
-    assert!(
-        profiles.iter().any(|profile| profile["profile"] == "codex"),
-        "list should include codex: {listed}"
-    );
-    assert!(
-        profiles
-            .iter()
-            .any(|profile| profile["profile"] == "claude"),
-        "list should include claude: {listed}"
+    let profile_names = profiles
+        .iter()
+        .map(|profile| profile["profile"].as_str().expect("profile name"))
+        .collect::<Vec<_>>();
+    assert_eq!(profile_names, ["codex", "claude", "mcp"]);
+    assert_eq!(
+        profiles.len(),
+        3,
+        "profile list should remain closed: {listed}"
     );
     let claude = profiles
         .iter()
@@ -434,21 +503,80 @@ fn integrate_prompt_prints_memzoi_protocol() {
 }
 
 #[test]
-fn integrate_prompt_profiles_include_two_plane_policy_and_mcp_guidance() {
+fn integrate_prompt_profiles_include_canonical_two_plane_policy_and_guidance() {
     let repo = initialized_temp_repo();
-    let claude = run_command_stdout(repo.path(), &["integrate", "prompt", "--profile", "claude"]);
-    assert!(claude.contains("You are Claude"));
-    assert!(claude.contains("Git-plane repo memory"));
-    assert!(claude.contains("Runtime-plane local/session memory"));
-    assert!(claude.contains("memzoi precheck --command"));
-    assert!(claude.contains("Do not commit secrets"));
 
-    let mcp = run_command_stdout(repo.path(), &["integrate", "prompt", "--profile", "mcp"]);
-    assert!(mcp.contains("Memzoi MCP setup and usage guidance"));
-    assert!(mcp.contains("memzoi mcp config --project-root ."));
-    assert!(mcp.contains("MCP clients must not:"));
-    assert!(mcp.contains("Apply proposals or write durable repo records directly."));
-    assert!(mcp.contains("Git-plane repo memory"));
+    for (profile, identity, search_guidance, context_guidance, precheck_guidance) in [
+        (
+            "codex",
+            "You are working in a repo that uses Memzoi.",
+            "Search Memzoi memory before broad scans.",
+            "memzoi context --task",
+            "memzoi precheck",
+        ),
+        (
+            "claude",
+            "You are Claude working in a repo that uses Memzoi.",
+            "Search Memzoi memory before broad scans.",
+            "memzoi context --task",
+            "memzoi precheck",
+        ),
+        (
+            "mcp",
+            "Memzoi MCP setup and usage guidance for this repo.",
+            "Search Memzoi memory before broad repo scans.",
+            "Build context packs for the current task.",
+            "Run precheck tools",
+        ),
+    ] {
+        let args = ["integrate", "prompt", "--profile", profile];
+        let output = run_command_stdout(repo.path(), &args);
+        let repeat = run_command_stdout(repo.path(), &args);
+        assert_eq!(output, repeat, "{profile} prompt must be deterministic");
+        assert!(
+            output.contains(identity),
+            "missing {profile} identity: {output}"
+        );
+        assert_two_plane_policy(&output);
+        assert!(
+            output.contains(search_guidance),
+            "{profile} must search memory before broad scans: {output}"
+        );
+        assert!(
+            output.contains(context_guidance),
+            "{profile} must include context guidance: {output}"
+        );
+        assert!(
+            output.contains(precheck_guidance),
+            "{profile} must include precheck guidance: {output}"
+        );
+        assert!(
+            output.contains("memzoi propose") || output.contains("proposal requests"),
+            "{profile} must include proposal guidance: {output}"
+        );
+        assert!(
+            output.contains(
+                "Canonical repo writes use supported file-backed proposal packets and review/apply flow; only applied packets become canonical records."
+            ),
+            "{profile} must describe the repository proposal/review boundary: {output}"
+        );
+        assert!(
+            output.contains("Do not commit secrets"),
+            "{profile} must include safety exclusions: {output}"
+        );
+
+        if profile == "mcp" {
+            assert!(output.contains("memzoi mcp config --project-root ."));
+            assert!(output.contains("MCP clients must not:"));
+            assert!(output.contains("Apply proposals or write durable repo records directly."));
+            assert!(
+                !output.lines().any(|line| line
+                    .trim_start()
+                    .starts_with("MCP can apply canonical records")),
+                "MCP must not promise canonical apply: {output}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -478,6 +606,8 @@ fn integrate_instructions_creates_and_updates_marked_block() {
     assert!(first.contains("memzoi handoff --task"));
     assert!(first.contains("memzoi propose --type"));
     assert!(first.contains("<!-- memzoi:end -->"));
+    assert_two_plane_policy(&first);
+    assert_eq!(first.matches("<!-- memzoi:end -->").count(), 1);
 
     fs::write(
         &instructions,
@@ -503,6 +633,27 @@ fn integrate_instructions_creates_and_updates_marked_block() {
     assert!(!updated.contains("stale-memory context --task"));
     assert!(updated.contains("memzoi context --task"));
     assert!(updated.contains("memzoi handoff --task"));
+    assert_two_plane_policy(&updated);
+    assert_eq!(updated.matches("<!-- memzoi:end -->").count(), 1);
+
+    let repeat_json = run_json_command(
+        repo.path(),
+        &[
+            "integrate",
+            "instructions",
+            "--profile",
+            "codex",
+            "--file",
+            instructions.to_str().expect("utf-8 path"),
+            "--json",
+        ],
+    );
+    assert_json_string_field(&repeat_json, &["status"], "updated");
+    let repeated = fs::read_to_string(&instructions).expect("read repeated instructions");
+    assert_eq!(
+        repeated, updated,
+        "marked instruction block should be idempotent"
+    );
 }
 
 #[test]
@@ -1576,15 +1727,7 @@ candidates:
     );
     assert_json_string_field(&planned, &["mode"], "plan");
     assert_json_string_field(&planned, &["schema"], "memzoi/import-plan-v1");
-    let source_file = json_string(&planned, "source_file");
-    assert!(
-        !source_file.is_empty(),
-        "plan should report a source manifest: {planned}"
-    );
-    assert!(
-        source_file.ends_with("mixed-import.yml"),
-        "plan should report the mixed-import.yml manifest: {planned}"
-    );
+    assert_json_string_field(&planned, &["source_file"], "mixed-import.yml");
     let plan_id = json_string(&planned, "plan_id").to_owned();
     assert!(
         !plan_id.is_empty(),
@@ -1653,6 +1796,7 @@ candidates:
     assert_json_string_field(&applied, &["mode"], "apply");
     assert_json_string_field(&applied, &["expected_plan_id"], &plan_id);
     assert_json_string_field(&applied, &["schema"], "memzoi/import-plan-v1");
+    assert_json_string_field(&applied, &["source_file"], "mixed-import.yml");
     let writes = applied["writes"]
         .as_array()
         .unwrap_or_else(|| panic!("apply should include writes: {applied}"));
@@ -1804,6 +1948,61 @@ candidates:
         fs::read(&paths.db_path).expect("read runtime db after stale plan"),
         database_before,
         "stale plan must not mutate runtime state"
+    );
+}
+
+#[test]
+fn import_plan_and_apply_hide_external_manifest_paths() {
+    let repo = initialized_temp_repo();
+    let external_dir = tempfile::tempdir().expect("external manifest dir");
+    let manifest_path = external_dir.path().join("external-import.yml");
+    fs::write(
+        &manifest_path,
+        r#"version: memzoi/import-v1
+sources:
+  - path: imports/external-source.yml
+candidates:
+  - destination: discard
+    reason: external manifest privacy check
+    type: fact
+    title: External manifest candidate
+    body: This candidate must not expose its manifest path.
+    sensitivity: unknown
+"#,
+    )
+    .expect("write external import manifest");
+
+    let planned = run_json_command(
+        repo.path(),
+        &[
+            "import",
+            "plan",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--json",
+        ],
+    );
+    assert!(
+        planned.get("source_file").map_or(true, Value::is_null),
+        "external plan must omit or null source_file rather than expose an absolute path: {planned}"
+    );
+    let plan_id = json_string(&planned, "plan_id").to_owned();
+
+    let applied = run_json_command(
+        repo.path(),
+        &[
+            "import",
+            "apply",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--plan-id",
+            plan_id.as_str(),
+            "--json",
+        ],
+    );
+    assert!(
+        applied.get("source_file").map_or(true, Value::is_null),
+        "external apply must omit or null source_file rather than expose an absolute path: {applied}"
     );
 }
 
