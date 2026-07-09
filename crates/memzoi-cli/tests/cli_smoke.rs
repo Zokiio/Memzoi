@@ -509,12 +509,13 @@ fn integrate_instructions_creates_and_updates_marked_block() {
 fn integrate_instructions_profile_defaults_report_resolved_file_and_reason() {
     let repo = initialized_temp_repo();
     let agents = repo.path().join("AGENTS.md");
+    let claude_file = repo.path().join("CLAUDE.md");
 
     let codex = run_json_command(
         repo.path(),
         &["integrate", "instructions", "--profile", "codex", "--json"],
     );
-    assert_json_string_field(&codex, &["file"], "AGENTS.md");
+    assert_json_path(&codex, "file", &agents);
     assert_json_string_field(&codex, &["profile"], "codex");
     assert_json_string_field(&codex, &["status"], "created");
     assert_json_string_field(&codex, &["reason"], "default_profile_file");
@@ -523,12 +524,16 @@ fn integrate_instructions_profile_defaults_report_resolved_file_and_reason() {
         repo.path(),
         &["integrate", "instructions", "--profile", "claude", "--json"],
     );
-    assert_json_string_field(&claude, &["file"], "AGENTS.md");
+    assert_json_path(&claude, "file", &agents);
     assert_json_string_field(&claude, &["profile"], "claude");
     assert_json_string_field(&claude, &["status"], "updated");
     assert_json_string_field(&claude, &["reason"], "existing_memzoi_block");
     let updated_agents = fs::read_to_string(&agents).expect("read AGENTS.md");
     assert!(updated_agents.contains("You are Claude"));
+    assert!(
+        !claude_file.exists(),
+        "Claude should reuse the existing AGENTS Memzoi block"
+    );
 }
 
 #[test]
@@ -548,7 +553,7 @@ fn integrate_instructions_claude_prefers_existing_agents_memzoi_block_over_claud
         &["integrate", "instructions", "--profile", "claude", "--json"],
     );
 
-    assert_json_string_field(&claude, &["file"], "AGENTS.md");
+    assert_json_path(&claude, "file", &agents);
     assert_json_string_field(&claude, &["reason"], "existing_memzoi_block");
     let updated_agents = fs::read_to_string(&agents).expect("read AGENTS.md");
     assert!(updated_agents.contains("You are Claude"));
@@ -571,7 +576,7 @@ fn integrate_instructions_claude_ignores_reversed_agents_markers() {
         &["integrate", "instructions", "--profile", "claude", "--json"],
     );
 
-    assert_json_string_field(&claude, &["file"], "CLAUDE.md");
+    assert_json_path(&claude, "file", &repo.path().join("CLAUDE.md"));
     assert_json_string_field(&claude, &["reason"], "default_profile_file");
     let unchanged_agents = fs::read_to_string(&agents).expect("read AGENTS.md");
     assert!(unchanged_agents.contains("<!-- memzoi:end -->"));
@@ -617,7 +622,7 @@ fn integrate_instructions_claude_falls_back_when_agents_block_check_is_unreadabl
         &["integrate", "instructions", "--profile", "claude", "--json"],
     );
 
-    assert_json_string_field(&claude, &["file"], "CLAUDE.md");
+    assert_json_path(&claude, "file", &repo.path().join("CLAUDE.md"));
     assert_json_string_field(&claude, &["reason"], "default_profile_file");
     assert_eq!(
         fs::read(&agents).expect("read AGENTS.md after fallback"),
@@ -625,6 +630,51 @@ fn integrate_instructions_claude_falls_back_when_agents_block_check_is_unreadabl
     );
     let claude_file = fs::read_to_string(repo.path().join("CLAUDE.md")).expect("read CLAUDE.md");
     assert!(claude_file.contains("You are Claude"));
+}
+
+#[test]
+fn integrate_instructions_defaults_resolve_from_project_root() {
+    let repo = initialized_temp_repo();
+    let nested = repo.path().join("nested").join("deeper");
+    fs::create_dir_all(&nested).expect("create nested directory");
+
+    let mut cmd = memzoi();
+    let assert = cmd
+        .args(["integrate", "instructions", "--profile", "codex", "--json"])
+        .current_dir(&nested)
+        .assert()
+        .success();
+    let written = json_from_stdout(&assert.get_output().stdout);
+
+    assert_json_path(&written, "file", &repo.path().join("AGENTS.md"));
+    assert!(
+        !nested.join("AGENTS.md").exists(),
+        "default instruction file should not be created in the current subdirectory"
+    );
+}
+
+#[test]
+fn integrate_instructions_mcp_skips_unreadable_agents_for_readable_claude() {
+    let repo = initialized_temp_repo();
+    let agents = repo.path().join("AGENTS.md");
+    let claude = repo.path().join("CLAUDE.md");
+    let invalid_utf8 = vec![0xff, 0xfe, 0xfd];
+    fs::write(&agents, &invalid_utf8).expect("write invalid utf-8 AGENTS.md");
+    fs::write(&claude, "# Claude instructions\n").expect("write CLAUDE.md");
+
+    let mcp = run_json_command(
+        repo.path(),
+        &["integrate", "instructions", "--profile", "mcp", "--json"],
+    );
+
+    assert_json_path(&mcp, "file", &claude);
+    assert_json_string_field(&mcp, &["reason"], "existing_instruction_file");
+    assert_eq!(
+        fs::read(&agents).expect("read AGENTS.md after MCP fallback"),
+        invalid_utf8
+    );
+    let updated_claude = fs::read_to_string(&claude).expect("read updated CLAUDE.md");
+    assert!(updated_claude.contains("Memzoi MCP setup and usage guidance"));
 }
 
 #[test]

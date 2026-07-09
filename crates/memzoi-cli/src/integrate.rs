@@ -1,6 +1,7 @@
 use std::{fs, io::ErrorKind, path::PathBuf};
 
 use anyhow::{Context, Result};
+use memzoi_core::discover_paths;
 use serde_json::json;
 
 use crate::{cli::IntegrateProfile, output::print_json};
@@ -102,8 +103,9 @@ fn resolve_instruction_file(
         });
     }
 
-    let agents = PathBuf::from("AGENTS.md");
-    let claude = PathBuf::from("CLAUDE.md");
+    let root = default_instruction_root()?;
+    let agents = root.join("AGENTS.md");
+    let claude = root.join("CLAUDE.md");
 
     match profile {
         IntegrateProfile::Codex => Ok(InstructionFileSelection {
@@ -124,15 +126,20 @@ fn resolve_instruction_file(
             }
         }
         IntegrateProfile::Mcp => {
-            if agents.exists() {
+            if agents.exists() && file_is_readable_text(&agents) {
                 Ok(InstructionFileSelection {
                     file: agents,
                     reason: "existing_instruction_file",
                 })
-            } else if claude.exists() {
+            } else if claude.exists() && file_is_readable_text(&claude) {
                 Ok(InstructionFileSelection {
                     file: claude,
                     reason: "existing_instruction_file",
+                })
+            } else if agents.exists() {
+                Ok(InstructionFileSelection {
+                    file: claude,
+                    reason: "default_profile_file",
                 })
             } else {
                 Ok(InstructionFileSelection {
@@ -144,6 +151,11 @@ fn resolve_instruction_file(
     }
 }
 
+fn default_instruction_root() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    Ok(discover_paths(cwd)?.project_root)
+}
+
 fn file_contains_memzoi_block(file: &PathBuf) -> Result<bool> {
     let contents =
         fs::read_to_string(file).with_context(|| format!("failed to read {}", file.display()))?;
@@ -151,6 +163,10 @@ fn file_contains_memzoi_block(file: &PathBuf) -> Result<bool> {
         .find(MEMZOI_START)
         .and_then(|start| contents[start..].find(MEMZOI_END))
         .is_some())
+}
+
+fn file_is_readable_text(file: &PathBuf) -> bool {
+    fs::read_to_string(file).is_ok()
 }
 
 fn profile_json(profile: IntegrateProfile) -> serde_json::Value {
@@ -193,7 +209,7 @@ fn profile_selection_policy(profile: IntegrateProfile) -> &'static str {
             "writes an existing AGENTS.md Memzoi block, otherwise writes CLAUDE.md"
         }
         IntegrateProfile::Mcp => {
-            "writes an existing instruction file, preferring AGENTS.md, otherwise creates AGENTS.md"
+            "writes a readable existing instruction file, preferring AGENTS.md, otherwise creates a profile file"
         }
     }
 }
