@@ -2091,7 +2091,7 @@ candidates:
         ],
     );
     assert!(
-        planned.get("source_file").map_or(true, Value::is_null),
+        planned.get("source_file").is_none_or(Value::is_null),
         "external plan must omit or null source_file rather than expose an absolute path: {planned}"
     );
     let plan_id = json_string(&planned, "plan_id").to_owned();
@@ -2109,7 +2109,7 @@ candidates:
         ],
     );
     assert!(
-        applied.get("source_file").map_or(true, Value::is_null),
+        applied.get("source_file").is_none_or(Value::is_null),
         "external apply must omit or null source_file rather than expose an absolute path: {applied}"
     );
 }
