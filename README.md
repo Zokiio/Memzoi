@@ -133,6 +133,7 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
 - File-native canonical memory records under `.memzoi/records/`.
 - Local runtime state under `~/.memzoi/projects/<project-key>/` for derived SQLite indexes, generated exports, and DB-local open proposal state.
 - Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
+- Deterministic planning for explicitly classified `memzoi/import-v1` candidates can create reviewable file proposals; local/session writes remain deferred. See the [import reference](website/docs/reference.md#classified-import).
 - Rebuild from canonical records with `memzoi rebuild` when the derived runtime index needs to be regenerated.
 - Text search, prompt-ready context packs, and CLI handoff packs.
 - Pre-action governance checks with citations and suggested next steps.

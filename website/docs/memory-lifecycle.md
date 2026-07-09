@@ -207,6 +207,42 @@ Promotion is transactional across the session-end operation: if a runtime
 write or proposal-file write fails, created proposal files are cleaned up. A
 successful `repo` route still requires the separate review/apply step above.
 
+## Import planning
+
+Import is a strict, compact manifest workflow, not an extractor or automatic
+classifier. The caller supplies a manifest with the exact version
+`memzoi/import-v1`, explicit candidates, and provenance sources. It does not
+parse `AGENTS.md`, `CLAUDE.md`, Cursor files, ADRs, chats, or other ambient
+project state; it does not infer candidates from those sources.
+
+Review the mutation-free, deterministic plan before applying it:
+
+```bash
+memzoi import plan --from-file <manifest.yml> [--actor cli] [--json]
+memzoi import apply --from-file <manifest.yml> --plan-id <import_…> [--actor cli] [--json]
+```
+
+`plan` reports the plan identity and candidate outcomes without writing. `apply`
+recomputes that identity before writing and creates only valid pending,
+file-backed proposals for `repo` candidates. It does not write local or session
+runtime state. The destination outcomes are:
+
+- `repo`: create a pending proposal for later review; it is not canonical yet;
+- `local` or `session`: deferred, with no local/session write by import;
+- `discard`: no write; and
+- `needs_review`: blocked, with no write until a human decides.
+
+After reviewing an imported repo proposal, use the separate explicit proposal
+review/apply workflow described in [Approval, review, and promotion](#approval-review-and-promotion),
+including `memzoi proposal-files apply <proposal-id>` to create the canonical
+`.memzoi/records/*.md` record (then rebuild derived runtime search state when
+needed). A plan may contain local or private candidates and must not be
+blindly committed. Duplicate checks compare trimmed-body BLAKE3 values against
+canonical records, pending proposals, active runtime memory, and earlier input
+candidates. Treat manifests and plan output as potentially sensitive; the
+Git-plane sharing and exclusion rules remain those in [The two planes](#the-two-planes)
+and [Git-plane responsibilities and exclusions](#git-plane-responsibilities-and-exclusions).
+
 ## MVP scope and non-goals
 
 The current MVP includes the two explicit planes, five current destinations,

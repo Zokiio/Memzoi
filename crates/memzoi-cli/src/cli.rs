@@ -85,6 +85,11 @@ pub(crate) enum Commands {
         command: ProposalCommands,
     },
 
+    /// Plan and apply classified imports.
+    Import {
+        #[command(subcommand)]
+        command: ImportCommands,
+    },
     /// Inspect OKF proposal files under .memzoi/proposals/pending.
     ProposalFiles {
         #[command(subcommand)]
@@ -294,6 +299,30 @@ pub(crate) enum ProposalCommands {
     Apply {
         #[arg(long = "all-approved")]
         all_approved: bool,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub(crate) enum ImportCommands {
+    /// Classify an import manifest without writing.
+    Plan {
+        #[arg(long = "from-file")]
+        from_file: PathBuf,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Apply a previously reviewed import plan.
+    Apply {
+        #[arg(long = "from-file")]
+        from_file: PathBuf,
+        #[arg(long = "plan-id")]
+        plan_id: String,
         #[arg(long, default_value = "cli")]
         actor: String,
         #[arg(long)]

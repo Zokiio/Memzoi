@@ -5,6 +5,7 @@ mod error;
 mod events;
 mod exporters;
 mod handoff;
+mod import;
 mod memory_policy;
 mod models;
 mod okf;
@@ -25,6 +26,11 @@ pub use config::{
 pub use context::ContextPackInput;
 pub use error::{CoreError, Result};
 pub use handoff::HandoffInput;
+pub use import::{
+    ImportApplyResult, ImportCandidate, ImportCandidateAction, ImportCandidateInput,
+    ImportDocument, ImportDuplicate, ImportDuplicateKind, ImportPlan, ImportPlanCandidate,
+    ImportPlanSummary, ImportProposalWrite, ImportScope, parse_import_document,
+};
 pub use memory_policy::{
     MemoryDestinationPolicy, MemoryPlane, MemoryReviewRequirement, MemoryWriteRoute,
     RepoMemoryExclusion, TWO_PLANE_MEMORY_POLICY, TwoPlaneMemoryPolicy,

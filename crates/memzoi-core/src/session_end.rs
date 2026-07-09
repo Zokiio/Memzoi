@@ -1,16 +1,11 @@
-use std::{
-    collections::BTreeSet,
-    fs::{self, OpenOptions},
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDestination, MemoryLane, MemoryType, ScopeKind,
-    okf::{OkfProposalSensitivity, parse_okf_proposal_markdown},
-    proposals::title_to_concept_slug,
+    okf::{OkfCreateProposalDraft, OkfProposalSensitivity},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -97,11 +92,39 @@ pub enum SessionEndWrite {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SessionEndRepoProposalPlan {
-    pub proposal_id: String,
-    pub path: PathBuf,
-    markdown: String,
+pub(crate) fn session_end_proposal_draft(
+    candidate: &SessionEndCandidate,
+    actor: &str,
+    timestamp: &str,
+    proposal_id: String,
+) -> Result<OkfCreateProposalDraft> {
+    if candidate.destination != MemoryDestination::Repo {
+        bail!("session-end proposal drafts require repo destination");
+    }
+    let scope = candidate.scope.clone().unwrap_or(SessionEndScope {
+        kind: ScopeKind::Repo,
+        id: None,
+        paths: Vec::new(),
+    });
+    let sensitivity = candidate
+        .sensitivity
+        .context("repo candidate sensitivity should be validated")?;
+    Ok(OkfCreateProposalDraft {
+        proposal_id,
+        memory_type: candidate.memory_type,
+        lane: candidate.lane,
+        title: candidate.title.clone(),
+        body: candidate.body.clone(),
+        actor: actor.to_owned(),
+        timestamp: timestamp.to_owned(),
+        reason: candidate.reason.clone(),
+        scope_kind: scope.kind,
+        scope_id: scope.id,
+        applies_to: scope.paths,
+        tags: candidate.tags.clone(),
+        sources: Vec::new(),
+        sensitivity,
+    })
 }
 
 pub fn parse_session_end_document(input: &str) -> Result<SessionEndDocument> {
@@ -123,47 +146,6 @@ pub(crate) fn validate_session_end_document(document: &SessionEndDocument) -> Re
         validate_session_end_candidate(index, candidate)?;
     }
     Ok(())
-}
-
-pub(crate) fn plan_repo_proposal(
-    pending_root: &Path,
-    candidate: &SessionEndCandidate,
-    actor: &str,
-    timestamp: &str,
-    reserved_ids: &mut BTreeSet<String>,
-) -> Result<SessionEndRepoProposalPlan> {
-    let base_slug = title_to_concept_slug(&candidate.title).unwrap_or_else(|| "memory".to_owned());
-    let base_id = format!("mem_session_{base_slug}");
-    let proposal_id = next_available_proposal_id(pending_root, &base_id, reserved_ids)?;
-    let path = pending_root.join(format!("{proposal_id}.md"));
-    let markdown = render_repo_proposal_markdown(&proposal_id, candidate, actor, timestamp)?;
-    parse_okf_proposal_markdown(pending_root, &path, &markdown)?
-        .with_context(|| format!("rendered session-end proposal {proposal_id} was ignored"))?;
-    reserved_ids.insert(proposal_id.clone());
-    Ok(SessionEndRepoProposalPlan {
-        proposal_id,
-        path,
-        markdown,
-    })
-}
-
-pub(crate) fn write_repo_proposal_file(plan: &SessionEndRepoProposalPlan) -> Result<PathBuf> {
-    if let Some(parent) = plan.path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create proposal directory {}", parent.display()))?;
-    }
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&plan.path)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, plan.markdown.as_bytes()))
-        .with_context(|| {
-            format!(
-                "failed to create session-end proposal {}",
-                plan.path.display()
-            )
-        })?;
-    Ok(plan.path.clone())
 }
 
 fn session_end_yaml(input: &str) -> Result<&str> {
@@ -244,103 +226,6 @@ fn validate_session_end_candidate(index: usize, candidate: &SessionEndCandidate)
     Ok(())
 }
 
-fn next_available_proposal_id(
-    pending_root: &Path,
-    base_id: &str,
-    reserved_ids: &BTreeSet<String>,
-) -> Result<String> {
-    for suffix in 1.. {
-        let candidate = if suffix == 1 {
-            base_id.to_owned()
-        } else {
-            format!("{base_id}-{suffix}")
-        };
-        if reserved_ids.contains(&candidate) {
-            continue;
-        }
-        let path = pending_root.join(format!("{candidate}.md"));
-        if !path
-            .try_exists()
-            .with_context(|| format!("failed to inspect pending proposal {}", path.display()))?
-        {
-            return Ok(candidate);
-        }
-    }
-    unreachable!("unbounded suffix search returns")
-}
-
-fn render_repo_proposal_markdown(
-    proposal_id: &str,
-    candidate: &SessionEndCandidate,
-    actor: &str,
-    timestamp: &str,
-) -> Result<String> {
-    let scope = candidate.scope.clone().unwrap_or(SessionEndScope {
-        kind: ScopeKind::Repo,
-        id: None,
-        paths: Vec::new(),
-    });
-    let frontmatter = SessionEndProposalFrontmatter {
-        id: proposal_id.to_owned(),
-        kind: "proposal".to_owned(),
-        version: "okf/v0.1".to_owned(),
-        profile: "memzoi/v0".to_owned(),
-        memory_type: candidate.memory_type,
-        lane: candidate.lane,
-        title: candidate.title.trim().to_owned(),
-        description: first_non_empty_line(&candidate.body).to_owned(),
-        status: "proposed".to_owned(),
-        proposal: SessionEndProposalMetadata {
-            action: "create".to_owned(),
-            proposed_by: actor.trim().to_owned(),
-            proposed_at: timestamp.to_owned(),
-            reason: trimmed_optional(candidate.reason.as_deref()),
-        },
-        scope: SessionEndProposalScope {
-            kind: scope.kind,
-            id: trimmed_optional(scope.id.as_deref()),
-            paths: scope
-                .paths
-                .into_iter()
-                .map(|path| path.trim().to_owned())
-                .collect(),
-        },
-        tags: candidate
-            .tags
-            .iter()
-            .map(|tag| tag.trim().to_owned())
-            .collect(),
-        timestamp: timestamp.to_owned(),
-        created_by: actor.trim().to_owned(),
-        supersedes: Vec::new(),
-        sensitivity: candidate
-            .sensitivity
-            .context("repo candidate sensitivity should be validated")?,
-    };
-    let yaml = serde_yaml::to_string(&frontmatter)
-        .context("failed to render session-end proposal frontmatter")?;
-    Ok(format!(
-        "---\n{}---\n\n# {}\n\n{}\n",
-        yaml,
-        candidate.title.trim(),
-        candidate.body.trim()
-    ))
-}
-
-fn first_non_empty_line(body: &str) -> &str {
-    body.lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-}
-
-fn trimmed_optional(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 fn validate_relative_path(value: &str) -> Result<()> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -360,44 +245,4 @@ fn validate_relative_path(value: &str) -> Result<()> {
 
 fn default_scope_kind() -> ScopeKind {
     ScopeKind::Repo
-}
-
-#[derive(Debug, Serialize)]
-struct SessionEndProposalFrontmatter {
-    id: String,
-    kind: String,
-    version: String,
-    profile: String,
-    #[serde(rename = "type")]
-    memory_type: MemoryType,
-    lane: MemoryLane,
-    title: String,
-    description: String,
-    status: String,
-    proposal: SessionEndProposalMetadata,
-    scope: SessionEndProposalScope,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tags: Vec<String>,
-    timestamp: String,
-    created_by: String,
-    supersedes: Vec<String>,
-    sensitivity: OkfProposalSensitivity,
-}
-
-#[derive(Debug, Serialize)]
-struct SessionEndProposalMetadata {
-    action: String,
-    proposed_by: String,
-    proposed_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct SessionEndProposalScope {
-    kind: ScopeKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    paths: Vec<String>,
 }

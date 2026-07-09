@@ -6,21 +6,21 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, HandoffInput, InitRequest,
-    LocalMemoryInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryService,
-    MemoryType, OkfProposalFile, PrecheckInput, Proposal, ProposalApprovalOverride,
-    ProposalInboxSummary, ProposalStatus, ProposalStatusFilter, ProposeOptions, ScopeKind,
-    SearchInput, SearchResult, SessionEndResult, SessionEndWrite, Visibility,
-    apply_okf_create_proposal_file, discover_paths, parse_okf_proposal_file,
-    parse_session_end_document,
+    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, HandoffInput, ImportApplyResult,
+    ImportPlan, InitRequest, LocalMemoryInput, MemoryDestination, MemoryDraft, MemoryLane,
+    MemoryRecord, MemoryService, MemoryType, OkfProposalFile, PrecheckInput, Proposal,
+    ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus, ProposalStatusFilter,
+    ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult, SessionEndWrite,
+    Visibility, apply_okf_create_proposal_file, discover_paths, parse_import_document,
+    parse_okf_proposal_file, parse_session_end_document,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 use crate::{
     cli::{
-        CheckpointCommands, Cli, Commands, DraftCommand, EventCommands, IntegrateCommands,
-        LocalCommands, McpCommands, ProposalCommands, ProposalFileCommands,
+        CheckpointCommands, Cli, Commands, DraftCommand, EventCommands, ImportCommands,
+        IntegrateCommands, LocalCommands, McpCommands, ProposalCommands, ProposalFileCommands,
     },
     integrate, mcp,
     output::{print_json, print_jsonl_row},
@@ -83,6 +83,19 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 actor,
                 json,
             } => proposals_apply_command(all_approved, &actor, json),
+        },
+        Commands::Import { command } => match command {
+            ImportCommands::Plan {
+                from_file,
+                actor,
+                json,
+            } => import_plan_command(from_file, &actor, json),
+            ImportCommands::Apply {
+                from_file,
+                plan_id,
+                actor,
+                json,
+            } => import_apply_command(from_file, &plan_id, &actor, json),
         },
         Commands::ProposalFiles { command } => match command {
             ProposalFileCommands::List { json } => proposal_files_list_command(json),
@@ -252,6 +265,130 @@ fn init_command(force: bool, as_json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn import_plan_command(from_file: PathBuf, actor: &str, as_json: bool) -> Result<()> {
+    let manifest = fs::read_to_string(&from_file).with_context(|| {
+        format!(
+            "failed to read import manifest from {}",
+            from_file.display()
+        )
+    })?;
+    let document = parse_import_document(&manifest)
+        .with_context(|| format!("failed to parse import manifest {}", from_file.display()))?;
+    let service = open_service()?;
+    let plan = service.plan_import(actor, document)?;
+    if as_json {
+        let output = import_plan_json(
+            &plan,
+            &from_file,
+            service.paths().project_root.as_path(),
+            actor,
+        )?;
+        print_json(&output)
+    } else {
+        println!("plan\t{}", plan.plan_id);
+        print_import_plan_human(&plan);
+        Ok(())
+    }
+}
+
+fn import_apply_command(
+    from_file: PathBuf,
+    plan_id: &str,
+    actor: &str,
+    as_json: bool,
+) -> Result<()> {
+    if plan_id.trim().is_empty() {
+        bail!("import apply requires --plan-id");
+    }
+    let manifest = fs::read_to_string(&from_file).with_context(|| {
+        format!(
+            "failed to read import manifest from {}",
+            from_file.display()
+        )
+    })?;
+    let document = parse_import_document(&manifest)
+        .with_context(|| format!("failed to parse import manifest {}", from_file.display()))?;
+    let service = open_service()?;
+    let result = service.apply_import(actor, document, plan_id)?;
+    if as_json {
+        let output = import_apply_json(
+            &result,
+            &from_file,
+            service.paths().project_root.as_path(),
+            actor,
+            plan_id,
+        )?;
+        print_json(&output)
+    } else {
+        println!("applied\t{}", result.plan.plan_id);
+        print_import_plan_human(&result.plan);
+        Ok(())
+    }
+}
+
+fn import_plan_json(
+    plan: &ImportPlan,
+    from_file: &Path,
+    project_root: &Path,
+    actor: &str,
+) -> Result<serde_json::Value> {
+    let mut output = serde_json::to_value(plan).context("failed to serialize import plan")?;
+    if let serde_json::Value::Object(fields) = &mut output {
+        fields.insert("mode".to_owned(), json!("plan"));
+        fields.insert("actor".to_owned(), json!(actor));
+        fields.insert(
+            "source_file".to_owned(),
+            json!(safe_import_source_file(from_file, project_root)),
+        );
+    }
+    Ok(output)
+}
+
+fn import_apply_json(
+    result: &ImportApplyResult,
+    from_file: &Path,
+    project_root: &Path,
+    actor: &str,
+    expected_plan_id: &str,
+) -> Result<serde_json::Value> {
+    let mut output =
+        serde_json::to_value(&result.plan).context("failed to serialize import apply plan")?;
+    if let serde_json::Value::Object(fields) = &mut output {
+        fields.insert("mode".to_owned(), json!("apply"));
+        fields.insert("actor".to_owned(), json!(actor));
+        fields.insert(
+            "source_file".to_owned(),
+            json!(safe_import_source_file(from_file, project_root)),
+        );
+        fields.insert("expected_plan_id".to_owned(), json!(expected_plan_id));
+        fields.insert("writes".to_owned(), json!(result.writes));
+    }
+    Ok(output)
+}
+
+fn safe_import_source_file(from_file: &Path, project_root: &Path) -> Option<PathBuf> {
+    let manifest = from_file.canonicalize().ok()?;
+    let root = project_root.canonicalize().ok()?;
+    manifest.strip_prefix(root).ok().map(Path::to_path_buf)
+}
+
+fn print_import_plan_human(plan: &ImportPlan) {
+    println!(
+        "summary\t{}",
+        serde_json::to_string(&plan.summary).unwrap_or_default()
+    );
+    for candidate in &plan.candidates {
+        println!(
+            "candidate\t{}\t{}\t{}\t{}",
+            candidate.index,
+            candidate.title,
+            candidate.classification.destination.as_str(),
+            serde_json::to_string(&candidate.action).unwrap_or_default()
+        );
+        println!("body\t{}", candidate.body);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
