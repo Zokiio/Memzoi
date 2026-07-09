@@ -535,6 +535,9 @@ impl MemoryService {
         })
     }
     pub fn plan_import(&self, actor: &str, document: ImportDocument) -> Result<ImportPlan> {
+        if actor.trim().is_empty() {
+            bail!("import actor cannot be empty");
+        }
         import::validate_document(&document)?;
         let existing = self.load_import_duplicates()?;
         import::build_plan(

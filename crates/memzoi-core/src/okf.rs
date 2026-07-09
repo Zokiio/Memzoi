@@ -220,17 +220,37 @@ pub(crate) fn plan_okf_create_proposal(
 }
 
 pub(crate) fn create_okf_proposal_file(plan: &OkfCreateProposalPlan) -> Result<PathBuf> {
-    if let Some(parent) = plan.path.parent() {
+    create_okf_proposal_file_with_writer(&plan.path, |file| {
+        std::io::Write::write_all(file, plan.markdown.as_bytes())
+    })
+}
+
+fn create_okf_proposal_file_with_writer(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> Result<PathBuf> {
+    if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create proposal directory {}", parent.display()))?;
     }
-    OpenOptions::new()
+    let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&plan.path)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, plan.markdown.as_bytes()))
-        .with_context(|| format!("failed to create OKF proposal {}", plan.path.display()))?;
-    Ok(plan.path.clone())
+        .open(path)
+        .with_context(|| format!("failed to create OKF proposal {}", path.display()))?;
+    if let Err(error) = write(&mut file) {
+        let write_error = anyhow::Error::new(error)
+            .context(format!("failed to create OKF proposal {}", path.display()));
+        drop(file);
+        return match fs::remove_file(path) {
+            Ok(()) => Err(write_error),
+            Err(cleanup_error) => Err(write_error.context(format!(
+                "failed to remove incomplete OKF proposal {}: {cleanup_error}",
+                path.display()
+            ))),
+        };
+    }
+    Ok(path.to_path_buf())
 }
 
 pub(crate) fn cleanup_okf_proposal_files(paths: &[PathBuf]) -> Result<()> {
@@ -1419,13 +1439,52 @@ fn body_without_matching_h1(body: &str, title: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{io::ErrorKind, path::Path};
+
+    use tempfile::TempDir;
 
     use crate::{MemoryLane, MemoryStatus, MemoryType, ScopeKind, Visibility};
 
     const EXAMPLE_MEMORY: &str = include_str!("../../../examples/example-memory.md");
 
     #[test]
+    fn failed_proposal_write_removes_partial_target_and_preserves_cause() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let proposal_dir = temp.path().join("proposals");
+        std::fs::create_dir_all(&proposal_dir)?;
+        let target = proposal_dir.join("new.md");
+        let sibling = proposal_dir.join("untouched.md");
+        let sentinel = b"untouched sibling sentinel";
+        std::fs::write(&sibling, sentinel)?;
+
+        let error = super::create_okf_proposal_file_with_writer(&target, |file| {
+            std::io::Write::write_all(file, b"partial proposal bytes")?;
+            Err(std::io::Error::new(
+                ErrorKind::Other,
+                "forced writer failure",
+            ))
+        })
+        .expect_err("forced writer failure should fail proposal creation");
+
+        assert!(!target.exists(), "partial proposal target was not removed");
+        assert_eq!(std::fs::read(&sibling)?, sentinel);
+        assert!(
+            error.to_string().contains(&format!(
+                "failed to create OKF proposal {}",
+                target.display()
+            )),
+            "proposal path context missing from error: {error:#}"
+        );
+        let cause = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("original writer IO error should remain in anyhow chain");
+        assert_eq!(cause.kind(), ErrorKind::Other);
+        assert_eq!(cause.to_string(), "forced writer failure");
+
+        Ok(())
+    }
+
     fn parses_example_memory_into_importable_draft() -> anyhow::Result<()> {
         let bundle_root = Path::new("/bundle");
         let file_path = bundle_root.join("memories/repo/frontend/swedish-first.md");

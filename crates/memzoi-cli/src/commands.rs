@@ -278,7 +278,12 @@ fn import_plan_command(from_file: PathBuf, actor: &str, as_json: bool) -> Result
         .with_context(|| format!("failed to parse import manifest {}", from_file.display()))?;
     let service = open_service()?;
     let plan = service.plan_import(actor, document)?;
-    let output = import_plan_json(&plan, &from_file, actor)?;
+    let output = import_plan_json(
+        &plan,
+        &from_file,
+        service.paths().project_root.as_path(),
+        actor,
+    )?;
     if as_json {
         print_json(&output)
     } else {
@@ -307,7 +312,13 @@ fn import_apply_command(
         .with_context(|| format!("failed to parse import manifest {}", from_file.display()))?;
     let service = open_service()?;
     let result = service.apply_import(actor, document, plan_id)?;
-    let output = import_apply_json(&result, &from_file, actor, plan_id)?;
+    let output = import_apply_json(
+        &result,
+        &from_file,
+        service.paths().project_root.as_path(),
+        actor,
+        plan_id,
+    )?;
     if as_json {
         print_json(&output)
     } else {
@@ -317,12 +328,20 @@ fn import_apply_command(
     }
 }
 
-fn import_plan_json(plan: &ImportPlan, from_file: &Path, actor: &str) -> Result<serde_json::Value> {
+fn import_plan_json(
+    plan: &ImportPlan,
+    from_file: &Path,
+    project_root: &Path,
+    actor: &str,
+) -> Result<serde_json::Value> {
     let mut output = serde_json::to_value(plan).context("failed to serialize import plan")?;
     if let serde_json::Value::Object(fields) = &mut output {
         fields.insert("mode".to_owned(), json!("plan"));
         fields.insert("actor".to_owned(), json!(actor));
-        fields.insert("source_file".to_owned(), json!(from_file));
+        fields.insert(
+            "source_file".to_owned(),
+            json!(safe_import_source_file(from_file, project_root)),
+        );
     }
     Ok(output)
 }
@@ -330,6 +349,7 @@ fn import_plan_json(plan: &ImportPlan, from_file: &Path, actor: &str) -> Result<
 fn import_apply_json(
     result: &ImportApplyResult,
     from_file: &Path,
+    project_root: &Path,
     actor: &str,
     expected_plan_id: &str,
 ) -> Result<serde_json::Value> {
@@ -338,11 +358,20 @@ fn import_apply_json(
     if let serde_json::Value::Object(fields) = &mut output {
         fields.insert("mode".to_owned(), json!("apply"));
         fields.insert("actor".to_owned(), json!(actor));
-        fields.insert("source_file".to_owned(), json!(from_file));
+        fields.insert(
+            "source_file".to_owned(),
+            json!(safe_import_source_file(from_file, project_root)),
+        );
         fields.insert("expected_plan_id".to_owned(), json!(expected_plan_id));
         fields.insert("writes".to_owned(), json!(result.writes));
     }
     Ok(output)
+}
+
+fn safe_import_source_file(from_file: &Path, project_root: &Path) -> Option<PathBuf> {
+    let manifest = from_file.canonicalize().ok()?;
+    let root = project_root.canonicalize().ok()?;
+    manifest.strip_prefix(root).ok().map(Path::to_path_buf)
 }
 
 fn print_import_plan_human(plan: &ImportPlan, output: &serde_json::Value) {

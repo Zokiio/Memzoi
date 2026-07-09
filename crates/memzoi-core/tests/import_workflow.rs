@@ -232,3 +232,25 @@ candidates:
     assert_eq!(file_names(&service.paths().records_dir())?, before_records);
     Ok(())
 }
+
+#[test]
+fn empty_or_whitespace_actor_is_rejected_before_import_planning_or_writes() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let service = initialized_service(&temp)?;
+    let document = parse_import_document(MIXED_MANIFEST)?;
+
+    for actor in ["", "   \t\n"] {
+        let error = service
+            .plan_import(actor, document.clone())
+            .expect_err("an empty or whitespace actor must be rejected during planning");
+        assert!(
+            error.to_string().to_lowercase().contains("actor"),
+            "actor validation error should identify the invalid actor: {error}"
+        );
+        assert!(file_names(&service.paths().proposals_dir())?.is_empty());
+        assert!(file_names(&service.paths().proposals_dir().join("pending"))?.is_empty());
+        assert!(file_names(&service.paths().records_dir())?.is_empty());
+    }
+
+    Ok(())
+}
