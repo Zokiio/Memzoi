@@ -385,6 +385,23 @@ fn integrate_list_shows_supported_profiles() {
             .any(|profile| profile["profile"] == "claude"),
         "list should include claude: {listed}"
     );
+    let claude = profiles
+        .iter()
+        .find(|profile| profile["profile"] == "claude")
+        .expect("list should include claude");
+    assert!(
+        claude.get("default_file").is_none(),
+        "list should not expose a single misleading default_file: {listed}"
+    );
+    assert_json_array_contains(claude, "default_files", "AGENTS.md");
+    assert_json_array_contains(claude, "default_files", "CLAUDE.md");
+    assert!(
+        claude["selection"]
+            .as_str()
+            .expect("selection should be a string")
+            .contains("AGENTS.md Memzoi block"),
+        "claude selection should describe conditional resolution: {listed}"
+    );
     assert!(
         profiles.iter().any(|profile| profile["profile"] == "mcp"),
         "list should include mcp: {listed}"
@@ -563,6 +580,28 @@ fn integrate_instructions_fails_without_overwriting_unreadable_existing_file() {
         fs::read(&instructions).expect("read instructions after failed update"),
         invalid_utf8
     );
+}
+
+#[test]
+fn integrate_instructions_claude_falls_back_when_agents_block_check_is_unreadable() {
+    let repo = initialized_temp_repo();
+    let agents = repo.path().join("AGENTS.md");
+    let invalid_utf8 = vec![0xff, 0xfe, 0xfd];
+    fs::write(&agents, &invalid_utf8).expect("write invalid utf-8 AGENTS.md");
+
+    let claude = run_json_command(
+        repo.path(),
+        &["integrate", "instructions", "--profile", "claude", "--json"],
+    );
+
+    assert_json_string_field(&claude, &["file"], "CLAUDE.md");
+    assert_json_string_field(&claude, &["reason"], "default_profile_file");
+    assert_eq!(
+        fs::read(&agents).expect("read AGENTS.md after fallback"),
+        invalid_utf8
+    );
+    let claude_file = fs::read_to_string(repo.path().join("CLAUDE.md")).expect("read CLAUDE.md");
+    assert!(claude_file.contains("You are Claude"));
 }
 
 #[test]

@@ -111,15 +111,10 @@ fn resolve_instruction_file(
             reason: "default_profile_file",
         }),
         IntegrateProfile::Claude => {
-            if agents.exists() && file_contains_memzoi_block(&agents)? {
+            if agents.exists() && file_contains_memzoi_block(&agents).unwrap_or(false) {
                 Ok(InstructionFileSelection {
                     file: agents,
                     reason: "existing_memzoi_block",
-                })
-            } else if claude.exists() {
-                Ok(InstructionFileSelection {
-                    file: claude,
-                    reason: "default_profile_file",
                 })
             } else {
                 Ok(InstructionFileSelection {
@@ -160,7 +155,8 @@ fn profile_json(profile: IntegrateProfile) -> serde_json::Value {
         "profile": profile.as_str(),
         "label": profile_label(profile),
         "kind": profile_kind(profile),
-        "default_file": profile_default_file(profile),
+        "default_files": profile_default_files(profile),
+        "selection": profile_selection_policy(profile),
     })
 }
 
@@ -179,11 +175,23 @@ fn profile_kind(profile: IntegrateProfile) -> &'static str {
     }
 }
 
-fn profile_default_file(profile: IntegrateProfile) -> &'static str {
+fn profile_default_files(profile: IntegrateProfile) -> &'static [&'static str] {
     match profile {
-        IntegrateProfile::Codex => "AGENTS.md",
-        IntegrateProfile::Claude => "CLAUDE.md",
-        IntegrateProfile::Mcp => "AGENTS.md",
+        IntegrateProfile::Codex => &["AGENTS.md"],
+        IntegrateProfile::Claude => &["AGENTS.md", "CLAUDE.md"],
+        IntegrateProfile::Mcp => &["AGENTS.md", "CLAUDE.md"],
+    }
+}
+
+fn profile_selection_policy(profile: IntegrateProfile) -> &'static str {
+    match profile {
+        IntegrateProfile::Codex => "writes AGENTS.md unless --file is provided",
+        IntegrateProfile::Claude => {
+            "writes an existing AGENTS.md Memzoi block, otherwise writes CLAUDE.md"
+        }
+        IntegrateProfile::Mcp => {
+            "writes an existing instruction file, preferring AGENTS.md, otherwise creates AGENTS.md"
+        }
     }
 }
 
