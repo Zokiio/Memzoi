@@ -70,7 +70,9 @@ Run `memzoi <command> --help` for exact options.
 | `quickstart` | `--apply-sample`, `--json` |
 | `update` | `--check`, `--ref`, `--json` |
 | `mcp config` | `--project-root` |
-| `integrate instructions` | `--file`, `--json` |
+| `integrate list` | `--json` |
+| `integrate prompt` | `--profile` |
+| `integrate instructions` | `--profile`, `--file`, `--json` |
 
 ## Context JSON
 

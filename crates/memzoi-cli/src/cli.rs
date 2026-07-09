@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -390,16 +390,47 @@ pub(crate) enum McpCommands {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum IntegrateCommands {
-    /// Print a one-shot prompt that teaches an agent to use Memzoi.
-    Prompt,
-
-    /// Create or update a marked Memzoi block in an instruction file.
-    Instructions {
-        #[arg(long, default_value = "AGENTS.md")]
-        file: PathBuf,
+    /// List supported agent integration profiles.
+    List {
+        /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
+
+    /// Print a one-shot prompt that teaches an agent to use Memzoi.
+    Prompt {
+        /// Agent or integration profile to generate.
+        #[arg(long, value_enum)]
+        profile: IntegrateProfile,
+    },
+
+    /// Create or update a marked Memzoi block in an instruction file.
+    Instructions {
+        /// Agent or integration profile to generate.
+        #[arg(long, value_enum)]
+        profile: IntegrateProfile,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum IntegrateProfile {
+    Codex,
+    Claude,
+    Mcp,
+}
+
+impl IntegrateProfile {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Mcp => "mcp",
+        }
+    }
 }
 
 pub(crate) struct DraftCommand {

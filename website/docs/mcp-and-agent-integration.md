@@ -91,32 +91,54 @@ Structured output includes the proposal ID, status, validation details when avai
 Print a one-shot prompt that teaches an agent how to use Memzoi:
 
 ```bash
-memzoi integrate prompt
+memzoi integrate prompt --profile codex
+memzoi integrate prompt --profile claude
+memzoi integrate prompt --profile mcp
 ```
 
-The prompt tells agents to:
+List supported profiles:
 
-- Run `memzoi context --task "<task>"` before non-trivial work.
+```bash
+memzoi integrate list
+memzoi integrate list --json
+```
+
+Profiles currently include `codex`, `claude`, and `mcp`, and `--profile` is required for prompt
+and instruction generation. The `mcp` profile is setup and usage guidance for an instruction file; it does not write an MCP config file. Use
+`memzoi mcp config --project-root .` for the copy-pasteable MCP server configuration.
+
+Profile prompts tell agents to:
+
+- Run `memzoi context --task "<task>"` before non-trivial work, especially before broad repo scans.
 - Use `memzoi handoff --task "<task>"` when switching CLI agents or harnesses.
 - Add `--path <relative/path>` when editing specific files.
 - Add `--include-local` or `--include-session` only when private runtime memory or explicit checkpoints should be part of the context.
+- Treat `.memzoi/records/*.md` as reviewed Git-plane repo truth.
+- Keep local/session runtime memory out of repo records unless promoted through reviewable proposals.
 - Run `memzoi precheck` before risky actions.
 - Propose durable repo knowledge with `memzoi propose`.
-- Avoid secrets, raw chat logs, temporary task progress, and private user facts.
+- Avoid committing secrets, raw chat logs, temporary task progress, private user facts, and local-only memory.
 
 ## Install instruction block
 
 Create or update a marked Memzoi block in an instruction file:
 
 ```bash
-memzoi integrate instructions --file AGENTS.md
+memzoi integrate instructions --profile codex --file AGENTS.md
+memzoi integrate instructions --profile claude
+memzoi integrate instructions --profile mcp --file AGENTS.md
 ```
 
 Use `--json` for scriptable output:
 
 ```bash
-memzoi integrate instructions --file AGENTS.md --json
+memzoi integrate instructions --profile codex --file AGENTS.md --json
 ```
+
+When `--file` is omitted, `codex` defaults to `AGENTS.md`, `claude` defaults to `CLAUDE.md`
+unless an existing `AGENTS.md` already contains a Memzoi block, and `mcp` uses an existing
+instruction file when available. JSON output includes the resolved `file`, `profile`,
+`status`, `marker`, and default-selection `reason`.
 
 The command replaces content between:
 
