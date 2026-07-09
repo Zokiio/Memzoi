@@ -269,7 +269,7 @@ fn memzoi_policy_block() -> String {
 - Destination policy (destination → plane, write route, review boundary):\n\
 {destinations}\n\
 - `memzoi propose` and MCP proposals are reviewable operational state, not canonical records.\n\
-- Canonical repo writes use supported file-backed proposal packets and review/apply flow; only applied packets become canonical records.\n\
+- Canonical repo writes require an explicit CLI apply route: DB proposals use `memzoi apply <proposal-id>` or `memzoi proposals apply --all-approved` after approval, or the one-shot `memzoi propose --apply` route; file-backed proposal packets require review followed by `memzoi proposal-files apply <proposal-id>`. DB proposal state and packet review alone are not canonical.\n\
 - Do not commit {exclusions} to canonical repo records.\n\
 - Future destinations not enabled by this integration: {future_destinations}.",
         TWO_PLANE_MEMORY_POLICY.canonical_records_glob,
@@ -299,7 +299,7 @@ When durable repo knowledge is discovered:
 - Use types like fact, decision, procedure, preference, warning, risk, or failed_attempt.
 - Prefer reviewable proposals over silent durable mutation.
 
-The policy block defines the canonical route; DB-local and MCP proposal state cannot apply canonical records."#;
+The policy block defines the canonical route; DB-local and MCP proposal state are not canonical before an explicit CLI apply."#;
 
 const CLAUDE_PROMPT_PREFIX: &str = "You are Claude working in a repo that uses Memzoi.";
 
@@ -323,7 +323,7 @@ When durable repo knowledge is discovered:
 - Use types like fact, decision, procedure, preference, warning, risk, or failed_attempt.
 - Prefer reviewable proposals over silent durable mutation.
 
-The policy block defines the canonical route; DB-local and MCP proposal state cannot apply canonical records."#;
+The policy block defines the canonical route; DB-local and MCP proposal state are not canonical before an explicit CLI apply."#;
 
 const MCP_PROMPT_PREFIX: &str = r#"Memzoi MCP setup and usage guidance for this repo.
 
@@ -338,10 +338,10 @@ const MCP_PROMPT_SUFFIX: &str = r#"MCP clients should use Memzoi tools to:
 - Create reviewable proposal requests for durable repo memories.
 
 MCP clients must not:
-- Apply proposals or write durable repo records directly.
+- Apply proposals or write canonical repo records.
 - Treat DB-local or MCP proposal state as canonical records.
 - Commit excluded or runtime-only material into canonical repo records.
-- Claim that MCP can apply canonical records; only the supported file-backed proposal/review/apply flow can do so."#;
+- Claim that MCP can apply canonical records; canonical writes require an explicit CLI apply route described in the policy block."#;
 
 fn memzoi_instruction_block(profile: IntegrateProfile) -> String {
     format!(

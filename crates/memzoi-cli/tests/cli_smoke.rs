@@ -556,10 +556,28 @@ fn integrate_prompt_profiles_include_canonical_two_plane_policy_and_guidance() {
         );
         assert!(
             output.contains(
-                "Canonical repo writes use supported file-backed proposal packets and review/apply flow; only applied packets become canonical records."
+                "Canonical repo writes require an explicit CLI apply route: DB proposals use `memzoi apply <proposal-id>` or `memzoi proposals apply --all-approved` after approval, or the one-shot `memzoi propose --apply` route; file-backed proposal packets require review followed by `memzoi proposal-files apply <proposal-id>`. DB proposal state and packet review alone are not canonical."
             ),
-            "{profile} must describe the repository proposal/review boundary: {output}"
+            "{profile} must name explicit DB and file-backed CLI apply routes: {output}"
         );
+        if profile == "mcp" {
+            assert!(
+                output.contains("DB proposal state and packet review alone are not canonical."),
+                "{profile} must distinguish non-canonical DB/MCP state from canonical records: {output}"
+            );
+            assert!(
+                output.contains("Apply proposals or write canonical repo records."),
+                "{profile} must forbid MCP from applying or writing canonical records: {output}"
+            );
+        } else {
+            assert!(
+                output.contains(
+                    "The policy block defines the canonical route; DB-local and MCP proposal state are not canonical before an explicit CLI apply."
+                ),
+                "{profile} must distinguish pre-apply DB/MCP state from canonical records: {output}"
+            );
+        }
+
         assert!(
             output.contains("Do not commit secrets"),
             "{profile} must include safety exclusions: {output}"
@@ -568,7 +586,10 @@ fn integrate_prompt_profiles_include_canonical_two_plane_policy_and_guidance() {
         if profile == "mcp" {
             assert!(output.contains("memzoi mcp config --project-root ."));
             assert!(output.contains("MCP clients must not:"));
-            assert!(output.contains("Apply proposals or write durable repo records directly."));
+            assert!(output.contains("Apply proposals or write canonical repo records."));
+            assert!(output.contains(
+                "Claim that MCP can apply canonical records; canonical writes require an explicit CLI apply route described in the policy block."
+            ));
             assert!(
                 !output.lines().any(|line| line
                     .trim_start()
@@ -577,6 +598,93 @@ fn integrate_prompt_profiles_include_canonical_two_plane_policy_and_guidance() {
             );
         }
     }
+}
+
+#[test]
+fn import_human_mode_keeps_tabular_review_without_json_envelope() {
+    let repo = initialized_temp_repo();
+    let manifest_path = repo.path().join("human-import.yml");
+    fs::write(
+        &manifest_path,
+        r#"version: memzoi/import-v1
+sources:
+  - path: imports/human-source.yml
+candidates:
+  - destination: repo
+    reason: human review output
+    type: decision
+    lane: semantic
+    title: Human review candidate
+    body: Preserve this candidate body in human output.
+    sensitivity: repo-safe
+    scope:
+      kind: repo
+    tags: [review]
+"#,
+    )
+    .expect("write human import manifest");
+
+    let planned_json = run_json_command(
+        repo.path(),
+        &[
+            "import",
+            "plan",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--json",
+        ],
+    );
+    let plan_id = json_string(&planned_json, "plan_id").to_owned();
+
+    let human_plan = run_command_stdout(
+        repo.path(),
+        &[
+            "import",
+            "plan",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+        ],
+    );
+    assert!(human_plan.contains(&format!("plan\t{plan_id}")));
+    assert!(human_plan.contains("summary\t"));
+    assert!(human_plan.contains("candidate\t0\tHuman review candidate\trepo\t"));
+    assert!(human_plan.contains("body\tPreserve this candidate body in human output."));
+    assert!(
+        !human_plan
+            .lines()
+            .any(|line| line.trim_start().starts_with('{')),
+        "human import plan must not append a pretty JSON object: {human_plan}"
+    );
+    assert!(
+        !human_plan.contains("\"schema\"") && !human_plan.contains("\"mode\""),
+        "human import plan must not append a JSON schema envelope: {human_plan}"
+    );
+
+    let human_apply = run_command_stdout(
+        repo.path(),
+        &[
+            "import",
+            "apply",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--plan-id",
+            plan_id.as_str(),
+        ],
+    );
+    assert!(human_apply.contains(&format!("applied\t{plan_id}")));
+    assert!(human_apply.contains("summary\t"));
+    assert!(human_apply.contains("candidate\t0\tHuman review candidate\trepo\t"));
+    assert!(human_apply.contains("body\tPreserve this candidate body in human output."));
+    assert!(
+        !human_apply
+            .lines()
+            .any(|line| line.trim_start().starts_with('{')),
+        "human import apply must not append a pretty JSON object: {human_apply}"
+    );
+    assert!(
+        !human_apply.contains("\"schema\"") && !human_apply.contains("\"mode\""),
+        "human import apply must not append a JSON schema envelope: {human_apply}"
+    );
 }
 
 #[test]
