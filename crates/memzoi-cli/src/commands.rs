@@ -560,10 +560,10 @@ fn proposal_files_validate_command(as_json: bool) -> Result<()> {
         print_json(&proposal_file_validation_json(&scan))?;
     } else {
         for entry in &scan.proposals {
-            println!("valid\t{}\t{}", entry.path.display(), &entry.proposal.id);
+            println!("valid\t{}\t{}", entry.path.display(), entry.proposal.id);
         }
         for error in &scan.errors {
-            println!("invalid\t{}\t{}", error.path.display(), &error.error);
+            println!("invalid\t{}\t{}", error.path.display(), error.error);
         }
     }
 
@@ -606,7 +606,7 @@ fn proposal_files_apply_command(proposal_id: &str, as_json: bool) -> Result<()> 
             "title": &entry.proposal.title,
         }))?;
     } else {
-        println!("applied\t{}\t{}", &result.record.id, record_path.display());
+        println!("applied\t{}\t{}", result.record.id, record_path.display());
     }
     Ok(())
 }
@@ -967,19 +967,19 @@ fn is_hidden(path: &Path) -> bool {
 fn print_proposal_file_summary(entry: &ProposalFileEntry) {
     println!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        &entry.proposal.id,
+        entry.proposal.id,
         entry.path.display(),
         entry.proposal.proposal.action.as_str(),
         entry.proposal.lane.as_str(),
         entry.proposal.memory_type.as_str(),
         entry.proposal.sensitivity.as_str(),
-        &entry.proposal.title,
+        entry.proposal.title,
     );
 }
 
 fn print_proposal_file_detail(entry: &ProposalFileEntry) {
-    println!("id:\t{}", &entry.proposal.id);
-    println!("file_id:\t{}", &entry.proposal.file_id);
+    println!("id:\t{}", entry.proposal.id);
+    println!("file_id:\t{}", entry.proposal.file_id);
     println!("path:\t{}", entry.path.display());
     if let Some(kind) = &entry.proposal.kind {
         println!("kind:\t{kind}");
@@ -992,8 +992,8 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     }
     println!("status:\t{}", entry.proposal.status.as_str());
     println!("action:\t{}", entry.proposal.proposal.action.as_str());
-    println!("proposed_by:\t{}", &entry.proposal.proposal.proposed_by);
-    println!("proposed_at:\t{}", &entry.proposal.proposal.proposed_at);
+    println!("proposed_by:\t{}", entry.proposal.proposal.proposed_by);
+    println!("proposed_at:\t{}", entry.proposal.proposal.proposed_at);
     if let Some(reason) = &entry.proposal.proposal.reason {
         println!("reason:\t{reason}");
     }
@@ -1015,7 +1015,7 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     if !entry.proposal.tags.is_empty() {
         println!("tags:\t{}", entry.proposal.tags.join(", "));
     }
-    println!("timestamp:\t{}", &entry.proposal.timestamp);
+    println!("timestamp:\t{}", entry.proposal.timestamp);
     if let Some(created_by) = &entry.proposal.created_by {
         println!("created_by:\t{created_by}");
     }
@@ -1042,9 +1042,9 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
         println!("supersedes:\t{}", entry.proposal.supersedes.join(", "));
     }
     println!("sensitivity:\t{}", entry.proposal.sensitivity.as_str());
-    println!("title:\t{}", &entry.proposal.title);
-    println!("description:\t{}", &entry.proposal.description);
-    println!("body:\t{}", &entry.proposal.body);
+    println!("title:\t{}", entry.proposal.title);
+    println!("description:\t{}", entry.proposal.description);
+    println!("body:\t{}", entry.proposal.body);
 }
 
 fn proposal_file_scan_json(scan: &ProposalFileScan) -> serde_json::Value {
