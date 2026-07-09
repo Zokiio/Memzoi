@@ -23,7 +23,7 @@ use crate::{
         ProposalApprovalPolicy, discover_existing_paths, discover_paths, load_effective_config,
     },
     context, db,
-    events::{AppendEvent, append_event, list_events, now_utc},
+    events::{AppendEvent, append_event, for_each_event as stream_events, now_utc},
     exporters, handoff, okf, precheck, proposals, search,
     session_end::{
         SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument, SessionEndResult,
@@ -179,8 +179,8 @@ impl MemoryService {
         &self.paths
     }
 
-    pub fn list_events(&self) -> Result<Vec<MemoryEvent>> {
-        Ok(list_events(&self.conn)?)
+    pub fn for_each_event(&self, visit: impl FnMut(MemoryEvent) -> Result<()>) -> Result<()> {
+        stream_events(&self.conn, visit)
     }
 
     pub fn propose_memory(&self, actor: &str, draft: MemoryDraft) -> Result<Proposal> {

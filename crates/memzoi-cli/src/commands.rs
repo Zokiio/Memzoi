@@ -1310,19 +1310,20 @@ fn export_command(format: &str, scope_kind: &str, as_json: bool) -> Result<()> {
 
 fn events_export_command(jsonl: bool) -> Result<()> {
     let service = open_service()?;
-    let events = service.list_events()?;
 
     if jsonl {
-        for event in &events {
-            print_jsonl_row(event)?;
-        }
+        service.for_each_event(|event| {
+            print_jsonl_row(&event)?;
+            Ok(())
+        })?;
     } else {
-        for event in events {
+        service.for_each_event(|event| {
             println!(
                 "{}\t{}\t{}\t{}",
                 event.created_at, event.id, event.event_type, event.actor
             );
-        }
+            Ok(())
+        })?;
     }
 
     Ok(())

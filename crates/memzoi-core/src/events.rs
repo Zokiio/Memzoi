@@ -1,8 +1,8 @@
 use crate::{
-    error::{CoreError, Result},
+    error::{CoreError, Result as CoreResult},
     models::MemoryEvent,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -17,7 +17,7 @@ pub struct AppendEvent {
     pub proposal_id: Option<String>,
 }
 
-pub fn append_event(conn: &Connection, input: AppendEvent) -> Result<MemoryEvent> {
+pub fn append_event(conn: &Connection, input: AppendEvent) -> CoreResult<MemoryEvent> {
     let event = MemoryEvent {
         id: format!("evt_{}", Uuid::now_v7()),
         event_type: input.event_type,
@@ -49,35 +49,51 @@ pub fn append_event(conn: &Connection, input: AppendEvent) -> Result<MemoryEvent
     Ok(event)
 }
 
-pub(crate) fn list_events(conn: &Connection) -> Result<Vec<MemoryEvent>> {
+pub(crate) fn for_each_event(
+    conn: &Connection,
+    mut visit: impl FnMut(MemoryEvent) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
          FROM event_log
          ORDER BY created_at ASC, id ASC",
     )?;
-    let rows = stmt.query_map([], |row| {
-        let payload_json: String = row.get(3)?;
-        let payload = serde_json::from_str(&payload_json).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?;
-        Ok(MemoryEvent {
-            id: row.get(0)?,
-            event_type: row.get(1)?,
-            actor: row.get(2)?,
-            payload,
-            record_id: row.get(4)?,
-            proposal_id: row.get(5)?,
-            created_at: row.get(6)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut rows = stmt.query([])?;
+
+    while let Some(row) = rows.next()? {
+        visit(memory_event_from_row(row)?)?;
+    }
+
+    Ok(())
 }
 
-pub(crate) fn now_utc() -> Result<String> {
+#[cfg(test)]
+pub(crate) fn list_events(conn: &Connection) -> anyhow::Result<Vec<MemoryEvent>> {
+    let mut events = Vec::new();
+    for_each_event(conn, |event| {
+        events.push(event);
+        Ok(())
+    })?;
+    Ok(events)
+}
+
+fn memory_event_from_row(row: &Row<'_>) -> rusqlite::Result<MemoryEvent> {
+    let payload_json: String = row.get(3)?;
+    let payload = serde_json::from_str(&payload_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(MemoryEvent {
+        id: row.get(0)?,
+        event_type: row.get(1)?,
+        actor: row.get(2)?,
+        payload,
+        record_id: row.get(4)?,
+        proposal_id: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
+
+pub(crate) fn now_utc() -> CoreResult<String> {
     Ok(OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?)
 }
 
@@ -87,7 +103,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        events::{AppendEvent, append_event, list_events},
+        events::{AppendEvent, append_event, for_each_event, list_events},
         init_database, open_database,
     };
 
@@ -164,6 +180,44 @@ mod tests {
                 "status": "active"
             })
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn for_each_event_stops_after_consumer_error() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+
+        let first = append_event(
+            &conn,
+            AppendEvent {
+                event_type: "memory.proposed".to_owned(),
+                actor: "agent:streaming-test".to_owned(),
+                payload: json!({ "sequence": 1 }),
+                record_id: None,
+                proposal_id: None,
+            },
+        )?;
+        append_event(
+            &conn,
+            AppendEvent {
+                event_type: "memory.applied".to_owned(),
+                actor: "agent:streaming-test".to_owned(),
+                payload: json!({ "sequence": 2 }),
+                record_id: None,
+                proposal_id: None,
+            },
+        )?;
+
+        let mut observed = Vec::new();
+        let result = for_each_event(&conn, |event| {
+            observed.push(event.id);
+            Err(anyhow::anyhow!("stop after first event"))
+        });
+
+        assert_eq!(observed, vec![first.id]);
+        let error = result.expect_err("the consumer error should stop traversal");
+        assert_eq!(error.to_string(), "stop after first event");
 
         Ok(())
     }
