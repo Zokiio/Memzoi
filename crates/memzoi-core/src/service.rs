@@ -3169,7 +3169,7 @@ mod tests {
         let paths = service.paths.clone();
         let mut draft = sample_memory_draft(
             "Lineage survives rebuild",
-            "Evidence-backed zircon lineage.",
+            "\n  Evidence-backed zircon lineage.  \n",
         );
         draft.source_kind = Some("  test  ".to_owned());
         draft.source_ref = Some("  service-proposal-tests  ".to_owned());
@@ -3182,7 +3182,16 @@ mod tests {
             },
         )?;
         let proposal_id = applied.proposal.id.clone();
-        let record_id = applied.record.expect("record should be applied").id;
+        let applied_record = applied.record.expect("record should be applied");
+        let record_id = applied_record.id.clone();
+        let expected_hash = blake3::hash("Evidence-backed zircon lineage.".as_bytes())
+            .to_hex()
+            .to_string();
+        assert_eq!(applied_record.content_hash, expected_hash);
+        assert!(
+            service.repo_index_drift()?.is_current(),
+            "normalized proposal apply must agree with its canonical file immediately"
+        );
 
         service.rebuild()?;
         let rebuilt = MemoryService::open_paths(paths)?;
@@ -3209,6 +3218,7 @@ mod tests {
             result.record.proposal_id.as_deref(),
             Some(proposal_id.as_str())
         );
+        assert_eq!(result.record.content_hash, expected_hash);
         assert_eq!(
             result.citations[0].source_ref.as_deref(),
             Some("service-proposal-tests"),

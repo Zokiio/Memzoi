@@ -669,12 +669,13 @@ mod tests {
                         "actor": "mcp-smoke",
                         "type": "decision",
                         "scope_kind": "repo",
+                        "scope_id": "  team-alpha  ",
                         "visibility": "repo",
                         "sensitivity": "repo-safe",
                         "source_kind": "  issue  ",
                         "source_ref": "  issue://42  ",
-                        "title": "Keep MCP smoke tests focused",
-                        "body": "MCP smoke tests cover the JSON-RPC tool contract."
+                        "title": "  Keep MCP smoke tests focused  ",
+                        "body": "\n  MCP smoke tests cover the JSON-RPC tool contract.  \n"
                     }
                 }
             }),
@@ -705,6 +706,7 @@ mod tests {
         assert_eq!(proposal["actor"], "mcp-smoke");
         assert_eq!(proposal["payload"]["memory_type"], "decision");
         assert_eq!(proposal["payload"]["scope_kind"], "repo");
+        assert_eq!(proposal["payload"]["scope_id"], "team-alpha");
         assert_eq!(proposal["payload"]["visibility"], "repo");
         assert_eq!(proposal["payload"]["sensitivity"], "repo-safe");
         assert_eq!(proposal["payload"]["source_kind"], "issue");

@@ -125,7 +125,7 @@ pub struct SupersedeResult {
 }
 
 pub fn propose_memory(conn: &Connection, actor: &str, mut draft: MemoryDraft) -> Result<Proposal> {
-    normalize_evidence_metadata(&mut draft)?;
+    normalize_draft(&mut draft)?;
     validate_draft_shape(&draft)?;
     let id = format!("prop_{}", Uuid::now_v7());
     let now = now_utc()?;
@@ -251,6 +251,15 @@ pub fn validate_proposal(conn: &Connection, proposal_id: &str) -> Result<Validat
 }
 
 pub fn approve_proposal(conn: &Connection, proposal_id: &str, actor: &str) -> Result<Proposal> {
+    let proposal = load_proposal(conn, proposal_id)?;
+    match proposal.status {
+        ProposalStatus::Approved => return Ok(proposal),
+        ProposalStatus::Applied => {
+            bail!("applied proposal {proposal_id} cannot be approved again")
+        }
+        ProposalStatus::Rejected => bail!("rejected proposal {proposal_id} cannot be approved"),
+        ProposalStatus::Pending | ProposalStatus::Validated => {}
+    }
     set_proposal_status(conn, proposal_id, ProposalStatus::Approved)?;
     append_event(
         conn,
@@ -271,6 +280,12 @@ pub fn reject_proposal(
     actor: &str,
     reason: &str,
 ) -> Result<Proposal> {
+    let proposal = load_proposal(conn, proposal_id)?;
+    match proposal.status {
+        ProposalStatus::Rejected => return Ok(proposal),
+        ProposalStatus::Applied => bail!("applied proposal {proposal_id} cannot be rejected"),
+        ProposalStatus::Pending | ProposalStatus::Validated | ProposalStatus::Approved => {}
+    }
     set_proposal_status(conn, proposal_id, ProposalStatus::Rejected)?;
     append_event(
         conn,
@@ -375,13 +390,16 @@ fn validate_draft_shape(draft: &MemoryDraft) -> Result<()> {
     Ok(())
 }
 
-fn normalize_evidence_metadata(draft: &mut MemoryDraft) -> Result<()> {
-    draft.source_kind = normalize_optional_evidence(draft.source_kind.take(), "source_kind")?;
-    draft.source_ref = normalize_optional_evidence(draft.source_ref.take(), "source_ref")?;
+fn normalize_draft(draft: &mut MemoryDraft) -> Result<()> {
+    draft.title = draft.title.trim().to_owned();
+    draft.body = draft.body.trim().to_owned();
+    draft.scope_id = normalize_optional_metadata(draft.scope_id.take(), "scope_id")?;
+    draft.source_kind = normalize_optional_metadata(draft.source_kind.take(), "source_kind")?;
+    draft.source_ref = normalize_optional_metadata(draft.source_ref.take(), "source_ref")?;
     Ok(())
 }
 
-fn normalize_optional_evidence(value: Option<String>, field: &str) -> Result<Option<String>> {
+fn normalize_optional_metadata(value: Option<String>, field: &str) -> Result<Option<String>> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -470,7 +488,7 @@ fn insert_record(
     proposal_id: Option<&str>,
 ) -> Result<MemoryRecord> {
     let mut draft = draft.clone();
-    normalize_evidence_metadata(&mut draft)?;
+    normalize_draft(&mut draft)?;
     validate_draft_shape(&draft)?;
     let id = next_record_id(conn, &draft)?;
     let now = now_utc()?;
@@ -561,7 +579,9 @@ fn duplicate_record_ids(conn: &Connection, content_hash: &str) -> Result<Vec<Str
 }
 
 fn content_hash(draft: &MemoryDraft) -> String {
-    blake3::hash(draft.body.as_bytes()).to_hex().to_string()
+    blake3::hash(draft.body.trim().as_bytes())
+        .to_hex()
+        .to_string()
 }
 
 fn next_record_id(conn: &Connection, draft: &MemoryDraft) -> Result<String> {
@@ -727,33 +747,62 @@ mod tests {
     }
 
     #[test]
-    fn proposal_evidence_is_normalized_before_persistence_and_apply() -> anyhow::Result<()> {
+    fn proposal_metadata_is_normalized_before_persistence_and_apply() -> anyhow::Result<()> {
         let (_temp, conn) = initialized_database()?;
         let mut draft = sample_memory_draft("Normalize proposal evidence once");
+        draft.title = "  Normalize proposal evidence once  ".to_owned();
+        draft.body = "\n  Evidence-backed body with normalized edges.  \n".to_owned();
+        draft.scope_id = Some("  team-alpha  ".to_owned());
         draft.source_kind = Some("  issue  ".to_owned());
         draft.source_ref = Some("  issue://42  ".to_owned());
 
         let proposal = propose_memory(&conn, "agent:red-tests", draft)?;
+        assert_eq!(proposal.payload.title, "Normalize proposal evidence once");
+        assert_eq!(
+            proposal.payload.body,
+            "Evidence-backed body with normalized edges."
+        );
+        assert_eq!(proposal.payload.scope_id.as_deref(), Some("team-alpha"));
         assert_eq!(proposal.payload.source_kind.as_deref(), Some("issue"));
         assert_eq!(proposal.payload.source_ref.as_deref(), Some("issue://42"));
 
         approve_proposal(&conn, proposal.id.as_str(), "reviewer:human")?;
         let record = apply_proposal(&conn, proposal.id.as_str(), "agent:applier")?;
+        assert_eq!(record.scope_id.as_deref(), Some("team-alpha"));
         assert_eq!(record.source_kind.as_deref(), Some("issue"));
         assert_eq!(record.source_ref.as_deref(), Some("issue://42"));
+        assert_eq!(
+            record.content_hash,
+            blake3::hash("Evidence-backed body with normalized edges.".as_bytes())
+                .to_hex()
+                .to_string()
+        );
+
+        let mut duplicate = sample_memory_draft("Duplicate after normalization");
+        duplicate.body = "  Evidence-backed body with normalized edges.  ".to_owned();
+        let duplicate = propose_memory(&conn, "agent:red-tests", duplicate)?;
+        let validation = validate_proposal(&conn, &duplicate.id)?;
+        assert!(
+            validation
+                .issues
+                .iter()
+                .any(|issue| issue.code == "duplicate_content_hash"),
+            "trim-equivalent evidence should remain duplicate: {validation:?}"
+        );
 
         Ok(())
     }
 
     #[test]
-    fn proposal_rejects_empty_evidence_metadata_before_persistence() -> anyhow::Result<()> {
-        for field in ["source_kind", "source_ref"] {
+    fn proposal_rejects_empty_optional_metadata_before_persistence() -> anyhow::Result<()> {
+        for field in ["scope_id", "source_kind", "source_ref"] {
             let (_temp, conn) = initialized_database()?;
             let mut draft = sample_memory_draft("Reject empty proposal evidence");
-            if field == "source_kind" {
-                draft.source_kind = Some("   ".to_owned());
-            } else {
-                draft.source_ref = Some("   ".to_owned());
+            match field {
+                "scope_id" => draft.scope_id = Some("   ".to_owned()),
+                "source_kind" => draft.source_kind = Some("   ".to_owned()),
+                "source_ref" => draft.source_ref = Some("   ".to_owned()),
+                _ => unreachable!(),
             }
 
             let error = propose_memory(&conn, "agent:red-tests", draft)
@@ -796,6 +845,91 @@ mod tests {
             .map(|event| event.event_type)
             .collect::<Vec<_>>();
         assert_eq!(event_types, vec!["memory.proposed", "proposal.rejected"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_proposal_states_cannot_be_reopened() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        let applied = propose_memory(
+            &conn,
+            "agent:red-tests",
+            sample_memory_draft("Applied proposal stays terminal"),
+        )?;
+        approve_proposal(&conn, &applied.id, "reviewer:human")?;
+        apply_proposal(&conn, &applied.id, "agent:applier")?;
+        let record_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+        let event_count = list_events(&conn)?.len();
+
+        for error in [
+            approve_proposal(&conn, &applied.id, "reviewer:human")
+                .expect_err("applied proposal must not be re-approved"),
+            reject_proposal(
+                &conn,
+                &applied.id,
+                "reviewer:human",
+                "Applied state is terminal.",
+            )
+            .expect_err("applied proposal must not be rejected"),
+        ] {
+            assert!(error.to_string().contains("applied proposal"), "{error:#}");
+        }
+        assert!(
+            apply_proposal(&conn, &applied.id, "agent:applier")
+                .expect_err("applied proposal must not apply twice")
+                .to_string()
+                .contains("already applied")
+        );
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM memory_record", [], |row| {
+                row.get(0)
+            })?,
+            record_count
+        );
+        assert_eq!(list_events(&conn)?.len(), event_count);
+        assert_eq!(
+            load_proposal(&conn, &applied.id)?.status,
+            ProposalStatus::Applied
+        );
+
+        let rejected = propose_memory(
+            &conn,
+            "agent:red-tests",
+            sample_memory_draft("Rejected proposal stays terminal"),
+        )?;
+        reject_proposal(
+            &conn,
+            &rejected.id,
+            "reviewer:human",
+            "Rejected state is terminal.",
+        )?;
+        let event_count = list_events(&conn)?.len();
+        let repeated = reject_proposal(
+            &conn,
+            &rejected.id,
+            "reviewer:human",
+            "A repeated rejection is an idempotent no-op.",
+        )?;
+        assert_eq!(repeated.status, ProposalStatus::Rejected);
+        assert_eq!(list_events(&conn)?.len(), event_count);
+        assert!(
+            approve_proposal(&conn, &rejected.id, "reviewer:human")
+                .expect_err("rejected proposal must not be approved")
+                .to_string()
+                .contains("rejected proposal")
+        );
+        assert!(
+            apply_proposal(&conn, &rejected.id, "agent:applier")
+                .expect_err("rejected proposal must not be applied")
+                .to_string()
+                .contains("cannot be applied")
+        );
+        assert_eq!(
+            load_proposal(&conn, &rejected.id)?.status,
+            ProposalStatus::Rejected
+        );
 
         Ok(())
     }
