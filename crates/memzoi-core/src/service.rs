@@ -1147,7 +1147,7 @@ fn active_records_for_destination(
     let mut stmt = conn.prepare(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at
+                supersedes_id, expires_at, proposal_id
          FROM memory_record
          WHERE status = 'active'
            AND destination = ?1
@@ -1205,7 +1205,7 @@ fn record_by_id(conn: &Connection, record_id: &str) -> Result<Option<MemoryRecor
     let mut stmt = conn.prepare(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at
+                supersedes_id, expires_at, proposal_id
          FROM memory_record
          WHERE id = ?1",
     )?;

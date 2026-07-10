@@ -413,8 +413,9 @@ fn append_precheck_event(
 mod tests {
     use rusqlite::{Connection, params};
     use tempfile::TempDir;
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-    use super::{PrecheckInput, precheck};
+    use super::{PrecheckInput, precheck, precheck_at};
     use crate::{
         init_database,
         models::{MemoryStatus, MemoryType, ScopeKind},
@@ -461,6 +462,38 @@ mod tests {
             warnings[0].citations[0].path.as_deref(),
             Some("apps/api/src/billing/invoice.rs")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn path_only_precheck_excludes_records_at_the_expiry_boundary() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "risk-expired-path-only",
+                memory_type: MemoryType::Risk,
+                title: "Preserve unrelated invariant",
+                body: "This content deliberately has no requested path tokens.",
+                path: "apps/api/src/billing/invoice.rs",
+                source_ref: "issue://expired-path-only",
+            },
+        )?;
+        conn.execute(
+            "UPDATE memory_record SET expires_at = ?1 WHERE id = ?2",
+            params!["2026-07-10T12:00:00Z", "risk-expired-path-only"],
+        )?;
+
+        let warnings = precheck_at(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/api/src/billing/invoice.rs".to_owned()),
+                ..PrecheckInput::default()
+            },
+            OffsetDateTime::parse("2026-07-10T12:00:00Z", &Rfc3339)?,
+        )?;
+
+        assert!(warnings.is_empty());
         Ok(())
     }
 
