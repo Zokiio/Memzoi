@@ -199,7 +199,8 @@ Repo writes create `status: proposed` OKF proposal files under
 `.memzoi/proposals/pending/`; they **do not create canonical records** under
 `.memzoi/records/`. Local/session writes create private active records only in the
 runtime SQLite plane. Review and explicitly apply the pending repo proposal with the
-proposal-file workflow when it is appropriate; rebuild the derived repo index afterward.
+proposal-file workflow when it is appropriate; successful apply updates the
+derived repo index in the same operation.
 
 ### Duplicate and no-write behavior
 
@@ -370,7 +371,11 @@ Valid proposal file actions:
 - `supersede`
 - `tombstone`
 
-`supersede` proposals require at least one `supersedes` target. `tombstone` proposals require `proposal.target`. `update` is intentionally unsupported in the first file profile.
+`supersede` proposals require exactly one `supersedes` target and a reason.
+`tombstone` proposals require exactly one `proposal.target` and a reason.
+Create packets cannot name a target. Before mutation, apply rejects a target
+that is missing, inactive, cross-scope, or newer than `proposal.proposed_at`.
+`update` is intentionally unsupported in the file profile.
 
 Valid proposal sensitivity values:
 
@@ -392,7 +397,7 @@ memzoi proposal-files apply <proposal-id>
 memzoi proposal-files reject <proposal-id> --reason "..."
 ```
 
-`list`, `show`, and `validate` are read-only. `list` and `validate` describe the pending inbox; `show` can also inspect a resolved packet. `apply` accepts a `status: proposed`, `sensitivity: repo-safe` packet, writes its compact canonical projection and derived SQLite row atomically, then moves the packet to `.memzoi/proposals/resolved/applied/`. `reject` creates no canonical record and moves the packet to `.memzoi/proposals/resolved/rejected/` with an explicit reason. Resolution metadata records the outcome, actor, timestamp, reason, and affected record IDs. Repeating the same outcome is an auditable no-op; requesting the opposite outcome is refused.
+`list`, `show`, and `validate` are read-only. `list` and `validate` describe the pending inbox; `show` can also inspect a resolved packet. `validate` includes target existence, active-state, scope, and freshness checks for supersede/tombstone packets. `apply` accepts a `status: proposed`, `sensitivity: repo-safe` packet, writes its canonical changes and derived SQLite rows atomically, then moves the packet to `.memzoi/proposals/resolved/applied/`. Create writes one active record; supersede preserves the target as `superseded` and creates one lineage-linked active replacement; tombstone preserves the target evidence with `status: tombstoned`. `reject` creates no canonical record and moves the packet to `.memzoi/proposals/resolved/rejected/` with an explicit reason. Resolution metadata records the outcome, actor, timestamp, reason, and affected record IDs. Repeating the same outcome is an auditable no-op; requesting the opposite outcome is refused.
 
 Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals, and there is no override flag. Classify or sanitize blocked proposals before repo apply, or route `local-only` memory to the local/runtime plane.
 

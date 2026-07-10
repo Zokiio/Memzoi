@@ -713,7 +713,8 @@ fn proposal_files_show_command(proposal_id: &str, as_json: bool) -> Result<()> {
 }
 
 fn proposal_files_validate_command(as_json: bool) -> Result<()> {
-    let scan = scan_pending_proposal_files()?;
+    let mut scan = scan_pending_proposal_files()?;
+    validate_pending_proposal_scan(&mut scan)?;
     if as_json {
         print_json(&proposal_file_validation_json(&scan))?;
     } else {
@@ -732,6 +733,24 @@ fn proposal_files_validate_command(as_json: bool) -> Result<()> {
             if scan.errors.len() == 1 { "" } else { "s" }
         );
     }
+    Ok(())
+}
+
+fn validate_pending_proposal_scan(scan: &mut ProposalFileScan) -> Result<()> {
+    let service = open_service()?;
+    let mut valid = Vec::with_capacity(scan.proposals.len());
+    for entry in scan.proposals.drain(..) {
+        match service.validate_file_proposal(&entry.proposal) {
+            Ok(()) => valid.push(entry),
+            Err(error) => scan.errors.push(ProposalFileError {
+                path: entry.path,
+                error: error.to_string(),
+            }),
+        }
+    }
+    scan.proposals = valid;
+    scan.errors
+        .sort_by(|left, right| left.path.cmp(&right.path));
     Ok(())
 }
 
@@ -1396,6 +1415,19 @@ fn print_file_resolution_result(
         .as_ref()
         .map(|record| record.id.as_str())
         .or(result.resolution.record_id.as_deref());
+    let record_status = result
+        .record
+        .as_ref()
+        .map(|record| record.status.as_str())
+        .or(
+            (result.resolution.outcome == OkfProposalOutcome::Applied).then_some({
+                match result.proposal.proposal.action {
+                    memzoi_core::OkfProposalAction::Create
+                    | memzoi_core::OkfProposalAction::Supersede => "active",
+                    memzoi_core::OkfProposalAction::Tombstone => "tombstoned",
+                }
+            }),
+        );
 
     if as_json {
         print_json(&json!({
@@ -1407,6 +1439,7 @@ fn print_file_resolution_result(
             "sensitivity": result.proposal.sensitivity.as_str(),
             "title": &result.proposal.title,
             "record_id": record_id,
+            "record_status": record_status,
             "record_path": record_path,
             "target_id": &result.resolution.target_id,
             "resolved_path": resolved_path,
@@ -1790,7 +1823,23 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         scan_pending_proposal_files_at(&paths),
         scan_resolved_proposal_files_at(&paths),
     ) {
-        (Ok(pending), Ok(resolved)) => {
+        (Ok(mut pending), Ok(resolved)) => {
+            if paths.config_path.is_file()
+                && paths.db_path.is_file()
+                && let Ok(service) = MemoryService::open_paths(paths.clone())
+            {
+                let mut valid = Vec::with_capacity(pending.proposals.len());
+                for entry in pending.proposals.drain(..) {
+                    match service.validate_file_proposal(&entry.proposal) {
+                        Ok(()) => valid.push(entry),
+                        Err(error) => pending.errors.push(ProposalFileError {
+                            path: entry.path,
+                            error: error.to_string(),
+                        }),
+                    }
+                }
+                pending.proposals = valid;
+            }
             let invalid = pending.errors.len() + resolved.errors.len();
             if invalid > 0 {
                 checks.push(check(

@@ -31,6 +31,12 @@ Use this example to understand the fields, not as a place to store this reposito
 
 Proposal files may carry review-only context such as reason, confidence, and review notes. Applied canonical records should be compact and should not copy proposal-only metadata unless it remains durable project knowledge.
 
+After review, `memzoi proposal-files apply` moves packets to
+`.memzoi/proposals/resolved/applied/`; explicit rejection moves them to
+`resolved/rejected/` with a reason. The supersede and tombstone examples each
+name one target and require that target to remain active, same-scope, and no
+newer than the proposal when applied.
+
 ## MCP Config Example
 
 `memzoi.mcp.json` is intentionally generic. Replace `/absolute/path/to/your/repo` with the project root for the repository you want the MCP server to read.

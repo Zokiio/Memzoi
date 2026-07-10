@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime, Time, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::import::{self, ExistingDuplicate};
@@ -180,6 +180,30 @@ enum FileWriteMode {
     Overwrite,
 }
 
+#[derive(Debug)]
+struct FileProposalApplyPlan {
+    writes: Vec<CanonicalFileWrite>,
+    record: MemoryRecord,
+    record_path: PathBuf,
+    target_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct CanonicalFileWrite {
+    record_file: okf::OkfRecordFile,
+    path: PathBuf,
+    markdown: String,
+    mode: FileWriteMode,
+}
+
+#[derive(Debug)]
+struct StagedCanonicalFileWrite {
+    path: PathBuf,
+    temp_path: PathBuf,
+    backup_path: Option<PathBuf>,
+    installed: bool,
+}
+
 impl MemoryService {
     pub fn open(start: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_clock(start, SystemClock)
@@ -338,26 +362,15 @@ impl MemoryService {
         validate_resolution_actor(actor)?;
         let proposal_path = proposal_path.as_ref();
         let proposal = self.load_pending_file_proposal(proposal_path)?;
-        if proposal.proposal.action != OkfProposalAction::Create {
-            bail!(
-                "OKF proposal action {} is not supported by `memzoi proposal-files apply`; only create is supported",
-                proposal.proposal.action.as_str()
-            );
-        }
-
-        let record = okf::project_okf_create_proposal(&proposal)?;
-        let records_root = self.paths.records_dir();
-        let record_path = records_root.join(format!("{}.md", record.id));
-        ensure_path_absent(&record_path, "canonical memory record")?;
-
         let resolved_at = expiry::format_timestamp(self.now())?;
+        let plan = self.build_file_proposal_apply_plan(&proposal, &resolved_at)?;
         let resolution = OkfProposalResolution {
             outcome: OkfProposalOutcome::Applied,
             resolved_by: actor.trim().to_owned(),
-            resolved_at,
+            resolved_at: resolved_at.clone(),
             reason: proposal.proposal.reason.clone(),
-            record_id: Some(record.id.clone()),
-            target_id: None,
+            record_id: Some(plan.record.id.clone()),
+            target_id: plan.target_id.clone(),
         };
         let resolved_path = self
             .paths
@@ -367,19 +380,30 @@ impl MemoryService {
             .join(format!("{}.md", proposal.file_id));
         ensure_path_absent(&resolved_path, "resolved proposal packet")?;
 
-        let record_markdown =
-            okf::render_memory_record_markdown(&record, &proposal.tags, &proposal.applies_to);
-        let record_file =
-            okf::parse_okf_record_markdown(&records_root, &record_path, &record_markdown)?
-                .context("projected canonical record was ignored")?;
         let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
-
         let nonce = Uuid::now_v7().to_string();
-        let record_temp = stage_file(&record_path, &record_markdown, &nonce)?;
+        let mut staged_writes = Vec::with_capacity(plan.writes.len());
+        for write in &plan.writes {
+            let temp_path = match stage_file(&write.path, &write.markdown, &nonce) {
+                Ok(path) => path,
+                Err(error) => {
+                    cleanup_staged_canonical_writes(&staged_writes);
+                    return Err(error);
+                }
+            };
+            let backup_path = (write.mode == FileWriteMode::Overwrite)
+                .then(|| sibling_transaction_path(&write.path, &nonce, "canonical"));
+            staged_writes.push(StagedCanonicalFileWrite {
+                path: write.path.clone(),
+                temp_path,
+                backup_path,
+                installed: false,
+            });
+        }
         let resolved_temp = match stage_file(&resolved_path, &resolved_markdown, &nonce) {
             Ok(path) => path,
             Err(error) => {
-                remove_staged_file(&record_temp);
+                cleanup_staged_canonical_writes(&staged_writes);
                 return Err(error);
             }
         };
@@ -388,12 +412,17 @@ impl MemoryService {
         let tx = match self.conn.unchecked_transaction() {
             Ok(tx) => tx,
             Err(error) => {
-                remove_staged_file(&record_temp);
+                cleanup_staged_canonical_writes(&staged_writes);
                 remove_staged_file(&resolved_temp);
                 return Err(error.into());
             }
         };
-        if let Err(error) = okf::import_okf_records(&tx, &[record_file]).and_then(|_| {
+        let record_files = plan
+            .writes
+            .iter()
+            .map(|write| write.record_file.clone())
+            .collect::<Vec<_>>();
+        if let Err(error) = okf::import_okf_records(&tx, &record_files).and_then(|_| {
             append_event(
                 &tx,
                 AppendEvent {
@@ -403,22 +432,22 @@ impl MemoryService {
                         "proposal_id": proposal.id,
                         "file_id": proposal.file_id,
                         "action": proposal.proposal.action.as_str(),
-                        "record_id": record.id,
+                        "record_id": plan.record.id,
+                        "target_id": plan.target_id,
                         "resolved_path": resolved_path,
                     }),
-                    record_id: Some(record.id.clone()),
+                    record_id: Some(plan.record.id.clone()),
                     proposal_id: Some(proposal.id.clone()),
                 },
             )?;
             Ok(())
         }) {
-            remove_staged_file(&record_temp);
+            cleanup_staged_canonical_writes(&staged_writes);
             remove_staged_file(&resolved_temp);
             return Err(error);
         }
 
         let mut pending_moved = false;
-        let mut record_installed = false;
         let mut resolved_installed = false;
         let install_result = (|| -> Result<()> {
             fs::rename(proposal_path, &pending_backup).with_context(|| {
@@ -428,10 +457,20 @@ impl MemoryService {
                 )
             })?;
             pending_moved = true;
-            fs::rename(&record_temp, &record_path).with_context(|| {
-                format!("failed to install memory record {}", record_path.display())
-            })?;
-            record_installed = true;
+            for write in &mut staged_writes {
+                if let Some(backup_path) = &write.backup_path {
+                    fs::rename(&write.path, backup_path).with_context(|| {
+                        format!(
+                            "failed to stage canonical memory record {}",
+                            write.path.display()
+                        )
+                    })?;
+                }
+                fs::rename(&write.temp_path, &write.path).with_context(|| {
+                    format!("failed to install memory record {}", write.path.display())
+                })?;
+                write.installed = true;
+            }
             fs::rename(&resolved_temp, &resolved_path).with_context(|| {
                 format!(
                     "failed to install resolved proposal {}",
@@ -443,45 +482,213 @@ impl MemoryService {
         })();
 
         if let Err(error) = install_result {
-            rollback_create_resolution(
+            rollback_file_resolution(
                 proposal_path,
                 &pending_backup,
                 pending_moved,
-                &record_path,
-                record_installed,
+                &mut staged_writes,
                 &resolved_path,
                 resolved_installed,
-                &record_temp,
                 &resolved_temp,
             );
             return Err(error);
         }
 
         if let Err(error) = tx.commit() {
-            rollback_create_resolution(
+            rollback_file_resolution(
                 proposal_path,
                 &pending_backup,
                 pending_moved,
-                &record_path,
-                record_installed,
+                &mut staged_writes,
                 &resolved_path,
                 resolved_installed,
-                &record_temp,
                 &resolved_temp,
             );
             return Err(error).context("failed to commit proposal-file runtime index update");
         }
 
         remove_staged_file(&pending_backup);
+        for write in &staged_writes {
+            if let Some(backup_path) = &write.backup_path {
+                remove_staged_file(backup_path);
+            }
+        }
         Ok(FileProposalResolutionResult {
             proposal,
             resolution,
             resolved_path,
-            record: Some(record),
-            record_path: Some(record_path),
+            record: Some(plan.record),
+            record_path: Some(plan.record_path),
             already_resolved: false,
             runtime_index_updated: true,
         })
+    }
+
+    pub fn validate_file_proposal(&self, proposal: &OkfProposalFile) -> Result<()> {
+        let mut structurally_reviewed = proposal.clone();
+        structurally_reviewed.sensitivity = crate::OkfProposalSensitivity::RepoSafe;
+        self.build_file_proposal_apply_plan(
+            &structurally_reviewed,
+            &expiry::format_timestamp(self.now())?,
+        )?;
+        Ok(())
+    }
+
+    fn build_file_proposal_apply_plan(
+        &self,
+        proposal: &OkfProposalFile,
+        resolved_at: &str,
+    ) -> Result<FileProposalApplyPlan> {
+        okf::validate_repo_apply_proposal(proposal)?;
+        match proposal.proposal.action {
+            OkfProposalAction::Create => {
+                if proposal.proposal.target.is_some() || !proposal.supersedes.is_empty() {
+                    bail!("OKF create proposals cannot name a target or supersedes record");
+                }
+                let record = okf::project_okf_create_proposal(proposal)?;
+                let write = self.prepare_canonical_file_write(
+                    record.clone(),
+                    proposal.tags.clone(),
+                    proposal.applies_to.clone(),
+                    FileWriteMode::CreateNew,
+                )?;
+                Ok(FileProposalApplyPlan {
+                    record_path: write.path.clone(),
+                    writes: vec![write],
+                    record,
+                    target_id: None,
+                })
+            }
+            OkfProposalAction::Supersede => {
+                require_action_reason(proposal, "supersede")?;
+                if proposal.supersedes.len() != 1 || proposal.proposal.target.is_some() {
+                    bail!(
+                        "OKF supersede proposals must include exactly one supersedes target and no proposal.target"
+                    );
+                }
+                let target_id = proposal.supersedes[0].clone();
+                let target = self.load_file_proposal_target(proposal, &target_id)?;
+                let mut previous = okf::project_okf_record(&target);
+                previous.status = MemoryStatus::Superseded;
+                previous.updated_at = resolved_at.to_owned();
+                let replacement = okf::project_okf_supersede_proposal(proposal, &target_id)?;
+                if replacement.id == target_id {
+                    bail!(
+                        "supersede replacement record id {} collides with its target; use a distinct title or proposal file id",
+                        replacement.id
+                    );
+                }
+                let previous_write = self.prepare_canonical_file_write(
+                    previous,
+                    target.draft.tags.clone(),
+                    target.applies_to.clone(),
+                    FileWriteMode::Overwrite,
+                )?;
+                let replacement_write = self.prepare_canonical_file_write(
+                    replacement.clone(),
+                    proposal.tags.clone(),
+                    proposal.applies_to.clone(),
+                    FileWriteMode::CreateNew,
+                )?;
+                Ok(FileProposalApplyPlan {
+                    record_path: replacement_write.path.clone(),
+                    writes: vec![previous_write, replacement_write],
+                    record: replacement,
+                    target_id: Some(target_id),
+                })
+            }
+            OkfProposalAction::Tombstone => {
+                require_action_reason(proposal, "tombstone")?;
+                if !proposal.supersedes.is_empty() {
+                    bail!("OKF tombstone proposals cannot include supersedes records");
+                }
+                let target_id = proposal
+                    .proposal
+                    .target
+                    .as_deref()
+                    .context("OKF tombstone proposals must include exactly one proposal.target")?
+                    .to_owned();
+                let target = self.load_file_proposal_target(proposal, &target_id)?;
+                let mut tombstoned = okf::project_okf_record(&target);
+                tombstoned.status = MemoryStatus::Tombstoned;
+                tombstoned.updated_at = resolved_at.to_owned();
+                let write = self.prepare_canonical_file_write(
+                    tombstoned.clone(),
+                    target.draft.tags.clone(),
+                    target.applies_to.clone(),
+                    FileWriteMode::Overwrite,
+                )?;
+                Ok(FileProposalApplyPlan {
+                    record_path: write.path.clone(),
+                    writes: vec![write],
+                    record: tombstoned,
+                    target_id: Some(target_id),
+                })
+            }
+        }
+    }
+
+    fn prepare_canonical_file_write(
+        &self,
+        record: MemoryRecord,
+        tags: Vec<String>,
+        applies_to: Vec<String>,
+        mode: FileWriteMode,
+    ) -> Result<CanonicalFileWrite> {
+        let records_root = self.paths.records_dir();
+        let path = records_root.join(format!("{}.md", record.id));
+        match mode {
+            FileWriteMode::CreateNew => ensure_path_absent(&path, "canonical memory record")?,
+            FileWriteMode::Overwrite => ensure_regular_file(&path, "canonical memory record")?,
+        }
+        let markdown = okf::render_memory_record_markdown(&record, &tags, &applies_to);
+        let record_file = okf::parse_okf_record_markdown(&records_root, &path, &markdown)?
+            .context("projected canonical record was ignored")?;
+        Ok(CanonicalFileWrite {
+            record_file,
+            path,
+            markdown,
+            mode,
+        })
+    }
+
+    fn load_file_proposal_target(
+        &self,
+        proposal: &OkfProposalFile,
+        target_id: &str,
+    ) -> Result<okf::OkfRecordFile> {
+        let records = okf::read_okf_record_files(self.paths.records_dir())?;
+        let target = records
+            .into_iter()
+            .find(|record| record.concept_id == target_id)
+            .with_context(|| format!("proposal target does not exist: {target_id}"))?;
+        if target.status != MemoryStatus::Active {
+            bail!(
+                "proposal target {target_id} is inactive with status {}",
+                target.status.as_str()
+            );
+        }
+        if target.draft.scope_kind != proposal.scope_kind
+            || target.draft.scope_id != proposal.scope_id
+        {
+            bail!(
+                "proposal target {target_id} is cross-scope: target={}:{}, proposal={}:{}",
+                target.draft.scope_kind.as_str(),
+                target.draft.scope_id.as_deref().unwrap_or("-"),
+                proposal.scope_kind.as_str(),
+                proposal.scope_id.as_deref().unwrap_or("-")
+            );
+        }
+        let target_updated = target.updated.as_deref().unwrap_or(&target.created);
+        if parse_orderable_timestamp(target_updated, "target updated")?
+            > parse_orderable_timestamp(&proposal.proposal.proposed_at, "proposal.proposed_at")?
+        {
+            bail!(
+                "proposal target {target_id} is stale: target updated at {target_updated} after proposal at {}",
+                proposal.proposal.proposed_at
+            );
+        }
+        Ok(target)
     }
 
     pub fn reject_file_proposal(
@@ -1144,12 +1351,46 @@ fn validate_resolution_actor(actor: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_action_reason(proposal: &OkfProposalFile, action: &str) -> Result<()> {
+    if proposal
+        .proposal
+        .reason
+        .as_deref()
+        .is_none_or(|reason| reason.trim().is_empty())
+    {
+        bail!("OKF {action} proposals must include proposal.reason");
+    }
+    Ok(())
+}
+
+fn parse_orderable_timestamp(value: &str, label: &str) -> Result<OffsetDateTime> {
+    if let Ok(timestamp) = OffsetDateTime::parse(value, &Rfc3339) {
+        return Ok(timestamp);
+    }
+    if value.len() == 10 {
+        let format = time::format_description::parse_borrowed::<2>("[year]-[month]-[day]")?;
+        if let Ok(date) = Date::parse(value, &format) {
+            return Ok(date.with_time(Time::MIDNIGHT).assume_utc());
+        }
+    }
+    bail!("{label} must be an RFC 3339 timestamp or YYYY-MM-DD date: {value:?}")
+}
+
 fn ensure_path_absent(path: &Path, label: &str) -> Result<()> {
     if path
         .try_exists()
         .with_context(|| format!("failed to inspect {label} {}", path.display()))?
     {
         bail!("{label} already exists: {}", path.display());
+    }
+    Ok(())
+}
+
+fn ensure_regular_file(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect {label} {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("{label} must be a regular file: {}", path.display());
     }
     Ok(())
 }
@@ -1192,28 +1433,39 @@ fn remove_staged_file(path: &Path) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn rollback_create_resolution(
+fn cleanup_staged_canonical_writes(writes: &[StagedCanonicalFileWrite]) {
+    for write in writes {
+        remove_staged_file(&write.temp_path);
+    }
+}
+
+fn rollback_file_resolution(
     pending_path: &Path,
     pending_backup: &Path,
     pending_moved: bool,
-    record_path: &Path,
-    record_installed: bool,
+    writes: &mut [StagedCanonicalFileWrite],
     resolved_path: &Path,
     resolved_installed: bool,
-    record_temp: &Path,
     resolved_temp: &Path,
 ) {
     if resolved_installed {
         remove_staged_file(resolved_path);
     }
-    if record_installed {
-        remove_staged_file(record_path);
+    for write in writes.iter_mut().rev() {
+        if write.installed {
+            remove_staged_file(&write.path);
+            write.installed = false;
+        }
+        if let Some(backup_path) = &write.backup_path
+            && backup_path.exists()
+        {
+            let _ = fs::rename(backup_path, &write.path);
+        }
+        remove_staged_file(&write.temp_path);
     }
     if pending_moved {
         let _ = fs::rename(pending_backup, pending_path);
     }
-    remove_staged_file(record_temp);
     remove_staged_file(resolved_temp);
 }
 

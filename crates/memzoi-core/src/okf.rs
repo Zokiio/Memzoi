@@ -134,11 +134,7 @@ pub(crate) fn reserve_okf_proposal_id(
         if reserved_ids.contains(&candidate) {
             continue;
         }
-        let path = pending_root.join(format!("{candidate}.md"));
-        if !path
-            .try_exists()
-            .with_context(|| format!("failed to inspect pending proposal {}", path.display()))?
-        {
+        if !proposal_packet_id_exists(pending_root, &candidate)? {
             reserved_ids.insert(candidate.clone());
             return Ok(candidate);
         }
@@ -214,11 +210,8 @@ pub(crate) fn plan_okf_create_proposal(
     validate_okf_create_proposal_draft(draft)?;
     let proposal_id = draft.proposal_id.trim();
     let path = pending_root.join(format!("{proposal_id}.md"));
-    if path
-        .try_exists()
-        .with_context(|| format!("failed to inspect pending proposal {}", path.display()))?
-    {
-        bail!("pending proposal {} already exists", path.display());
+    if proposal_packet_id_exists(pending_root, proposal_id)? {
+        bail!("proposal packet id {proposal_id} already exists in pending or resolved state");
     }
     let markdown = render_okf_create_proposal_markdown(draft)?;
     let parsed = parse_okf_proposal_markdown(pending_root, &path, &markdown)?
@@ -232,6 +225,36 @@ pub(crate) fn plan_okf_create_proposal(
         markdown,
         parsed,
     })
+}
+
+fn proposal_packet_id_exists(pending_root: &Path, proposal_id: &str) -> Result<bool> {
+    let pending_path = pending_root.join(format!("{proposal_id}.md"));
+    if pending_path.try_exists().with_context(|| {
+        format!(
+            "failed to inspect pending proposal {}",
+            pending_path.display()
+        )
+    })? {
+        return Ok(true);
+    }
+    let Some(proposals_root) = pending_root.parent() else {
+        return Ok(false);
+    };
+    for outcome in ["applied", "rejected"] {
+        let resolved_path = proposals_root
+            .join("resolved")
+            .join(outcome)
+            .join(format!("{proposal_id}.md"));
+        if resolved_path.try_exists().with_context(|| {
+            format!(
+                "failed to inspect resolved proposal packet {}",
+                resolved_path.display()
+            )
+        })? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn create_okf_proposal_file(plan: &OkfCreateProposalPlan) -> Result<PathBuf> {
@@ -623,7 +646,12 @@ pub fn parse_okf_proposal_markdown(
     let supersedes =
         validate_string_list(frontmatter.supersedes.unwrap_or_default(), "supersedes")?;
     let proposal = parse_proposal_metadata(frontmatter.proposal)?;
-    validate_proposal_action_shape(proposal.action, &proposal.target, &supersedes)?;
+    validate_proposal_action_shape(
+        proposal.action,
+        &proposal.target,
+        &proposal.reason,
+        &supersedes,
+    )?;
     let sources = validate_proposal_sources(frontmatter.sources.unwrap_or_default())?;
     let resolution = parse_proposal_resolution(frontmatter.resolution)?;
     validate_proposal_resolution(status, resolution.as_ref())?;
@@ -722,9 +750,30 @@ pub(crate) fn project_okf_create_proposal(proposal: &OkfProposalFile) -> Result<
         );
     }
 
+    Ok(project_okf_new_record(proposal, None))
+}
+
+pub(crate) fn project_okf_supersede_proposal(
+    proposal: &OkfProposalFile,
+    target_id: &str,
+) -> Result<MemoryRecord> {
+    validate_repo_apply_proposal(proposal)?;
+    if proposal.proposal.action != OkfProposalAction::Supersede {
+        bail!(
+            "OKF proposal action {} is not supported by supersede projection",
+            proposal.proposal.action.as_str()
+        );
+    }
+    Ok(project_okf_new_record(proposal, Some(target_id.to_owned())))
+}
+
+fn project_okf_new_record(
+    proposal: &OkfProposalFile,
+    supersedes_id: Option<String>,
+) -> MemoryRecord {
     let body = proposal.body.trim().to_owned();
     let (source_kind, source_ref) = proposal_primary_evidence(&proposal.sources);
-    Ok(MemoryRecord {
+    MemoryRecord {
         id: title_to_concept_slug(&proposal.title)
             .unwrap_or_else(|| proposal.file_id.replace('_', "-")),
         memory_type: proposal.memory_type,
@@ -745,9 +794,38 @@ pub(crate) fn project_okf_create_proposal(proposal: &OkfProposalFile) -> Result<
             .to_string(),
         created_at: proposal.timestamp.clone(),
         updated_at: proposal.timestamp.clone(),
-        supersedes_id: None,
+        supersedes_id,
         expires_at: None,
-    })
+    }
+}
+
+pub(crate) fn project_okf_record(record: &OkfRecordFile) -> MemoryRecord {
+    MemoryRecord {
+        id: record.concept_id.clone(),
+        memory_type: record.draft.memory_type,
+        lane: record.draft.lane,
+        destination: MemoryDestination::Repo,
+        scope_kind: record.draft.scope_kind,
+        scope_id: record.draft.scope_id.clone(),
+        visibility: record.draft.visibility,
+        title: record.draft.title.clone(),
+        body: record.draft.body.clone(),
+        status: record.status,
+        confidence: record.draft.confidence,
+        source_kind: record.draft.source_kind.clone(),
+        source_ref: record.draft.source_ref.clone(),
+        proposal_id: record.proposal_id.clone(),
+        content_hash: blake3::hash(record.draft.body.as_bytes())
+            .to_hex()
+            .to_string(),
+        created_at: record.created.clone(),
+        updated_at: record
+            .updated
+            .clone()
+            .unwrap_or_else(|| record.created.clone()),
+        supersedes_id: record.supersedes_id.clone(),
+        expires_at: record.expires_at.clone(),
+    }
 }
 
 pub(crate) fn validate_repo_apply_proposal(proposal: &OkfProposalFile) -> Result<()> {
@@ -1604,19 +1682,35 @@ fn parse_proposal_scope(
 fn validate_proposal_action_shape(
     action: OkfProposalAction,
     target: &Option<String>,
+    reason: &Option<String>,
     supersedes: &[String],
 ) -> Result<()> {
     match action {
-        OkfProposalAction::Create => Ok(()),
+        OkfProposalAction::Create => {
+            if target.is_some() || !supersedes.is_empty() {
+                bail!("OKF create proposals cannot name a target or supersedes record");
+            }
+            Ok(())
+        }
         OkfProposalAction::Supersede => {
-            if supersedes.is_empty() {
-                bail!("OKF supersede proposals must include at least one supersedes target");
+            if supersedes.len() != 1 || target.is_some() {
+                bail!(
+                    "OKF supersede proposals must include exactly one supersedes target and no proposal.target"
+                );
+            }
+            if reason.is_none() {
+                bail!("OKF supersede proposals must include proposal.reason");
             }
             Ok(())
         }
         OkfProposalAction::Tombstone => {
-            if target.as_deref().is_none_or(str::is_empty) {
-                bail!("OKF tombstone proposals must include proposal.target");
+            if target.as_deref().is_none_or(str::is_empty) || !supersedes.is_empty() {
+                bail!(
+                    "OKF tombstone proposals must include exactly one proposal.target and no supersedes records"
+                );
+            }
+            if reason.is_none() {
+                bail!("OKF tombstone proposals must include proposal.reason");
             }
             Ok(())
         }
@@ -1727,13 +1821,29 @@ fn body_without_matching_h1(body: &str, title: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::ErrorKind, path::Path};
+    use std::{collections::BTreeSet, io::ErrorKind, path::Path};
 
     use tempfile::TempDir;
 
     use crate::{MemoryLane, MemoryStatus, MemoryType, ScopeKind, Visibility};
 
     const EXAMPLE_MEMORY: &str = include_str!("../../../examples/example-memory.md");
+
+    #[test]
+    fn proposal_id_reservation_never_reuses_resolved_audit_ids() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let pending = temp.path().join("proposals/pending");
+        let applied = temp.path().join("proposals/resolved/applied");
+        std::fs::create_dir_all(&pending)?;
+        std::fs::create_dir_all(&applied)?;
+        std::fs::write(applied.join("mem_example.md"), "resolved evidence")?;
+
+        let reserved =
+            super::reserve_okf_proposal_id(&pending, "mem_example", &mut BTreeSet::new())?;
+
+        assert_eq!(reserved, "mem_example-2");
+        Ok(())
+    }
 
     #[test]
     fn failed_proposal_write_removes_partial_target_and_preserves_cause() -> anyhow::Result<()> {

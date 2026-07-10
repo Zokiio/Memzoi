@@ -176,6 +176,15 @@ timestamp, outcome, and reason embedded in its frontmatter. Repeating the same
 apply or reject command returns the stored resolution without writing again;
 attempting the opposite outcome is refused.
 
+File-backed `supersede` and `tombstone` actions must name exactly one target and
+include a reason. Apply accepts only a repo-safe packet whose target still
+exists, is active, matches the proposal's scope kind and scope ID, and was not
+updated after `proposal.proposed_at`. Supersede retains the old evidence as a
+`superseded` record and creates an active replacement with explicit lineage.
+Tombstone retains the target evidence as a `tombstoned` record while the
+resolved packet preserves the reason. Any validation, file, or index failure
+leaves the target, replacement set, index, and pending packet unchanged.
+
 Runtime promotion follows the same boundary: local/session rows are not
 directly promoted to canonical files. To promote an explicit durable finding,
 provide a structured candidate to `memzoi session-end` with destination `repo`,
@@ -273,8 +282,8 @@ state. The destination outcomes are:
 After reviewing an imported repo proposal, use the separate explicit proposal
 review/apply workflow described in [Approval, review, and promotion](#approval-review-and-promotion),
 including `memzoi proposal-files apply <proposal-id>` to create the canonical
-`.memzoi/records/*.md` record (then rebuild derived runtime search state when
-needed). A plan may contain local or private candidates and must not be
+`.memzoi/records/*.md` record and update derived runtime search state in the
+same operation. A plan may contain local or private candidates and must not be
 blindly committed. Duplicate checks compare trimmed-body BLAKE3 values against
 canonical records, pending proposals, active runtime memory, and earlier input
 candidates. Treat manifests and plan output as potentially sensitive; the

@@ -211,8 +211,8 @@ Proposal actions:
 | Action | Meaning |
 | --- | --- |
 | `create` | Propose a new canonical memory record. |
-| `supersede` | Propose a new memory that replaces one or more existing memories. Requires `supersedes`. |
-| `tombstone` | Propose marking an existing memory intentionally inactive or removed. Requires `proposal.target`. |
+| `supersede` | Propose a new memory that replaces exactly one active memory. Requires one `supersedes` target and `proposal.reason`. |
+| `tombstone` | Propose marking exactly one active memory intentionally inactive. Requires `proposal.target` and `proposal.reason`. |
 
 `update` is intentionally unsupported in the first file profile. Meaningful changes should usually create a superseding memory rather than silently editing an existing record in place.
 
@@ -234,8 +234,14 @@ Validation checks:
 - `lane` must be `session`, `semantic`, `episodic`, or `procedural`.
 - `type` must use current lowercase Memzoi values such as `decision`, `fact`, `procedure`, `risk`, or `failed_attempt`.
 - `sensitivity` must be one of the listed sensitivity values.
-- `supersede` proposals must include at least one `supersedes` target.
-- `tombstone` proposals must include `proposal.target`.
+- `create` proposals cannot name a target.
+- `supersede` proposals must include exactly one `supersedes` target and no
+  `proposal.target`.
+- `tombstone` proposals must include exactly one `proposal.target` and no
+  `supersedes` entries.
+- `supersede` and `tombstone` require a reviewable `proposal.reason`.
+- Apply verifies that the target exists, is active, has the same scope kind and
+  scope ID, and has not changed since `proposal.proposed_at`.
 - The body must be non-empty and should include enough review context to understand the intended memory change.
 
 Proposal-to-record mapping:
@@ -252,6 +258,14 @@ record. The resolved packet retains the reviewed proposal evidence and adds a
 Git-readable outcome, reviewer, timestamp, reason, and affected record IDs.
 
 The resulting canonical record may be a compact projection of the proposal. Review-only fields such as `proposal.reason`, proposal confidence, and review notes do not need to be copied into canonical record frontmatter unless they remain durable project knowledge.
+
+A supersede apply preserves the old record and its evidence with
+`status: superseded`, then creates an active replacement whose `supersedes`
+field points to the old record. A tombstone apply preserves the target's body,
+source, tags, paths, and earlier lineage while changing its status to
+`tombstoned`; the resolved packet retains the reason. Both changes and their
+derived search updates commit through the same all-or-nothing lifecycle as
+create.
 
 Compactness policy:
 
