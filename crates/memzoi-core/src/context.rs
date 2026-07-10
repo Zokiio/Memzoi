@@ -245,7 +245,6 @@ fn path_candidates(
     if requested_path.is_empty() {
         return Ok(Vec::new());
     }
-    let path_like = format!("{}/%", requested_path);
     let mut stmt = conn
         .prepare(
             "SELECT DISTINCT memory_record.id, memory_record.type, memory_record.lane,
@@ -258,29 +257,11 @@ fn path_candidates(
              FROM memory_path
              JOIN memory_record ON memory_record.id = memory_path.record_id
              WHERE memory_record.status = 'active'
-               AND memzoi_is_expired(memory_record.expires_at, ?5) = 0
+               AND memzoi_is_expired(memory_record.expires_at, ?4) = 0
                AND memory_record.destination = ?1
-               AND (
-                 memory_path.path = ?2
-                 OR memory_path.path LIKE ?3
-                 OR ?2 LIKE memory_path.path || '/%'
-                 OR (
-                     memory_path.path LIKE '%/**'
-                     AND (
-                         ?2 = substr(memory_path.path, 1, length(memory_path.path) - 3)
-                         OR ?2 LIKE substr(memory_path.path, 1, length(memory_path.path) - 2) || '%'
-                     )
-                 )
-                 OR (
-                     ?2 LIKE '%/**'
-                     AND (
-                         memory_path.path = substr(?2, 1, length(?2) - 3)
-                         OR memory_path.path LIKE substr(?2, 1, length(?2) - 2) || '%'
-                     )
-                 )
-               )
+               AND memzoi_path_matches(memory_path.path, ?2) = 1
              ORDER BY memory_record.updated_at DESC, memory_record.id ASC
-             LIMIT ?4",
+             LIMIT ?3",
         )
         .context("failed to prepare path-scoped context candidate query")?;
     let rows = stmt
@@ -288,7 +269,6 @@ fn path_candidates(
             params![
                 destination.as_str(),
                 requested_path,
-                path_like,
                 limit as i64,
                 expiry::format_timestamp(now)?,
             ],
@@ -306,7 +286,10 @@ fn path_candidates(
         {
             continue;
         }
-        let citation = citation_for(&record, paths.first())?;
+        let citation_path = paths
+            .iter()
+            .find(|path| path_matches_request(&path.path, path_prefix));
+        let citation = citation_for(&record, citation_path)?;
         results.push(SearchResult {
             record,
             score: 0.0,
@@ -1292,6 +1275,73 @@ mod tests {
             "deduplication should keep canonical repo memory over duplicate local memory: {json}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn path_candidate_limit_is_applied_after_literal_path_applicability() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "rec-literal-path-match",
+                memory_type: MemoryType::Warning,
+                scope_kind: ScopeKind::Repo,
+                status: MemoryStatus::Active,
+                title: "Applicable frontend boundary",
+                body: "This warning is recalled from its literal directory binding.",
+                path: Some("apps/my_app/"),
+                source_ref: Some("runbook://literal-path-match"),
+            },
+        )?;
+        conn.execute(
+            "UPDATE memory_record SET updated_at = '2026-07-01T00:00:00Z' WHERE id = ?1",
+            ["rec-literal-path-match"],
+        )?;
+
+        for index in 0..50 {
+            let id = format!("rec-like-false-positive-{index:02}");
+            let path = format!("apps/myXapp/unrelated-{index:02}.rs");
+            insert_memory(
+                &conn,
+                MemoryFixture {
+                    id: &id,
+                    memory_type: MemoryType::Fact,
+                    scope_kind: ScopeKind::Repo,
+                    status: MemoryStatus::Active,
+                    title: "Unrelated LIKE candidate",
+                    body: "SQLite wildcard candidates must not consume the path recall limit.",
+                    path: Some(&path),
+                    source_ref: Some("test://like-false-positive"),
+                },
+            )?;
+            conn.execute(
+                "UPDATE memory_record SET updated_at = '2026-07-11T00:00:00Z' WHERE id = ?1",
+                [&id],
+            )?;
+        }
+
+        let pack = build_context_pack(
+            &conn,
+            ContextPackInput {
+                task: "zzzz-no-lexical-overlap".to_owned(),
+                path_prefix: Some("apps/my_app/src/App.tsx".to_owned()),
+                token_budget: Some(160),
+                include_local: false,
+                include_session: false,
+            },
+        )?;
+        let ids = record_ids_from_pack(&serde_json::to_value(&pack)?);
+
+        assert!(
+            ids.iter().any(|id| id == "rec-literal-path-match"),
+            "false LIKE candidates must not starve the applicable path record: {ids:?}"
+        );
+        assert!(
+            ids.iter()
+                .all(|id| !id.starts_with("rec-like-false-positive")),
+            "SQL path applicability must be literal and case-sensitive: {ids:?}"
+        );
         Ok(())
     }
 

@@ -137,10 +137,10 @@ fn path_governance_candidates(
         return Ok(Vec::new());
     }
 
-    let path_like = format!("{requested_path}/%");
     let scope_kind = scope_kind.map(|value| value.as_str().to_owned());
-    // SQL narrows the indexed candidates; path_matches_request below remains
-    // authoritative for the documented exact/directory/trailing-glob rules.
+    // The SQLite scalar delegates to the same literal matcher used below, so
+    // SQL candidate discovery cannot diverge on LIKE metacharacters, case, or
+    // trailing slash normalization.
     let mut stmt = conn
         .prepare(
             "SELECT DISTINCT memory_record.id, memory_record.type, memory_record.lane,
@@ -153,29 +153,11 @@ fn path_governance_candidates(
              FROM memory_path
              JOIN memory_record ON memory_record.id = memory_path.record_id
              WHERE memory_record.status = 'active'
-               AND memzoi_is_expired(memory_record.expires_at, ?5) = 0
+               AND memzoi_is_expired(memory_record.expires_at, ?4) = 0
                AND memory_record.destination = ?1
                AND memory_record.type IN ('risk', 'warning', 'failed_attempt')
                AND (?2 IS NULL OR memory_record.scope_kind = ?2)
-               AND (
-                 memory_path.path = ?3
-                 OR memory_path.path LIKE ?4
-                 OR ?3 LIKE memory_path.path || '/%'
-                 OR (
-                     memory_path.path LIKE '%/**'
-                     AND (
-                         ?3 = substr(memory_path.path, 1, length(memory_path.path) - 3)
-                         OR ?3 LIKE substr(memory_path.path, 1, length(memory_path.path) - 2) || '%'
-                     )
-                 )
-                 OR (
-                     ?3 LIKE '%/**'
-                     AND (
-                         memory_path.path = substr(?3, 1, length(?3) - 3)
-                         OR memory_path.path LIKE substr(?3, 1, length(?3) - 2) || '%'
-                     )
-                 )
-               )
+               AND memzoi_path_matches(memory_path.path, ?3) = 1
              ORDER BY memory_record.updated_at DESC, memory_record.id ASC",
         )
         .context("failed to prepare path-scoped precheck candidate query")?;
@@ -185,7 +167,6 @@ fn path_governance_candidates(
                 MemoryDestination::Repo.as_str(),
                 scope_kind,
                 requested_path,
-                path_like,
                 evaluated_at,
             ],
             record_from_row,
@@ -637,6 +618,71 @@ mod tests {
             warnings[0].citations[0].path.as_deref(),
             Some("config/keys.toml"),
             "the citation should use the most specific applicable binding"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn precheck_treats_sql_like_metacharacters_in_paths_literally() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "warning-unrelated-underscore-path",
+                memory_type: MemoryType::Warning,
+                title: "Rotate signing keys carefully",
+                body: "The lexical text matches, but the bound path must remain unrelated.",
+                path: "apps/myXapp/secret/keys.toml",
+                source_ref: "runbook://unrelated-underscore-path",
+            },
+        )?;
+
+        let warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/my_app".to_owned()),
+                action: Some("rotate signing keys".to_owned()),
+                ..PrecheckInput::default()
+            },
+        )?;
+
+        assert!(
+            warnings.is_empty(),
+            "an underscore in the requested path is literal, not a SQLite LIKE wildcard: {warnings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_only_precheck_normalizes_trailing_slash_bindings_before_sql_prefilter()
+    -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "warning-trailing-slash-directory",
+                memory_type: MemoryType::Warning,
+                title: "Preserve the frontend boundary",
+                body: "This warning intentionally has no requested file-name tokens.",
+                path: "apps/web/",
+                source_ref: "runbook://trailing-slash-directory",
+            },
+        )?;
+
+        let warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/web/src/App.tsx".to_owned()),
+                ..PrecheckInput::default()
+            },
+        )?;
+
+        assert_eq!(
+            warnings
+                .iter()
+                .map(|warning| warning.record_id.as_str())
+                .collect::<Vec<_>>(),
+            ["warning-trailing-slash-directory"]
         );
         Ok(())
     }

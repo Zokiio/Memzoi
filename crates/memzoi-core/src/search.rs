@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, functions::FunctionFlags, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
@@ -12,6 +12,25 @@ use crate::{
         SearchResult,
     },
 };
+
+pub(crate) const SQL_PATH_MATCHES_REQUEST: &str = "memzoi_path_matches";
+
+pub(crate) fn register_sqlite_functions(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        SQL_PATH_MATCHES_REQUEST,
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let stored_path = context.get::<String>(0)?;
+            let requested_path = context.get::<String>(1)?;
+            Ok(i64::from(path_matches_request(
+                &stored_path,
+                &requested_path,
+            )))
+        },
+    )?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SearchInput {
@@ -69,30 +88,12 @@ pub(crate) fn search_memory_at(
         "1 = 1"
     };
     let destination = input.destination.unwrap_or(MemoryDestination::Repo);
-    let destination_filter = "memory_record.destination = ?7";
+    let destination_filter = "memory_record.destination = ?6";
     let path_filter = if path_prefix.is_some() {
         "EXISTS (
             SELECT 1 FROM memory_path
             WHERE memory_path.record_id = memory_record.id
-              AND (
-                memory_path.path = ?5
-                OR memory_path.path LIKE ?6
-                OR ?5 LIKE memory_path.path || '/%'
-                OR (
-                    memory_path.path LIKE '%/**'
-                    AND (
-                        ?5 = substr(memory_path.path, 1, length(memory_path.path) - 3)
-                        OR ?5 LIKE substr(memory_path.path, 1, length(memory_path.path) - 2) || '%'
-                    )
-                )
-                OR (
-                    ?5 LIKE '%/**'
-                    AND (
-                        memory_path.path = substr(?5, 1, length(?5) - 3)
-                        OR memory_path.path LIKE substr(?5, 1, length(?5) - 2) || '%'
-                    )
-                )
-              )
+              AND memzoi_path_matches(memory_path.path, ?5) = 1
         )"
     } else {
         "1 = 1"
@@ -110,22 +111,19 @@ pub(crate) fn search_memory_at(
          JOIN memory_record ON memory_record.rowid = memory_fts.rowid
          WHERE memory_fts MATCH ?1
            AND {status_filter}
-           AND memzoi_is_expired(memory_record.expires_at, ?9) = 0
+           AND memzoi_is_expired(memory_record.expires_at, ?8) = 0
            AND {destination_filter}
            AND {scope_filter}
            AND {scope_id_filter}
            AND {type_filter}
            AND {path_filter}
          ORDER BY rank ASC, memory_record.updated_at DESC, memory_record.id ASC
-         LIMIT ?8"
+         LIMIT ?7"
     );
 
     let scope_kind = input.scope_kind.map(|value| value.as_str().to_owned());
     let memory_type = input.memory_type.map(|value| value.as_str().to_owned());
     let destination = destination.as_str().to_owned();
-    let path_like = path_prefix
-        .as_ref()
-        .map(|path| format!("{}/%", path.trim_end_matches('/')));
     let mut stmt = conn
         .prepare(&sql)
         .context("failed to prepare memory search")?;
@@ -136,8 +134,7 @@ pub(crate) fn search_memory_at(
                 scope_kind,
                 input.scope_id,
                 memory_type,
-                path_prefix,
-                path_like,
+                path_prefix.as_deref(),
                 destination,
                 limit as i64,
                 evaluated_at,
@@ -154,7 +151,15 @@ pub(crate) fn search_memory_at(
     for row in rows {
         let (record, rank) = row.context("failed to read memory search row")?;
         let paths = load_paths(conn, &record.id)?;
-        let citation = citation_for(&record, paths.first())?;
+        let citation_path = path_prefix
+            .as_deref()
+            .and_then(|requested_path| {
+                paths
+                    .iter()
+                    .find(|path| path_matches_request(&path.path, requested_path))
+            })
+            .or_else(|| paths.first());
+        let citation = citation_for(&record, citation_path)?;
         results.push(SearchResult {
             score: -rank,
             snippet: Some(snippet(&record, &input.query)),
