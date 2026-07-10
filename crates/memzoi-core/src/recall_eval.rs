@@ -747,13 +747,12 @@ fn corpus_digest(root: &Path, corpus_bytes: &[u8], corpus: &RecallEvalCorpus) ->
         hash_digest_entry(&mut hasher, &Path::new("records").join(path), &bytes);
     }
     validate_fixture_root(&corpus.proposals_root, "proposals_root")?;
-    for path in sorted_paths(
-        &corpus
-            .proposal_fixtures
-            .iter()
-            .map(|fixture| fixture.path.clone())
-            .collect::<Vec<_>>(),
-    ) {
+    let proposal_paths = corpus
+        .proposal_fixtures
+        .iter()
+        .map(|fixture| fixture.path.clone())
+        .collect::<Vec<_>>();
+    for path in sorted_paths(&proposal_paths) {
         validate_fixture_path(path, "proposal fixture")?;
         let bytes = read_safe_fixture(root, &corpus.proposals_root, path, "proposal fixture")?;
         hash_digest_entry(&mut hasher, &Path::new("proposals").join(path), &bytes);
@@ -1243,17 +1242,7 @@ fn stage_and_apply_proposal_fixtures(
             &fixture.path,
             "proposal fixture",
         )?;
-        let file_name = fixture
-            .path
-            .file_name()
-            .context("proposal fixture has no file name")?;
-        let pending_path = pending_root.join(file_name);
-        fs::write(&pending_path, bytes).with_context(|| {
-            format!(
-                "failed to stage proposal fixture {}",
-                fixture.path.display()
-            )
-        })?;
+        let pending_path = stage_proposal_fixture(&pending_root, &fixture.path, &bytes)?;
         let result = service
             .apply_file_proposal(&pending_path, "memzoi-eval")
             .with_context(|| {
@@ -1275,6 +1264,41 @@ fn stage_and_apply_proposal_fixtures(
         });
     }
     Ok(applied)
+}
+
+fn stage_proposal_fixture(
+    pending_root: &Path,
+    fixture_path: &Path,
+    bytes: &[u8],
+) -> Result<PathBuf> {
+    validate_fixture_path(fixture_path, "proposal fixture")?;
+    let pending_path = pending_root.join(fixture_path);
+    let parent = pending_path
+        .parent()
+        .context("proposal fixture destination has no parent")?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create proposal fixture directory {}",
+            parent.display()
+        )
+    })?;
+    let mut destination = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pending_path)
+        .with_context(|| {
+            format!(
+                "failed to stage proposal fixture {}",
+                fixture_path.display()
+            )
+        })?;
+    destination.write_all(bytes).with_context(|| {
+        format!(
+            "failed to write proposal fixture {}",
+            fixture_path.display()
+        )
+    })?;
+    Ok(pending_path)
 }
 
 fn seed_runtime_fixtures(
@@ -1365,25 +1389,23 @@ fn validate_case_record_ids(
         if matches!(case, RecallEvalCase::WriteGate { .. }) {
             continue;
         }
-        for (label, ids) in [
-            ("relevant", case_relevant_ids(case)),
-            (
-                "forbidden",
-                &case_forbidden(case)
-                    .all()
-                    .into_iter()
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>(),
-            ),
-        ] {
-            for id in ids {
-                if !catalog.contains_key(id.as_str()) {
-                    bail!(
-                        "recall case {:?} references missing {label} record id {:?}",
-                        case_id(case),
-                        id
-                    );
-                }
+        for id in case_relevant_ids(case) {
+            if !catalog.contains_key(id.as_str()) {
+                bail!(
+                    "recall case {:?} references missing relevant record id {:?}",
+                    case_id(case),
+                    id
+                );
+            }
+        }
+        let forbidden_ids = case_forbidden(case).all();
+        for id in forbidden_ids {
+            if !catalog.contains_key(id) {
+                bail!(
+                    "recall case {:?} references missing forbidden record id {:?}",
+                    case_id(case),
+                    id
+                );
             }
         }
     }
@@ -2677,10 +2699,14 @@ fn rounded(value: f64, digits: i32) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::Path};
+
+    use tempfile::TempDir;
+
     use super::{
         RECALL_EVAL_CORPUS_VERSION, RawMetrics, RecallEvalCorpus, RecallEvalForbiddenIds,
         RecallEvalSurface, RecallEvalThresholds, evaluate_thresholds, nearest_rank_index,
-        validate_corpus,
+        stage_proposal_fixture, validate_corpus,
     };
 
     #[test]
@@ -2730,6 +2756,34 @@ unexpected: true
         assert_eq!(nearest_rank_index(1, 0.50), 0);
         assert_eq!(nearest_rank_index(4, 0.50), 1);
         assert_eq!(nearest_rank_index(4, 0.95), 3);
+    }
+
+    #[test]
+    fn proposal_fixtures_preserve_relative_subdirectories() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let pending_root = temp.path().join("pending");
+
+        let first = stage_proposal_fixture(
+            &pending_root,
+            Path::new("alpha/shared.md"),
+            b"alpha fixture",
+        )?;
+        let second =
+            stage_proposal_fixture(&pending_root, Path::new("beta/shared.md"), b"beta fixture")?;
+
+        assert_eq!(first, pending_root.join("alpha/shared.md"));
+        assert_eq!(second, pending_root.join("beta/shared.md"));
+        assert_eq!(fs::read(&first)?, b"alpha fixture");
+        assert_eq!(fs::read(second)?, b"beta fixture");
+        let collision = stage_proposal_fixture(
+            &pending_root,
+            Path::new("alpha/shared.md"),
+            b"replacement fixture",
+        )
+        .expect_err("fixture staging must not replace an existing destination");
+        assert!(collision.to_string().contains("failed to stage"));
+        assert_eq!(fs::read(first)?, b"alpha fixture");
+        Ok(())
     }
 
     #[test]
