@@ -1,0 +1,219 @@
+{
+  "version": "memzoi-recall-baseline/v1",
+  "report_version": "memzoi-recall-report/v2",
+  "definitions_version": "memzoi-trust-metrics/v1",
+  "corpus": {
+    "name": "memzoi-trust-contract-v2",
+    "version": "memzoi-recall-corpus/v2",
+    "digest": "8480b3cd4d3ae574d2f559a1fffc644a48d890511772dc60f6d0023bfb9f6a55"
+  },
+  "metrics": {
+    "mean_recall_at_k": 1.0,
+    "mean_mrr": 1.0,
+    "precheck_precision": 1.0,
+    "precheck_recall": 1.0,
+    "stale_leakage_rate": 0.0,
+    "expired_leakage_rate": 0.0,
+    "scope_leakage_rate": 0.0,
+    "prohibited_leakage_rate": 0.0,
+    "destination_leakage_rate": 0.0,
+    "forbidden_hit_rate": 0.0,
+    "citation_integrity": 1.0,
+    "provenance_integrity": 1.0,
+    "case_pass_rate": 1.0,
+    "estimated_usage_total": 1416,
+    "estimated_usage_max": 379
+  },
+  "cases": [
+    {
+      "id": "lexical-title-and-body",
+      "surface": "search",
+      "retrieved_ids": [
+        "lexical-target",
+        "plane-repo",
+        "precheck-path-fact"
+      ],
+      "estimated_usage": null,
+      "passed": true
+    },
+    {
+      "id": "path-filter-before-limit",
+      "surface": "search",
+      "retrieved_ids": [
+        "path-target"
+      ],
+      "estimated_usage": null,
+      "passed": true
+    },
+    {
+      "id": "scope-filter-before-limit",
+      "surface": "search",
+      "retrieved_ids": [
+        "scope-alpha"
+      ],
+      "estimated_usage": null,
+      "passed": true
+    },
+    {
+      "id": "lane-filter-before-limit",
+      "surface": "search",
+      "retrieved_ids": [
+        "lane-target"
+      ],
+      "estimated_usage": null,
+      "passed": true
+    },
+    {
+      "id": "lifecycle-suppression",
+      "surface": "search",
+      "retrieved_ids": [
+        "lifecycle-active"
+      ],
+      "estimated_usage": null,
+      "passed": true
+    },
+    {
+      "id": "expiry-boundary",
+      "surface": "search",
+      "retrieved_ids": [
+        "expiry-live"
+      ],
+      "estimated_usage": null,
+      "passed": true
+    },
+    {
+      "id": "citation-integrity",
+      "surface": "search",
+      "retrieved_ids": [
+        "citation-target"
+      ],
+      "estimated_usage": null,
+      "passed": true
+    },
+    {
+      "id": "proposal-evidence-round-trip",
+      "surface": "search",
+      "retrieved_ids": [
+        "proposal-evidence-round-trip"
+      ],
+      "estimated_usage": null,
+      "passed": true
+    },
+    {
+      "id": "precheck-path-only-warning",
+      "surface": "precheck",
+      "retrieved_ids": [
+        "precheck-path-target"
+      ],
+      "estimated_usage": null,
+      "passed": true
+    },
+    {
+      "id": "context-default-plane",
+      "surface": "context",
+      "retrieved_ids": [
+        "precheck-path-target",
+        "lifecycle-active",
+        "expiry-live",
+        "precheck-path-unrelated",
+        "path-target",
+        "citation-target",
+        "path-distractor",
+        "proposal-evidence-round-trip",
+        "lane-target",
+        "scope-alpha",
+        "scope-repo",
+        "scope-beta",
+        "lane-distractor",
+        "plane-repo",
+        "precheck-path-fact",
+        "lexical-target"
+      ],
+      "estimated_usage": 329,
+      "passed": true
+    },
+    {
+      "id": "context-local-opt-in",
+      "surface": "context",
+      "retrieved_ids": [
+        "precheck-path-target",
+        "lifecycle-active",
+        "expiry-live",
+        "precheck-path-unrelated",
+        "path-target",
+        "citation-target",
+        "path-distractor",
+        "proposal-evidence-round-trip",
+        "lane-target",
+        "scope-alpha",
+        "scope-repo",
+        "scope-beta",
+        "lane-distractor",
+        "plane-repo",
+        "precheck-path-fact",
+        "lexical-target",
+        "local-onyx-memory-plane-sentinel-local"
+      ],
+      "estimated_usage": 354,
+      "passed": true
+    },
+    {
+      "id": "context-session-opt-in",
+      "surface": "context",
+      "retrieved_ids": [
+        "precheck-path-target",
+        "lifecycle-active",
+        "expiry-live",
+        "precheck-path-unrelated",
+        "path-target",
+        "citation-target",
+        "path-distractor",
+        "proposal-evidence-round-trip",
+        "lane-target",
+        "scope-alpha",
+        "scope-repo",
+        "scope-beta",
+        "lane-distractor",
+        "plane-repo",
+        "precheck-path-fact",
+        "lexical-target",
+        "session-onyx-memory-plane-sentinel-session"
+      ],
+      "estimated_usage": 354,
+      "passed": true
+    },
+    {
+      "id": "context-all-planes-opt-in",
+      "surface": "context",
+      "retrieved_ids": [
+        "precheck-path-target",
+        "lifecycle-active",
+        "expiry-live",
+        "precheck-path-unrelated",
+        "path-target",
+        "citation-target",
+        "path-distractor",
+        "proposal-evidence-round-trip",
+        "lane-target",
+        "scope-alpha",
+        "scope-repo",
+        "scope-beta",
+        "lane-distractor",
+        "plane-repo",
+        "precheck-path-fact",
+        "lexical-target",
+        "local-onyx-memory-plane-sentinel-local",
+        "session-onyx-memory-plane-sentinel-session"
+      ],
+      "estimated_usage": 379,
+      "passed": true
+    },
+    {
+      "id": "prohibited-repo-write",
+      "surface": "write_gate",
+      "retrieved_ids": [],
+      "estimated_usage": null,
+      "passed": true
+    }
+  ]
+}

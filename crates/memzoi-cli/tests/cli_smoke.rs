@@ -84,6 +84,8 @@ fn eval_recall_help_requires_an_explicit_corpus() {
         .stdout(
             predicate::str::contains("Evaluate recall quality")
                 .and(predicate::str::contains("--corpus <CORPUS>"))
+                .and(predicate::str::contains("--baseline <BASELINE>"))
+                .and(predicate::str::contains("--update-baseline"))
                 .and(predicate::str::contains("--json")),
         );
 }
@@ -92,6 +94,8 @@ fn eval_recall_help_requires_an_explicit_corpus() {
 fn eval_recall_json_uses_isolated_state_and_reports_citations() {
     let repo = tempfile::tempdir().expect("temp repo");
     let sentinel = repo.path().join(".memzoi/records/user-record.md");
+    let baseline_path = checked_recall_baseline();
+    let baseline_before = fs::read(&baseline_path).expect("read checked baseline");
     fs::create_dir_all(sentinel.parent().expect("sentinel parent")).expect("create sentinel root");
     fs::write(&sentinel, "user canonical bytes").expect("write sentinel");
 
@@ -99,6 +103,8 @@ fn eval_recall_json_uses_isolated_state_and_reports_citations() {
     let assert = cmd
         .args(["eval", "recall", "--corpus"])
         .arg(checked_recall_corpus())
+        .arg("--baseline")
+        .arg(&baseline_path)
         .arg("--json")
         .current_dir(repo.path())
         .assert()
@@ -107,10 +113,51 @@ fn eval_recall_json_uses_isolated_state_and_reports_citations() {
 
     assert_eq!(
         report.get("version").and_then(Value::as_str),
-        Some("memzoi-recall-report/v1")
+        Some("memzoi-recall-report/v2")
     );
     assert_eq!(
-        report.pointer("/aggregate/passed").and_then(Value::as_bool),
+        report.pointer("/corpus/version").and_then(Value::as_str),
+        Some("memzoi-recall-corpus/v2")
+    );
+    assert_eq!(report.get("passed").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        report
+            .pointer("/metrics/search/mean_recall_at_k")
+            .and_then(Value::as_f64),
+        Some(1.0)
+    );
+    assert_eq!(
+        report
+            .pointer("/metrics/precheck/precision/value")
+            .and_then(Value::as_f64),
+        Some(1.0)
+    );
+    assert_eq!(
+        report
+            .pointer("/metrics/leakage/forbidden/rate")
+            .and_then(Value::as_f64),
+        Some(0.0)
+    );
+    assert_eq!(
+        report
+            .pointer("/metrics/citation_integrity/rate")
+            .and_then(Value::as_f64),
+        Some(1.0)
+    );
+    assert_eq!(
+        report
+            .pointer("/metrics/provenance_integrity/rate")
+            .and_then(Value::as_f64),
+        Some(1.0)
+    );
+    assert_eq!(
+        report.pointer("/baseline/status").and_then(Value::as_str),
+        Some("match")
+    );
+    assert_eq!(
+        report
+            .pointer("/baseline/deterministic_match")
+            .and_then(Value::as_bool),
         Some(true)
     );
     let citation = report
@@ -119,13 +166,13 @@ fn eval_recall_json_uses_isolated_state_and_reports_citations() {
         .and_then(|cases| {
             cases
                 .iter()
-                .find(|case| case.get("id").and_then(Value::as_str) == Some("citation-round-trip"))
+                .find(|case| case.get("id").and_then(Value::as_str) == Some("citation-integrity"))
         })
         .and_then(|case| case.pointer("/retrieved/0/citations/0"))
         .expect("citation-bearing retrieved result");
     assert_eq!(
         citation.get("source_ref").and_then(Value::as_str),
-        Some("issue://44")
+        Some("issue://47")
     );
     assert_eq!(
         citation.get("path").and_then(Value::as_str),
@@ -135,6 +182,86 @@ fn eval_recall_json_uses_isolated_state_and_reports_citations() {
         fs::read_to_string(&sentinel).expect("read sentinel"),
         "user canonical bytes",
         "evaluation must not mutate normal canonical state"
+    );
+    assert_eq!(
+        fs::read(&baseline_path).expect("read checked baseline after comparison"),
+        baseline_before,
+        "ordinary baseline comparison must be read-only"
+    );
+}
+
+#[test]
+fn eval_recall_can_update_and_compare_a_local_baseline() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    let baseline_path = repo.path().join("baseline.json");
+    fs::write(&baseline_path, "existing baseline bytes").expect("seed baseline sentinel");
+    let mut cmd = memzoi();
+
+    let assert = cmd
+        .args(["eval", "recall", "--corpus"])
+        .arg(checked_recall_corpus())
+        .arg("--baseline")
+        .arg("baseline.json")
+        .args(["--update-baseline", "--json"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let report = json_from_stdout(&assert.get_output().stdout);
+    let baseline = serde_json::from_str::<Value>(
+        &fs::read_to_string(&baseline_path).expect("read updated baseline"),
+    )
+    .expect("updated baseline is JSON");
+
+    assert_eq!(report.get("passed").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        report.pointer("/baseline/status").and_then(Value::as_str),
+        Some("match")
+    );
+    assert_eq!(
+        report
+            .pointer("/baseline/deterministic_match")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        baseline.get("version").and_then(Value::as_str),
+        Some("memzoi-recall-baseline/v1")
+    );
+    assert_eq!(
+        baseline.pointer("/corpus/version").and_then(Value::as_str),
+        Some("memzoi-recall-corpus/v2")
+    );
+    assert_eq!(
+        baseline.pointer("/corpus/digest"),
+        report.pointer("/corpus/digest")
+    );
+}
+
+#[test]
+fn eval_recall_refuses_to_update_a_failing_baseline() {
+    let (_fixture, corpus) = failing_recall_corpus();
+    let repo = tempfile::tempdir().expect("temp repo");
+    let baseline_root = tempfile::tempdir().expect("baseline root");
+    let baseline_path = baseline_root.path().join("baseline.json");
+    fs::write(&baseline_path, "existing baseline bytes").expect("seed baseline sentinel");
+    let mut cmd = memzoi();
+
+    cmd.args(["eval", "recall", "--corpus"])
+        .arg(&corpus)
+        .arg("--baseline")
+        .arg(&baseline_path)
+        .args(["--update-baseline", "--json"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "thresholds failed; baseline was not modified",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(&baseline_path).expect("read baseline sentinel"),
+        "existing baseline bytes",
+        "a failing threshold run must not replace its baseline"
     );
 }
 
@@ -151,26 +278,24 @@ fn eval_recall_regression_keeps_json_report_on_stdout_and_exits_nonzero() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "recall evaluation thresholds failed",
+            "recall evaluation thresholds or baseline compatibility failed",
         ));
     let report = json_from_stdout(&assert.get_output().stdout);
 
+    assert_eq!(report.get("passed").and_then(Value::as_bool), Some(false));
+    let mean_recall = report
+        .pointer("/metrics/search/mean_recall_at_k")
+        .and_then(Value::as_f64)
+        .expect("v2 report has search mean recall metric");
+    assert!(
+        mean_recall < 1.0,
+        "intentional regression should lower search recall: {report}"
+    );
     assert_eq!(
-        report.pointer("/aggregate/passed").and_then(Value::as_bool),
+        report
+            .pointer("/threshold_results/min_mean_recall_at_k")
+            .and_then(Value::as_bool),
         Some(false)
-    );
-    assert_eq!(
-        report
-            .pointer("/aggregate/mean_recall_at_k")
-            .and_then(Value::as_f64),
-        Some(0.5)
-    );
-    assert_eq!(
-        report
-            .pointer("/cases/0/retrieved_ids")
-            .and_then(Value::as_array)
-            .map(Vec::len),
-        Some(1)
     );
 }
 
@@ -6505,66 +6630,53 @@ fn run_command_failure_stderr_with_home(repo: &Path, args: &[&str], memzoi_home:
 }
 
 fn checked_recall_corpus() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v1/corpus.yaml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v2/corpus.yaml")
+}
+
+fn checked_recall_baseline() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v2/baseline.json")
 }
 
 fn failing_recall_corpus() -> (tempfile::TempDir, PathBuf) {
     let fixture = tempfile::tempdir().expect("recall fixture root");
-    let records = fixture.path().join("records");
-    fs::create_dir(&records).expect("create recall records root");
-    for id in ["target", "second-relevant"] {
-        fs::write(
-            records.join(format!("{id}.md")),
-            format!(
-                r#"---
-type: fact
-lane: semantic
-title: Regression anchor {id}
-timestamp: "2026-07-01T00:00:00Z"
-updated: "2026-07-01T00:00:00Z"
-status: active
-scope: repo
-visibility: repo
-confidence: 1
-source: eval
-source_ref: fixture://{id}
----
-
-# Regression anchor {id}
-
-The regression anchor appears in this fixture.
-"#
-            ),
-        )
-        .expect("write recall record fixture");
-    }
+    let checked = checked_recall_corpus();
+    let checked_root = checked.parent().expect("checked corpus has a parent");
+    copy_directory(checked_root, fixture.path());
     let corpus = fixture.path().join("corpus.yaml");
+    let yaml = fs::read_to_string(&corpus).expect("read copied v2 corpus");
+    let original = "relevant_ids: [lexical-target]";
+    assert_eq!(
+        yaml.matches(original).count(),
+        1,
+        "checked corpus should have one lexical expectation to perturb"
+    );
     fs::write(
         &corpus,
-        r#"version: memzoi-recall-corpus/v1
-name: intentional-regression
-evaluated_at: 2026-07-10T12:00:00Z
-records_root: records
-records:
-  - target.md
-  - second-relevant.md
-thresholds:
-  min_mean_recall_at_k: 1.0
-  min_mean_mrr: 0.0
-  max_forbidden_hits: 0
-cases:
-  - id: misses-one-relevant-record
-    query: regression anchor
-    relevant_ids: [target, second-relevant]
-    forbidden_ids: []
-    scope_kind: repo
-    type: fact
-    lane: semantic
-    k: 1
-"#,
+        yaml.replacen(original, "relevant_ids: [path-target]", 1),
     )
-    .expect("write failing recall corpus");
+    .expect("write failing v2 recall corpus");
     (fixture, corpus)
+}
+
+fn copy_directory(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create copied fixture directory");
+    for entry in fs::read_dir(source).expect("read checked fixture directory") {
+        let entry = entry.expect("read checked fixture entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().expect("read checked fixture type");
+        if file_type.is_dir() {
+            copy_directory(&source_path, &destination_path);
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+                panic!(
+                    "copy checked fixture {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+    }
 }
 
 fn write_pending_proposal_file(repo: &Path, name: &str, contents: String) {

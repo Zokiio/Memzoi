@@ -30,6 +30,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run tests
         run: cargo test --workspace
+      - name: Run trust evaluation
+        run: make eval
       - name: Run onboarding smoke test
         run: make onboarding-smoke
       - name: Check old-name drift

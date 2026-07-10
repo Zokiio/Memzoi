@@ -4,7 +4,7 @@
 
 ### Added
 
-- File-native `memzoi eval recall` golden suites with isolated disposable state, versioned YAML corpora, stable human/JSON reports, configurable recall/MRR/forbidden-hit/latency thresholds, and non-zero regression exits.
+- File-native `memzoi eval recall` v2 trust suites with isolated disposable state, search/precheck/context/write-gate cases, lifecycle and scope leakage metrics, citation/provenance checks, token and latency reporting, and an explicit typed baseline for local and CI regression gates.
 - A proposed evidence-backed capture and extractor boundary RFC whose high-level v0.4 plan/review/apply direction is maintainer-endorsed.
 
 ## [0.3.1] - 2026-07-10

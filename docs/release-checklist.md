@@ -16,6 +16,7 @@ Use this checklist for GitHub binary releases.
 - [ ] Run `cargo fmt --all -- --check`.
 - [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`.
 - [ ] Run `cargo test --workspace`.
+- [ ] Run `make eval` and confirm the checked-in trust baseline passes.
 - [ ] Run `cargo +1.96.1 check --workspace --all-targets --locked`.
 - [ ] Run `make onboarding-smoke`.
 - [ ] Run `pnpm docs:build` under `website/`.

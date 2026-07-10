@@ -31,7 +31,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi export` | Export active repo memory into reviewable files. |
 | `memzoi rebuild` | Rebuild the derived SQLite database from canonical `.memzoi/records/` files. |
 | `memzoi doctor` | Check installation and repo memory readiness. |
-| `memzoi eval recall` | Evaluate recall against a versioned file-native corpus in disposable isolated state. |
+| `memzoi eval recall` | Evaluate a versioned file-native trust corpus in disposable isolated state. |
 | `memzoi quickstart` | Print or run a tiny first-run workflow. |
 | `memzoi update` | Check for or apply a Memzoi release update. |
 | `memzoi mcp` | Print MCP integration configuration. |
@@ -73,7 +73,7 @@ Run `memzoi <command> --help` for exact options.
 | `export` | `<format>`, `--scope-kind`, `--json` |
 | `rebuild` | `--json` |
 | `doctor` | `--project-root`, `--json` |
-| `eval recall` | `--corpus <path>`, `--json` |
+| `eval recall` | `--corpus <path>`, `--baseline <path>`, `--update-baseline`, `--json` |
 | `quickstart` | `--apply-sample`, `--json` |
 | `update` | `--check`, `--ref`, `--json` |
 | `mcp config` | `--project-root` |
@@ -83,51 +83,109 @@ Run `memzoi <command> --help` for exact options.
 
 ## Recall evaluation
 
-Run a checked-in golden corpus without opening or mutating the current project's
-canonical records, proposal inbox, runtime database, exports, or event log:
+Run the checked-in trust corpus without opening or mutating the current
+project's canonical records, proposal inbox, runtime database, exports, or event
+log:
 
 ```bash
-memzoi eval recall --corpus evals/recall/v1/corpus.yaml
-memzoi eval recall --corpus evals/recall/v1/corpus.yaml --json
+memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json
+memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --json
+```
+
+`--baseline` is optional. `--update-baseline` requires it and is the only mode
+that writes the selected baseline. A threshold-failing run is never written:
+
+```bash
+memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --update-baseline
 ```
 
 The explicit corpus is strict YAML with version
-`memzoi-recall-corpus/v1`. It references real OKF Markdown fixtures relative
-to the corpus file, fixes the evaluation clock, declares aggregate thresholds,
-and defines ordered cases:
+`memzoi-recall-corpus/v2`. It references OKF Markdown, proposal, and private
+runtime fixtures relative to the corpus, fixes the evaluation clock, declares
+aggregate thresholds, and defines tagged cases. Unknown fields are rejected.
+The following abridged excerpt shows the search and precheck shapes; a complete
+v2 trust corpus must also declare proposal/runtime fixtures, context and
+write-gate cases, and forbidden opportunities for every required safety
+category:
 
 ```yaml
-version: memzoi-recall-corpus/v1
-name: project-recall-v1
+version: memzoi-recall-corpus/v2
+name: project-trust-v2
 evaluated_at: 2026-07-10T12:00:00Z
 records_root: records
 records:
   - package-manager.md
+  - package-manager-warning.md
+  - unrelated-package-manager.md
 thresholds:
   min_mean_recall_at_k: 1.0
   min_mean_mrr: 1.0
-  max_forbidden_hits: 0
-  # max_mean_latency_ms: 50
+  min_precheck_precision: 1.0
+  min_precheck_recall: 1.0
+  max_stale_leakage_rate: 0.0
+  max_expired_leakage_rate: 0.0
+  max_scope_leakage_rate: 0.0
+  max_forbidden_hit_rate: 0.0
+  min_citation_integrity: 1.0
+  min_provenance_integrity: 1.0
+  min_case_pass_rate: 1.0
+  max_estimated_usage: 500 # Per-case maximum; corpus total is reported separately.
+  # max_p95_latency_ms: 50
 cases:
-  - id: package-manager-decision
+  - surface: search
+    id: package-manager-decision
     query: package manager
     relevant_ids: [package-manager]
-    forbidden_ids: []
+    forbidden:
+      scope: [unrelated-package-manager]
     scope_kind: repo
-    scope_id: null
     type: decision
     lane: semantic
     path: package.json
     k: 5
+  - surface: precheck
+    id: package-manager-precheck
+    path: package.json
+    scope_kind: repo
+    relevant_ids: [package-manager-warning]
 ```
 
-Every case can constrain scope kind/ID, memory type, lane, and path before the
-top-k limit is applied. JSON output uses `memzoi-recall-report/v1` and includes
-ordered retrieved IDs, citations, recall@k, MRR, forbidden hits, latency, and
-aggregate threshold results. A valid corpus always prints its complete report;
-if an aggregate threshold fails, the command then exits non-zero so CI can gate
-regressions. Corpus or fixture validation errors also exit non-zero but do not
-produce a report.
+Case `surface` selects one strict shape:
+
+- `search` accepts a query, top-k limit, relevant IDs, categorized forbidden
+  IDs, optional scope/type/lane/path filters, and an optional proposal fixture.
+- `precheck` accepts path/action/command inputs, scope, and expected warning IDs.
+- `context` accepts task/path/budget inputs, local/session opt-ins, and expected
+  included or forbidden destinations.
+- `write_gate` declares a prohibited candidate, expected policy issue code, and
+  a record ID that must remain absent.
+
+JSON output uses `memzoi-recall-report/v2`. Its `definitions` object explains
+the versioned formulas, while `runtime` reports the Memzoi/SQLite environment,
+timer, isolated-state guarantee, and estimator. `metrics` contains:
+
+- search case count, mean recall at k, and mean MRR;
+- micro precheck precision/recall with true-positive, false-positive, and
+  false-negative counts;
+- stale, expired, scope, prohibited, destination, and total forbidden leakage
+  as hits, opportunities, and rates;
+- citation and provenance integrity as valid/checked ratios;
+- deterministic `approx_words` usage totals and distribution;
+- nearest-rank p50/p95 monotonic-clock latency; and
+- the overall case pass ratio.
+
+Empty precision/recall/integrity denominators resolve to `1.0`; empty leakage
+denominators resolve to `0.0`. Threshold comparisons use the underlying values,
+not their display rounding.
+
+The typed `memzoi-recall-baseline/v1` artifact contains only deterministic
+metrics and per-case outcomes. Runtime metadata and observed latency are not
+exact-compared. A baseline comparison has status `match`, `changed`, or
+`incompatible`: deterministic changes are reported for review but remain
+informational, while an incompatible corpus/schema identity fails the report.
+Corpus thresholds remain the regression gate. A valid corpus prints its full
+report before a threshold or baseline failure returns non-zero; corpus or
+fixture validation errors return non-zero without a report.
 
 ## Classified import
 
