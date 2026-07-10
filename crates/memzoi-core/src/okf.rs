@@ -51,12 +51,26 @@ pub struct OkfProposalFile {
     pub sources: Vec<OkfProposalSource>,
     pub supersedes: Vec<String>,
     pub sensitivity: OkfProposalSensitivity,
+    pub resolution: Option<OkfProposalResolution>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OkfProposalApplyResult {
     pub record: MemoryRecord,
     pub record_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OkfProposalResolution {
+    pub outcome: OkfProposalOutcome,
+    pub resolved_by: String,
+    pub resolved_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +333,15 @@ pub enum OkfProposalAction {
 #[serde(rename_all = "snake_case")]
 pub enum OkfProposalStatus {
     Proposed,
+    Applied,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OkfProposalOutcome {
+    Applied,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +372,17 @@ impl OkfProposalStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Proposed => "proposed",
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+impl OkfProposalOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
         }
     }
 }
@@ -387,7 +421,21 @@ impl FromStr for OkfProposalStatus {
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         match value {
             "proposed" => Ok(Self::Proposed),
+            "applied" => Ok(Self::Applied),
+            "rejected" => Ok(Self::Rejected),
             other => Err(format!("unknown OKF proposal status {other:?}")),
+        }
+    }
+}
+
+impl FromStr for OkfProposalOutcome {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "applied" => Ok(Self::Applied),
+            "rejected" => Ok(Self::Rejected),
+            other => Err(format!("unknown OKF proposal outcome {other:?}")),
         }
     }
 }
@@ -577,6 +625,8 @@ pub fn parse_okf_proposal_markdown(
     let proposal = parse_proposal_metadata(frontmatter.proposal)?;
     validate_proposal_action_shape(proposal.action, &proposal.target, &supersedes)?;
     let sources = validate_proposal_sources(frontmatter.sources.unwrap_or_default())?;
+    let resolution = parse_proposal_resolution(frontmatter.resolution)?;
+    validate_proposal_resolution(status, resolution.as_ref())?;
     let body = body_without_matching_h1(body, &title)?;
     if body.trim().is_empty() {
         bail!("OKF proposal body cannot be empty");
@@ -604,6 +654,7 @@ pub fn parse_okf_proposal_markdown(
         sources,
         supersedes,
         sensitivity,
+        resolution,
     }))
 }
 
@@ -648,29 +699,32 @@ pub fn apply_okf_create_proposal_file(
     records_root: impl AsRef<Path>,
     proposal: &OkfProposalFile,
 ) -> Result<OkfProposalApplyResult> {
-    if proposal.status != OkfProposalStatus::Proposed {
-        bail!(
-            "OKF proposal {} must have status proposed before apply",
-            proposal.id
-        );
-    }
+    let record = project_okf_create_proposal(proposal)?;
+    let record_path = create_memory_record_file_with_metadata(
+        records_root.as_ref(),
+        &record,
+        &proposal.tags,
+        &proposal.applies_to,
+    )?;
+
+    Ok(OkfProposalApplyResult {
+        record,
+        record_path,
+    })
+}
+
+pub(crate) fn project_okf_create_proposal(proposal: &OkfProposalFile) -> Result<MemoryRecord> {
+    validate_repo_apply_proposal(proposal)?;
     if proposal.proposal.action != OkfProposalAction::Create {
         bail!(
-            "OKF proposal action {} is not supported by `memzoi proposal-files apply`; only create is supported",
+            "OKF proposal action {} is not supported by create projection",
             proposal.proposal.action.as_str()
-        );
-    }
-    if proposal.sensitivity != OkfProposalSensitivity::RepoSafe {
-        bail!(
-            "OKF proposal sensitivity {} cannot be applied into repo records; {}",
-            proposal.sensitivity.as_str(),
-            repo_apply_sensitivity_guidance(proposal.sensitivity)
         );
     }
 
     let body = proposal.body.trim().to_owned();
     let (source_kind, source_ref) = proposal_primary_evidence(&proposal.sources);
-    let record = MemoryRecord {
+    Ok(MemoryRecord {
         id: title_to_concept_slug(&proposal.title)
             .unwrap_or_else(|| proposal.file_id.replace('_', "-")),
         memory_type: proposal.memory_type,
@@ -693,18 +747,85 @@ pub fn apply_okf_create_proposal_file(
         updated_at: proposal.timestamp.clone(),
         supersedes_id: None,
         expires_at: None,
-    };
-    let record_path = create_memory_record_file_with_metadata(
-        records_root.as_ref(),
-        &record,
-        &proposal.tags,
-        &proposal.applies_to,
-    )?;
-
-    Ok(OkfProposalApplyResult {
-        record,
-        record_path,
     })
+}
+
+pub(crate) fn validate_repo_apply_proposal(proposal: &OkfProposalFile) -> Result<()> {
+    if proposal.status != OkfProposalStatus::Proposed {
+        bail!(
+            "OKF proposal {} must have status proposed before apply",
+            proposal.id
+        );
+    }
+    if proposal.sensitivity != OkfProposalSensitivity::RepoSafe {
+        bail!(
+            "OKF proposal sensitivity {} cannot be applied into repo records; {}",
+            proposal.sensitivity.as_str(),
+            repo_apply_sensitivity_guidance(proposal.sensitivity)
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn render_resolved_okf_proposal_markdown(
+    proposal: &OkfProposalFile,
+    resolution: &OkfProposalResolution,
+) -> Result<String> {
+    if proposal.status != OkfProposalStatus::Proposed || proposal.resolution.is_some() {
+        bail!("only pending proposed packets can be resolved");
+    }
+    let status = match resolution.outcome {
+        OkfProposalOutcome::Applied => OkfProposalStatus::Applied,
+        OkfProposalOutcome::Rejected => OkfProposalStatus::Rejected,
+    };
+    validate_proposal_resolution(status, Some(resolution))?;
+    let frontmatter = OkfResolvedProposalFrontmatter {
+        id: proposal.id.clone(),
+        kind: proposal.kind.clone(),
+        version: proposal.version.clone(),
+        profile: proposal.profile.clone(),
+        memory_type: proposal.memory_type,
+        lane: proposal.lane,
+        title: proposal.title.clone(),
+        description: proposal.description.clone(),
+        status,
+        proposal: OkfResolvedProposalMetadata {
+            action: proposal.proposal.action,
+            proposed_by: proposal.proposal.proposed_by.clone(),
+            proposed_at: proposal.proposal.proposed_at.clone(),
+            reason: proposal.proposal.reason.clone(),
+            confidence: proposal.proposal.confidence.clone(),
+            target: proposal.proposal.target.clone(),
+        },
+        scope: OkfResolvedProposalScope {
+            kind: proposal.scope_kind,
+            id: proposal.scope_id.clone(),
+            paths: proposal.applies_to.clone(),
+        },
+        tags: proposal.tags.clone(),
+        timestamp: proposal.timestamp.clone(),
+        created_by: proposal.created_by.clone(),
+        sources: proposal.sources.clone(),
+        supersedes: proposal.supersedes.clone(),
+        sensitivity: proposal.sensitivity,
+        resolution: resolution.clone(),
+    };
+    let yaml = serde_yaml::to_string(&frontmatter)
+        .context("failed to render resolved OKF proposal frontmatter")?;
+    Ok(format!(
+        "---\n{}---\n\n# {}\n\n{}\n",
+        yaml,
+        proposal.title.trim(),
+        proposal.body.trim()
+    ))
+}
+
+pub(crate) fn render_memory_record_markdown(
+    record: &MemoryRecord,
+    tags: &[String],
+    applies_to: &[String],
+) -> String {
+    render_memory_record(record, tags, applies_to)
 }
 
 fn repo_apply_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'static str {
@@ -873,6 +994,68 @@ struct OkfProposalFrontmatter {
     sources: Option<Vec<OkfProposalSource>>,
     supersedes: Option<StringList>,
     sensitivity: Option<String>,
+    resolution: Option<OkfProposalResolutionFrontmatter>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OkfProposalResolutionFrontmatter {
+    outcome: Option<String>,
+    resolved_by: Option<String>,
+    resolved_at: Option<String>,
+    reason: Option<String>,
+    record_id: Option<String>,
+    target_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OkfResolvedProposalFrontmatter {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(rename = "type")]
+    memory_type: MemoryType,
+    lane: MemoryLane,
+    title: String,
+    description: String,
+    status: OkfProposalStatus,
+    proposal: OkfResolvedProposalMetadata,
+    scope: OkfResolvedProposalScope,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_by: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<OkfProposalSource>,
+    supersedes: Vec<String>,
+    sensitivity: OkfProposalSensitivity,
+    resolution: OkfProposalResolution,
+}
+
+#[derive(Debug, Serialize)]
+struct OkfResolvedProposalMetadata {
+    action: OkfProposalAction,
+    proposed_by: String,
+    proposed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OkfResolvedProposalScope {
+    kind: ScopeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1339,6 +1522,61 @@ fn parse_proposal_metadata(
         confidence,
         target,
     })
+}
+
+fn parse_proposal_resolution(
+    resolution: Option<OkfProposalResolutionFrontmatter>,
+) -> Result<Option<OkfProposalResolution>> {
+    let Some(resolution) = resolution else {
+        return Ok(None);
+    };
+    let outcome =
+        parse_required_enum::<OkfProposalOutcome>(resolution.outcome, "resolution.outcome")?;
+    let resolved_by = required_string(resolution.resolved_by, "resolution.resolved_by")?;
+    let resolved_at = required_string(resolution.resolved_at, "resolution.resolved_at")?;
+    ensure_timestampish(&resolved_at, "resolution.resolved_at")?;
+    Ok(Some(OkfProposalResolution {
+        outcome,
+        resolved_by,
+        resolved_at,
+        reason: optional_string(resolution.reason, "resolution.reason")?,
+        record_id: optional_string(resolution.record_id, "resolution.record_id")?,
+        target_id: optional_string(resolution.target_id, "resolution.target_id")?,
+    }))
+}
+
+fn validate_proposal_resolution(
+    status: OkfProposalStatus,
+    resolution: Option<&OkfProposalResolution>,
+) -> Result<()> {
+    match (status, resolution) {
+        (OkfProposalStatus::Proposed, None) => Ok(()),
+        (OkfProposalStatus::Proposed, Some(_)) => {
+            bail!("proposed OKF packets cannot include a resolution")
+        }
+        (OkfProposalStatus::Applied, Some(resolution))
+            if resolution.outcome == OkfProposalOutcome::Applied
+                && resolution.record_id.is_some() =>
+        {
+            Ok(())
+        }
+        (OkfProposalStatus::Rejected, Some(resolution))
+            if resolution.outcome == OkfProposalOutcome::Rejected
+                && resolution.reason.is_some()
+                && resolution.record_id.is_none() =>
+        {
+            Ok(())
+        }
+        (OkfProposalStatus::Applied, None) | (OkfProposalStatus::Rejected, None) => {
+            bail!("resolved OKF packets must include resolution metadata")
+        }
+        (OkfProposalStatus::Applied, Some(_)) => {
+            bail!("applied OKF packets require an applied outcome and record_id")
+        }
+        (OkfProposalStatus::Rejected, Some(_)) => {
+            bail!("rejected OKF packets require a rejected outcome and reason without record_id")
+        }
+    }
 }
 
 fn parse_proposal_scope(

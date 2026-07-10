@@ -228,7 +228,8 @@ Proposal sensitivity values:
 
 Validation checks:
 
-- `status` must be `proposed`.
+- Pending packets use `status: proposed`. Resolved packets use `status: applied`
+  or `status: rejected` and include matching `resolution` metadata.
 - `proposal.action` must be `create`, `supersede`, or `tombstone`.
 - `lane` must be `session`, `semantic`, `episodic`, or `procedural`.
 - `type` must use current lowercase Memzoi values such as `decision`, `fact`, `procedure`, `risk`, or `failed_attempt`.
@@ -243,7 +244,12 @@ Proposal-to-record mapping:
 .memzoi/proposals/pending/mem_2026_07_06_auth_001.md
   -> approve/apply
 .memzoi/records/semantic/decisions/auth-session-validation.md
+.memzoi/proposals/resolved/applied/mem_2026_07_06_auth_001.md
 ```
+
+Rejected packets move to `resolved/rejected/` instead and create no canonical
+record. The resolved packet retains the reviewed proposal evidence and adds a
+Git-readable outcome, reviewer, timestamp, reason, and affected record IDs.
 
 The resulting canonical record may be a compact projection of the proposal. Review-only fields such as `proposal.reason`, proposal confidence, and review notes do not need to be copied into canonical record frontmatter unless they remain durable project knowledge.
 

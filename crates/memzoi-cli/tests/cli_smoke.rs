@@ -1779,7 +1779,7 @@ fn proposal_files_skip_symlinks_under_pending_directory() {
 }
 
 #[test]
-fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_db_mutation() {
+fn proposal_files_apply_repo_safe_create_resolves_packet_and_updates_runtime_index() {
     let repo = initialized_temp_repo();
     write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
 
@@ -1798,8 +1798,15 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
     assert_json_string_field(&applied, &["action"], "create");
     assert_json_string_field(&applied, &["sensitivity"], "repo-safe");
     assert_json_string_field(&applied, &["title"], "Valid proposal");
-    assert_eq!(applied["runtime_index_updated"], false);
-    assert_json_array_contains(&applied, "next_steps", "memzoi rebuild");
+    assert_json_string_field(&applied, &["status"], "applied");
+    assert_json_string_field(&applied, &["outcome"], "applied");
+    assert_eq!(applied["runtime_index_updated"], true);
+    assert_eq!(applied["already_resolved"], false);
+    assert_json_string_field(
+        &applied,
+        &["resolved_path"],
+        ".memzoi/proposals/resolved/applied/valid-proposal.md",
+    );
 
     let record_path = repo.path().join(json_string(&applied, "record_path"));
     let rendered = fs::read_to_string(&record_path).expect("read canonical record");
@@ -1829,30 +1836,152 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
     }
 
     assert!(
-        repo.path()
+        !repo
+            .path()
             .join(".memzoi/proposals/pending/valid-proposal.md")
-            .is_file(),
-        "apply should leave the pending proposal file in place"
+            .exists(),
+        "apply should remove the resolved packet from pending"
+    );
+    let resolved_path = repo
+        .path()
+        .join(".memzoi/proposals/resolved/applied/valid-proposal.md");
+    let resolved = fs::read_to_string(&resolved_path).expect("read resolved proposal");
+    assert!(resolved.contains("status: applied\n"), "{resolved}");
+    assert!(resolved.contains("outcome: applied\n"), "{resolved}");
+    assert!(resolved.contains("resolved_by: cli\n"), "{resolved}");
+    assert!(
+        resolved.contains("record_id: valid-proposal\n"),
+        "{resolved}"
     );
     let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
     let runtime_records: i64 = conn
         .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))
         .expect("count runtime records");
-    assert_eq!(runtime_records, 0, "Git-plane apply must not write SQLite");
+    assert_eq!(
+        runtime_records, 1,
+        "apply should update derived SQLite state"
+    );
 
-    let stale_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
-    assert_check_status(&stale_doctor, "repo_index", "warning");
-    assert_json_array_contains(&stale_doctor, "next_steps", "memzoi rebuild");
-
-    run_json_command(repo.path(), &["rebuild", "--json"]);
     let current_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
     assert_check_status(&current_doctor, "repo_index", "ok");
+    assert_check_status(&current_doctor, "proposal_files", "ok");
     let search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
     assert_eq!(
         search["records"].as_array().map(Vec::len),
         Some(1),
-        "rebuilt runtime index should recall the applied proposal: {search}"
+        "runtime index should immediately recall the applied proposal: {search}"
     );
+
+    let pending = run_json_command(repo.path(), &["proposal-files", "list", "--json"]);
+    assert!(proposals_from_json(&pending).is_empty(), "{pending}");
+    let shown = run_json_command(
+        repo.path(),
+        &["proposal-files", "show", "mem_test_valid", "--json"],
+    );
+    assert_json_string_field(&shown, &["status"], "applied");
+    assert_json_string_field(&shown["resolution"], &["outcome"], "applied");
+
+    let resolved_before = fs::read(&resolved_path).expect("read resolved packet before rerun");
+    let record_before = fs::read(&record_path).expect("read record before rerun");
+    let repeated = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repeated["already_resolved"], true);
+    assert_json_string_field(&repeated, &["outcome"], "applied");
+    assert_eq!(
+        fs::read(&resolved_path).expect("read resolved rerun"),
+        resolved_before
+    );
+    assert_eq!(
+        fs::read(&record_path).expect("read record rerun"),
+        record_before
+    );
+}
+
+#[test]
+fn proposal_files_reject_archives_reason_without_creating_canonical_memory() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Reviewer found the evidence too weak.",
+            "--actor",
+            "reviewer:human",
+            "--json",
+        ],
+    );
+    assert_json_string_field(&rejected, &["status"], "rejected");
+    assert_json_string_field(&rejected, &["outcome"], "rejected");
+    assert_eq!(rejected["already_resolved"], false);
+    assert_eq!(rejected["runtime_index_updated"], false);
+    assert!(rejected["record_id"].is_null(), "{rejected}");
+    assert_json_string_field(
+        &rejected["resolution"],
+        &["reason"],
+        "Reviewer found the evidence too weak.",
+    );
+    assert_json_string_field(&rejected["resolution"], &["resolved_by"], "reviewer:human");
+
+    assert_eq!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("read records directory")
+            .count(),
+        0
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".memzoi/proposals/pending/valid-proposal.md")
+            .exists()
+    );
+    let resolved_path = repo
+        .path()
+        .join(".memzoi/proposals/resolved/rejected/valid-proposal.md");
+    let resolved_before = fs::read(&resolved_path).expect("read rejected packet");
+    let rendered = String::from_utf8(resolved_before.clone()).expect("resolved UTF-8");
+    assert!(rendered.contains("status: rejected\n"), "{rendered}");
+    assert!(
+        rendered.contains("reason: Reviewer found the evidence too weak."),
+        "{rendered}"
+    );
+
+    let repeated = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "A different repeated reason is not written.",
+            "--json",
+        ],
+    );
+    assert_eq!(repeated["already_resolved"], true);
+    assert_json_string_field(
+        &repeated["resolution"],
+        &["reason"],
+        "Reviewer found the evidence too weak.",
+    );
+    assert_eq!(
+        fs::read(&resolved_path).expect("read repeated rejection"),
+        resolved_before
+    );
+
+    let conflict =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        conflict.contains("already resolved as rejected"),
+        "{conflict}"
+    );
+    let search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    assert!(search["records"].as_array().is_some_and(Vec::is_empty));
 }
 
 #[test]
@@ -2283,7 +2412,7 @@ fn proposal_files_apply_refuses_existing_canonical_record() {
     let stderr =
         run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
     assert!(
-        stderr.contains("failed to create memory record"),
+        stderr.contains("canonical memory record already exists"),
         "expected collision error, got {stderr}"
     );
     assert_eq!(

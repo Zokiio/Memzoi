@@ -125,7 +125,7 @@ command's JSON output, event, or database row does not change what it writes.
 | --- | --- | --- |
 | **Canonical Git record writers** | `memzoi apply <proposal-id>`; `memzoi proposals apply --all-approved` | Apply approved DB proposals and write canonical `.memzoi/records/*.md`. |
 |  | `memzoi propose --apply` | Create, validate, approve, and then explicitly apply one proposal. The flag supplies an `auto` per-call approval override and writes a canonical record only because `--apply` was requested; `--manual --apply` is invalid. |
-|  | `memzoi proposal-files apply <proposal-id>` | Explicitly apply one valid repo-safe OKF `create` proposal file to `.memzoi/records/*.md`. It leaves the pending file in place and does not update the runtime SQLite index; the command and `memzoi doctor` direct you to `memzoi rebuild` for derived search state. |
+|  | `memzoi proposal-files apply <proposal-id>` | Explicitly apply one valid repo-safe OKF proposal, update the runtime search index in the same operation, and move the packet from `pending/` to `resolved/applied/`. |
 |  | `memzoi supersede <record-id>`; `memzoi tombstone <record-id>` | Explicitly update canonical record files and their lifecycle status. |
 |  | `memzoi quickstart --apply-sample` | Explicitly creates the quickstart sample as a canonical repo record (and also generates an export). |
 | **Pending file proposal writers** | `memzoi session-end --from-file <path>`; `memzoi session-end --from-checkpoint <id>` with a `repo` candidate | Write `.memzoi/proposals/pending/*.md` review packets. They do **not** write `.memzoi/records/*.md`; review and an explicit proposal-file apply are separate steps. |
@@ -165,9 +165,16 @@ The Git review rule is:
 1. Classify a candidate as `repo` only when it is durable, repo-safe knowledge.
 2. Create or receive the file-backed proposal (`.memzoi/proposals/pending/`).
 3. Validate and review the proposal, including its sensitivity and scope.
-4. Explicitly apply it to create/update `.memzoi/records/*.md`.
-5. Rebuild derived runtime search state when the record came from a proposal
-   file apply.
+4. Explicitly apply it to create/update `.memzoi/records/*.md`; successful
+   apply also updates derived search state and archives the packet under
+   `.memzoi/proposals/resolved/applied/`.
+
+To close a packet without a canonical write, run
+`memzoi proposal-files reject <proposal-id> --reason "..."`. Rejection moves
+the packet to `.memzoi/proposals/resolved/rejected/` with the reviewer,
+timestamp, outcome, and reason embedded in its frontmatter. Repeating the same
+apply or reject command returns the stored resolution without writing again;
+attempting the opposite outcome is refused.
 
 Runtime promotion follows the same boundary: local/session rows are not
 directly promoted to canonical files. To promote an explicit durable finding,

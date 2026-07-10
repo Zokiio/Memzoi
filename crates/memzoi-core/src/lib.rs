@@ -46,11 +46,12 @@ pub use models::{
 };
 pub use okf::{
     OkfProposalAction, OkfProposalApplyResult, OkfProposalFile, OkfProposalMetadata,
-    OkfProposalSensitivity, OkfProposalSource, OkfProposalStatus, OkfRecordFile,
-    apply_okf_create_proposal_file, import_okf_records, parse_okf_proposal_file,
-    parse_okf_proposal_markdown, parse_okf_record_file, parse_okf_record_markdown,
-    read_okf_proposal_files, read_okf_record_files, write_memory_record_file,
-    write_memory_record_file_with_metadata, write_memory_record_file_with_tags,
+    OkfProposalOutcome, OkfProposalResolution, OkfProposalSensitivity, OkfProposalSource,
+    OkfProposalStatus, OkfRecordFile, apply_okf_create_proposal_file, import_okf_records,
+    parse_okf_proposal_file, parse_okf_proposal_markdown, parse_okf_record_file,
+    parse_okf_record_markdown, read_okf_proposal_files, read_okf_record_files,
+    write_memory_record_file, write_memory_record_file_with_metadata,
+    write_memory_record_file_with_tags,
 };
 pub use precheck::PrecheckInput;
 pub use proposals::{
@@ -59,9 +60,10 @@ pub use proposals::{
 };
 pub use search::SearchInput;
 pub use service::{
-    CheckpointInput, ExportFormat, ExportInput, ExportResult, InitBundleResult, InitRequest,
-    InitResult, LocalMemoryInput, MemoryService, ProposalApprovalOverride, ProposeOptions,
-    ProposeResult, RebuildResult, RepoIndexDrift, init_bundle,
+    CheckpointInput, ExportFormat, ExportInput, ExportResult, FileProposalResolutionResult,
+    InitBundleResult, InitRequest, InitResult, LocalMemoryInput, MemoryService,
+    ProposalApprovalOverride, ProposeOptions, ProposeResult, RebuildResult, RepoIndexDrift,
+    init_bundle,
 };
 pub use session_end::{
     SessionEndCandidate, SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument,

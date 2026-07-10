@@ -365,9 +365,22 @@ pub(crate) enum ProposalFileCommands {
         json: bool,
     },
 
-    /// Apply one repo-safe create proposal file into canonical records.
+    /// Apply one repo-safe proposal file and archive its resolved packet.
     Apply {
         proposal_id: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Reject one proposal file with a reviewable reason.
+    Reject {
+        proposal_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
         #[arg(long)]
         json: bool,
     },

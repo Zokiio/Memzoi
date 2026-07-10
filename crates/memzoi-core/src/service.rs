@@ -1,7 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    fs::OpenOptions,
     io::ErrorKind,
+    io::Write,
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -18,7 +20,8 @@ use crate::import::{self, ExistingDuplicate};
 use crate::{
     ContextPack, ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult, ImportDocument,
     ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryLane, MemoryPaths, MemoryRecord,
-    MemoryStatus, MemoryType, PrecheckInput, PrecheckWarning, Proposal, ProposalStatus,
+    MemoryStatus, MemoryType, OkfProposalAction, OkfProposalFile, OkfProposalOutcome,
+    OkfProposalResolution, PrecheckInput, PrecheckWarning, Proposal, ProposalStatus,
     ProposalStatusFilter, ScopeKind, SearchInput, SearchResult, SupersedeResult, ValidationResult,
     Visibility,
 };
@@ -152,6 +155,17 @@ pub struct ProposeResult {
     pub record: Option<MemoryRecord>,
     pub validation: Option<ValidationResult>,
     pub applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileProposalResolutionResult {
+    pub proposal: OkfProposalFile,
+    pub resolution: OkfProposalResolution,
+    pub resolved_path: PathBuf,
+    pub record: Option<MemoryRecord>,
+    pub record_path: Option<PathBuf>,
+    pub already_resolved: bool,
+    pub runtime_index_updated: bool,
 }
 
 pub struct MemoryService {
@@ -314,6 +328,258 @@ impl MemoryService {
         self.write_record_file_with_conn(&tx, &record, FileWriteMode::CreateNew)?;
         tx.commit()?;
         Ok(record)
+    }
+
+    pub fn apply_file_proposal(
+        &self,
+        proposal_path: impl AsRef<Path>,
+        actor: &str,
+    ) -> Result<FileProposalResolutionResult> {
+        validate_resolution_actor(actor)?;
+        let proposal_path = proposal_path.as_ref();
+        let proposal = self.load_pending_file_proposal(proposal_path)?;
+        if proposal.proposal.action != OkfProposalAction::Create {
+            bail!(
+                "OKF proposal action {} is not supported by `memzoi proposal-files apply`; only create is supported",
+                proposal.proposal.action.as_str()
+            );
+        }
+
+        let record = okf::project_okf_create_proposal(&proposal)?;
+        let records_root = self.paths.records_dir();
+        let record_path = records_root.join(format!("{}.md", record.id));
+        ensure_path_absent(&record_path, "canonical memory record")?;
+
+        let resolved_at = expiry::format_timestamp(self.now())?;
+        let resolution = OkfProposalResolution {
+            outcome: OkfProposalOutcome::Applied,
+            resolved_by: actor.trim().to_owned(),
+            resolved_at,
+            reason: proposal.proposal.reason.clone(),
+            record_id: Some(record.id.clone()),
+            target_id: None,
+        };
+        let resolved_path = self
+            .paths
+            .proposals_dir()
+            .join("resolved")
+            .join("applied")
+            .join(format!("{}.md", proposal.file_id));
+        ensure_path_absent(&resolved_path, "resolved proposal packet")?;
+
+        let record_markdown =
+            okf::render_memory_record_markdown(&record, &proposal.tags, &proposal.applies_to);
+        let record_file =
+            okf::parse_okf_record_markdown(&records_root, &record_path, &record_markdown)?
+                .context("projected canonical record was ignored")?;
+        let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
+
+        let nonce = Uuid::now_v7().to_string();
+        let record_temp = stage_file(&record_path, &record_markdown, &nonce)?;
+        let resolved_temp = match stage_file(&resolved_path, &resolved_markdown, &nonce) {
+            Ok(path) => path,
+            Err(error) => {
+                remove_staged_file(&record_temp);
+                return Err(error);
+            }
+        };
+        let pending_backup = sibling_transaction_path(proposal_path, &nonce, "pending");
+
+        let tx = match self.conn.unchecked_transaction() {
+            Ok(tx) => tx,
+            Err(error) => {
+                remove_staged_file(&record_temp);
+                remove_staged_file(&resolved_temp);
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = okf::import_okf_records(&tx, &[record_file]).and_then(|_| {
+            append_event(
+                &tx,
+                AppendEvent {
+                    event_type: "proposal_file.applied".to_owned(),
+                    actor: actor.trim().to_owned(),
+                    payload: json!({
+                        "proposal_id": proposal.id,
+                        "file_id": proposal.file_id,
+                        "action": proposal.proposal.action.as_str(),
+                        "record_id": record.id,
+                        "resolved_path": resolved_path,
+                    }),
+                    record_id: Some(record.id.clone()),
+                    proposal_id: Some(proposal.id.clone()),
+                },
+            )?;
+            Ok(())
+        }) {
+            remove_staged_file(&record_temp);
+            remove_staged_file(&resolved_temp);
+            return Err(error);
+        }
+
+        let mut pending_moved = false;
+        let mut record_installed = false;
+        let mut resolved_installed = false;
+        let install_result = (|| -> Result<()> {
+            fs::rename(proposal_path, &pending_backup).with_context(|| {
+                format!(
+                    "failed to stage pending proposal {} for resolution",
+                    proposal_path.display()
+                )
+            })?;
+            pending_moved = true;
+            fs::rename(&record_temp, &record_path).with_context(|| {
+                format!("failed to install memory record {}", record_path.display())
+            })?;
+            record_installed = true;
+            fs::rename(&resolved_temp, &resolved_path).with_context(|| {
+                format!(
+                    "failed to install resolved proposal {}",
+                    resolved_path.display()
+                )
+            })?;
+            resolved_installed = true;
+            Ok(())
+        })();
+
+        if let Err(error) = install_result {
+            rollback_create_resolution(
+                proposal_path,
+                &pending_backup,
+                pending_moved,
+                &record_path,
+                record_installed,
+                &resolved_path,
+                resolved_installed,
+                &record_temp,
+                &resolved_temp,
+            );
+            return Err(error);
+        }
+
+        if let Err(error) = tx.commit() {
+            rollback_create_resolution(
+                proposal_path,
+                &pending_backup,
+                pending_moved,
+                &record_path,
+                record_installed,
+                &resolved_path,
+                resolved_installed,
+                &record_temp,
+                &resolved_temp,
+            );
+            return Err(error).context("failed to commit proposal-file runtime index update");
+        }
+
+        remove_staged_file(&pending_backup);
+        Ok(FileProposalResolutionResult {
+            proposal,
+            resolution,
+            resolved_path,
+            record: Some(record),
+            record_path: Some(record_path),
+            already_resolved: false,
+            runtime_index_updated: true,
+        })
+    }
+
+    pub fn reject_file_proposal(
+        &self,
+        proposal_path: impl AsRef<Path>,
+        actor: &str,
+        reason: &str,
+    ) -> Result<FileProposalResolutionResult> {
+        validate_resolution_actor(actor)?;
+        let reason = reason.trim();
+        if reason.is_empty() {
+            bail!("proposal-file rejection reason cannot be empty");
+        }
+        let proposal_path = proposal_path.as_ref();
+        let proposal = self.load_pending_file_proposal(proposal_path)?;
+        let resolution = OkfProposalResolution {
+            outcome: OkfProposalOutcome::Rejected,
+            resolved_by: actor.trim().to_owned(),
+            resolved_at: expiry::format_timestamp(self.now())?,
+            reason: Some(reason.to_owned()),
+            record_id: None,
+            target_id: proposal
+                .proposal
+                .target
+                .clone()
+                .or_else(|| proposal.supersedes.first().cloned()),
+        };
+        let resolved_path = self
+            .paths
+            .proposals_dir()
+            .join("resolved")
+            .join("rejected")
+            .join(format!("{}.md", proposal.file_id));
+        ensure_path_absent(&resolved_path, "resolved proposal packet")?;
+        let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
+        let nonce = Uuid::now_v7().to_string();
+        let resolved_temp = stage_file(&resolved_path, &resolved_markdown, &nonce)?;
+        let pending_backup = sibling_transaction_path(proposal_path, &nonce, "pending");
+
+        if let Err(error) = fs::rename(proposal_path, &pending_backup).with_context(|| {
+            format!(
+                "failed to stage pending proposal {} for rejection",
+                proposal_path.display()
+            )
+        }) {
+            remove_staged_file(&resolved_temp);
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&resolved_temp, &resolved_path).with_context(|| {
+            format!(
+                "failed to install rejected proposal {}",
+                resolved_path.display()
+            )
+        }) {
+            let _ = fs::rename(&pending_backup, proposal_path);
+            remove_staged_file(&resolved_temp);
+            return Err(error);
+        }
+        remove_staged_file(&pending_backup);
+
+        Ok(FileProposalResolutionResult {
+            proposal,
+            resolution,
+            resolved_path,
+            record: None,
+            record_path: None,
+            already_resolved: false,
+            runtime_index_updated: false,
+        })
+    }
+
+    fn load_pending_file_proposal(&self, proposal_path: &Path) -> Result<OkfProposalFile> {
+        let pending_root = self.paths.proposals_dir().join("pending");
+        proposal_path.strip_prefix(&pending_root).with_context(|| {
+            format!(
+                "proposal path {} is not under pending proposal root {}",
+                proposal_path.display(),
+                pending_root.display()
+            )
+        })?;
+        let metadata = fs::symlink_metadata(proposal_path).with_context(|| {
+            format!(
+                "failed to inspect pending proposal {}",
+                proposal_path.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!(
+                "pending proposal path must be a regular file: {}",
+                proposal_path.display()
+            );
+        }
+        let proposal = okf::parse_okf_proposal_file(&pending_root, proposal_path)?
+            .with_context(|| format!("pending proposal {} was ignored", proposal_path.display()))?;
+        if proposal.status != crate::OkfProposalStatus::Proposed || proposal.resolution.is_some() {
+            bail!("pending proposal {} must be unresolved", proposal.id);
+        }
+        Ok(proposal)
     }
 
     pub fn supersede_record(
@@ -869,6 +1135,86 @@ fn repo_record_matches(canonical: &okf::OkfRecordFile, indexed: &MemoryRecord) -
         && indexed.updated_at == canonical.updated.as_deref().unwrap_or(&canonical.created)
         && indexed.supersedes_id == canonical.supersedes_id
         && indexed.expires_at == canonical.expires_at
+}
+
+fn validate_resolution_actor(actor: &str) -> Result<()> {
+    if actor.trim().is_empty() {
+        bail!("proposal-file resolution actor cannot be empty");
+    }
+    Ok(())
+}
+
+fn ensure_path_absent(path: &Path, label: &str) -> Result<()> {
+    if path
+        .try_exists()
+        .with_context(|| format!("failed to inspect {label} {}", path.display()))?
+    {
+        bail!("{label} already exists: {}", path.display());
+    }
+    Ok(())
+}
+
+fn sibling_transaction_path(path: &Path, nonce: &str, role: &str) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("memzoi");
+    path.with_file_name(format!(".{name}.{nonce}.{role}.tmp"))
+}
+
+fn stage_file(final_path: &Path, contents: &str, nonce: &str) -> Result<PathBuf> {
+    let parent = final_path.parent().context("staged file has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    let temp_path = sibling_transaction_path(final_path, nonce, "write");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .with_context(|| format!("failed to stage file {}", final_path.display()))?;
+    if let Err(error) = file
+        .write_all(contents.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        drop(file);
+        remove_staged_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to stage file {}", final_path.display()));
+    }
+    Ok(temp_path)
+}
+
+fn remove_staged_file(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(_) => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rollback_create_resolution(
+    pending_path: &Path,
+    pending_backup: &Path,
+    pending_moved: bool,
+    record_path: &Path,
+    record_installed: bool,
+    resolved_path: &Path,
+    resolved_installed: bool,
+    record_temp: &Path,
+    resolved_temp: &Path,
+) {
+    if resolved_installed {
+        remove_staged_file(resolved_path);
+    }
+    if record_installed {
+        remove_staged_file(record_path);
+    }
+    if pending_moved {
+        let _ = fs::rename(pending_backup, pending_path);
+    }
+    remove_staged_file(record_temp);
+    remove_staged_file(resolved_temp);
 }
 
 pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult> {

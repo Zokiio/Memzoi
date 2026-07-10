@@ -50,7 +50,8 @@ Run `memzoi <command> --help` for exact options.
 | `proposal-files list` | `--json` |
 | `proposal-files show` | `<proposal-id>`, `--json` |
 | `proposal-files validate` | `--json` |
-| `proposal-files apply` | `<proposal-id>`, `--json` |
+| `proposal-files apply` | `<proposal-id>`, `--actor`, `--json` |
+| `proposal-files reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `local add` | `--type`, `--title`, `--body`, `--actor`, `--json` |
 | `local list` | `--json` |
 | `local search` | `<query>`, `--limit`, `--json` |
@@ -388,9 +389,10 @@ memzoi proposal-files list
 memzoi proposal-files show <proposal-id>
 memzoi proposal-files validate
 memzoi proposal-files apply <proposal-id>
+memzoi proposal-files reject <proposal-id> --reason "..."
 ```
 
-`list`, `show`, and `validate` are read-only. `apply` currently supports only `proposal.action: create` with `status: proposed` and `sensitivity: repo-safe`; it writes a compact canonical record under `.memzoi/records/`, leaves the pending proposal file in place, and does not update runtime SQLite state. Its output includes `runtime_index_updated: false` and `next_steps: ["memzoi rebuild"]`. Until rebuild completes, `memzoi doctor` reports the repo index as stale.
+`list`, `show`, and `validate` are read-only. `list` and `validate` describe the pending inbox; `show` can also inspect a resolved packet. `apply` accepts a `status: proposed`, `sensitivity: repo-safe` packet, writes its compact canonical projection and derived SQLite row atomically, then moves the packet to `.memzoi/proposals/resolved/applied/`. `reject` creates no canonical record and moves the packet to `.memzoi/proposals/resolved/rejected/` with an explicit reason. Resolution metadata records the outcome, actor, timestamp, reason, and affected record IDs. Repeating the same outcome is an auditable no-op; requesting the opposite outcome is refused.
 
 Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals, and there is no override flag. Classify or sanitize blocked proposals before repo apply, or route `local-only` memory to the local/runtime plane.
 
