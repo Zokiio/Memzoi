@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDestination, MemoryDestinationClassification, MemoryDestinationPolicy, MemoryLane,
-    MemoryType, OkfProposalSensitivity, OkfProposalSource, ScopeKind, okf::OkfCreateProposalDraft,
+    MemoryType, MemoryWriteRoute, OkfProposalSensitivity, OkfProposalSource, ScopeKind,
+    okf::OkfCreateProposalDraft,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,9 +92,8 @@ pub enum ImportCandidateAction {
         #[serde(serialize_with = "serialize_posix_relative_path")]
         path: PathBuf,
     },
-    Deferred {
-        route: String,
-        reason: String,
+    CreateRuntime {
+        route: MemoryWriteRoute,
     },
     Duplicate {
         matches: Vec<ImportDuplicate>,
@@ -153,8 +153,8 @@ pub struct ImportPlanCandidate {
 pub struct ImportPlanSummary {
     pub total: usize,
     pub create_proposals: usize,
-    pub deferred_local: usize,
-    pub deferred_session: usize,
+    pub local_writes: usize,
+    pub session_writes: usize,
     pub duplicates: usize,
     pub discarded: usize,
     pub needs_review: usize,
@@ -170,16 +170,25 @@ pub struct ImportPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImportProposalWrite {
-    pub index: usize,
-    pub proposal_id: String,
-    pub path: PathBuf,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImportWrite {
+    ProposalFile {
+        index: usize,
+        proposal_id: String,
+        #[serde(serialize_with = "serialize_posix_relative_path")]
+        path: PathBuf,
+    },
+    RuntimeRecord {
+        index: usize,
+        record_id: String,
+        destination: MemoryDestination,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportApplyResult {
     pub plan: ImportPlan,
-    pub writes: Vec<ImportProposalWrite>,
+    pub writes: Vec<ImportWrite>,
 }
 
 pub fn parse_import_document(input: &str) -> Result<ImportDocument> {
@@ -488,17 +497,15 @@ pub(crate) fn build_plan(
                     }
                 }
                 crate::MemoryWriteRoute::RuntimeLocal => {
-                    summary.deferred_local += 1;
-                    ImportCandidateAction::Deferred {
-                        route: "runtime_local".to_owned(),
-                        reason: "runtime import writes are unavailable in this slice".to_owned(),
+                    summary.local_writes += 1;
+                    ImportCandidateAction::CreateRuntime {
+                        route: c.policy.write_route,
                     }
                 }
                 crate::MemoryWriteRoute::RuntimeSession => {
-                    summary.deferred_session += 1;
-                    ImportCandidateAction::Deferred {
-                        route: "runtime_session".to_owned(),
-                        reason: "runtime import writes are unavailable in this slice".to_owned(),
+                    summary.session_writes += 1;
+                    ImportCandidateAction::CreateRuntime {
+                        route: c.policy.write_route,
                     }
                 }
                 crate::MemoryWriteRoute::NoWrite

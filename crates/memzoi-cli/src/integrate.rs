@@ -235,7 +235,7 @@ fn memzoi_policy_block() -> String {
         .map(|destination| {
             let policy = destination.policy();
             format!(
-                "- `{}`: plane `{}`, route `{}`, review `{}`.",
+                "  - `{}`: plane `{}`, route `{}`, review `{}`.",
                 destination.as_str(),
                 policy.plane.map(|plane| plane.as_str()).unwrap_or("none"),
                 policy.write_route.as_str(),

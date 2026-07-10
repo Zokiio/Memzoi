@@ -95,8 +95,8 @@ fn mixed_manifest_is_review_first_and_respects_all_destination_boundaries() -> a
     assert_eq!(plan_json["candidates"].as_array().unwrap().len(), 5);
     assert_eq!(plan_json["summary"]["total"], 5);
     assert_eq!(plan_json["summary"]["create_proposals"], 1);
-    assert_eq!(plan_json["summary"]["deferred_local"], 1);
-    assert_eq!(plan_json["summary"]["deferred_session"], 1);
+    assert_eq!(plan_json["summary"]["local_writes"], 1);
+    assert_eq!(plan_json["summary"]["session_writes"], 1);
     assert_eq!(plan_json["summary"]["discarded"], 1);
     assert_eq!(plan_json["summary"]["needs_review"], 1);
     assert_eq!(
@@ -108,12 +108,17 @@ fn mixed_manifest_is_review_first_and_respects_all_destination_boundaries() -> a
         candidate(&plan_json, 1)["classification"]["destination"],
         "local"
     );
-    assert_eq!(action_kind(candidate(&plan_json, 1)), "deferred");
+    assert_eq!(action_kind(candidate(&plan_json, 1)), "create_runtime");
+    assert_eq!(candidate(&plan_json, 1)["action"]["route"], "runtime_local");
     assert_eq!(
         candidate(&plan_json, 2)["classification"]["destination"],
         "session"
     );
-    assert_eq!(action_kind(candidate(&plan_json, 2)), "deferred");
+    assert_eq!(action_kind(candidate(&plan_json, 2)), "create_runtime");
+    assert_eq!(
+        candidate(&plan_json, 2)["action"]["route"],
+        "runtime_session"
+    );
     assert_eq!(
         candidate(&plan_json, 3)["classification"]["destination"],
         "discard"
@@ -130,7 +135,16 @@ fn mixed_manifest_is_review_first_and_respects_all_destination_boundaries() -> a
 
     let applied = service.apply_import("test", document, plan_json["plan_id"].as_str().unwrap())?;
     let applied_json = serde_json::to_value(&applied)?;
-    assert_eq!(applied_json["writes"].as_array().unwrap().len(), 1);
+    let writes = applied_json["writes"].as_array().unwrap();
+    assert_eq!(writes.len(), 3);
+    assert_eq!(writes[0]["kind"], "proposal_file");
+    assert_eq!(writes[0]["index"], 0);
+    assert_eq!(writes[1]["kind"], "runtime_record");
+    assert_eq!(writes[1]["index"], 1);
+    assert_eq!(writes[1]["destination"], "local");
+    assert_eq!(writes[2]["kind"], "runtime_record");
+    assert_eq!(writes[2]["index"], 2);
+    assert_eq!(writes[2]["destination"], "session");
     assert!(file_names(&service.paths().records_dir())?.is_empty());
     let proposal_files = file_names(&service.paths().proposals_dir())?;
     assert_eq!(proposal_files.len(), 1);
@@ -143,6 +157,21 @@ fn mixed_manifest_is_review_first_and_respects_all_destination_boundaries() -> a
         "The repository uses explicit review before durable memory changes."
     );
     assert_eq!(proposals[0].status.as_str(), "proposed");
+
+    let local = service.list_local_memory()?;
+    assert_eq!(local.len(), 1);
+    assert_eq!(local[0].title, "Local preference");
+    assert_eq!(
+        local[0].body,
+        "Keep this preference in local runtime memory only."
+    );
+    let session = service.list_checkpoints()?;
+    assert_eq!(session.len(), 1);
+    assert_eq!(session[0].title, "Session continuity");
+    assert_eq!(
+        session[0].body,
+        "Resume the import review in the next session."
+    );
     Ok(())
 }
 
@@ -181,6 +210,7 @@ fn wrong_or_stale_plan_id_is_a_zero_write_guard() -> anyhow::Result<()> {
 
     let before_proposals = file_names(&service.paths().proposals_dir())?;
     let before_records = file_names(&service.paths().records_dir())?;
+    let database_before = fs::read(&service.paths().db_path)?;
     let error = service
         .apply_import("test", document, &format!("{plan_id}-stale"))
         .expect_err("stale plan id must be rejected");
@@ -190,6 +220,7 @@ fn wrong_or_stale_plan_id_is_a_zero_write_guard() -> anyhow::Result<()> {
         before_proposals
     );
     assert_eq!(file_names(&service.paths().records_dir())?, before_records);
+    assert_eq!(fs::read(&service.paths().db_path)?, database_before);
     Ok(())
 }
 
@@ -207,13 +238,15 @@ fn an_existing_pending_proposal_is_an_exact_duplicate() -> anyhow::Result<()> {
 
     let second = service.plan_import("test", document)?;
     let second_json = serde_json::to_value(&second)?;
-    assert_eq!(action_kind(candidate(&second_json, 0)), "duplicate");
-    assert!(
-        !candidate(&second_json, 0)["duplicates"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    for index in 0..=2 {
+        assert_eq!(action_kind(candidate(&second_json, index)), "duplicate");
+        assert!(
+            !candidate(&second_json, index)["duplicates"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
     assert_eq!(file_names(&service.paths().proposals_dir())?.len(), 1);
     assert!(file_names(&service.paths().records_dir())?.is_empty());
     Ok(())
