@@ -18,6 +18,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi checkpoint` | Add and list runtime session checkpoints. |
 | `memzoi events` | Export runtime event-log rows. |
 | `memzoi session-end` | Promote explicit structured session-end candidates into proposal files or runtime memory. |
+| `memzoi capture` | Plan evidence-backed capture from one explicit Markdown file, record a complete review, and route reviewed candidates. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
@@ -60,6 +61,9 @@ Run `memzoi <command> --help` for exact options.
 | `checkpoint list` | `--json` |
 | `events export` | `--jsonl` |
 | `session-end` | `--from-file <path>` or `--from-checkpoint <checkpoint-id>`, `--actor`, `--json` |
+| `capture plan` | `--source <project-relative.md>`, `--source-id`, `--output`, `--json` |
+| `capture review` | `--plan-file`, `--decisions-file`, `--prior-review-file`, `--reviewed-by`, `--reviewed-at`, `--output`, `--json` |
+| `capture apply` | `--plan-file`, `--review-file`, `--prior-review-file`, `--plan-id`, `--review-id`, `--actor`, `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
@@ -186,6 +190,179 @@ informational, while an incompatible corpus/schema identity fails the report.
 Corpus thresholds remain the regression gate. A valid corpus prints its full
 report before a threshold or baseline failure returns non-zero; corpus or
 fixture validation errors return non-zero without a report.
+
+## Evidence-backed capture
+
+Capture turns one explicit Markdown document into evidence-linked memory candidates without
+scanning the repository or inferring from chat, shell history, hidden agent state, or generated
+Memzoi files. Its three CLI stages keep extraction, human judgment, and writes separate:
+
+```bash
+memzoi capture plan \
+  --source notes/session-findings.md \
+  --source-id session-findings \
+  --output capture-plan.json \
+  --json
+
+memzoi capture review \
+  --plan-file capture-plan.json \
+  --decisions-file capture-decisions.json \
+  --reviewed-by zoki \
+  --reviewed-at 2026-07-10T12:00:00Z \
+  --output capture-review.json \
+  --json
+
+memzoi capture apply \
+  --plan-file capture-plan.json \
+  --review-file capture-review.json \
+  --plan-id capture_... \
+  --review-id review_... \
+  --actor zoki \
+  --json
+```
+
+`plan` and `review` do not write memory state. `--output` optionally writes the complete JSON
+artifact, while `--json` prints it; without `--json`, the command prints a human-readable view.
+Input artifacts must be regular, nonsymlink UTF-8 files no larger than 2 MiB. Artifact output is
+installed without replacing an existing path. The artifact's data class also constrains where it
+may be saved, as described below.
+
+### Deterministic Markdown profile
+
+The v0.4 profile accepts exactly one regular UTF-8 `.md` file named by a POSIX
+project-relative path. Absolute paths, traversal components, backslashes, `.memzoi`, symbolic
+links, non-Markdown files, and files larger than 1 MiB are rejected. The source is read only from
+the current project; capture never searches for additional inputs. The profile also caps a plan at
+100 candidates, 4,096 Markdown headings, 16 KiB per evidence item, 256 KiB of total evidence, a
+bounded 10,000-file/32 MiB duplicate inventory, and a serialized plan just under 2 MiB.
+The extractor identity is `markdown-deterministic` with a versioned configuration hash.
+
+Capture file access and private artifact saving currently require Unix handle-relative,
+no-symlink primitives. Windows builds fail these capture operations closed; the rest of the CLI
+remains available there.
+
+The extractor recognizes ATX headings outside fenced code blocks. A heading prefix determines
+the type, lane, destination, and sensitivity of the section that follows it:
+
+| Heading prefix | Type and lane | Planned route |
+| --- | --- | --- |
+| `Fact:` | `fact`, `semantic` | Repo-safe pending proposal |
+| `Decision:` | `decision`, `semantic` | Repo-safe pending proposal |
+| `Procedure:` | `procedure`, `procedural` | Repo-safe pending proposal |
+| `Warning:` | `warning`, `semantic` | Repo-safe pending proposal |
+| `Failed attempt:` | `failed_attempt`, `episodic` | Repo-safe pending proposal |
+| `Risk:` | `risk`, `semantic` | Repo-safe pending proposal |
+| `Preference:` | `preference`, `semantic` | Local-only runtime record |
+| `Episode:` | `episode`, `session` | Temporary session runtime record |
+
+For example:
+
+```markdown
+## Decision: Verify downloaded release archives
+
+Verify the SHA-256 checksum before extracting a release archive.
+```
+
+Each candidate contains the exact source locator, source and evidence hashes, byte and line
+spans, heading kind, extractor identity, and deterministic claim/candidate identities. Planning
+also compares candidates with canonical records, pending proposals, active runtime memory, and
+earlier candidates in the same source. Exact matches become no-write duplicates; same-scope,
+same-title disagreements become conflicts requiring lifecycle resolution. A document without a
+recognized typed heading becomes `needs_review` with unknown sensitivity rather than being
+silently routed. In a mixed document, nonempty preamble text and untyped sections produce
+identity-covered `unsupported_markdown_content` diagnostics with their source ID and starting
+line, so typed extraction cannot silently hide unsupported regions.
+
+The same source bytes and relevant memory inventory produce the same plan. The `plan_id` pins the
+request, source snapshot, extracted candidates, duplicate/conflict match sets, reserved proposal
+IDs, policy/configuration versions, and preconditions. Planning opens existing runtime inventory
+read-only and does not create or change `.memzoi/`, SQLite, proposal, export, or event state.
+If runtime inventory is missing or cannot be read safely, affected local/session candidates become
+`needs_review` no-write actions with a stable warning. Unaffected repo-only candidates retain the
+same identity they would have against an empty runtime inventory.
+
+### Data classes and review
+
+Every plan and review has one conservative `data_class`:
+
+- `repo_safe` means every routeable candidate is explicitly repo-safe and repo-bound. The
+  artifact may be saved to a normal review location, but never under `.memzoi`, the private
+  runtime directory, or generated exports.
+- `private` means the artifact contains or derives from local/session/private or unresolved
+  material. CLI output may be printed, but `--output` is accepted only under the project's private
+  runtime directory, never under the project root or generated exports.
+- `blocked` means a prohibited credential, known secret token, private key, private-personal-data,
+  or raw-transcript pattern was found. The redacted plan omits source snapshots, candidates, and
+  evidence text, reports only safe diagnostics, cannot be reviewed, and may only be emitted to
+  standard output.
+
+The strict review-input artifact must decide every candidate exactly once. This JSON example
+accepts one candidate:
+
+```json
+{
+  "schema": "memzoi/capture-review-input-v1",
+  "plan_id": "capture_...",
+  "decisions": [
+    {
+      "candidate_id": "candidate_...",
+      "outcome": "accept"
+    }
+  ]
+}
+```
+
+Outcomes are `accept`, `reject`, `edit`, and `defer`. Accept keeps a routeable extracted
+candidate. Reject and defer produce no write. Edit requires a complete replacement memory draft
+and may request a destination; policy is reapplied to the edited candidate. Duplicates cannot be
+accepted as new memory, conflicts require separate lifecycle resolution, and a no-write candidate
+must be edited, rejected, or deferred. `reviewed_by` must be non-empty and `reviewed_at` must be an
+explicit RFC 3339 time. The resulting `review_id` pins the plan, reviewer, time, complete decision
+set, and any reviewed candidate edits.
+
+A later review may replace deferred decisions only. Set `prior_review_id` in the next
+`capture-review-input-v1` artifact and pass the complete predecessor with
+`--prior-review-file <capture-review.json>`. Core verifies the prior review identity, requires the
+same plan, preserves every terminal decision byte-for-byte after normalization, and binds the new
+review ID to its predecessor. Applying that later review also requires the immediate predecessor
+through `capture apply --prior-review-file`; apply repeats the lineage validation at the locked
+transaction boundary. The v0.4 profile supports one predecessor hop. A review whose predecessor
+already names an earlier review is rejected until a future interface can carry and validate the
+complete ancestor chain.
+
+Review recomputes the plan before creating an artifact. Apply validates the supplied plan and
+review identities, reconstructs the review, and recomputes current source/inventory preconditions
+again before writing and after acquiring the repo lifecycle lock when needed. A changed source,
+new duplicate/conflict, consumed proposal ID, altered artifact, or mismatched expected ID is a
+stale zero-write error.
+
+### Apply routing and provenance
+
+Only accepted or edited routeable candidates are considered during `capture apply`:
+
+- A `repo`/`repo-safe` candidate creates a pending OKF packet under
+  `.memzoi/proposals/pending/`. Capture never writes it directly to `.memzoi/records/`; validate,
+  review, and explicitly apply that packet with `memzoi proposal-files apply <proposal-id>`.
+- A `local` candidate creates a private local runtime record.
+- A `session` candidate creates a private session runtime record.
+- Rejected, deferred, duplicate, conflicting, blocked, and unresolved candidates write nothing.
+
+Proposal-file and runtime writes are one crash-recoverable guarded operation. A content-free,
+fsynced journal and a SQLite commit marker let the next service open roll back an interrupted
+uncommitted batch or finish a committed proposal install without exposing private bodies in the
+journal. The result uses schema
+`memzoi/capture-apply-result-v1` and lists each proposal file or runtime record written.
+
+Capture provenance records the plan/review, original and reviewed candidate identities, extractor,
+evidence locator/spans/hashes, confidence, destination, sensitivity, and review outcome. Pending
+proposal packets retain the review evidence. When a proposal is applied, canonical OKF keeps a
+compact form without copied evidence text; its evidence identity and lineage remain available to
+rebuild, recall citations, and later audits. Private runtime records retain the same provenance
+through runtime preservation and rebuild.
+
+MCP exposes the same planner as the read-only `plan_capture_v1` tool, but deliberately exposes no
+capture review or apply tool and denies `private` results by default. See
+[MCP and agent integration](./mcp-and-agent-integration.md#plan_capture_v1-contract).
 
 ## Classified import
 

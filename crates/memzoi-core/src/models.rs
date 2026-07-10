@@ -127,6 +127,9 @@ pub struct MemoryRecord {
     pub source_ref: Option<String>,
     /// Review packet that approved this canonical record, kept separate from evidence provenance.
     pub proposal_id: Option<String>,
+    /// Versioned capture evidence and review lineage, when this record originated from capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<crate::CaptureProvenance>,
     pub content_hash: String,
     pub created_at: String,
     pub updated_at: String,
@@ -176,6 +179,8 @@ pub struct MemoryCitation {
     pub source_kind: Option<String>,
     pub source_ref: Option<String>,
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<crate::CaptureProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

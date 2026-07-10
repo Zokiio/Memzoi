@@ -99,6 +99,13 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: ImportCommands,
     },
+
+    /// Plan, review, and route evidence-backed capture.
+    Capture {
+        #[command(subcommand)]
+        command: CaptureCommands,
+    },
+
     /// Inspect OKF proposal files under .memzoi/proposals/pending.
     ProposalFiles {
         #[command(subcommand)]
@@ -376,6 +383,75 @@ pub(crate) enum ImportCommands {
         plan_id: String,
         #[arg(long, default_value = "cli")]
         actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CaptureCommands {
+    /// Extract a deterministic, mutation-free plan from one Markdown source.
+    Plan {
+        /// Explicit POSIX project-relative Markdown source path.
+        #[arg(long)]
+        source: String,
+        /// Stable source identifier included in evidence references.
+        #[arg(long = "source-id", default_value = "source")]
+        source_id: String,
+        /// Explicit destination for the complete JSON plan artifact.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Emit the versioned plan as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Bind reviewed decisions to an immutable capture plan.
+    Review {
+        /// Complete capture-plan-v1 JSON artifact.
+        #[arg(long = "plan-file")]
+        plan_file: PathBuf,
+        /// Strict capture-review-input-v1 JSON artifact.
+        #[arg(long = "decisions-file")]
+        decisions_file: PathBuf,
+        /// Prior capture-review-v1 artifact when replacing deferred decisions.
+        #[arg(long = "prior-review-file")]
+        prior_review_file: Option<PathBuf>,
+        /// Reviewer identity recorded in the review artifact.
+        #[arg(long = "reviewed-by")]
+        reviewed_by: String,
+        /// Explicit RFC 3339 review time recorded in the review artifact.
+        #[arg(long = "reviewed-at")]
+        reviewed_at: String,
+        /// Explicit destination for the complete JSON review artifact.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Emit the versioned review as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Route one complete, pinned capture plan and review.
+    Apply {
+        /// Complete capture-plan-v1 JSON artifact.
+        #[arg(long = "plan-file")]
+        plan_file: PathBuf,
+        /// Complete capture-review-v1 JSON artifact.
+        #[arg(long = "review-file")]
+        review_file: PathBuf,
+        /// Immediate predecessor review when applying a later deferred-decision review.
+        #[arg(long = "prior-review-file")]
+        prior_review_file: Option<PathBuf>,
+        /// Expected plan identity pinned by the reviewer.
+        #[arg(long = "plan-id")]
+        plan_id: String,
+        /// Expected review identity pinned by the reviewer.
+        #[arg(long = "review-id")]
+        review_id: String,
+        /// Actor recorded on routed writes.
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        /// Emit the versioned apply result as machine-readable JSON.
         #[arg(long)]
         json: bool,
     },

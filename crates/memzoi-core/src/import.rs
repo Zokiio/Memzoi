@@ -672,6 +672,7 @@ pub(crate) fn proposal_draft(
         tags: candidate.tags.clone(),
         sources: sources.to_vec(),
         sensitivity: candidate.sensitivity,
+        capture: None,
     }
 }
 

@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::{Date, OffsetDateTime, Time, format_description::well_known::Rfc3339};
@@ -18,12 +18,14 @@ use uuid::Uuid;
 
 use crate::import::{self, ExistingDuplicate};
 use crate::{
+    CaptureAction, CaptureApplyResult, CapturePlan, CaptureProvenance, CaptureReview,
+    CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome, CaptureWrite,
     ContextPack, ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult, ImportDocument,
-    ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryLane, MemoryPaths, MemoryRecord,
-    MemoryStatus, MemoryType, OkfProposalAction, OkfProposalFile, OkfProposalOutcome,
-    OkfProposalResolution, PrecheckInput, PrecheckWarning, Proposal, ProposalStatus,
-    ProposalStatusFilter, ScopeKind, SearchInput, SearchResult, SupersedeResult, ValidationResult,
-    Visibility,
+    ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryLane, MemoryPath, MemoryPaths,
+    MemoryRecord, MemoryStatus, MemoryType, OkfProposalAction, OkfProposalFile, OkfProposalOutcome,
+    OkfProposalResolution, OkfProposalSource, PrecheckInput, PrecheckWarning, Proposal,
+    ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput, SearchResult, SupersedeResult,
+    ValidationResult, Visibility,
 };
 use crate::{
     config::{
@@ -237,6 +239,54 @@ struct PendingFileProposalSnapshot {
     display_path: PathBuf,
 }
 
+const CAPTURE_APPLY_JOURNAL_SCHEMA: &str = "memzoi/capture-apply-journal-v1";
+const CAPTURE_APPLY_COMMIT_SCHEMA: &str = "memzoi/capture-apply-commit-v1";
+const CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v1.json";
+const CAPTURE_APPLY_COMMIT_EVENT: &str = "capture.apply_committed";
+const MAX_CAPTURE_APPLY_JOURNAL_BYTES: u64 = 256 * 1024;
+const MAX_CAPTURE_APPLY_JOURNAL_ENTRIES: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureApplyJournal {
+    schema: String,
+    journal_id: String,
+    plan_id: String,
+    review_id: String,
+    entries: Vec<CaptureApplyJournalEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureApplyJournalEntry {
+    proposal_id: String,
+    content_bytes: u64,
+    content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureApplyCommitMarker {
+    schema: String,
+    journal_id: String,
+    plan_id: String,
+    review_id: String,
+    proposal_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureApplyRecoveryOutcome {
+    NoJournal,
+    RolledBack,
+    Committed,
+}
+
+struct LoadedCaptureApplyJournal {
+    journal: CaptureApplyJournal,
+    content_bytes: u64,
+    content_hash: String,
+}
+
 struct RepoLifecycleLock {
     _file: fs::File,
 }
@@ -265,6 +315,11 @@ impl MemoryService {
 
         let conn = db::open_database(&paths.db_path)?;
         db::init_database(&conn)?;
+        if capture_apply_journal_exists(&paths)? {
+            let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
+            recover_capture_apply(&paths, &conn)
+                .context("failed to recover an interrupted capture apply")?;
+        }
         Ok(Self {
             paths,
             conn,
@@ -1936,6 +1991,301 @@ impl MemoryService {
         Ok(ImportApplyResult { plan, writes })
     }
 
+    pub fn apply_capture(
+        &self,
+        actor: &str,
+        plan: CapturePlan,
+        review: CaptureReview,
+        expected_plan_id: &str,
+        expected_review_id: &str,
+    ) -> Result<CaptureApplyResult> {
+        self.apply_capture_inner(
+            actor,
+            plan,
+            review,
+            None,
+            expected_plan_id,
+            expected_review_id,
+        )
+    }
+
+    pub fn apply_capture_with_prior(
+        &self,
+        actor: &str,
+        plan: CapturePlan,
+        review: CaptureReview,
+        prior_review: &CaptureReview,
+        expected_plan_id: &str,
+        expected_review_id: &str,
+    ) -> Result<CaptureApplyResult> {
+        self.apply_capture_inner(
+            actor,
+            plan,
+            review,
+            Some(prior_review),
+            expected_plan_id,
+            expected_review_id,
+        )
+    }
+
+    fn apply_capture_inner(
+        &self,
+        actor: &str,
+        plan: CapturePlan,
+        review: CaptureReview,
+        prior_review: Option<&CaptureReview>,
+        expected_plan_id: &str,
+        expected_review_id: &str,
+    ) -> Result<CaptureApplyResult> {
+        let actor = actor.trim();
+        crate::capture::validate_capture_actor(actor)?;
+        crate::capture::validate_plan_identity(&plan)?;
+        crate::capture::validate_review_identity(&review)?;
+        if expected_plan_id.trim() != plan.plan_id || expected_review_id.trim() != review.review_id
+        {
+            bail!("stale capture apply identity");
+        }
+        if review.plan_id != plan.plan_id {
+            bail!("capture review does not match the supplied plan");
+        }
+        let current = crate::capture::plan_capture_with_connection(
+            &self.paths,
+            plan.request.clone(),
+            &self.conn,
+        )?;
+        if current.plan_id != plan.plan_id || current != plan {
+            bail!("stale capture plan");
+        }
+
+        let review_input = CaptureReviewInput {
+            schema: crate::CAPTURE_REVIEW_INPUT_SCHEMA.to_owned(),
+            plan_id: plan.plan_id.clone(),
+            prior_review_id: review.prior_review_id.clone(),
+            decisions: review
+                .decisions
+                .iter()
+                .map(|decision| CaptureReviewDecisionInput {
+                    candidate_id: decision.candidate_id.clone(),
+                    outcome: decision.outcome,
+                    reason_code: decision.reason_code.clone(),
+                    memory: (decision.outcome == CaptureReviewOutcome::Edit)
+                        .then(|| {
+                            decision
+                                .reviewed_candidate
+                                .as_ref()
+                                .map(|c| c.memory.clone())
+                        })
+                        .flatten(),
+                    requested_destination: (decision.outcome == CaptureReviewOutcome::Edit)
+                        .then(|| {
+                            decision
+                                .reviewed_candidate
+                                .as_ref()
+                                .map(|c| c.classification.destination)
+                        })
+                        .flatten(),
+                })
+                .collect(),
+        };
+        let rebuilt_review = crate::capture::build_capture_review_with_connection(
+            &self.paths,
+            &self.conn,
+            &plan,
+            review_input.clone(),
+            prior_review,
+            &review.reviewed_by,
+            &review.reviewed_at,
+        )?;
+        if rebuilt_review.review_id != review.review_id || rebuilt_review != review {
+            bail!("stale or modified capture review");
+        }
+
+        let selected = review
+            .decisions
+            .iter()
+            .filter_map(|decision| {
+                decision
+                    .reviewed_candidate
+                    .as_ref()
+                    .map(|candidate| (decision, candidate))
+            })
+            .collect::<Vec<_>>();
+        let has_repo_writes = selected
+            .iter()
+            .any(|(_, candidate)| matches!(candidate.action, CaptureAction::CreateProposal { .. }));
+        let has_runtime_writes = selected
+            .iter()
+            .any(|(_, candidate)| matches!(candidate.action, CaptureAction::CreateRuntime { .. }));
+        if !has_repo_writes && !has_runtime_writes {
+            return Ok(CaptureApplyResult {
+                schema: crate::CAPTURE_APPLY_RESULT_SCHEMA.to_owned(),
+                plan_id: plan.plan_id,
+                review_id: review.review_id,
+                writes: Vec::new(),
+            });
+        }
+
+        let _lifecycle_lock = (has_repo_writes || has_runtime_writes)
+            .then(|| RepoLifecycleLock::acquire(&self.paths))
+            .transpose()?;
+        recover_capture_apply(&self.paths, &self.conn)
+            .context("failed to recover an interrupted capture apply")?;
+
+        let locked_current = crate::capture::plan_capture_with_connection(
+            &self.paths,
+            plan.request.clone(),
+            &self.conn,
+        )?;
+        if locked_current.plan_id != plan.plan_id || locked_current != plan {
+            bail!("stale capture plan after lifecycle lock");
+        }
+
+        let timestamp = self.now_timestamp()?;
+        let pending_root = self.paths.proposals_dir().join("pending");
+        let mut planned = Vec::new();
+        for (decision, candidate) in &selected {
+            let CaptureAction::CreateProposal { proposal_id, .. } = &candidate.action else {
+                continue;
+            };
+            let provenance = capture_provenance(&plan, &review, decision, candidate, actor);
+            let draft = okf::OkfCreateProposalDraft {
+                proposal_id: proposal_id.clone(),
+                memory_type: candidate.memory.memory_type,
+                lane: candidate.memory.lane,
+                title: candidate.memory.title.clone(),
+                body: candidate.memory.body.clone(),
+                actor: actor.to_owned(),
+                timestamp: timestamp.clone(),
+                reason: Some(candidate.classification.destination_reason.clone()),
+                scope_kind: candidate.memory.scope.kind,
+                scope_id: candidate.memory.scope.id.clone(),
+                applies_to: candidate.memory.scope.paths.clone(),
+                tags: candidate.memory.tags.clone(),
+                sources: candidate
+                    .evidence
+                    .iter()
+                    .map(|evidence| OkfProposalSource {
+                        path: Some(evidence.locator.path().to_owned()),
+                        url: None,
+                        reference: None,
+                    })
+                    .collect(),
+                sensitivity: candidate.classification.sensitivity,
+                capture: Some(provenance),
+            };
+            planned.push((
+                candidate.candidate_id.clone(),
+                okf::plan_okf_create_proposal(&pending_root, &draft)?,
+            ));
+        }
+
+        let mut writes = Vec::new();
+        let result = (|| -> Result<()> {
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+            let transactional_current = crate::capture::plan_capture_with_connection(
+                &self.paths,
+                plan.request.clone(),
+                &tx,
+            )?;
+            if transactional_current.plan_id != plan.plan_id || transactional_current != plan {
+                bail!("stale capture plan at write boundary");
+            }
+            let transactional_review = crate::capture::build_capture_review_with_connection(
+                &self.paths,
+                &tx,
+                &plan,
+                review_input.clone(),
+                prior_review,
+                &review.reviewed_by,
+                &review.reviewed_at,
+            )?;
+            if transactional_review.review_id != review.review_id || transactional_review != review
+            {
+                bail!("stale capture review at write boundary");
+            }
+            if !planned.is_empty() {
+                prepare_pending_proposal_root(&self.paths)?;
+                let inventory = scan_file_proposal_inventory(&self.paths)?;
+                require_clean_file_proposal_inventory(&inventory)?;
+                ensure_planned_proposals_available(
+                    &tx,
+                    &inventory,
+                    planned.iter().map(|(_, proposal)| proposal),
+                )?;
+            }
+
+            let journal = (!planned.is_empty())
+                .then(|| build_capture_apply_journal(&plan, &review, &planned))
+                .transpose()?;
+            if let Some(journal) = journal.as_ref() {
+                write_capture_apply_journal(&self.paths, journal)?;
+                stage_capture_apply_proposals(&self.paths, journal, &planned)?;
+                install_capture_apply_proposals(&self.paths, journal)?;
+            }
+            for (candidate_id, proposal) in &planned {
+                writes.push(CaptureWrite::ProposalFile {
+                    candidate_id: candidate_id.clone(),
+                    proposal_id: proposal.proposal_id.clone(),
+                    path: format!(".memzoi/proposals/pending/{}.md", proposal.proposal_id),
+                });
+            }
+            for (decision, candidate) in &selected {
+                let CaptureAction::CreateRuntime { route } = candidate.action else {
+                    continue;
+                };
+                let destination = match route {
+                    crate::MemoryWriteRoute::RuntimeLocal => MemoryDestination::Local,
+                    crate::MemoryWriteRoute::RuntimeSession => MemoryDestination::Session,
+                    _ => bail!("capture runtime candidate has an invalid route"),
+                };
+                let provenance = capture_provenance(&plan, &review, decision, candidate, actor);
+                let record = create_capture_runtime_with_conn(
+                    &tx,
+                    actor,
+                    candidate,
+                    destination,
+                    &timestamp,
+                    provenance,
+                )?;
+                writes.push(CaptureWrite::RuntimeRecord {
+                    candidate_id: candidate.candidate_id.clone(),
+                    record_id: record.id,
+                    destination,
+                });
+            }
+            if let Some(journal) = journal.as_ref() {
+                append_capture_apply_commit_marker(&tx, journal, actor, &timestamp)?;
+            }
+            tx.commit()?;
+            if journal.is_some() {
+                let outcome = recover_capture_apply(&self.paths, &self.conn)?;
+                if outcome != CaptureApplyRecoveryOutcome::Committed {
+                    bail!("capture apply committed without a recoverable journal marker");
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            match recover_capture_apply(&self.paths, &self.conn) {
+                Ok(CaptureApplyRecoveryOutcome::Committed) => {}
+                Ok(CaptureApplyRecoveryOutcome::NoJournal)
+                | Ok(CaptureApplyRecoveryOutcome::RolledBack) => return Err(error),
+                Err(recovery_error) => {
+                    return Err(error).context(format!(
+                        "capture apply recovery also failed: {recovery_error:#}"
+                    ));
+                }
+            }
+        }
+
+        Ok(CaptureApplyResult {
+            schema: crate::CAPTURE_APPLY_RESULT_SCHEMA.to_owned(),
+            plan_id: plan.plan_id,
+            review_id: review.review_id,
+            writes,
+        })
+    }
+
     fn load_import_duplicates(
         &self,
         pending_proposals: &[FileProposalInventoryEntry],
@@ -2152,6 +2502,465 @@ impl RepoLifecycleLock {
         })?;
         Ok(Self { _file: file })
     }
+}
+
+fn build_capture_apply_journal(
+    plan: &CapturePlan,
+    review: &CaptureReview,
+    planned: &[(String, okf::OkfCreateProposalPlan)],
+) -> Result<CaptureApplyJournal> {
+    let journal = CaptureApplyJournal {
+        schema: CAPTURE_APPLY_JOURNAL_SCHEMA.to_owned(),
+        journal_id: Uuid::now_v7().to_string(),
+        plan_id: plan.plan_id.clone(),
+        review_id: review.review_id.clone(),
+        entries: planned
+            .iter()
+            .map(|(_, proposal)| CaptureApplyJournalEntry {
+                proposal_id: proposal.proposal_id.clone(),
+                content_bytes: proposal.markdown.len() as u64,
+                content_hash: blake3::hash(proposal.markdown.as_bytes())
+                    .to_hex()
+                    .to_string(),
+            })
+            .collect(),
+    };
+    validate_capture_apply_journal(&journal)?;
+    Ok(journal)
+}
+
+fn capture_apply_journal_path(paths: &MemoryPaths) -> PathBuf {
+    paths.runtime_dir.join(CAPTURE_APPLY_JOURNAL_FILE)
+}
+
+fn capture_apply_destination_path(
+    paths: &MemoryPaths,
+    entry: &CaptureApplyJournalEntry,
+) -> PathBuf {
+    paths
+        .proposals_dir()
+        .join("pending")
+        .join(format!("{}.md", entry.proposal_id))
+}
+
+fn capture_apply_stage_path(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    entry: &CaptureApplyJournalEntry,
+) -> PathBuf {
+    sibling_transaction_path(
+        &capture_apply_destination_path(paths, entry),
+        &journal.journal_id,
+        "write",
+    )
+}
+
+fn capture_apply_commit_event_id(journal: &CaptureApplyJournal) -> String {
+    format!("evt_capture_apply_{}", journal.journal_id)
+}
+
+fn capture_apply_commit_marker(journal: &CaptureApplyJournal) -> CaptureApplyCommitMarker {
+    CaptureApplyCommitMarker {
+        schema: CAPTURE_APPLY_COMMIT_SCHEMA.to_owned(),
+        journal_id: journal.journal_id.clone(),
+        plan_id: journal.plan_id.clone(),
+        review_id: journal.review_id.clone(),
+        proposal_ids: journal
+            .entries
+            .iter()
+            .map(|entry| entry.proposal_id.clone())
+            .collect(),
+    }
+}
+
+fn validate_capture_apply_journal(journal: &CaptureApplyJournal) -> Result<()> {
+    if journal.schema != CAPTURE_APPLY_JOURNAL_SCHEMA {
+        bail!("unsupported capture apply journal schema");
+    }
+    let journal_id =
+        Uuid::parse_str(&journal.journal_id).context("capture apply journal id is invalid")?;
+    if journal_id.to_string() != journal.journal_id {
+        bail!("capture apply journal id must use canonical UUID syntax");
+    }
+    validate_capture_apply_journal_token(&journal.plan_id, "plan id")?;
+    validate_capture_apply_journal_token(&journal.review_id, "review id")?;
+    if journal.entries.is_empty() || journal.entries.len() > MAX_CAPTURE_APPLY_JOURNAL_ENTRIES {
+        bail!("capture apply journal has an invalid entry count");
+    }
+    let mut proposal_ids = BTreeSet::new();
+    for entry in &journal.entries {
+        validate_capture_apply_proposal_id(&entry.proposal_id)?;
+        if !proposal_ids.insert(entry.proposal_id.as_str()) {
+            bail!("capture apply journal contains a duplicate proposal id");
+        }
+        if entry.content_bytes == 0 || entry.content_bytes > 8 * 1024 * 1024 {
+            bail!("capture apply journal contains an invalid proposal size");
+        }
+        if entry.content_hash.len() != 64
+            || !entry
+                .content_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("capture apply journal contains an invalid content hash");
+        }
+    }
+    Ok(())
+}
+
+fn validate_capture_apply_journal_token(value: &str, label: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("capture apply journal {label} is invalid");
+    }
+    Ok(())
+}
+
+fn validate_capture_apply_proposal_id(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        bail!("capture apply journal proposal id is invalid");
+    }
+    Ok(())
+}
+
+fn capture_apply_journal_exists(paths: &MemoryPaths) -> Result<bool> {
+    let path = capture_apply_journal_path(paths);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("capture apply journal must be a regular file")
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("failed to inspect capture apply journal"),
+    }
+}
+
+fn load_capture_apply_journal(paths: &MemoryPaths) -> Result<Option<LoadedCaptureApplyJournal>> {
+    if !capture_apply_journal_exists(paths)? {
+        return Ok(None);
+    }
+    let path = capture_apply_journal_path(paths);
+    let metadata =
+        fs::symlink_metadata(&path).context("failed to inspect capture apply journal")?;
+    if metadata.len() == 0 || metadata.len() > MAX_CAPTURE_APPLY_JOURNAL_BYTES {
+        bail!("capture apply journal has an invalid size");
+    }
+    let bytes = fs::read(&path).context("failed to read capture apply journal")?;
+    if bytes.len() as u64 != metadata.len() {
+        bail!("capture apply journal changed while it was being read");
+    }
+    let journal: CaptureApplyJournal =
+        serde_json::from_slice(&bytes).context("failed to parse capture apply journal")?;
+    validate_capture_apply_journal(&journal)?;
+    Ok(Some(LoadedCaptureApplyJournal {
+        journal,
+        content_bytes: bytes.len() as u64,
+        content_hash: blake3::hash(&bytes).to_hex().to_string(),
+    }))
+}
+
+fn write_capture_apply_journal(paths: &MemoryPaths, journal: &CaptureApplyJournal) -> Result<()> {
+    validate_capture_apply_journal(journal)?;
+    fs::create_dir_all(&paths.runtime_dir).context("failed to create capture journal directory")?;
+    if capture_apply_journal_exists(paths)? {
+        bail!("an interrupted capture apply must be recovered before starting another one");
+    }
+    let mut bytes =
+        serde_json::to_vec_pretty(journal).context("failed to serialize capture apply journal")?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_CAPTURE_APPLY_JOURNAL_BYTES {
+        bail!("capture apply journal is too large");
+    }
+    let journal_path = capture_apply_journal_path(paths);
+    let temp_path = paths.runtime_dir.join(format!(
+        ".{CAPTURE_APPLY_JOURNAL_FILE}.{}.tmp",
+        journal.journal_id
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp_path)
+        .context("failed to stage capture apply journal")?;
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = remove_staged_file(&temp_path);
+        return Err(error).context("failed to persist capture apply journal");
+    }
+    drop(file);
+    if let Err(error) = fs::hard_link(&temp_path, &journal_path) {
+        let _ = remove_staged_file(&temp_path);
+        return Err(error).context("failed to install capture apply journal without replacement");
+    }
+    remove_staged_file(&temp_path).context("failed to finalize capture apply journal")?;
+    sync_directory(&paths.runtime_dir).context("failed to sync capture journal directory")
+}
+
+fn stage_capture_apply_proposals(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    planned: &[(String, okf::OkfCreateProposalPlan)],
+) -> Result<()> {
+    validate_capture_apply_journal(journal)?;
+    if journal.entries.len() != planned.len() {
+        bail!("capture apply journal does not match the proposal batch");
+    }
+    for (entry, (_, proposal)) in journal.entries.iter().zip(planned) {
+        let expected_destination = capture_apply_destination_path(paths, entry);
+        let expected_hash = blake3::hash(proposal.markdown.as_bytes())
+            .to_hex()
+            .to_string();
+        if proposal.proposal_id != entry.proposal_id
+            || proposal.path != expected_destination
+            || proposal.markdown.len() as u64 != entry.content_bytes
+            || expected_hash != entry.content_hash
+        {
+            bail!("capture proposal batch changed after journaling");
+        }
+        let staged = stage_file(
+            &expected_destination,
+            &proposal.markdown,
+            &journal.journal_id,
+        )?;
+        if staged != capture_apply_stage_path(paths, journal, entry) {
+            let _ = remove_staged_file(&staged);
+            bail!("capture proposal staging path mismatch");
+        }
+    }
+    sync_directory(&paths.proposals_dir().join("pending"))
+        .context("failed to sync staged capture proposals")
+}
+
+fn install_capture_apply_proposals(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+) -> Result<()> {
+    validate_capture_apply_journal(journal)?;
+    for entry in &journal.entries {
+        let staged = capture_apply_stage_path(paths, journal, entry);
+        let destination = capture_apply_destination_path(paths, entry);
+        if !capture_apply_file_matches(
+            &staged,
+            entry.content_bytes,
+            &entry.content_hash,
+            "staged capture proposal",
+        )? {
+            bail!("staged capture proposal is missing");
+        }
+        ensure_path_absent(&destination, "capture proposal")?;
+        fs::hard_link(&staged, &destination).with_context(|| {
+            format!(
+                "failed to install capture proposal {} without replacement",
+                destination.display()
+            )
+        })?;
+    }
+    sync_directory(&paths.proposals_dir().join("pending"))
+        .context("failed to sync installed capture proposals")
+}
+
+fn append_capture_apply_commit_marker(
+    conn: &Connection,
+    journal: &CaptureApplyJournal,
+    actor: &str,
+    timestamp: &str,
+) -> Result<()> {
+    let payload = serde_json::to_string(&capture_apply_commit_marker(journal))
+        .context("failed to serialize capture apply commit marker")?;
+    conn.execute(
+        "INSERT INTO event_log (
+           id, event_type, actor, payload_json, record_id, proposal_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+        rusqlite::params![
+            capture_apply_commit_event_id(journal),
+            CAPTURE_APPLY_COMMIT_EVENT,
+            actor,
+            payload,
+            timestamp,
+        ],
+    )
+    .context("failed to append capture apply commit marker")?;
+    Ok(())
+}
+
+fn capture_apply_commit_marker_exists(
+    conn: &Connection,
+    journal: &CaptureApplyJournal,
+) -> Result<bool> {
+    let row = conn
+        .query_row(
+            "SELECT event_type, payload_json FROM event_log WHERE id = ?1",
+            [capture_apply_commit_event_id(journal)],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .context("failed to inspect capture apply commit marker")?;
+    let Some((event_type, payload_json)) = row else {
+        return Ok(false);
+    };
+    if event_type != CAPTURE_APPLY_COMMIT_EVENT {
+        bail!("capture apply commit marker has an unexpected event type");
+    }
+    let marker: CaptureApplyCommitMarker = serde_json::from_str(&payload_json)
+        .context("failed to parse capture apply commit marker")?;
+    if marker != capture_apply_commit_marker(journal) {
+        bail!("capture apply commit marker does not match its journal");
+    }
+    Ok(true)
+}
+
+fn recover_capture_apply(
+    paths: &MemoryPaths,
+    conn: &Connection,
+) -> Result<CaptureApplyRecoveryOutcome> {
+    let Some(loaded) = load_capture_apply_journal(paths)? else {
+        return Ok(CaptureApplyRecoveryOutcome::NoJournal);
+    };
+    let journal = &loaded.journal;
+    let committed = capture_apply_commit_marker_exists(conn, journal)?;
+    prepare_pending_proposal_root(paths)?;
+
+    if committed {
+        for entry in &journal.entries {
+            let destination = capture_apply_destination_path(paths, entry);
+            if capture_apply_file_matches(
+                &destination,
+                entry.content_bytes,
+                &entry.content_hash,
+                "committed capture proposal",
+            )? {
+                continue;
+            }
+            let staged = capture_apply_stage_path(paths, journal, entry);
+            if !capture_apply_file_matches(
+                &staged,
+                entry.content_bytes,
+                &entry.content_hash,
+                "staged capture proposal",
+            )? {
+                bail!("committed capture proposal and its staging file are both missing");
+            }
+            fs::hard_link(&staged, &destination).with_context(|| {
+                format!(
+                    "failed to finish committed capture proposal {}",
+                    destination.display()
+                )
+            })?;
+        }
+        sync_directory(&paths.proposals_dir().join("pending"))
+            .context("failed to sync recovered capture proposals")?;
+        for entry in &journal.entries {
+            let destination = capture_apply_destination_path(paths, entry);
+            if !capture_apply_file_matches(
+                &destination,
+                entry.content_bytes,
+                &entry.content_hash,
+                "committed capture proposal",
+            )? {
+                bail!("committed capture proposal is missing after recovery");
+            }
+            remove_capture_apply_file_if_matching(
+                &capture_apply_stage_path(paths, journal, entry),
+                entry.content_bytes,
+                &entry.content_hash,
+                "staged capture proposal",
+            )?;
+        }
+    } else {
+        for entry in &journal.entries {
+            remove_capture_apply_file_if_matching(
+                &capture_apply_destination_path(paths, entry),
+                entry.content_bytes,
+                &entry.content_hash,
+                "uncommitted capture proposal",
+            )?;
+            remove_capture_apply_file_if_matching(
+                &capture_apply_stage_path(paths, journal, entry),
+                entry.content_bytes,
+                &entry.content_hash,
+                "staged capture proposal",
+            )?;
+        }
+    }
+    sync_directory(&paths.proposals_dir().join("pending"))
+        .context("failed to sync capture recovery cleanup")?;
+
+    let journal_path = capture_apply_journal_path(paths);
+    remove_capture_apply_file_if_matching(
+        &journal_path,
+        loaded.content_bytes,
+        &loaded.content_hash,
+        "capture apply journal",
+    )?;
+    sync_directory(&paths.runtime_dir).context("failed to sync capture journal cleanup")?;
+    Ok(if committed {
+        CaptureApplyRecoveryOutcome::Committed
+    } else {
+        CaptureApplyRecoveryOutcome::RolledBack
+    })
+}
+
+fn capture_apply_file_matches(
+    path: &Path,
+    expected_bytes: u64,
+    expected_hash: &str,
+    label: &str,
+) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("failed to inspect {label}")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("{label} is not a regular file; refusing recovery deletion");
+    }
+    if metadata.len() != expected_bytes {
+        bail!("{label} does not match the recovery journal; refusing recovery deletion");
+    }
+    let bytes = fs::read(path).with_context(|| format!("failed to read {label}"))?;
+    if bytes.len() as u64 != expected_bytes
+        || blake3::hash(&bytes).to_hex().as_str() != expected_hash
+    {
+        bail!("{label} does not match the recovery journal; refusing recovery deletion");
+    }
+    Ok(true)
+}
+
+fn remove_capture_apply_file_if_matching(
+    path: &Path,
+    expected_bytes: u64,
+    expected_hash: &str,
+    label: &str,
+) -> Result<()> {
+    if capture_apply_file_matches(path, expected_bytes, expected_hash, label)? {
+        fs::remove_file(path).with_context(|| format!("failed to remove {label}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("failed to sync directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 pub fn scan_file_proposal_inventory(paths: &MemoryPaths) -> Result<FileProposalInventory> {
@@ -3385,6 +4194,120 @@ fn record_tags(conn: &Connection, record_id: &str) -> Result<Vec<String>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn capture_provenance(
+    plan: &CapturePlan,
+    review: &CaptureReview,
+    decision: &crate::CaptureReviewDecision,
+    candidate: &crate::CaptureCandidate,
+    actor: &str,
+) -> CaptureProvenance {
+    let original = plan
+        .candidates
+        .iter()
+        .find(|original| original.candidate_id == decision.candidate_id)
+        .expect("validated capture review decision must name a plan candidate");
+    CaptureProvenance {
+        schema: crate::CAPTURE_PROVENANCE_SCHEMA.to_owned(),
+        plan_id: review.plan_id.clone(),
+        review_id: review.review_id.clone(),
+        claim_id: original.claim_id.clone(),
+        reviewed_claim_id: candidate.claim_id.clone(),
+        candidate_id: decision.candidate_id.clone(),
+        reviewed_candidate_id: candidate.candidate_id.clone(),
+        extraction: candidate.extraction.clone(),
+        evidence: candidate.evidence.clone(),
+        confidence: candidate.confidence.to_string(),
+        classification: candidate.classification.clone(),
+        destination: candidate.classification.destination,
+        sensitivity: candidate.classification.sensitivity,
+        review_outcome: decision.outcome,
+        review_reason_code: decision.reason_code.clone(),
+        reviewed_by: review.reviewed_by.clone(),
+        reviewed_at: review.reviewed_at.clone(),
+        routed_by: actor.to_owned(),
+    }
+}
+
+fn create_capture_runtime_with_conn(
+    conn: &Connection,
+    actor: &str,
+    candidate: &crate::CaptureCandidate,
+    destination: MemoryDestination,
+    now: &str,
+    provenance: CaptureProvenance,
+) -> Result<MemoryRecord> {
+    if !matches!(
+        destination,
+        MemoryDestination::Local | MemoryDestination::Session
+    ) {
+        bail!("capture runtime writes require local or session destination");
+    }
+    let prefix = match destination {
+        MemoryDestination::Local => "local",
+        MemoryDestination::Session => "session",
+        _ => unreachable!("destination is checked above"),
+    };
+    let record = MemoryRecord {
+        id: next_prefixed_record_id(conn, prefix, &candidate.memory.title)?,
+        memory_type: candidate.memory.memory_type,
+        lane: candidate.memory.lane,
+        destination,
+        scope_kind: candidate.memory.scope.kind,
+        scope_id: candidate.memory.scope.id.clone(),
+        visibility: Visibility::Private,
+        title: candidate.memory.title.trim().to_owned(),
+        body: candidate.memory.body.trim().to_owned(),
+        status: MemoryStatus::Active,
+        confidence: candidate.confidence,
+        source_kind: Some("memzoi-capture".to_owned()),
+        source_ref: candidate
+            .evidence
+            .first()
+            .map(|evidence| evidence.locator.path().to_owned()),
+        proposal_id: None,
+        capture: Some(provenance),
+        content_hash: crate::import::content_hash(&candidate.memory.body),
+        created_at: now.to_owned(),
+        updated_at: now.to_owned(),
+        supersedes_id: None,
+        expires_at: None,
+    };
+    insert_memory_record_row(conn, &record, InsertMode::Create)?;
+    for tag in &candidate.memory.tags {
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_tag(record_id, tag) VALUES (?1, ?2)",
+            rusqlite::params![record.id, tag],
+        )?;
+    }
+    for (index, path) in candidate.memory.scope.paths.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO memory_path(id, record_id, path, line_start, line_end)
+             VALUES (?1, ?2, ?3, NULL, NULL)",
+            rusqlite::params![
+                format!("{}_capture_path_{index}", record.id),
+                record.id,
+                path
+            ],
+        )?;
+    }
+    append_event(
+        conn,
+        AppendEvent {
+            event_type: "memory.capture_routed".to_owned(),
+            actor: actor.to_owned(),
+            payload: json!({
+                "record_id": &record.id,
+                "destination": destination.as_str(),
+                "plan_id": &record.capture.as_ref().expect("capture provenance").plan_id,
+                "review_id": &record.capture.as_ref().expect("capture provenance").review_id,
+            }),
+            record_id: Some(record.id.clone()),
+            proposal_id: None,
+        },
+    )?;
+    Ok(record)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InsertMode {
     Create,
@@ -3415,6 +4338,7 @@ fn create_local_memory_with_conn(
         source_kind: Some("memzoi-local".to_owned()),
         source_ref: None,
         proposal_id: None,
+        capture: None,
         content_hash: blake3::hash(input.body.trim().as_bytes())
             .to_hex()
             .to_string(),
@@ -3465,6 +4389,7 @@ fn create_checkpoint_with_conn(
         source_kind: Some("memzoi-checkpoint".to_owned()),
         source_ref: None,
         proposal_id: None,
+        capture: None,
         content_hash: blake3::hash(input.note.trim().as_bytes())
             .to_hex()
             .to_string(),
@@ -3575,6 +4500,7 @@ fn insert_memory_record_row(
             &record.expires_at,
         ],
     )?;
+    crate::capture::store_capture_provenance(conn, &record.id, record.capture.as_ref())?;
     Ok(())
 }
 
@@ -3592,7 +4518,10 @@ fn indexed_active_records_for_destination(
          ORDER BY updated_at DESC, id ASC",
     )?;
     let rows = stmt.query_map([destination.as_str()], search::record_from_row)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    load_capture_provenance_for_records(conn, &mut records)?;
+    Ok(records)
 }
 
 fn active_records_for_destination(
@@ -3614,7 +4543,10 @@ fn active_records_for_destination(
         rusqlite::params![destination.as_str(), expiry::format_timestamp(now)?],
         search::record_from_row,
     )?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    load_capture_provenance_for_records(conn, &mut records)?;
+    Ok(records)
 }
 
 fn active_checkpoint_records(conn: &Connection, now: OffsetDateTime) -> Result<Vec<MemoryRecord>> {
@@ -3665,9 +4597,25 @@ fn record_by_id(conn: &Connection, record_id: &str) -> Result<Option<MemoryRecor
          FROM memory_record
          WHERE id = ?1",
     )?;
-    stmt.query_row([record_id], search::record_from_row)
+    let mut record = stmt
+        .query_row([record_id], search::record_from_row)
         .optional()
-        .map_err(Into::into)
+        .map_err(anyhow::Error::from)?;
+    drop(stmt);
+    if let Some(record) = &mut record {
+        record.capture = crate::capture::load_capture_provenance(conn, &record.id)?;
+    }
+    Ok(record)
+}
+
+fn load_capture_provenance_for_records(
+    conn: &Connection,
+    records: &mut [MemoryRecord],
+) -> Result<()> {
+    for record in records {
+        record.capture = crate::capture::load_capture_provenance(conn, &record.id)?;
+    }
+    Ok(())
 }
 
 fn records_for_runtime_preservation(conn: &Connection) -> Result<Vec<MemoryRecord>> {
@@ -3680,10 +4628,55 @@ fn records_for_runtime_preservation(conn: &Connection) -> Result<Vec<MemoryRecor
          ORDER BY updated_at DESC, id ASC",
     )?;
     let rows = stmt.query_map([], search::record_from_row)?;
+    let mut records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    load_capture_provenance_for_records(conn, &mut records)?;
+    Ok(records)
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeRecordPreservation {
+    record: MemoryRecord,
+    tags: Vec<String>,
+    paths: Vec<MemoryPath>,
+}
+
+fn runtime_records_for_rebuild_preservation(
+    conn: &Connection,
+) -> Result<Vec<RuntimeRecordPreservation>> {
+    records_for_runtime_preservation(conn)?
+        .into_iter()
+        .map(|record| {
+            let tags = record_tags(conn, &record.id)?;
+            let paths = runtime_record_paths(conn, &record.id)?;
+            Ok(RuntimeRecordPreservation {
+                record,
+                tags,
+                paths,
+            })
+        })
+        .collect()
+}
+
+fn runtime_record_paths(conn: &Connection, record_id: &str) -> Result<Vec<MemoryPath>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, symbol, line_start, line_end
+         FROM memory_path
+         WHERE record_id = ?1
+         ORDER BY path ASC, COALESCE(symbol, '') ASC, COALESCE(line_start, 0) ASC",
+    )?;
+    let rows = stmt.query_map([record_id], |row| {
+        Ok(MemoryPath {
+            path: row.get(0)?,
+            symbol: row.get(1)?,
+            line_start: row.get(2)?,
+            line_end: row.get(3)?,
+        })
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn load_runtime_records_for_rebuild(db_path: &Path) -> Result<Vec<MemoryRecord>> {
+fn load_runtime_records_for_rebuild(db_path: &Path) -> Result<Vec<RuntimeRecordPreservation>> {
     if !db_path.exists() {
         return Ok(Vec::new());
     }
@@ -3699,14 +4692,14 @@ fn load_runtime_records_for_rebuild(db_path: &Path) -> Result<Vec<MemoryRecord>>
             db_path.display()
         )
     })?;
-    records_for_runtime_preservation(&conn).context(
+    runtime_records_for_rebuild_preservation(&conn).context(
         "rebuild refused because local/session runtime memory could not be loaded for preservation",
     )
 }
 
 fn guard_no_runtime_record_id_collisions(
     records: &[okf::OkfRecordFile],
-    runtime_records: &[MemoryRecord],
+    runtime_records: &[RuntimeRecordPreservation],
 ) -> Result<()> {
     if runtime_records.is_empty() {
         return Ok(());
@@ -3718,7 +4711,8 @@ fn guard_no_runtime_record_id_collisions(
         .collect::<BTreeSet<_>>();
     let collisions = runtime_records
         .iter()
-        .filter_map(|record| {
+        .filter_map(|snapshot| {
+            let record = &snapshot.record;
             repo_ids
                 .contains(record.id.as_str())
                 .then_some(record.id.as_str())
@@ -3738,10 +4732,31 @@ fn guard_no_runtime_record_id_collisions(
 
 fn restore_runtime_records_after_rebuild(
     conn: &Connection,
-    records: &[MemoryRecord],
+    records: &[RuntimeRecordPreservation],
 ) -> Result<()> {
-    for record in records {
+    for snapshot in records {
+        let record = &snapshot.record;
         insert_memory_record_row(conn, record, InsertMode::RestoreIfAbsent)?;
+        for tag in &snapshot.tags {
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_tag(record_id, tag) VALUES (?1, ?2)",
+                rusqlite::params![record.id, tag],
+            )?;
+        }
+        for (index, path) in snapshot.paths.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO memory_path(id, record_id, path, symbol, line_start, line_end)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    format!("{}_restored_path_{index}", record.id),
+                    record.id,
+                    path.path,
+                    path.symbol,
+                    path.line_start,
+                    path.line_end,
+                ],
+            )?;
+        }
     }
     Ok(())
 }
@@ -3843,6 +4858,96 @@ mod tests {
                 .contains("another repo lifecycle operation is in progress"),
             "unexpected lock contention error: {error:#}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn open_rolls_back_uncommitted_capture_proposal_files_from_journal() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let paths = service.paths.clone();
+        let contents = b"repo-safe staged proposal\n";
+        let journal = test_capture_apply_journal("mem_capture_uncommitted", contents);
+        prepare_pending_proposal_root(&paths)?;
+        write_capture_apply_journal(&paths, &journal)?;
+        assert!(
+            !fs::read_to_string(capture_apply_journal_path(&paths))?
+                .contains("repo-safe staged proposal"),
+            "the durable journal must contain metadata and hashes, not proposal bodies"
+        );
+        let entry = &journal.entries[0];
+        let staged = capture_apply_stage_path(&paths, &journal, entry);
+        let destination = capture_apply_destination_path(&paths, entry);
+        fs::write(&staged, contents)?;
+        fs::hard_link(&staged, &destination)?;
+        drop(service);
+
+        let reopened = MemoryService::open_paths(paths.clone())?;
+
+        assert!(!destination.exists());
+        assert!(!staged.exists());
+        assert!(!capture_apply_journal_path(&paths).exists());
+        assert!(!capture_apply_commit_marker_exists(
+            &reopened.conn,
+            &journal
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn open_completes_committed_capture_install_from_retained_stage() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let paths = service.paths.clone();
+        let contents = b"repo-safe committed proposal\n";
+        let journal = test_capture_apply_journal("mem_capture_committed", contents);
+        prepare_pending_proposal_root(&paths)?;
+        write_capture_apply_journal(&paths, &journal)?;
+        let entry = &journal.entries[0];
+        let staged = capture_apply_stage_path(&paths, &journal, entry);
+        let destination = capture_apply_destination_path(&paths, entry);
+        fs::write(&staged, contents)?;
+        append_capture_apply_commit_marker(
+            &service.conn,
+            &journal,
+            "agent:recovery-test",
+            "2026-07-10T12:00:00Z",
+        )?;
+        drop(service);
+
+        let reopened = MemoryService::open_paths(paths.clone())?;
+
+        assert_eq!(fs::read(&destination)?, contents);
+        assert!(!staged.exists());
+        assert!(!capture_apply_journal_path(&paths).exists());
+        assert!(capture_apply_commit_marker_exists(
+            &reopened.conn,
+            &journal
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_preserves_mismatched_files_and_keeps_the_journal() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let paths = service.paths.clone();
+        let contents = b"repo-safe expected proposal\n";
+        let journal = test_capture_apply_journal("mem_capture_mismatch", contents);
+        prepare_pending_proposal_root(&paths)?;
+        write_capture_apply_journal(&paths, &journal)?;
+        let entry = &journal.entries[0];
+        let staged = capture_apply_stage_path(&paths, &journal, entry);
+        let destination = capture_apply_destination_path(&paths, entry);
+        fs::write(&staged, contents)?;
+        fs::write(&destination, b"user replacement\n")?;
+        drop(service);
+
+        let error = MemoryService::open_paths(paths.clone())
+            .err()
+            .context("mismatched recovery file should block startup")?;
+
+        assert!(format!("{error:#}").contains("refusing recovery deletion"));
+        assert_eq!(fs::read(&destination)?, b"user replacement\n");
+        assert_eq!(fs::read(&staged)?, contents);
+        assert!(capture_apply_journal_path(&paths).is_file());
         Ok(())
     }
 
@@ -5123,6 +6228,22 @@ mod tests {
         Ok((temp, service))
     }
 
+    fn test_capture_apply_journal(proposal_id: &str, contents: &[u8]) -> CaptureApplyJournal {
+        CaptureApplyJournal {
+            schema: CAPTURE_APPLY_JOURNAL_SCHEMA.to_owned(),
+            journal_id: Uuid::now_v7().to_string(),
+            plan_id: "capture_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            review_id: "review_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            entries: vec![CaptureApplyJournalEntry {
+                proposal_id: proposal_id.to_owned(),
+                content_bytes: contents.len() as u64,
+                content_hash: blake3::hash(contents).to_hex().to_string(),
+            }],
+        }
+    }
+
     fn apply_test_record(
         service: &MemoryService,
         draft: MemoryDraft,
@@ -5246,6 +6367,7 @@ mod tests {
                 reference: None,
             }],
             sensitivity: OkfProposalSensitivity::RepoSafe,
+            capture: None,
         };
         let plan =
             okf::plan_okf_create_proposal(&service.paths.proposals_dir().join("pending"), &draft)?;
@@ -5302,6 +6424,7 @@ mod tests {
             source_kind: Some("test-runtime".to_owned()),
             source_ref: None,
             proposal_id: None,
+            capture: None,
             content_hash: blake3::hash(b"Runtime collision sentinel")
                 .to_hex()
                 .to_string(),

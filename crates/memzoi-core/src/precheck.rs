@@ -335,6 +335,7 @@ fn warning_from_result(result: SearchResult) -> Result<PrecheckWarning> {
             source_kind: result.record.source_kind.clone(),
             source_ref: result.record.source_ref.clone(),
             path: result.paths.first().map(|path| path.path.clone()),
+            capture: result.record.capture.clone(),
         },
     };
     let suggested_next_step = match result.record.memory_type {

@@ -1,33 +1,279 @@
-use std::io::{self, BufRead, Write};
+use std::{
+    cell::OnceCell,
+    io::{self, BufRead, Write},
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    thread,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
-    ContextPackInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryService, MemoryType,
-    OkfProposalSensitivity, PrecheckInput, Proposal, ProposalApprovalOverride, ProposeOptions,
-    ScopeKind, SearchInput, Visibility,
+    CaptureDataClass, CapturePlanningControl, CaptureRequest, ContextPackInput, MemoryDestination,
+    MemoryDraft, MemoryLane, MemoryPaths, MemoryService, MemoryType, OkfProposalSensitivity,
+    PrecheckInput, Proposal, ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput,
+    Visibility, plan_capture, plan_capture_with_control,
 };
 use serde_json::{Value, json};
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
+const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "memzoi";
 const DEFAULT_ACTOR: &str = "mcp";
+const INVALID_CAPTURE_REQUEST: &str = "invalid memzoi/capture-request-v1 request";
+const CAPTURE_PLANNING_FAILED: &str = "capture planning failed safely";
+const PRIVATE_CAPTURE_DENIED: &str = "private capture plans are not available to this MCP client";
+const MAX_JSONRPC_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+const JSONRPC_MESSAGE_TOO_LARGE: &str = "JSON-RPC message exceeds the 2 MiB limit";
+const JSONRPC_RESPONSE_TOO_LARGE: &str = "JSON-RPC response exceeds the 2 MiB limit";
+const CAPTURE_PLANNING_TIMEOUT: Duration = Duration::from_secs(60);
+const CAPTURE_TERMINATION_GRACE: Duration = Duration::from_secs(2);
+const CAPTURE_CANCELLED: &str = "capture planning cancelled";
+const CAPTURE_TIMED_OUT: &str = "capture planning timed out";
+const CAPTURE_BUSY: &str = "another capture plan is already running";
+const CAPTURE_TERMINATION_FAILED: &str =
+    "capture planner did not terminate within the cancellation grace period";
+const STDIO_INPUT_CAPACITY: usize = 16;
+const MAX_JSONRPC_ID_BYTES: usize = 256;
+const INVALID_JSONRPC_ID: &str = "JSON-RPC id must be a number or at most 256 UTF-8 bytes";
+const STDOUT_QUEUE_CAPACITY: usize = 4;
+const STDOUT_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 
-pub(crate) fn serve_stdio(service: MemoryService) -> Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout().lock();
+pub(crate) struct ProtocolState {
+    paths: MemoryPaths,
+    service: OnceCell<MemoryService>,
+}
 
-    for line in stdin.lock().lines() {
-        let line = line.context("failed to read stdin")?;
+impl ProtocolState {
+    pub(crate) fn new(paths: MemoryPaths) -> Self {
+        Self {
+            paths,
+            service: OnceCell::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_service(service: MemoryService) -> Self {
+        let paths = service.paths().clone();
+        let slot = OnceCell::new();
+        slot.set(service)
+            .unwrap_or_else(|_| unreachable!("new service slot must be empty"));
+        Self {
+            paths,
+            service: slot,
+        }
+    }
+
+    fn memory_service(&self) -> Result<&MemoryService> {
+        if let Some(service) = self.service.get() {
+            return Ok(service);
+        }
+
+        let service = MemoryService::open_paths(self.paths.clone()).with_context(|| {
+            format!(
+                "failed to open memory service at {}",
+                self.paths.project_root.display()
+            )
+        })?;
+        self.service
+            .set(service)
+            .map_err(|_| anyhow!("memory service was initialized concurrently"))?;
+        self.service
+            .get()
+            .ok_or_else(|| anyhow!("memory service initialization failed"))
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for ProtocolState {
+    type Target = MemoryService;
+
+    fn deref(&self) -> &Self::Target {
+        self.service
+            .get()
+            .expect("test protocol state should contain a memory service")
+    }
+}
+
+pub(crate) fn serve_stdio(state: ProtocolState) -> Result<()> {
+    let input = spawn_stdio_reader();
+    let (mut stdout, writer_finished) = spawn_stdout_writer();
+    let result = serve_event_loop(&state, &input, &mut stdout, CAPTURE_PLANNING_TIMEOUT);
+    drop(stdout);
+    let writer_result = writer_finished.recv_timeout(CAPTURE_TERMINATION_GRACE);
+    match (result, writer_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Ok(Ok(()))) => Ok(()),
+        (Ok(()), Ok(Err(error))) => bail!("stdout writer failed: {error}"),
+        (Ok(()), Err(RecvTimeoutError::Timeout)) => {
+            bail!("stdout writer did not terminate within the bounded grace period")
+        }
+        (Ok(()), Err(RecvTimeoutError::Disconnected)) => {
+            bail!("stdout writer stopped unexpectedly")
+        }
+    }
+}
+
+struct BoundedOutput {
+    sender: mpsc::SyncSender<Vec<u8>>,
+    pending: Vec<u8>,
+}
+
+impl Write for BoundedOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.pending.len().saturating_add(bytes.len()) > MAX_JSONRPC_MESSAGE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                JSONRPC_MESSAGE_TOO_LARGE,
+            ));
+        }
+        self.pending.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let mut message = std::mem::take(&mut self.pending);
+        let deadline = Instant::now()
+            .checked_add(STDOUT_ENQUEUE_TIMEOUT)
+            .unwrap_or_else(Instant::now);
+        loop {
+            match self.sender.try_send(message) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Full(returned)) if Instant::now() < deadline => {
+                    message = returned;
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(mpsc::TrySendError::Full(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "bounded stdout queue remained full",
+                    ));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "stdout writer stopped",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn spawn_stdout_writer() -> (BoundedOutput, Receiver<std::result::Result<(), String>>) {
+    let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(STDOUT_QUEUE_CAPACITY);
+    let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let stdout = io::stdout();
+        let mut stdout = stdout.lock();
+        let result = receiver.into_iter().try_for_each(|message| {
+            stdout
+                .write_all(&message)
+                .and_then(|_| stdout.flush())
+                .map_err(|error| error.to_string())
+        });
+        let _ = finished_sender.send(result);
+    });
+    (
+        BoundedOutput {
+            sender,
+            pending: Vec::new(),
+        },
+        finished_receiver,
+    )
+}
+
+#[derive(Debug)]
+enum InputEvent {
+    Line(String),
+    TooLarge,
+    InvalidUtf8,
+    Eof,
+    ReadError(String),
+}
+
+fn spawn_stdio_reader() -> Receiver<InputEvent> {
+    let (sender, receiver) = mpsc::sync_channel(STDIO_INPUT_CAPACITY);
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut stdin = stdin.lock();
+        loop {
+            let event = match read_bounded_line(&mut stdin) {
+                Ok(BoundedLine::Eof) => InputEvent::Eof,
+                Ok(BoundedLine::TooLarge) => InputEvent::TooLarge,
+                Ok(BoundedLine::Line(line)) => match String::from_utf8(line) {
+                    Ok(line) => InputEvent::Line(line),
+                    Err(_) => InputEvent::InvalidUtf8,
+                },
+                Err(error) => InputEvent::ReadError(error.to_string()),
+            };
+            let finished = matches!(event, InputEvent::Eof | InputEvent::ReadError(_));
+            if sender.send(event).is_err() || finished {
+                break;
+            }
+        }
+    });
+    receiver
+}
+
+fn serve_event_loop(
+    state: &ProtocolState,
+    input: &Receiver<InputEvent>,
+    mut output: impl Write,
+    capture_timeout: Duration,
+) -> Result<()> {
+    loop {
+        let event = input.recv().context("stdin reader stopped unexpectedly")?;
+        let line = match event {
+            InputEvent::Eof => break,
+            InputEvent::ReadError(error) => bail!("failed to read stdin: {error}"),
+            InputEvent::TooLarge => {
+                write_json_line(
+                    &mut output,
+                    &jsonrpc_error(Value::Null, -32600, JSONRPC_MESSAGE_TOO_LARGE.to_owned()),
+                )?;
+                continue;
+            }
+            InputEvent::InvalidUtf8 => {
+                write_json_line(
+                    &mut output,
+                    &jsonrpc_error(
+                        Value::Null,
+                        -32700,
+                        "parse error: JSON-RPC input must be UTF-8".to_owned(),
+                    ),
+                )?;
+                continue;
+            }
+            InputEvent::Line(line) => line,
+        };
         if line.trim().is_empty() {
             continue;
         }
 
-        match handle_line(&service, &line) {
-            Ok(Some(response)) => write_json_line(&mut stdout, &response)?,
+        let request = match parse_jsonrpc_line(&line) {
+            Ok(request) => request,
+            Err(response) => {
+                write_protocol_response(&mut output, &response)?;
+                continue;
+            }
+        };
+        if is_capture_tool_request(&request) {
+            match wait_for_capture_request(state, request, input, &mut output, capture_timeout)? {
+                CaptureWaitEnd::Continue => {}
+                CaptureWaitEnd::Eof => break,
+                CaptureWaitEnd::ReadError(error) => bail!("failed to read stdin: {error}"),
+            }
+            continue;
+        }
+
+        match handle_message(state, request) {
+            Ok(Some(response)) => write_protocol_response(&mut output, &response)?,
             Ok(None) => {}
             Err(error) => {
                 let response = jsonrpc_error(Value::Null, -32603, error.to_string());
-                write_json_line(&mut stdout, &response)?;
+                write_protocol_response(&mut output, &response)?;
             }
         }
     }
@@ -35,8 +281,273 @@ pub(crate) fn serve_stdio(service: MemoryService) -> Result<()> {
     Ok(())
 }
 
+fn parse_jsonrpc_line(line: &str) -> std::result::Result<Value, Value> {
+    if line.len() > MAX_JSONRPC_MESSAGE_BYTES {
+        return Err(jsonrpc_error(
+            Value::Null,
+            -32600,
+            JSONRPC_MESSAGE_TOO_LARGE.to_owned(),
+        ));
+    }
+    let request = serde_json::from_str::<Value>(line)
+        .map_err(|error| jsonrpc_error(Value::Null, -32700, format!("parse error: {error}")))?;
+    if request.get("id").is_some_and(|id| !valid_jsonrpc_id(id)) {
+        return Err(jsonrpc_error(
+            Value::Null,
+            -32600,
+            INVALID_JSONRPC_ID.to_owned(),
+        ));
+    }
+    Ok(request)
+}
+
+fn valid_jsonrpc_id(id: &Value) -> bool {
+    id.is_number()
+        || id
+            .as_str()
+            .is_some_and(|value| value.len() <= MAX_JSONRPC_ID_BYTES)
+}
+
+fn is_capture_tool_request(request: &Value) -> bool {
+    request.get("id").is_some()
+        && request.get("method").and_then(Value::as_str) == Some("tools/call")
+        && request.pointer("/params/name").and_then(Value::as_str) == Some("plan_capture_v1")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CaptureWaitEnd {
+    Continue,
+    Eof,
+    ReadError(String),
+}
+
+fn wait_for_capture_request(
+    state: &ProtocolState,
+    request: Value,
+    input: &Receiver<InputEvent>,
+    mut output: impl Write,
+    timeout: Duration,
+) -> Result<CaptureWaitEnd> {
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let control = CapturePlanningControl::new(deadline);
+    let worker_control = control.clone();
+    let paths = state.paths.clone();
+    let (result_sender, result_receiver) = mpsc::sync_channel(1);
+    let mut worker = Some(thread::spawn(move || {
+        let worker_state = ProtocolState::new(paths);
+        let result = handle_message_with_control(&worker_state, request, Some(&worker_control));
+        let _ = result_sender.send(result);
+    }));
+
+    let mut terminal_sent = false;
+    let mut termination_deadline = None;
+    let mut input_end = CaptureWaitEnd::Continue;
+    loop {
+        let now = Instant::now();
+        if !terminal_sent && now >= deadline {
+            control.cancel();
+            write_protocol_response(
+                &mut output,
+                &jsonrpc_error(id.clone(), -32001, CAPTURE_TIMED_OUT.to_owned()),
+            )?;
+            terminal_sent = true;
+            termination_deadline = now.checked_add(CAPTURE_TERMINATION_GRACE);
+        }
+        if terminal_sent && termination_deadline.is_some_and(|end| now >= end) {
+            bail!(CAPTURE_TERMINATION_FAILED);
+        }
+
+        match result_receiver.try_recv() {
+            Ok(result) => {
+                worker
+                    .take()
+                    .expect("capture worker is joined once")
+                    .join()
+                    .map_err(|_| anyhow!("capture planner worker panicked"))?;
+                if !terminal_sent {
+                    match result {
+                        Ok(Some(response)) => write_protocol_response(&mut output, &response)?,
+                        Ok(None) => {}
+                        Err(error) => write_protocol_response(
+                            &mut output,
+                            &jsonrpc_error(id.clone(), -32603, error.to_string()),
+                        )?,
+                    }
+                }
+                return Ok(input_end);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                worker
+                    .take()
+                    .expect("capture worker is joined once")
+                    .join()
+                    .map_err(|_| anyhow!("capture planner worker panicked"))?;
+                if !terminal_sent {
+                    write_protocol_response(
+                        &mut output,
+                        &jsonrpc_error(id.clone(), -32603, CAPTURE_PLANNING_FAILED.to_owned()),
+                    )?;
+                }
+                return Ok(input_end);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        if input_end != CaptureWaitEnd::Continue {
+            thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        let next_wakeup = termination_deadline.unwrap_or(deadline);
+        let wait = next_wakeup
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(10));
+        match input.recv_timeout(wait) {
+            Ok(InputEvent::Line(line)) => {
+                if cancellation_targets_request(&line, &id) {
+                    if !terminal_sent {
+                        control.cancel();
+                        terminal_sent = true;
+                        termination_deadline =
+                            Instant::now().checked_add(CAPTURE_TERMINATION_GRACE);
+                    }
+                } else {
+                    reject_concurrent_input(&mut output, &line)?;
+                }
+            }
+            Ok(InputEvent::TooLarge) => write_json_line(
+                &mut output,
+                &jsonrpc_error(Value::Null, -32600, JSONRPC_MESSAGE_TOO_LARGE.to_owned()),
+            )?,
+            Ok(InputEvent::InvalidUtf8) => write_json_line(
+                &mut output,
+                &jsonrpc_error(
+                    Value::Null,
+                    -32700,
+                    "parse error: JSON-RPC input must be UTF-8".to_owned(),
+                ),
+            )?,
+            Ok(InputEvent::Eof) => {
+                control.cancel();
+                terminal_sent = true;
+                termination_deadline = Instant::now().checked_add(CAPTURE_TERMINATION_GRACE);
+                input_end = CaptureWaitEnd::Eof;
+            }
+            Ok(InputEvent::ReadError(error)) => {
+                control.cancel();
+                terminal_sent = true;
+                termination_deadline = Instant::now().checked_add(CAPTURE_TERMINATION_GRACE);
+                input_end = CaptureWaitEnd::ReadError(error);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                control.cancel();
+                terminal_sent = true;
+                termination_deadline = Instant::now().checked_add(CAPTURE_TERMINATION_GRACE);
+                input_end = CaptureWaitEnd::Eof;
+            }
+        }
+    }
+}
+
+fn cancellation_targets_request(line: &str, active_id: &Value) -> bool {
+    let Ok(request) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    request.get("method").and_then(Value::as_str) == Some("notifications/cancelled")
+        && request.pointer("/params/requestId") == Some(active_id)
+}
+
+fn reject_concurrent_input(mut output: impl Write, line: &str) -> Result<()> {
+    match parse_jsonrpc_line(line) {
+        Ok(request) => {
+            if let Some(id) = request.get("id").cloned() {
+                write_protocol_response(
+                    &mut output,
+                    &jsonrpc_error(id, -32002, CAPTURE_BUSY.to_owned()),
+                )?;
+            }
+        }
+        Err(response) => write_protocol_response(&mut output, &response)?,
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedLine {
+    Eof,
+    Line(Vec<u8>),
+    TooLarge,
+}
+
+fn read_bounded_line(reader: &mut impl BufRead) -> io::Result<BoundedLine> {
+    let mut line = Vec::new();
+    let mut too_large = false;
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if too_large {
+                Ok(BoundedLine::TooLarge)
+            } else if line.is_empty() {
+                Ok(BoundedLine::Eof)
+            } else {
+                Ok(BoundedLine::Line(line))
+            };
+        }
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        if !too_large {
+            let payload = &available[..consumed];
+            if line.len().saturating_add(payload.len()) > MAX_JSONRPC_MESSAGE_BYTES {
+                too_large = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(payload);
+            }
+        }
+        reader.consume(consumed);
+
+        if newline.is_some() {
+            return if too_large {
+                Ok(BoundedLine::TooLarge)
+            } else {
+                Ok(BoundedLine::Line(line))
+            };
+        }
+    }
+}
+
+fn write_protocol_response(mut writer: impl Write, response: &Value) -> Result<()> {
+    let encoded = serde_json::to_vec(response).context("failed to encode JSON-RPC response")?;
+    if encoded.len().saturating_add(1) <= MAX_JSONRPC_MESSAGE_BYTES {
+        return write_encoded_json_line(&mut writer, &encoded);
+    }
+
+    let id = response
+        .get("id")
+        .filter(|id| valid_jsonrpc_id(id))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let bounded_error = jsonrpc_error(id, -32603, JSONRPC_RESPONSE_TOO_LARGE.to_owned());
+    write_json_line(&mut writer, &bounded_error)
+}
+
 fn write_json_line(mut writer: impl Write, value: &Value) -> Result<()> {
-    serde_json::to_writer(&mut writer, value).context("failed to encode JSON-RPC response")?;
+    let encoded = serde_json::to_vec(value).context("failed to encode JSON-RPC response")?;
+    if encoded.len().saturating_add(1) > MAX_JSONRPC_MESSAGE_BYTES {
+        bail!(JSONRPC_MESSAGE_TOO_LARGE);
+    }
+    write_encoded_json_line(&mut writer, &encoded)
+}
+
+fn write_encoded_json_line(mut writer: impl Write, encoded: &[u8]) -> Result<()> {
+    writer
+        .write_all(encoded)
+        .context("failed to write response")?;
     writer
         .write_all(b"\n")
         .context("failed to write response")?;
@@ -44,22 +555,25 @@ fn write_json_line(mut writer: impl Write, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn handle_line(service: &MemoryService, line: &str) -> Result<Option<Value>> {
-    let request = match serde_json::from_str::<Value>(line) {
+#[cfg(test)]
+fn handle_line(state: &ProtocolState, line: &str) -> Result<Option<Value>> {
+    let request = match parse_jsonrpc_line(line) {
         Ok(request) => request,
-        Err(error) => {
-            return Ok(Some(jsonrpc_error(
-                Value::Null,
-                -32700,
-                format!("parse error: {error}"),
-            )));
-        }
+        Err(response) => return Ok(Some(response)),
     };
 
-    handle_message(service, request)
+    handle_message(state, request)
 }
 
-fn handle_message(service: &MemoryService, request: Value) -> Result<Option<Value>> {
+fn handle_message(state: &ProtocolState, request: Value) -> Result<Option<Value>> {
+    handle_message_with_control(state, request, None)
+}
+
+fn handle_message_with_control(
+    state: &ProtocolState,
+    request: Value,
+    capture_control: Option<&CapturePlanningControl>,
+) -> Result<Option<Value>> {
     let id = request.get("id").cloned();
     let method = request
         .get("method")
@@ -75,7 +589,7 @@ fn handle_message(service: &MemoryService, request: Value) -> Result<Option<Valu
         "initialize" => initialize_result(),
         "ping" => json!({}),
         "tools/list" => tools_list_result(),
-        "tools/call" => match tools_call(service, params) {
+        "tools/call" => match tools_call(state, params, capture_control) {
             Ok(result) => result,
             Err(error) => return Ok(Some(jsonrpc_error(id, -32602, error.to_string()))),
         },
@@ -96,8 +610,11 @@ fn handle_message(service: &MemoryService, request: Value) -> Result<Option<Valu
 }
 
 fn handle_notification(method: &str) {
-    if method != "notifications/initialized" {
-        eprintln!("ignoring JSON-RPC notification: {method}");
+    if !matches!(
+        method,
+        "notifications/initialized" | "notifications/cancelled"
+    ) {
+        eprintln!("ignoring unrecognized JSON-RPC notification");
     }
 }
 
@@ -160,6 +677,67 @@ fn tools_list_result() -> Value {
                         "include_session": { "type": "boolean" }
                     },
                     "required": ["task"]
+                })
+            ),
+            tool_schema(
+                "plan_capture_v1",
+                "Plan evidence-backed capture from exactly one explicit project-relative Markdown file. This tool is read-only and never applies, approves, or writes memory state.",
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "schema": {
+                            "type": "string",
+                            "const": "memzoi/capture-request-v1"
+                        },
+                        "sources": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 1,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "source_id": {
+                                        "type": "string",
+                                        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                                    },
+                                    "locator": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "properties": {
+                                            "kind": {
+                                                "type": "string",
+                                                "const": "project_path"
+                                            },
+                                            "path": {
+                                                "type": "string",
+                                                "minLength": 1
+                                            }
+                                        },
+                                        "required": ["kind", "path"]
+                                    },
+                                    "media_type": {
+                                        "type": "string",
+                                        "const": "text/markdown"
+                                    }
+                                },
+                                "required": ["source_id", "locator", "media_type"]
+                            }
+                        },
+                        "extractor": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "profile": {
+                                    "type": "string",
+                                    "const": "markdown-deterministic"
+                                }
+                            },
+                            "required": ["profile"]
+                        }
+                    },
+                    "required": ["schema", "sources", "extractor"]
                 })
             ),
             tool_schema(
@@ -240,14 +818,41 @@ fn tools_list_result() -> Value {
 }
 
 fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
-    json!({
+    let mut tool = json!({
         "name": name,
         "description": description,
         "inputSchema": input_schema,
-    })
+    });
+    if name == "plan_capture_v1" {
+        tool["outputSchema"] = json!({
+            "type": "object",
+            "properties": {
+                "schema": { "const": "memzoi/capture-plan-v1" },
+                "plan_id": { "type": "string" },
+                "status": { "enum": ["ready", "blocked"] },
+                "data_class": { "enum": ["repo_safe", "private", "blocked"] },
+                "sources": { "type": "array" },
+                "safeguards": { "type": "object" },
+                "preconditions": { "type": "object" },
+                "extractor": { "type": "object" },
+                "candidates": { "type": "array" },
+                "summary": { "type": "object" },
+                "diagnostics": { "type": "array" }
+            },
+            "required": [
+                "schema", "plan_id", "status", "data_class", "sources", "safeguards",
+                "preconditions", "extractor", "candidates", "summary", "diagnostics"
+            ]
+        });
+    }
+    tool
 }
 
-fn tools_call(service: &MemoryService, params: Value) -> Result<Value> {
+fn tools_call(
+    state: &ProtocolState,
+    params: Value,
+    capture_control: Option<&CapturePlanningControl>,
+) -> Result<Value> {
     let name = required_str(&params, "name")?;
     let arguments = params
         .get("arguments")
@@ -256,17 +861,26 @@ fn tools_call(service: &MemoryService, params: Value) -> Result<Value> {
 
     let structured = match name {
         "search_memory" => json!({
-            "records": service.search_memory(search_input(&arguments)?)?,
+            "records": state.memory_service()?.search_memory(search_input(&arguments)?)?,
         }),
-        "inspect_memory_expiry" => {
-            serde_json::to_value(service.inspect_expiry(required_str(&arguments, "record_id")?)?)?
-        }
-        "build_context_pack" => {
-            serde_json::to_value(service.build_context_pack(context_input(&arguments)?)?)?
-        }
-        "propose_memory" => propose_memory_output(service, &arguments)?,
+        "inspect_memory_expiry" => serde_json::to_value(
+            state
+                .memory_service()?
+                .inspect_expiry(required_str(&arguments, "record_id")?)?,
+        )?,
+        "build_context_pack" => serde_json::to_value(
+            state
+                .memory_service()?
+                .build_context_pack(context_input(&arguments)?)?,
+        )?,
+        "plan_capture_v1" => match plan_capture_output(state, &arguments, capture_control) {
+            Ok(plan) => plan,
+            Err(error) if error.to_string() == INVALID_CAPTURE_REQUEST => return Err(error),
+            Err(error) => return Ok(tool_error_result(&error.to_string())),
+        },
+        "propose_memory" => propose_memory_output(state.memory_service()?, &arguments)?,
         "precheck_path" => json!({
-            "warnings": service.precheck(PrecheckInput {
+            "warnings": state.memory_service()?.precheck(PrecheckInput {
                 path: Some(required_str(&arguments, "path")?.to_owned()),
                 action: None,
                 command: None,
@@ -274,7 +888,7 @@ fn tools_call(service: &MemoryService, params: Value) -> Result<Value> {
             })?,
         }),
         "precheck_action" => json!({
-            "warnings": service.precheck(PrecheckInput {
+            "warnings": state.memory_service()?.precheck(PrecheckInput {
                 path: optional_string(&arguments, "path"),
                 action: Some(required_str(&arguments, "action")?.to_owned()),
                 command: None,
@@ -282,7 +896,7 @@ fn tools_call(service: &MemoryService, params: Value) -> Result<Value> {
             })?,
         }),
         "precheck_command" => json!({
-            "warnings": service.precheck(PrecheckInput {
+            "warnings": state.memory_service()?.precheck(PrecheckInput {
                 path: optional_string(&arguments, "path"),
                 action: None,
                 command: Some(required_str(&arguments, "command")?.to_owned()),
@@ -292,7 +906,11 @@ fn tools_call(service: &MemoryService, params: Value) -> Result<Value> {
         _ => bail!("unknown tool: {name}"),
     };
 
-    let text = serde_json::to_string_pretty(&structured)?;
+    let text = if name == "plan_capture_v1" {
+        capture_text_content(&structured)?
+    } else {
+        serde_json::to_string_pretty(&structured)?
+    };
     Ok(json!({
         "content": [
             {
@@ -303,6 +921,70 @@ fn tools_call(service: &MemoryService, params: Value) -> Result<Value> {
         "structuredContent": structured,
         "isError": false,
     }))
+}
+
+fn capture_text_content(structured: &Value) -> Result<String> {
+    let full = serde_json::to_string(structured)?;
+    let trial = json!({
+        "content": [{ "type": "text", "text": &full }],
+        "structuredContent": structured,
+        "isError": false,
+    });
+    if serde_json::to_vec(&trial)?.len().saturating_add(1024) <= MAX_JSONRPC_MESSAGE_BYTES {
+        return Ok(full);
+    }
+    serde_json::to_string(&json!({
+        "schema": structured.get("schema"),
+        "plan_id": structured.get("plan_id"),
+        "status": structured.get("status"),
+        "data_class": structured.get("data_class"),
+        "message": "Full capture plan is available in structuredContent"
+    }))
+    .map_err(Into::into)
+}
+
+fn tool_error_result(message: &str) -> Value {
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": message,
+            }
+        ],
+        "isError": true,
+    })
+}
+
+fn plan_capture_output(
+    state: &ProtocolState,
+    arguments: &Value,
+    control: Option<&CapturePlanningControl>,
+) -> Result<Value> {
+    let request = serde_json::from_value::<CaptureRequest>(arguments.clone())
+        .map_err(|_| anyhow!(INVALID_CAPTURE_REQUEST))?;
+    let plan = match control {
+        Some(control) => plan_capture_with_control(&state.paths, request, control),
+        None => plan_capture(&state.paths, request),
+    }
+    .map_err(|error| {
+        if control.is_some_and(CapturePlanningControl::is_cancelled) {
+            anyhow!(CAPTURE_CANCELLED)
+        } else if control.is_some_and(|control| Instant::now() >= control.deadline()) {
+            anyhow!(CAPTURE_TIMED_OUT)
+        } else {
+            let _ = error;
+            anyhow!(CAPTURE_PLANNING_FAILED)
+        }
+    })?;
+    ensure_capture_data_class(&plan.data_class)?;
+    serde_json::to_value(plan).map_err(|_| anyhow!(CAPTURE_PLANNING_FAILED))
+}
+
+fn ensure_capture_data_class(data_class: &CaptureDataClass) -> Result<()> {
+    if data_class == &CaptureDataClass::Private {
+        bail!(PRIVATE_CAPTURE_DENIED);
+    }
+    Ok(())
 }
 
 fn search_input(arguments: &Value) -> Result<SearchInput> {
@@ -513,7 +1195,12 @@ fn jsonrpc_error(id: Value, code: i64, message: String) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, fs};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        io::Cursor,
+        path::{Path, PathBuf},
+    };
 
     use memzoi_core::InitRequest;
     use serde_json::{Value, json};
@@ -521,15 +1208,25 @@ mod tests {
 
     use super::*;
 
-    fn test_service() -> (TempDir, MemoryService) {
+    fn test_service() -> (TempDir, ProtocolState) {
         let temp = TempDir::new().unwrap();
         MemoryService::initialize(temp.path(), InitRequest { force: false }).unwrap();
         let service = MemoryService::open(temp.path()).unwrap();
-        (temp, service)
+        (temp, ProtocolState::from_service(service))
     }
 
-    fn response(service: &MemoryService, request: Value) -> Value {
-        handle_message(service, request)
+    fn capture_test_state() -> (TempDir, ProtocolState) {
+        let temp = TempDir::new().unwrap();
+        let project_root = temp.path().join("repo");
+        fs::create_dir(&project_root).unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        let paths = MemoryPaths::with_runtime_home(project_root, temp.path().join("runtime-home"));
+        MemoryService::initialize_paths(paths.clone(), InitRequest { force: false }).unwrap();
+        (temp, ProtocolState::new(paths))
+    }
+
+    fn response(state: &ProtocolState, request: Value) -> Value {
+        handle_message(state, request)
             .unwrap()
             .expect("request should produce a JSON-RPC response")
     }
@@ -548,6 +1245,148 @@ mod tests {
             source_ref: Some("mcp-smoke".to_owned()),
             sensitivity: OkfProposalSensitivity::RepoSafe,
             confidence: 1.0,
+        }
+    }
+
+    fn capture_arguments(path: &str) -> Value {
+        json!({
+            "schema": "memzoi/capture-request-v1",
+            "sources": [
+                {
+                    "source_id": "mcp-source",
+                    "locator": {
+                        "kind": "project_path",
+                        "path": path
+                    },
+                    "media_type": "text/markdown"
+                }
+            ],
+            "extractor": {
+                "profile": "markdown-deterministic"
+            }
+        })
+    }
+
+    fn capture_response(state: &ProtocolState, id: &str, arguments: Value) -> Value {
+        response(
+            state,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "plan_capture_v1",
+                    "arguments": arguments
+                }
+            }),
+        )
+    }
+
+    fn managed_state_snapshot(state: &ProtocolState) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut snapshot = BTreeMap::new();
+        snapshot_tree(&state.paths.memory_dir, Path::new("repo"), &mut snapshot);
+        snapshot_tree(
+            &state.paths.runtime_dir,
+            Path::new("runtime"),
+            &mut snapshot,
+        );
+        snapshot
+    }
+
+    fn assert_managed_state_unchanged(
+        before: &BTreeMap<PathBuf, Vec<u8>>,
+        after: &BTreeMap<PathBuf, Vec<u8>>,
+        context: &str,
+    ) {
+        let keys = before
+            .keys()
+            .chain(after.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let differences = keys
+            .into_iter()
+            .filter_map(|key| match (before.get(&key), after.get(&key)) {
+                (Some(left), Some(right)) if left == right => None,
+                (Some(left), Some(right)) => Some(format!(
+                    "{} changed ({} bytes -> {} bytes)",
+                    key.display(),
+                    left.len(),
+                    right.len()
+                )),
+                (Some(left), None) => Some(format!(
+                    "{} was removed ({} bytes)",
+                    key.display(),
+                    left.len()
+                )),
+                (None, Some(right)) => Some(format!(
+                    "{} was created ({} bytes)",
+                    key.display(),
+                    right.len()
+                )),
+                (None, None) => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            differences.is_empty(),
+            "{context}: {}",
+            differences.join(", ")
+        );
+    }
+
+    fn snapshot_tree(root: &Path, label: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        if !root.exists() {
+            return;
+        }
+        snapshot.insert(label.to_path_buf(), b"directory".to_vec());
+        snapshot_tree_entries(root, root, label, snapshot);
+    }
+
+    fn snapshot_tree_entries(
+        root: &Path,
+        directory: &Path,
+        label: &Path,
+        snapshot: &mut BTreeMap<PathBuf, Vec<u8>>,
+    ) {
+        let mut entries = fs::read_dir(directory)
+            .unwrap_or_else(|error| panic!("read managed state {}: {error}", directory.display()))
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap_or_else(|error| {
+                panic!("collect managed state {}: {error}", directory.display())
+            });
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("managed state entry should be beneath snapshot root");
+            let key = label.join(relative);
+            let metadata = fs::symlink_metadata(&path).unwrap_or_else(|error| {
+                panic!("inspect managed state {}: {error}", path.display())
+            });
+            if metadata.is_dir() {
+                snapshot.insert(key, b"directory".to_vec());
+                snapshot_tree_entries(root, &path, label, snapshot);
+            } else if metadata.is_file() {
+                let mut value = b"file\0".to_vec();
+                value.extend(fs::read(&path).unwrap_or_else(|error| {
+                    panic!("read managed state {}: {error}", path.display())
+                }));
+                snapshot.insert(key, value);
+            } else if metadata.file_type().is_symlink() {
+                let mut value = b"symlink\0".to_vec();
+                value.extend(
+                    fs::read_link(&path)
+                        .unwrap_or_else(|error| {
+                            panic!("read managed symlink {}: {error}", path.display())
+                        })
+                        .as_os_str()
+                        .as_encoded_bytes(),
+                );
+                snapshot.insert(key, value);
+            } else {
+                snapshot.insert(key, b"special".to_vec());
+            }
         }
     }
 
@@ -593,6 +1432,230 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_notification_returns_no_response_without_opening_service() {
+        let (_temp, state) = capture_test_state();
+
+        let response = handle_message(
+            &state,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": "capture-1", "reason": "client stopped waiting" }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(response, None);
+        assert!(state.service.get().is_none());
+    }
+
+    #[test]
+    fn in_flight_capture_can_be_cancelled_without_mutation() {
+        let (_temp, state) = capture_test_state();
+        let source_path = "cancel-capture.md";
+        fs::write(
+            state.paths.project_root.join(source_path),
+            format!(
+                "# Fact: Cancelled capture\n{}\n",
+                "bounded-cancellation-body ".repeat(35_000)
+            ),
+        )
+        .unwrap();
+        let before = managed_state_snapshot(&state);
+        let (sender, receiver) = mpsc::sync_channel(4);
+        sender
+            .send(InputEvent::Line(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "cancel-active",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "plan_capture_v1",
+                        "arguments": capture_arguments(source_path)
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        sender
+            .send(InputEvent::Line(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": { "requestId": "cancel-active" }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        sender.send(InputEvent::Eof).unwrap();
+        drop(sender);
+        let mut output = Vec::new();
+
+        serve_event_loop(&state, &receiver, &mut output, CAPTURE_PLANNING_TIMEOUT).unwrap();
+
+        assert!(
+            output.is_empty(),
+            "cancelled request must not produce a response"
+        );
+        assert!(state.service.get().is_none());
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "cancelled MCP capture mutated state");
+    }
+
+    #[test]
+    fn capture_timeout_returns_a_bounded_error_without_mutation() {
+        let (_temp, state) = capture_test_state();
+        let source_path = "timeout-capture.md";
+        fs::write(
+            state.paths.project_root.join(source_path),
+            "# Fact: Timeout capture\nThis plan must not outlive its deadline.\n",
+        )
+        .unwrap();
+        let before = managed_state_snapshot(&state);
+        let (sender, receiver) = mpsc::sync_channel(2);
+        sender
+            .send(InputEvent::Line(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "timeout-active",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "plan_capture_v1",
+                        "arguments": capture_arguments(source_path)
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        sender.send(InputEvent::Eof).unwrap();
+        drop(sender);
+        let mut output = Vec::new();
+
+        serve_event_loop(&state, &receiver, &mut output, Duration::ZERO).unwrap();
+
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["id"], "timeout-active");
+        assert_eq!(response["error"]["code"], -32001);
+        assert_eq!(response["error"]["message"], CAPTURE_TIMED_OUT);
+        assert!(state.service.get().is_none());
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "timed-out MCP capture mutated state");
+    }
+
+    #[test]
+    fn bounded_line_reader_discards_an_oversized_message_and_resumes() {
+        let mut input = vec![b'x'; MAX_JSONRPC_MESSAGE_BYTES + 1];
+        input.extend_from_slice(b"\n{}\n");
+        let mut input = Cursor::new(input);
+
+        assert_eq!(
+            read_bounded_line(&mut input).unwrap(),
+            BoundedLine::TooLarge
+        );
+        assert_eq!(
+            read_bounded_line(&mut input).unwrap(),
+            BoundedLine::Line(b"{}\n".to_vec())
+        );
+        assert_eq!(read_bounded_line(&mut input).unwrap(), BoundedLine::Eof);
+    }
+
+    #[test]
+    fn bounded_output_preserves_a_healthy_burst_with_backpressure() {
+        let (sender, receiver) = mpsc::sync_channel(STDOUT_QUEUE_CAPACITY);
+        let consumer = thread::spawn(move || receiver.into_iter().collect::<Vec<Vec<u8>>>());
+        let mut output = BoundedOutput {
+            sender,
+            pending: Vec::new(),
+        };
+
+        for index in 0..100 {
+            writeln!(&mut output, "response-{index}").unwrap();
+            output.flush().unwrap();
+        }
+        drop(output);
+
+        let messages = consumer.join().unwrap();
+        assert_eq!(messages.len(), 100);
+        assert_eq!(messages[0], b"response-0\n");
+        assert_eq!(messages[99], b"response-99\n");
+    }
+
+    #[test]
+    fn oversized_jsonrpc_message_is_rejected_without_opening_service() {
+        let (_temp, state) = capture_test_state();
+        let line = "x".repeat(MAX_JSONRPC_MESSAGE_BYTES + 1);
+
+        let response = handle_line(&state, &line)
+            .unwrap()
+            .expect("oversized request should produce an error response");
+
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response["error"]["message"], JSONRPC_MESSAGE_TOO_LARGE);
+        assert!(state.service.get().is_none());
+    }
+
+    #[test]
+    fn oversized_request_id_is_rejected_with_a_small_null_id_error() {
+        let (_temp, state) = capture_test_state();
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": "i".repeat(MAX_JSONRPC_ID_BYTES + 1),
+            "method": "tools/list"
+        })
+        .to_string();
+
+        let response = handle_line(&state, &line)
+            .unwrap()
+            .expect("invalid id should produce an error response");
+
+        assert_eq!(response["id"], Value::Null);
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response["error"]["message"], INVALID_JSONRPC_ID);
+        assert!(serde_json::to_vec(&response).unwrap().len() < 1024);
+        assert!(state.service.get().is_none());
+    }
+
+    #[test]
+    fn oversized_response_becomes_a_small_correlated_jsonrpc_error() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": "large-capture",
+            "result": { "content": "x".repeat(MAX_JSONRPC_MESSAGE_BYTES) }
+        });
+        let mut output = Vec::new();
+
+        write_protocol_response(&mut output, &response).unwrap();
+
+        assert!(output.len() < 1024);
+        let rendered: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(rendered["id"], "large-capture");
+        assert_eq!(rendered["error"]["code"], -32603);
+        assert_eq!(rendered["error"]["message"], JSONRPC_RESPONSE_TOO_LARGE);
+    }
+
+    #[test]
+    fn protocol_discovery_does_not_open_mutable_memory_state() {
+        let (_temp, state) = capture_test_state();
+
+        for method in ["initialize", "tools/list"] {
+            let response = response(
+                &state,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": method,
+                    "method": method,
+                    "params": {}
+                }),
+            );
+            assert!(response.get("result").is_some());
+            assert!(
+                state.service.get().is_none(),
+                "{method} must not initialize mutable runtime state"
+            );
+        }
+    }
+
+    #[test]
     fn ping_returns_empty_result() {
         let (_temp, service) = test_service();
 
@@ -632,6 +1695,7 @@ mod tests {
             "search_memory",
             "inspect_memory_expiry",
             "build_context_pack",
+            "plan_capture_v1",
             "propose_memory",
             "precheck_path",
             "precheck_action",
@@ -652,6 +1716,255 @@ mod tests {
         let properties = &context_tool["inputSchema"]["properties"];
         assert_eq!(properties["include_local"]["type"], "boolean");
         assert_eq!(properties["include_session"]["type"], "boolean");
+
+        let capture_tool = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("plan_capture_v1"))
+            .unwrap_or_else(|| panic!("plan_capture_v1 tool should be exposed: {tools:?}"));
+        let schema = &capture_tool["inputSchema"];
+        assert_eq!(
+            capture_tool["outputSchema"]["properties"]["schema"]["const"],
+            "memzoi/capture-plan-v1"
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["required"],
+            json!(["schema", "sources", "extractor"])
+        );
+        assert_eq!(
+            schema["properties"]["schema"]["const"],
+            "memzoi/capture-request-v1"
+        );
+        let sources = &schema["properties"]["sources"];
+        assert_eq!(sources["minItems"], 1);
+        assert_eq!(sources["maxItems"], 1);
+        assert_eq!(sources["items"]["additionalProperties"], false);
+        assert_eq!(
+            sources["items"]["properties"]["locator"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            sources["items"]["properties"]["locator"]["properties"]["kind"]["const"],
+            "project_path"
+        );
+        assert_eq!(
+            sources["items"]["properties"]["media_type"]["const"],
+            "text/markdown"
+        );
+        assert_eq!(
+            schema["properties"]["extractor"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            schema["properties"]["extractor"]["properties"]["profile"]["const"],
+            "markdown-deterministic"
+        );
+    }
+
+    #[test]
+    fn capture_tool_rejects_mutation_like_and_unknown_arguments_without_opening_service() {
+        let (_temp, state) = capture_test_state();
+
+        for field in ["apply", "auto_apply", "approve", "review", "output_path"] {
+            let mut arguments = capture_arguments("missing.md");
+            arguments[field] = json!(true);
+
+            let response = capture_response(&state, field, arguments);
+
+            assert_eq!(response["error"]["code"], -32602);
+            assert_eq!(response["error"]["message"], INVALID_CAPTURE_REQUEST);
+            assert!(
+                state.service.get().is_none(),
+                "rejected capture arguments must not open mutable memory state"
+            );
+        }
+
+        let mut nested_extra = capture_arguments("missing.md");
+        nested_extra["sources"][0]["locator"]["url"] = json!("https://example.invalid/private");
+        let response = capture_response(&state, "nested-extra", nested_extra);
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(response["error"]["message"], INVALID_CAPTURE_REQUEST);
+        assert!(
+            !serde_json::to_string(&response)
+                .unwrap()
+                .contains("example.invalid")
+        );
+        assert!(state.service.get().is_none());
+    }
+
+    #[test]
+    fn capture_tool_denies_private_plans_with_a_constant_safe_error() {
+        let error = ensure_capture_data_class(&CaptureDataClass::Private).unwrap_err();
+        assert_eq!(error.to_string(), PRIVATE_CAPTURE_DENIED);
+    }
+
+    #[test]
+    fn capture_tool_matches_core_plan_and_leaves_managed_state_unchanged() {
+        let (_temp, state) = capture_test_state();
+        let source_path = "notes.md";
+        fs::write(
+            state.paths.project_root.join(source_path),
+            "# Notes\n\n## Decision: Use signed sessions\n\nUse server-verified signed sessions.\n",
+        )
+        .unwrap();
+        let arguments = capture_arguments(source_path);
+        let before = managed_state_snapshot(&state);
+
+        let response = capture_response(&state, "capture-parity", arguments.clone());
+
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "MCP capture planning mutated state");
+        assert!(
+            state.service.get().is_none(),
+            "capture planning must not open the mutable MemoryService"
+        );
+        let result = &response["result"];
+        assert_eq!(result["isError"], false);
+        let structured = &result["structuredContent"];
+        assert_eq!(structured["schema"], "memzoi/capture-plan-v1");
+        assert_eq!(structured["status"], "ready");
+        assert_eq!(structured["data_class"], "repo_safe");
+        assert!(
+            structured["plan_id"]
+                .as_str()
+                .is_some_and(|plan_id| plan_id.starts_with("capture_"))
+        );
+        assert_eq!(structured["candidates"][0]["memory"]["type"], "decision");
+        assert_eq!(
+            structured["candidates"][0]["evidence"][0]["locator"]["kind"],
+            "project_path"
+        );
+        assert_eq!(
+            structured["candidates"][0]["classification"]["sensitivity"],
+            "repo-safe"
+        );
+        assert_eq!(structured["summary"]["duplicates"], 0);
+        assert_eq!(structured["summary"]["conflicts"], 0);
+        assert!(structured["safeguards"].is_object());
+
+        let request = serde_json::from_value::<CaptureRequest>(arguments).unwrap();
+        let expected = plan_capture(&state.paths, request).unwrap();
+        assert_eq!(structured, &serde_json::to_value(expected).unwrap());
+        let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+            .expect("MCP capture text should encode the versioned plan");
+        assert_eq!(text, *structured);
+    }
+
+    #[test]
+    fn maximum_candidate_plan_fits_the_bounded_mcp_response_without_duplication() {
+        let (_temp, state) = capture_test_state();
+        let source_path = "large-plan.md";
+        let mut markdown = String::new();
+        for index in 0..100 {
+            markdown.push_str(&format!("## Fact: Escaped fact {index}\n"));
+            markdown.push_str(&"\\".repeat(2_400));
+            markdown.push_str("\n\n");
+        }
+        assert!(markdown.len() < memzoi_core::CAPTURE_MAX_SOURCE_BYTES);
+        fs::write(state.paths.project_root.join(source_path), markdown).unwrap();
+        let before = managed_state_snapshot(&state);
+
+        let response =
+            capture_response(&state, "large-capture-plan", capture_arguments(source_path));
+        let mut encoded = Vec::new();
+        write_protocol_response(&mut encoded, &response).unwrap();
+
+        assert!(encoded.len() <= MAX_JSONRPC_MESSAGE_BYTES + 1);
+        let decoded: Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.get("error").is_none(), "{decoded}");
+        assert_eq!(
+            decoded["result"]["structuredContent"]["candidates"]
+                .as_array()
+                .map(Vec::len),
+            Some(100)
+        );
+        assert!(
+            decoded["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.len() < 1024)
+        );
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "large MCP capture mutated state");
+        assert!(state.service.get().is_none());
+    }
+
+    #[test]
+    fn capture_tool_withholds_private_plan_content_without_mutation() {
+        let (_temp, state) = capture_test_state();
+        let source_path = "preferences.md";
+        let private_sentinel = "PRIVATE-MCP-CAPTURE-SENTINEL";
+        fs::write(
+            state.paths.project_root.join(source_path),
+            format!(
+                "# Preferences\n\n## Preference: Keep this local\n\n{private_sentinel} belongs only in local memory.\n"
+            ),
+        )
+        .unwrap();
+        let before = managed_state_snapshot(&state);
+
+        let response = capture_response(&state, "capture-private", capture_arguments(source_path));
+
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "private MCP capture mutated state");
+        assert!(state.service.get().is_none());
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            PRIVATE_CAPTURE_DENIED
+        );
+        let rendered = serde_json::to_string(&response).unwrap();
+        assert!(
+            !rendered.contains(private_sentinel),
+            "private plan content leaked through MCP: {rendered}"
+        );
+        assert!(
+            !rendered.contains(source_path),
+            "private plan locator leaked through MCP: {rendered}"
+        );
+    }
+
+    #[test]
+    fn capture_tool_returns_redacted_blocked_plan_for_prohibited_content() {
+        let (_temp, state) = capture_test_state();
+        let source_path = "blocked.md";
+        let secret_sentinel = "MCP-CAPTURE-SECRET-SENTINEL";
+        fs::write(
+            state.paths.project_root.join(source_path),
+            format!("# Blocked\n\n## Decision: Never expose this\n\napi_key = {secret_sentinel}\n"),
+        )
+        .unwrap();
+        let before = managed_state_snapshot(&state);
+
+        let response = capture_response(&state, "capture-blocked", capture_arguments(source_path));
+
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "blocked MCP capture mutated state");
+        assert!(state.service.get().is_none());
+        let result = &response["result"];
+        assert_eq!(result["isError"], false);
+        let structured = &result["structuredContent"];
+        assert_eq!(structured["schema"], "memzoi/capture-plan-v1");
+        assert_eq!(structured["status"], "blocked");
+        assert_eq!(structured["data_class"], "blocked");
+        assert_eq!(structured["candidates"], json!([]));
+        assert_eq!(structured["sources"], json!([]));
+        assert_eq!(
+            structured["request"]["sources"][0]["locator"]["path"],
+            "redacted.md"
+        );
+        assert_eq!(
+            structured["diagnostics"][0]["code"],
+            "prohibited_content_detected"
+        );
+        let rendered = serde_json::to_string(&response).unwrap();
+        assert!(
+            !rendered.contains(secret_sentinel),
+            "blocked plan leaked prohibited content: {rendered}"
+        );
+        assert!(
+            !rendered.contains(source_path),
+            "blocked plan leaked the original locator: {rendered}"
+        );
     }
 
     #[test]
@@ -980,7 +2293,7 @@ The mcpexpirydiagnostic token should be hidden from normal search.
         )
         .unwrap();
         MemoryService::rebuild_at(temp.path()).unwrap();
-        let service = MemoryService::open(temp.path()).unwrap();
+        let service = ProtocolState::from_service(MemoryService::open(temp.path()).unwrap());
 
         let response = response(
             &service,
