@@ -3167,12 +3167,15 @@ mod tests {
     fn evidence_provenance_and_proposal_lineage_survive_rebuild_and_export() -> anyhow::Result<()> {
         let (_temp, service) = initialized_service()?;
         let paths = service.paths.clone();
+        let mut draft = sample_memory_draft(
+            "Lineage survives rebuild",
+            "Evidence-backed zircon lineage.",
+        );
+        draft.source_kind = Some("  test  ".to_owned());
+        draft.source_ref = Some("  service-proposal-tests  ".to_owned());
         let applied = service.propose_memory_with_options(
             "agent:red-tests",
-            sample_memory_draft(
-                "Lineage survives rebuild",
-                "Evidence-backed zircon lineage.",
-            ),
+            draft,
             ProposeOptions {
                 approval_override: None,
                 apply: true,

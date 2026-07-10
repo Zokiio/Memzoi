@@ -671,6 +671,8 @@ mod tests {
                         "scope_kind": "repo",
                         "visibility": "repo",
                         "sensitivity": "repo-safe",
+                        "source_kind": "  issue  ",
+                        "source_ref": "  issue://42  ",
                         "title": "Keep MCP smoke tests focused",
                         "body": "MCP smoke tests cover the JSON-RPC tool contract."
                     }
@@ -705,6 +707,8 @@ mod tests {
         assert_eq!(proposal["payload"]["scope_kind"], "repo");
         assert_eq!(proposal["payload"]["visibility"], "repo");
         assert_eq!(proposal["payload"]["sensitivity"], "repo-safe");
+        assert_eq!(proposal["payload"]["source_kind"], "issue");
+        assert_eq!(proposal["payload"]["source_ref"], "issue://42");
         assert_eq!(proposal["payload"]["title"], "Keep MCP smoke tests focused");
         assert_eq!(
             proposal["payload"]["body"],

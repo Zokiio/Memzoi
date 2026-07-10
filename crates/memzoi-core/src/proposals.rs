@@ -124,7 +124,8 @@ pub struct SupersedeResult {
     pub replacement: MemoryRecord,
 }
 
-pub fn propose_memory(conn: &Connection, actor: &str, draft: MemoryDraft) -> Result<Proposal> {
+pub fn propose_memory(conn: &Connection, actor: &str, mut draft: MemoryDraft) -> Result<Proposal> {
+    normalize_evidence_metadata(&mut draft)?;
     validate_draft_shape(&draft)?;
     let id = format!("prop_{}", Uuid::now_v7());
     let now = now_utc()?;
@@ -374,6 +375,23 @@ fn validate_draft_shape(draft: &MemoryDraft) -> Result<()> {
     Ok(())
 }
 
+fn normalize_evidence_metadata(draft: &mut MemoryDraft) -> Result<()> {
+    draft.source_kind = normalize_optional_evidence(draft.source_kind.take(), "source_kind")?;
+    draft.source_ref = normalize_optional_evidence(draft.source_ref.take(), "source_ref")?;
+    Ok(())
+}
+
+fn normalize_optional_evidence(value: Option<String>, field: &str) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{field} cannot be empty");
+    }
+    Ok(Some(value.to_owned()))
+}
+
 pub(crate) fn ensure_repo_safe_sensitivity(sensitivity: OkfProposalSensitivity) -> Result<()> {
     if sensitivity != OkfProposalSensitivity::RepoSafe {
         bail!(
@@ -451,10 +469,12 @@ fn insert_record(
     supersedes_id: Option<&str>,
     proposal_id: Option<&str>,
 ) -> Result<MemoryRecord> {
-    validate_draft_shape(draft)?;
-    let id = next_record_id(conn, draft)?;
+    let mut draft = draft.clone();
+    normalize_evidence_metadata(&mut draft)?;
+    validate_draft_shape(&draft)?;
+    let id = next_record_id(conn, &draft)?;
     let now = now_utc()?;
-    let hash = content_hash(draft);
+    let hash = content_hash(&draft);
     conn.execute(
         "INSERT INTO memory_record (
           id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status, confidence,
@@ -702,6 +722,47 @@ mod tests {
             event_types,
             vec!["memory.proposed", "proposal.approved", "memory.applied"]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn proposal_evidence_is_normalized_before_persistence_and_apply() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        let mut draft = sample_memory_draft("Normalize proposal evidence once");
+        draft.source_kind = Some("  issue  ".to_owned());
+        draft.source_ref = Some("  issue://42  ".to_owned());
+
+        let proposal = propose_memory(&conn, "agent:red-tests", draft)?;
+        assert_eq!(proposal.payload.source_kind.as_deref(), Some("issue"));
+        assert_eq!(proposal.payload.source_ref.as_deref(), Some("issue://42"));
+
+        approve_proposal(&conn, proposal.id.as_str(), "reviewer:human")?;
+        let record = apply_proposal(&conn, proposal.id.as_str(), "agent:applier")?;
+        assert_eq!(record.source_kind.as_deref(), Some("issue"));
+        assert_eq!(record.source_ref.as_deref(), Some("issue://42"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn proposal_rejects_empty_evidence_metadata_before_persistence() -> anyhow::Result<()> {
+        for field in ["source_kind", "source_ref"] {
+            let (_temp, conn) = initialized_database()?;
+            let mut draft = sample_memory_draft("Reject empty proposal evidence");
+            if field == "source_kind" {
+                draft.source_kind = Some("   ".to_owned());
+            } else {
+                draft.source_ref = Some("   ".to_owned());
+            }
+
+            let error = propose_memory(&conn, "agent:red-tests", draft)
+                .expect_err("empty evidence metadata must be rejected");
+            assert!(error.to_string().contains(field), "{error:#}");
+            let proposal_count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM proposal", [], |row| row.get(0))?;
+            assert_eq!(proposal_count, 0);
+        }
 
         Ok(())
     }
