@@ -112,7 +112,7 @@ fn active_records_for_scope(
     let mut sql = String::from(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at
+                supersedes_id, expires_at, proposal_id
          FROM memory_record
          WHERE status = 'active'
            AND destination = 'repo'
@@ -154,6 +154,9 @@ fn render_record_markdown(record: &MemoryRecord, paths: &[MemoryPath]) -> String
     }
     if let Some(source_ref) = &record.source_ref {
         push_frontmatter(&mut output, "source_ref", source_ref);
+    }
+    if let Some(proposal_id) = &record.proposal_id {
+        push_frontmatter(&mut output, "proposal_id", proposal_id);
     }
     push_frontmatter(&mut output, "content_hash", &record.content_hash);
     push_frontmatter(&mut output, "created_at", &record.created_at);

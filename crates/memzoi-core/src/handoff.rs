@@ -340,6 +340,7 @@ mod tests {
             tags: Vec::new(),
             source_kind: Some("test".to_owned()),
             source_ref: None,
+            sensitivity: crate::OkfProposalSensitivity::RepoSafe,
             confidence: 0.9,
         }
     }

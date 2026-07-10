@@ -92,7 +92,8 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
                 memory_record.title, memory_record.body, memory_record.status,
                 memory_record.confidence, memory_record.source_kind, memory_record.source_ref,
                 memory_record.content_hash, memory_record.created_at, memory_record.updated_at,
-                memory_record.supersedes_id, memory_record.expires_at, bm25(memory_fts) AS rank
+                memory_record.supersedes_id, memory_record.expires_at, memory_record.proposal_id,
+                bm25(memory_fts) AS rank
          FROM memory_fts
          JOIN memory_record ON memory_record.rowid = memory_fts.rowid
          WHERE memory_fts MATCH ?1
@@ -129,7 +130,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
             ],
             |row| {
                 let record = record_from_row(row)?;
-                let rank: f64 = row.get(18)?;
+                let rank: f64 = row.get(19)?;
                 Ok((record, rank))
             },
         )
@@ -229,6 +230,7 @@ pub(crate) fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memor
         confidence: row.get(10)?,
         source_kind: row.get(11)?,
         source_ref: row.get(12)?,
+        proposal_id: row.get(18)?,
         content_hash: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,

@@ -821,6 +821,7 @@ fn repo_record_matches(canonical: &okf::OkfRecordFile, indexed: &MemoryRecord) -
         && indexed.confidence == draft.confidence
         && indexed.source_kind == draft.source_kind
         && indexed.source_ref == draft.source_ref
+        && indexed.proposal_id == canonical.proposal_id
         && indexed.content_hash == blake3::hash(draft.body.as_bytes()).to_hex().to_string()
         && indexed.created_at == canonical.created
         && indexed.updated_at == canonical.updated.as_deref().unwrap_or(&canonical.created)
@@ -915,6 +916,7 @@ fn create_local_memory_with_conn(
         confidence: 1.0,
         source_kind: Some("memzoi-local".to_owned()),
         source_ref: None,
+        proposal_id: None,
         content_hash: blake3::hash(input.body.trim().as_bytes())
             .to_hex()
             .to_string(),
@@ -964,6 +966,7 @@ fn create_checkpoint_with_conn(
         confidence: 1.0,
         source_kind: Some("memzoi-checkpoint".to_owned()),
         source_ref: None,
+        proposal_id: None,
         content_hash: blake3::hash(input.note.trim().as_bytes())
             .to_hex()
             .to_string(),
@@ -1046,9 +1049,9 @@ fn insert_memory_record_row(
     let sql = format!(
         "{verb} memory_record (
           id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
-          confidence, source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id,
-          expires_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"
+          confidence, source_kind, source_ref, proposal_id, content_hash, created_at, updated_at,
+          supersedes_id, expires_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
     );
     conn.execute(
         &sql,
@@ -1066,6 +1069,7 @@ fn insert_memory_record_row(
             record.confidence,
             &record.source_kind,
             &record.source_ref,
+            &record.proposal_id,
             &record.content_hash,
             &record.created_at,
             &record.updated_at,
@@ -1083,7 +1087,7 @@ fn active_records_for_destination(
     let mut stmt = conn.prepare(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at
+                supersedes_id, expires_at, proposal_id
          FROM memory_record
          WHERE status = 'active'
            AND destination = ?1
@@ -1097,7 +1101,7 @@ fn active_checkpoint_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at
+                supersedes_id, expires_at, proposal_id
          FROM memory_record
          WHERE status = 'active'
            AND destination = 'session'
@@ -1112,7 +1116,7 @@ fn checkpoint_record(conn: &Connection, record_id: &str) -> Result<Option<Memory
     let mut stmt = conn.prepare(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at
+                supersedes_id, expires_at, proposal_id
          FROM memory_record
          WHERE id = ?1
            AND status = 'active'
@@ -1128,7 +1132,7 @@ fn records_for_runtime_preservation(conn: &Connection) -> Result<Vec<MemoryRecor
     let mut stmt = conn.prepare(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at
+                supersedes_id, expires_at, proposal_id
          FROM memory_record
          WHERE destination IN ('local', 'session')
          ORDER BY updated_at DESC, id ASC",
@@ -1318,6 +1322,42 @@ mod tests {
     }
 
     #[test]
+    fn auto_approval_and_apply_cannot_bypass_unknown_sensitivity() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let mut draft = sample_memory_draft(
+            "Unknown sensitivity proposal",
+            "Content must remain outside canonical memory until classified.",
+        );
+        draft.sensitivity = crate::OkfProposalSensitivity::Unknown;
+
+        let result = service.propose_memory_with_options(
+            "agent:red-tests",
+            draft,
+            ProposeOptions {
+                approval_override: Some(ProposalApprovalOverride::Auto),
+                apply: true,
+            },
+        )?;
+
+        assert_eq!(result.proposal.status, ProposalStatus::Pending);
+        assert!(!result.applied);
+        assert_eq!(result.record, None);
+        assert!(result.validation.as_ref().is_some_and(|validation| {
+            validation
+                .issues
+                .iter()
+                .any(|issue| issue.code == "repo_sensitivity_required")
+        }));
+        let record_count: i64 =
+            service
+                .conn
+                .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+        assert_eq!(record_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
     fn propose_with_options_manual_override_leaves_proposal_pending() -> anyhow::Result<()> {
         let (_temp, service) = initialized_service()?;
 
@@ -1361,9 +1401,23 @@ mod tests {
         assert_eq!(result.proposal.status, ProposalStatus::Applied);
         assert_eq!(record.status, MemoryStatus::Active);
         assert_eq!(record.title, "Applied proposal");
+        assert_eq!(record.source_ref.as_deref(), Some("service-proposal-tests"));
+        assert_eq!(record.source_kind.as_deref(), Some("test"));
         assert_eq!(
-            record.source_ref.as_deref(),
+            record.proposal_id.as_deref(),
             Some(result.proposal.id.as_str())
+        );
+
+        let mut applied_event_proposal_ids = Vec::new();
+        service.for_each_event(|event| {
+            if event.event_type == "memory.applied" {
+                applied_event_proposal_ids.push(event.proposal_id);
+            }
+            Ok(())
+        })?;
+        assert_eq!(
+            applied_event_proposal_ids,
+            vec![Some(result.proposal.id.clone())]
         );
 
         let record_path = service
@@ -1383,6 +1437,75 @@ mod tests {
             canonical.contains("Applied proposal body"),
             "canonical record should include the approved body: {canonical}"
         );
+        assert!(
+            canonical.contains("source_ref: service-proposal-tests\n"),
+            "canonical record should preserve the evidence reference: {canonical}"
+        );
+        assert!(
+            canonical.contains(&format!("proposal_id: {}\n", result.proposal.id)),
+            "canonical record should store proposal lineage separately: {canonical}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_provenance_and_proposal_lineage_survive_rebuild_and_export() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let paths = service.paths.clone();
+        let applied = service.propose_memory_with_options(
+            "agent:red-tests",
+            sample_memory_draft(
+                "Lineage survives rebuild",
+                "Evidence-backed zircon lineage.",
+            ),
+            ProposeOptions {
+                approval_override: None,
+                apply: true,
+            },
+        )?;
+        let proposal_id = applied.proposal.id.clone();
+        let record_id = applied.record.expect("record should be applied").id;
+
+        service.rebuild()?;
+        let rebuilt = MemoryService::open_paths(paths)?;
+        let results = rebuilt.search_memory(SearchInput {
+            query: "zircon lineage".to_owned(),
+            scope_kind: Some(ScopeKind::Repo),
+            scope_id: None,
+            memory_type: None,
+            destination: Some(MemoryDestination::Repo),
+            path_prefix: None,
+            limit: 10,
+            include_inactive: false,
+        })?;
+        let result = results
+            .iter()
+            .find(|result| result.record.id == record_id)
+            .expect("rebuilt recall should return the applied record");
+        assert_eq!(result.record.source_kind.as_deref(), Some("test"));
+        assert_eq!(
+            result.record.source_ref.as_deref(),
+            Some("service-proposal-tests")
+        );
+        assert_eq!(
+            result.record.proposal_id.as_deref(),
+            Some(proposal_id.as_str())
+        );
+        assert_eq!(
+            result.citations[0].source_ref.as_deref(),
+            Some("service-proposal-tests"),
+            "recall citations must point at original evidence, not the review packet"
+        );
+
+        let exported = rebuilt.export(ExportInput {
+            format: ExportFormat::Okf,
+            scope_kind: ScopeKind::Repo,
+        })?;
+        let markdown = fs::read_to_string(&exported.written_paths[0])?;
+        assert!(markdown.contains("source_kind: \"test\""));
+        assert!(markdown.contains("source_ref: \"service-proposal-tests\""));
+        assert!(markdown.contains(&format!("proposal_id: \"{proposal_id}\"")));
 
         Ok(())
     }
@@ -1587,6 +1710,7 @@ mod tests {
             tags: vec!["rust".to_owned(), "tests".to_owned()],
             source_kind: Some("test".to_owned()),
             source_ref: Some("service-proposal-tests".to_owned()),
+            sensitivity: crate::OkfProposalSensitivity::RepoSafe,
             confidence: 0.82,
         }
     }

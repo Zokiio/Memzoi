@@ -110,6 +110,10 @@ fn compact_canonical_example_parses_without_proposal_metadata() -> anyhow::Resul
         record.draft.source_ref.as_deref(),
         Some("mem_2026_07_06_auth_001")
     );
+    assert_eq!(
+        record.proposal_id, None,
+        "legacy canonical records without proposal_id remain readable"
+    );
     assert!(
         !record.draft.body.contains("proposal:"),
         "canonical record body should not carry proposal metadata"
@@ -182,6 +186,28 @@ fn rejects_unknown_proposal_schema_values() {
             "{field} error should contain {expected:?}, got {error:#}"
         );
     }
+}
+
+#[test]
+fn legacy_proposal_without_sensitivity_is_read_as_unknown() -> anyhow::Result<()> {
+    let markdown = proposal_markdown(
+        "create",
+        "semantic",
+        "proposed",
+        "repo-safe",
+        "supersedes: []",
+        "",
+    )
+    .replace("sensitivity: repo-safe\n", "");
+    let parsed = parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/mem_test_proposal.md"),
+        &markdown,
+    )?
+    .expect("legacy proposal should remain reviewable");
+
+    assert_eq!(parsed.sensitivity, OkfProposalSensitivity::Unknown);
+    Ok(())
 }
 
 #[test]
@@ -323,6 +349,7 @@ fn rendered_records_are_valid_yaml_and_preserve_core_fields() -> anyhow::Result<
         confidence: 0.75,
         source_kind: Some("human-authored".to_owned()),
         source_ref: Some("issue://42".to_owned()),
+        proposal_id: Some("prop_review_42".to_owned()),
         content_hash: "hash".to_owned(),
         created_at: "2026-07-05T00:00:00Z".to_owned(),
         updated_at: "2026-07-06T00:00:00Z".to_owned(),
@@ -342,6 +369,7 @@ fn rendered_records_are_valid_yaml_and_preserve_core_fields() -> anyhow::Result<
     assert_eq!(parsed.draft.scope_id.as_deref(), Some("platform"));
     assert_eq!(parsed.status, MemoryStatus::Superseded);
     assert_eq!(parsed.draft.source_ref.as_deref(), Some("issue://42"));
+    assert_eq!(parsed.proposal_id.as_deref(), Some("prop_review_42"));
     assert_eq!(
         parsed.supersedes_id.as_deref(),
         Some("team/old-install-risk")
@@ -756,6 +784,7 @@ fn memory_draft(title: &str, body: &str, tags: Vec<String>) -> MemoryDraft {
         tags,
         source_kind: Some("test".to_owned()),
         source_ref: Some("okf-profile-test".to_owned()),
+        sensitivity: memzoi_core::OkfProposalSensitivity::RepoSafe,
         confidence: 0.9,
     }
 }

@@ -3,7 +3,8 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
     ContextPackInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryService, MemoryType,
-    PrecheckInput, ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, Visibility,
+    OkfProposalSensitivity, PrecheckInput, ProposalApprovalOverride, ProposeOptions, ScopeKind,
+    SearchInput, Visibility,
 };
 use serde_json::{Value, json};
 
@@ -167,6 +168,10 @@ fn tools_list_result() -> Value {
                         "tags": { "type": "array", "items": { "type": "string" } },
                         "source_kind": { "type": "string" },
                         "source_ref": { "type": "string" },
+                        "sensitivity": {
+                            "type": "string",
+                            "enum": ["repo-safe", "local-only", "sensitive", "secret", "raw-transcript", "private-personal-data", "temporary-state", "unknown"]
+                        },
                         "confidence": { "type": "number" },
                         "actor": { "type": "string" },
                         "approval_mode": {
@@ -351,6 +356,7 @@ fn memory_draft(arguments: &Value) -> Result<MemoryDraft> {
         tags: optional_string_array(arguments, "tags")?,
         source_kind: optional_string(arguments, "source_kind"),
         source_ref: optional_string(arguments, "source_ref"),
+        sensitivity: optional_sensitivity(arguments)?.unwrap_or_default(),
         confidence: optional_f64(arguments, "confidence")?.unwrap_or(1.0),
     })
 }
@@ -391,6 +397,13 @@ fn optional_visibility(value: &Value) -> Result<Option<Visibility>> {
         .map(str::parse)
         .transpose()
         .map_err(|error: String| anyhow!(error))
+}
+
+fn optional_sensitivity(value: &Value) -> Result<Option<OkfProposalSensitivity>> {
+    optional_str(value, "sensitivity")
+        .map(str::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)
 }
 
 fn optional_approval_override(value: &Value) -> Result<Option<ProposalApprovalOverride>> {
@@ -501,6 +514,7 @@ mod tests {
             tags: Vec::new(),
             source_kind: Some("test".to_owned()),
             source_ref: Some("mcp-smoke".to_owned()),
+            sensitivity: OkfProposalSensitivity::RepoSafe,
             confidence: 1.0,
         }
     }
@@ -624,6 +638,7 @@ mod tests {
                         "type": "decision",
                         "scope_kind": "repo",
                         "visibility": "repo",
+                        "sensitivity": "repo-safe",
                         "title": "Keep MCP smoke tests focused",
                         "body": "MCP smoke tests cover the JSON-RPC tool contract."
                     }
@@ -657,6 +672,7 @@ mod tests {
         assert_eq!(proposal["payload"]["memory_type"], "decision");
         assert_eq!(proposal["payload"]["scope_kind"], "repo");
         assert_eq!(proposal["payload"]["visibility"], "repo");
+        assert_eq!(proposal["payload"]["sensitivity"], "repo-safe");
         assert_eq!(proposal["payload"]["title"], "Keep MCP smoke tests focused");
         assert_eq!(
             proposal["payload"]["body"],
@@ -707,6 +723,7 @@ mod tests {
                     "arguments": {
                         "title": "Auto MCP proposal",
                         "body": "Auto approval approves this MCP proposal without applying it.",
+                        "sensitivity": "repo-safe",
                         "approval_mode": "auto"
                     }
                 }
@@ -717,6 +734,41 @@ mod tests {
         assert_eq!(structured["status"], "approved");
         assert_eq!(structured["proposal"]["status"], "approved");
         assert_eq!(structured["validation"]["is_valid"], true);
+        assert_eq!(structured["applied"], false);
+    }
+
+    #[test]
+    fn propose_memory_tool_treats_omitted_sensitivity_as_unknown() {
+        let (_temp, service) = test_service();
+
+        let response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "unknown-sensitivity",
+                "method": "tools/call",
+                "params": {
+                    "name": "propose_memory",
+                    "arguments": {
+                        "title": "Unclassified MCP proposal",
+                        "body": "Classification is required before canonical apply.",
+                        "approval_mode": "auto"
+                    }
+                }
+            }),
+        );
+
+        let structured = &response["result"]["structuredContent"];
+        assert_eq!(structured["status"], "pending");
+        assert_eq!(structured["proposal"]["payload"]["sensitivity"], "unknown");
+        assert_eq!(structured["validation"]["is_valid"], false);
+        assert!(
+            structured["validation"]["issues"]
+                .as_array()
+                .is_some_and(|issues| issues
+                    .iter()
+                    .any(|issue| { issue["code"] == "repo_sensitivity_required" }))
+        );
         assert_eq!(structured["applied"], false);
     }
 

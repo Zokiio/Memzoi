@@ -261,6 +261,8 @@ fn doctor_json_warns_about_open_proposals_and_prints_next_steps() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Doctor should surface pending proposals",
             "--body",
@@ -1060,6 +1062,8 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "CLI proposals produce JSON",
             "--body",
@@ -1127,6 +1131,8 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "CLI supersede writes replacement",
             "--body",
@@ -1181,6 +1187,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Default proposal is approved",
             "--body",
@@ -1203,6 +1211,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Manual proposal stays pending",
             "--body",
@@ -1225,6 +1235,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Apply approved proposal immediately",
             "--body",
@@ -1254,6 +1266,69 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
 }
 
 #[test]
+fn propose_omitted_sensitivity_is_explicit_unknown_and_cannot_apply() {
+    let repo = initialized_temp_repo();
+    let sentinel = "private-body-sentinel-must-not-appear-in-errors";
+    let proposal = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--title",
+            "Unclassified proposal",
+            "--body",
+            sentinel,
+            "--json",
+        ],
+    );
+
+    assert_eq!(json_string(&proposal, "status"), "pending");
+    assert_eq!(json_string(&proposal, "sensitivity"), "unknown");
+    assert_eq!(proposal["applied"], false);
+    assert_eq!(proposal["record_id"], Value::Null);
+    assert!(
+        proposal["validation"]["issues"]
+            .as_array()
+            .is_some_and(|issues| issues
+                .iter()
+                .any(|issue| { issue["code"] == "repo_sensitivity_required" }))
+    );
+
+    let proposal_id = json_string(&proposal, "proposal_id");
+    run_json_command(
+        repo.path(),
+        &[
+            "approve",
+            proposal_id,
+            "--actor",
+            "reviewer:human",
+            "--json",
+        ],
+    );
+    let mut apply = memzoi();
+    let output = apply
+        .args(["apply", proposal_id, "--json"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = std::str::from_utf8(&output).expect("stderr is UTF-8");
+    assert!(stderr.contains("requires sensitivity repo-safe; got unknown"));
+    assert!(!stderr.contains(sentinel));
+    assert!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("records directory")
+            .next()
+            .is_none(),
+        "unclassified proposal must not create canonical files"
+    );
+}
+
+#[test]
 fn propose_apply_implies_auto_approval_when_repo_policy_is_manual() {
     let repo = initialized_temp_repo();
     fs::write(
@@ -1273,6 +1348,8 @@ fn propose_apply_implies_auto_approval_when_repo_policy_is_manual() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Apply overrides manual policy",
             "--body",
@@ -1312,6 +1389,8 @@ fn propose_policy_flags_reject_conflicting_combinations() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Conflicting policies",
             "--body",
@@ -1337,6 +1416,8 @@ fn propose_policy_flags_reject_conflicting_combinations() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Manual apply conflict",
             "--body",
@@ -1364,6 +1445,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Human reviews risky memory",
             "--body",
@@ -1385,6 +1468,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Bulk apply first approved proposal",
             "--body",
@@ -1406,6 +1491,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Bulk apply second approved proposal",
             "--body",
@@ -1721,8 +1808,9 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
     assert!(rendered.contains("status: active\n"));
     assert!(rendered.contains("visibility: repo\n"));
     assert!(rendered.contains("confidence: 1\n"));
-    assert!(rendered.contains("source: memzoi-proposal-file\n"));
-    assert!(rendered.contains("source_ref: mem_test_valid\n"));
+    assert!(rendered.contains("source: path\n"));
+    assert!(rendered.contains("source_ref: src/lib.rs\n"));
+    assert!(rendered.contains("proposal_id: mem_test_valid\n"));
     assert!(rendered.contains("# Valid proposal\n\nThis proposal body is valid."));
     for forbidden in [
         "kind:",
@@ -2389,6 +2477,8 @@ fn reject_json_prevents_apply_from_creating_active_record() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Rejected memories do not apply",
             "--body",
@@ -4226,6 +4316,8 @@ fn rebuild_refuses_to_discard_open_proposals_with_ids_statuses_and_next_steps() 
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Pending rebuild protection",
             "--body",
@@ -4247,6 +4339,8 @@ fn rebuild_refuses_to_discard_open_proposals_with_ids_statuses_and_next_steps() 
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Approved rebuild protection",
             "--body",
@@ -4795,6 +4889,8 @@ fn create_applied_memory_with_visibility(
             scope_kind,
             "--visibility",
             visibility,
+            "--sensitivity",
+            "repo-safe",
             "--title",
             title,
             "--body",

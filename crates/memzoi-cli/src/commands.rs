@@ -8,11 +8,11 @@ use anyhow::{Context, Result, bail};
 use memzoi_core::{
     CheckpointInput, ContextPackInput, ExportFormat, ExportInput, HandoffInput, ImportApplyResult,
     ImportPlan, InitRequest, LocalMemoryInput, MemoryDestination, MemoryDraft, MemoryLane,
-    MemoryRecord, MemoryService, MemoryType, OkfProposalFile, PrecheckInput, Proposal,
-    ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus, ProposalStatusFilter,
-    ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult, SessionEndWrite,
-    Visibility, apply_okf_create_proposal_file, discover_paths, parse_import_document,
-    parse_okf_proposal_file, parse_session_end_document,
+    MemoryRecord, MemoryService, MemoryType, OkfProposalFile, OkfProposalSensitivity,
+    PrecheckInput, Proposal, ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus,
+    ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult,
+    SessionEndWrite, Visibility, apply_okf_create_proposal_file, discover_paths,
+    parse_import_document, parse_okf_proposal_file, parse_session_end_document,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -34,6 +34,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             memory_type,
             scope_kind,
             visibility,
+            sensitivity,
             title,
             body,
             actor,
@@ -46,6 +47,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 memory_type,
                 scope_kind,
                 visibility,
+                sensitivity,
                 title,
                 body,
             },
@@ -144,6 +146,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             memory_type,
             scope_kind,
             visibility,
+            sensitivity,
             title,
             body,
             actor,
@@ -154,6 +157,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 memory_type,
                 scope_kind,
                 visibility,
+                sensitivity,
                 title,
                 body,
             },
@@ -416,6 +420,7 @@ fn propose_command(
         &draft_args.memory_type,
         &draft_args.scope_kind,
         &draft_args.visibility,
+        &draft_args.sensitivity,
         draft_args.title,
         draft_args.body,
     )?;
@@ -443,6 +448,7 @@ fn propose_command(
             "record_status": record_status,
             "validation": result.validation,
             "applied": result.applied,
+            "sensitivity": result.proposal.payload.sensitivity.as_str(),
         }))
     } else {
         if let Some(record) = result.record {
@@ -966,6 +972,7 @@ fn runtime_record_json(record: &MemoryRecord) -> serde_json::Value {
         "body": &record.body,
         "source_kind": &record.source_kind,
         "source_ref": &record.source_ref,
+        "proposal_id": &record.proposal_id,
         "created_at": &record.created_at,
         "updated_at": &record.updated_at,
     })
@@ -1280,6 +1287,7 @@ fn supersede_command(
         &draft_args.memory_type,
         &draft_args.scope_kind,
         &draft_args.visibility,
+        &draft_args.sensitivity,
         draft_args.title,
         draft_args.body,
     )?;
@@ -1770,6 +1778,7 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
             tags: Vec::new(),
             source_kind: Some("quickstart".to_string()),
             source_ref: None,
+            sensitivity: OkfProposalSensitivity::RepoSafe,
             confidence: 1.0,
         };
         let proposal = service.propose_memory("quickstart", draft)?;
@@ -1862,6 +1871,7 @@ fn draft_from_args(
     memory_type: &str,
     scope_kind: &str,
     visibility: &str,
+    sensitivity: &str,
     title: String,
     body: String,
 ) -> Result<MemoryDraft> {
@@ -1876,6 +1886,7 @@ fn draft_from_args(
         tags: Vec::new(),
         source_kind: Some("cli".to_string()),
         source_ref: None,
+        sensitivity: sensitivity.parse().map_err(anyhow::Error::msg)?,
         confidence: 1.0,
     })
 }

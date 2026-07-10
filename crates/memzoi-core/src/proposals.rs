@@ -9,6 +9,7 @@ use crate::events::{AppendEvent, append_event, now_utc};
 use crate::models::{
     MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
 };
+use crate::okf::OkfProposalSensitivity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +86,9 @@ pub struct MemoryDraft {
     pub tags: Vec<String>,
     pub source_kind: Option<String>,
     pub source_ref: Option<String>,
+    /// Classification for writes to canonical repo memory. Missing legacy values deserialize as unknown.
+    #[serde(default)]
+    pub sensitivity: OkfProposalSensitivity,
     pub confidence: f64,
 }
 
@@ -215,6 +219,17 @@ pub fn validate_proposal(conn: &Connection, proposal_id: &str) -> Result<Validat
             content_hash: None,
         });
     }
+    if proposal.payload.sensitivity != OkfProposalSensitivity::RepoSafe {
+        issues.push(ValidationIssue {
+            code: "repo_sensitivity_required".to_owned(),
+            message: format!(
+                "canonical repo apply requires sensitivity repo-safe; got {}",
+                proposal.payload.sensitivity.as_str()
+            ),
+            record_id: None,
+            content_hash: None,
+        });
+    }
     for record_id in duplicate_record_ids(conn, &hash)? {
         issues.push(ValidationIssue {
             code: "duplicate_content_hash".to_owned(),
@@ -279,6 +294,7 @@ pub fn apply_proposal(conn: &Connection, proposal_id: &str, actor: &str) -> Resu
             bail!("proposal {proposal_id} must be approved before apply")
         }
     }
+    ensure_repo_safe_sensitivity(proposal.payload.sensitivity)?;
     let record = insert_record(conn, &proposal.payload, None, Some(proposal_id))?;
     set_proposal_status(conn, proposal_id, ProposalStatus::Applied)?;
     append_event(
@@ -300,6 +316,7 @@ pub fn supersede_record(
     actor: &str,
     replacement: MemoryDraft,
 ) -> Result<SupersedeResult> {
+    ensure_repo_safe_sensitivity(replacement.sensitivity)?;
     let replacement = insert_record(conn, &replacement, Some(record_id), None)?;
     let superseded_at = now_utc()?;
     conn.execute(
@@ -353,6 +370,16 @@ fn validate_draft_shape(draft: &MemoryDraft) -> Result<()> {
     }
     if draft.body.trim().is_empty() {
         bail!("body is required");
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_repo_safe_sensitivity(sensitivity: OkfProposalSensitivity) -> Result<()> {
+    if sensitivity != OkfProposalSensitivity::RepoSafe {
+        bail!(
+            "canonical repo apply requires sensitivity repo-safe; got {}",
+            sensitivity.as_str()
+        );
     }
     Ok(())
 }
@@ -431,8 +458,8 @@ fn insert_record(
     conn.execute(
         "INSERT INTO memory_record (
           id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status, confidence,
-          source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id
-        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
+          source_kind, source_ref, proposal_id, content_hash, created_at, updated_at, supersedes_id
+        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)",
         params![
             id,
             draft.memory_type.as_str(),
@@ -444,7 +471,8 @@ fn insert_record(
             draft.body.trim(),
             draft.confidence,
             draft.source_kind,
-            proposal_id.or(draft.source_ref.as_deref()),
+            draft.source_ref,
+            proposal_id,
             hash,
             now,
             supersedes_id,
@@ -463,7 +491,7 @@ fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
     conn.query_row(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at
+                supersedes_id, expires_at, proposal_id
          FROM memory_record WHERE id = ?1",
         [id],
         |row| {
@@ -487,6 +515,7 @@ fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
                 confidence: row.get(10)?,
                 source_kind: row.get(11)?,
                 source_ref: row.get(12)?,
+                proposal_id: row.get(18)?,
                 content_hash: row.get(13)?,
                 created_at: row.get(14)?,
                 updated_at: row.get(15)?,
@@ -661,6 +690,9 @@ mod tests {
         assert_eq!(record.scope_kind, ScopeKind::Repo);
         assert_eq!(record.visibility, Visibility::Repo);
         assert_eq!(record.supersedes_id, None);
+        assert_eq!(record.source_kind.as_deref(), Some("test"));
+        assert_eq!(record.source_ref.as_deref(), Some("proposal-red-tests"));
+        assert_eq!(record.proposal_id.as_deref(), Some(proposal.id.as_str()));
 
         let event_types = list_events(&conn)?
             .into_iter()
@@ -703,6 +735,87 @@ mod tests {
             .map(|event| event.event_type)
             .collect::<Vec<_>>();
         assert_eq!(event_types, vec!["memory.proposed", "proposal.rejected"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_missing_sensitivity_is_unknown_and_cannot_apply() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        let proposal = propose_memory(
+            &conn,
+            "agent:red-tests",
+            sample_memory_draft("Legacy sensitivity compatibility"),
+        )?;
+        let mut payload = serde_json::to_value(&proposal.payload)?;
+        payload
+            .as_object_mut()
+            .expect("draft should serialize as an object")
+            .remove("sensitivity");
+        conn.execute(
+            "UPDATE proposal SET payload_json = ?1 WHERE id = ?2",
+            rusqlite::params![serde_json::to_string(&payload)?, proposal.id],
+        )?;
+
+        let loaded = load_proposal(&conn, &proposal.id)?;
+        assert_eq!(
+            loaded.payload.sensitivity,
+            crate::OkfProposalSensitivity::Unknown
+        );
+        let validation = validate_proposal(&conn, &proposal.id)?;
+        assert!(!validation.is_valid);
+        assert!(
+            validation
+                .issues
+                .iter()
+                .any(|issue| issue.code == "repo_sensitivity_required")
+        );
+
+        approve_proposal(&conn, &proposal.id, "reviewer:human")?;
+        let error = apply_proposal(&conn, &proposal.id, "agent:applier")
+            .expect_err("legacy unknown sensitivity must not apply");
+        assert!(error.to_string().contains("got unknown"));
+        let record_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+        assert_eq!(record_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn every_non_repo_safe_classification_is_blocked_without_echoing_content() -> anyhow::Result<()>
+    {
+        for sensitivity in [
+            crate::OkfProposalSensitivity::LocalOnly,
+            crate::OkfProposalSensitivity::Sensitive,
+            crate::OkfProposalSensitivity::Secret,
+            crate::OkfProposalSensitivity::RawTranscript,
+            crate::OkfProposalSensitivity::PrivatePersonalData,
+            crate::OkfProposalSensitivity::TemporaryState,
+            crate::OkfProposalSensitivity::Unknown,
+        ] {
+            let (_temp, conn) = initialized_database()?;
+            let sentinel = format!("private-sentinel-{}", sensitivity.as_str());
+            let mut draft = sample_memory_draft(&sentinel);
+            draft.sensitivity = sensitivity;
+            let proposal = propose_memory(&conn, "agent:red-tests", draft)?;
+            approve_proposal(&conn, &proposal.id, "reviewer:human")?;
+
+            let error = apply_proposal(&conn, &proposal.id, "agent:applier")
+                .expect_err("non-repo-safe content must never reach canonical memory");
+            let message = error.to_string();
+            assert!(
+                message.contains(sensitivity.as_str()),
+                "unexpected error: {message}"
+            );
+            assert!(
+                !message.contains(&sentinel),
+                "structured safety errors must not echo proposal content"
+            );
+            let record_count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+            assert_eq!(record_count, 0);
+        }
 
         Ok(())
     }
@@ -981,6 +1094,7 @@ mod tests {
             tags: vec!["rust".to_owned(), "tests".to_owned()],
             source_kind: Some("test".to_owned()),
             source_ref: Some("proposal-red-tests".to_owned()),
+            sensitivity: crate::OkfProposalSensitivity::RepoSafe,
             confidence: 0.82,
         }
     }

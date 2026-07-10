@@ -239,7 +239,8 @@ fn path_candidates(
                     memory_record.visibility, memory_record.title, memory_record.body,
                     memory_record.status, memory_record.confidence, memory_record.source_kind,
                     memory_record.source_ref, memory_record.content_hash, memory_record.created_at,
-                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at
+                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at,
+                    memory_record.proposal_id
              FROM memory_path
              JOIN memory_record ON memory_record.id = memory_path.record_id
              WHERE memory_record.status = 'active'
@@ -1360,6 +1361,7 @@ mod tests {
                 confidence: 0.88,
                 source_kind: Some("test".to_owned()),
                 source_ref: None,
+                proposal_id: None,
                 content_hash: format!("hash-{id}"),
                 created_at: "2026-07-09T00:00:00Z".to_owned(),
                 updated_at: "2026-07-09T00:00:00Z".to_owned(),

@@ -25,6 +25,7 @@ pub struct OkfRecordFile {
     pub updated: Option<String>,
     pub supersedes_id: Option<String>,
     pub expires_at: Option<String>,
+    pub proposal_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,13 +321,17 @@ pub enum OkfProposalStatus {
     Proposed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OkfProposalSensitivity {
     RepoSafe,
     LocalOnly,
     Sensitive,
     Secret,
+    RawTranscript,
+    PrivatePersonalData,
+    TemporaryState,
+    #[default]
     Unknown,
 }
 
@@ -355,6 +360,9 @@ impl OkfProposalSensitivity {
             Self::LocalOnly => "local-only",
             Self::Sensitive => "sensitive",
             Self::Secret => "secret",
+            Self::RawTranscript => "raw-transcript",
+            Self::PrivatePersonalData => "private-personal-data",
+            Self::TemporaryState => "temporary-state",
             Self::Unknown => "unknown",
         }
     }
@@ -393,6 +401,9 @@ impl FromStr for OkfProposalSensitivity {
             "local-only" => Ok(Self::LocalOnly),
             "sensitive" => Ok(Self::Sensitive),
             "secret" => Ok(Self::Secret),
+            "raw-transcript" => Ok(Self::RawTranscript),
+            "private-personal-data" => Ok(Self::PrivatePersonalData),
+            "temporary-state" => Ok(Self::TemporaryState),
             "unknown" => Ok(Self::Unknown),
             other => Err(format!("unknown OKF proposal sensitivity {other:?}")),
         }
@@ -494,6 +505,7 @@ pub fn parse_okf_record_markdown(
     let applies_to = validate_applies_to(frontmatter.applies_to.unwrap_or_default())?;
     let supersedes_id = frontmatter.supersedes.or(frontmatter.supersedes_id);
     let expires_at = frontmatter.expires.or(frontmatter.expires_at);
+    let proposal_id = optional_string(frontmatter.proposal_id, "proposal_id")?;
     let body = body_without_matching_h1(body, &title)?;
 
     Ok(Some(OkfRecordFile {
@@ -509,6 +521,7 @@ pub fn parse_okf_record_markdown(
             tags: frontmatter.tags.unwrap_or_default(),
             source_kind: Some(source_kind),
             source_ref: frontmatter.source_ref.or(Some(concept_id)),
+            sensitivity: OkfProposalSensitivity::RepoSafe,
             confidence,
         },
         status,
@@ -517,6 +530,7 @@ pub fn parse_okf_record_markdown(
         updated,
         supersedes_id,
         expires_at,
+        proposal_id,
     }))
 }
 
@@ -546,7 +560,8 @@ pub fn parse_okf_proposal_markdown(
     let timestamp = required_string(frontmatter.timestamp, "timestamp")?;
     ensure_timestampish(&timestamp, "timestamp")?;
     let sensitivity =
-        parse_required_enum::<OkfProposalSensitivity>(frontmatter.sensitivity, "sensitivity")?;
+        parse_optional_enum::<OkfProposalSensitivity>(frontmatter.sensitivity, "sensitivity")?
+            .unwrap_or_default();
     let (scope_kind, scope_id, applies_to) = parse_proposal_scope(
         frontmatter.scope,
         frontmatter.scope_kind,
@@ -650,6 +665,7 @@ pub fn apply_okf_create_proposal_file(
     }
 
     let body = proposal.body.trim().to_owned();
+    let (source_kind, source_ref) = proposal_primary_evidence(&proposal.sources);
     let record = MemoryRecord {
         id: title_to_concept_slug(&proposal.title)
             .unwrap_or_else(|| proposal.file_id.replace('_', "-")),
@@ -663,8 +679,9 @@ pub fn apply_okf_create_proposal_file(
         body,
         status: MemoryStatus::Active,
         confidence: 1.0,
-        source_kind: Some("memzoi-proposal-file".to_owned()),
-        source_ref: Some(proposal.id.clone()),
+        source_kind,
+        source_ref,
+        proposal_id: Some(proposal.id.clone()),
         content_hash: blake3::hash(proposal.body.trim().as_bytes())
             .to_hex()
             .to_string(),
@@ -696,10 +713,34 @@ fn repo_apply_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'sta
         OkfProposalSensitivity::LocalOnly => {
             "local-only proposals belong in the future local/runtime memory plane"
         }
+        OkfProposalSensitivity::RawTranscript => {
+            "raw transcripts must not become repo-shared memory"
+        }
+        OkfProposalSensitivity::PrivatePersonalData => {
+            "private personal data must not become repo-shared memory"
+        }
+        OkfProposalSensitivity::TemporaryState => {
+            "temporary task state belongs in local or session memory, not canonical repo memory"
+        }
         OkfProposalSensitivity::Unknown => {
             "classify the proposal sensitivity before applying it to repo records"
         }
     }
+}
+
+fn proposal_primary_evidence(sources: &[OkfProposalSource]) -> (Option<String>, Option<String>) {
+    for source in sources {
+        if let Some(path) = trimmed_optional(source.path.as_deref()) {
+            return (Some("path".to_owned()), Some(path));
+        }
+        if let Some(url) = trimmed_optional(source.url.as_deref()) {
+            return (Some("url".to_owned()), Some(url));
+        }
+        if let Some(reference) = trimmed_optional(source.reference.as_deref()) {
+            return (Some("ref".to_owned()), Some(reference));
+        }
+    }
+    (None, None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -791,6 +832,7 @@ struct OkfFrontmatter {
     source: Option<String>,
     source_kind: Option<String>,
     source_ref: Option<String>,
+    proposal_id: Option<String>,
     supersedes: Option<String>,
     supersedes_id: Option<String>,
     expires: Option<String>,
@@ -906,8 +948,8 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO memory_record (
           id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status, confidence,
-          source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id, expires_at
-        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+          source_kind, source_ref, proposal_id, content_hash, created_at, updated_at, supersedes_id, expires_at
+        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             record.concept_id,
             record.draft.memory_type.as_str(),
@@ -921,6 +963,7 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
             record.draft.confidence,
             record.draft.source_kind,
             record.draft.source_ref,
+            record.proposal_id,
             hash,
             record.created,
             updated,
@@ -978,6 +1021,9 @@ fn render_memory_record(record: &MemoryRecord, tags: &[String], applies_to: &[St
     );
     if let Some(source_ref) = &record.source_ref {
         push_yaml_string(&mut output, "source_ref", source_ref);
+    }
+    if let Some(proposal_id) = &record.proposal_id {
+        push_yaml_string(&mut output, "proposal_id", proposal_id);
     }
     if !tags.is_empty() {
         output.push_str("tags:\n");

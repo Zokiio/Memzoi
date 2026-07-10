@@ -34,6 +34,9 @@ pub(crate) enum Commands {
         scope_kind: String,
         #[arg(long, default_value = "repo")]
         visibility: String,
+        /// Repo sharing classification. Canonical apply requires repo-safe.
+        #[arg(long, default_value = "unknown")]
+        sensitivity: String,
         #[arg(long)]
         title: String,
         #[arg(long)]
@@ -135,6 +138,9 @@ pub(crate) enum Commands {
         scope_kind: String,
         #[arg(long, default_value = "repo")]
         visibility: String,
+        /// Repo sharing classification. Canonical replacement requires repo-safe.
+        #[arg(long, default_value = "unknown")]
+        sensitivity: String,
         #[arg(long)]
         title: String,
         #[arg(long)]
@@ -482,6 +488,7 @@ pub(crate) struct DraftCommand {
     pub(crate) memory_type: String,
     pub(crate) scope_kind: String,
     pub(crate) visibility: String,
+    pub(crate) sensitivity: String,
     pub(crate) title: String,
     pub(crate) body: String,
 }
