@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-use crate::schema;
+use crate::{expiry, schema, search};
 
 pub fn open_database(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -28,6 +28,10 @@ fn configure_connection(conn: &Connection) -> Result<()> {
         .context("failed to set SQLite busy timeout")?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("failed to enable SQLite WAL journal mode")?;
+    expiry::register_sqlite_functions(conn)
+        .context("failed to register SQLite expiry functions")?;
+    search::register_sqlite_functions(conn)
+        .context("failed to register SQLite path applicability functions")?;
     Ok(())
 }
 
@@ -73,11 +77,11 @@ mod tests {
         }
 
         let migrations: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3)",
+            "SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3, 4)",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(migrations, 3);
+        assert_eq!(migrations, 4);
 
         let records: i64 = conn.query_row(
             "SELECT COUNT(*) FROM memory_record WHERE id = 'rec-existing'",
@@ -207,6 +211,62 @@ mod tests {
 
         let migration: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 3)",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(migration);
+
+        Ok(())
+    }
+
+    #[test]
+    fn init_database_adds_nullable_proposal_lineage_to_legacy_records() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("memory.db");
+        let conn = open_database(&db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_migrations (
+              version INTEGER PRIMARY KEY,
+              applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+            INSERT INTO schema_migrations(version) VALUES (1), (2), (3);
+            CREATE TABLE memory_record (
+              rowid INTEGER PRIMARY KEY,
+              id TEXT NOT NULL UNIQUE,
+              type TEXT NOT NULL,
+              lane TEXT NOT NULL DEFAULT 'semantic',
+              destination TEXT NOT NULL DEFAULT 'repo',
+              scope_kind TEXT NOT NULL,
+              scope_id TEXT,
+              visibility TEXT NOT NULL DEFAULT 'repo',
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              status TEXT NOT NULL,
+              confidence REAL NOT NULL DEFAULT 1.0,
+              source_kind TEXT,
+              source_ref TEXT,
+              content_hash TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+              updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+              supersedes_id TEXT,
+              expires_at TEXT
+            );
+            INSERT INTO memory_record(id, type, scope_kind, title, body, status, content_hash)
+            VALUES ('legacy-lineage-record', 'decision', 'repo', 'Legacy lineage', 'Legacy body', 'active', 'legacy-lineage-hash');
+            "#,
+        )?;
+
+        init_database(&conn)?;
+
+        let proposal_id: Option<String> = conn.query_row(
+            "SELECT proposal_id FROM memory_record WHERE id = 'legacy-lineage-record'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(proposal_id, None);
+        let migration: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 4)",
             [],
             |row| row.get(0),
         )?;

@@ -248,6 +248,28 @@ fn doctor_json_reports_ready_after_init_and_warns_when_mcp_binary_is_missing() {
 }
 
 #[test]
+fn doctor_warns_about_hidden_lifecycle_artifacts_without_exposing_their_identity() {
+    let repo = initialized_temp_repo();
+    let pending = repo.path().join(".memzoi/proposals/pending");
+    fs::create_dir_all(&pending).expect("create pending root");
+    let sentinel = "RAW-SECRET-IDENTITY-SENTINEL";
+    fs::write(
+        pending.join(format!(".{sentinel}.nonce.pending.tmp")),
+        "unresolved transaction bytes",
+    )
+    .expect("write transaction artifact");
+
+    let doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&doctor, "lifecycle_transactions", "warning");
+    let rendered = serde_json::to_string(&doctor).expect("serialize doctor output");
+    assert!(rendered.contains("1 hidden lifecycle transaction artifact"));
+    assert!(
+        !rendered.contains(sentinel),
+        "doctor leaked the transaction identity: {rendered}"
+    );
+}
+
+#[test]
 fn doctor_json_warns_about_open_proposals_and_prints_next_steps() {
     let repo = initialized_temp_repo();
     run_json_command(
@@ -261,6 +283,8 @@ fn doctor_json_warns_about_open_proposals_and_prints_next_steps() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Doctor should surface pending proposals",
             "--body",
@@ -1060,6 +1084,8 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "CLI proposals produce JSON",
             "--body",
@@ -1127,6 +1153,8 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "CLI supersede writes replacement",
             "--body",
@@ -1181,6 +1209,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Default proposal is approved",
             "--body",
@@ -1203,6 +1233,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Manual proposal stays pending",
             "--body",
@@ -1225,6 +1257,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Apply approved proposal immediately",
             "--body",
@@ -1254,6 +1288,257 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
 }
 
 #[test]
+fn propose_omitted_sensitivity_is_explicit_unknown_and_cannot_apply() {
+    let repo = initialized_temp_repo();
+    let sentinel = "private-body-sentinel-must-not-appear-in-errors";
+    let proposal = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--title",
+            "Unclassified proposal",
+            "--body",
+            sentinel,
+            "--json",
+        ],
+    );
+
+    assert_eq!(json_string(&proposal, "status"), "pending");
+    assert_eq!(json_string(&proposal, "sensitivity"), "unknown");
+    assert_eq!(proposal["applied"], false);
+    assert_eq!(proposal["record_id"], Value::Null);
+    assert!(
+        proposal["validation"]["issues"]
+            .as_array()
+            .is_some_and(|issues| issues
+                .iter()
+                .any(|issue| { issue["code"] == "repo_sensitivity_required" }))
+    );
+
+    let proposal_id = json_string(&proposal, "proposal_id");
+    run_json_command(
+        repo.path(),
+        &[
+            "approve",
+            proposal_id,
+            "--actor",
+            "reviewer:human",
+            "--json",
+        ],
+    );
+    let blocked = run_json_command_failure(repo.path(), &["apply", proposal_id, "--json"]);
+    assert_eq!(blocked["ok"], false);
+    assert_json_string_field(&blocked["error"], &["code"], "repo_sensitivity_required");
+    assert_json_string_field(&blocked["error"], &["operation"], "apply");
+    assert_json_string_field(&blocked["error"], &["sensitivity"], "unknown");
+    assert!(
+        !serde_json::to_string(&blocked)
+            .expect("serialize structured sensitivity error")
+            .contains(sentinel)
+    );
+    assert!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("records directory")
+            .next()
+            .is_none(),
+        "unclassified proposal must not create canonical files"
+    );
+}
+
+#[test]
+fn supersede_json_blocks_every_non_repo_safe_sensitivity_without_echoing_body() {
+    for sensitivity in [
+        "local-only",
+        "sensitive",
+        "secret",
+        "raw-transcript",
+        "private-personal-data",
+        "temporary-state",
+        "unknown",
+    ] {
+        let repo = initialized_temp_repo();
+        let applied = run_json_command(
+            repo.path(),
+            &[
+                "propose",
+                "--apply",
+                "--type",
+                "fact",
+                "--sensitivity",
+                "repo-safe",
+                "--title",
+                "Supersede sensitivity target",
+                "--body",
+                "Original canonical body remains active.",
+                "--json",
+            ],
+        );
+        let record_id = json_string(&applied, "record_id").to_owned();
+        let sentinel = format!("SUPERSEDE-{sensitivity}-BODY-SENTINEL");
+        let blocked = run_json_command_failure(
+            repo.path(),
+            &[
+                "supersede",
+                &record_id,
+                "--type",
+                "fact",
+                "--scope-kind",
+                "repo",
+                "--visibility",
+                "repo",
+                "--sensitivity",
+                sensitivity,
+                "--title",
+                "Blocked replacement",
+                "--body",
+                &sentinel,
+                "--json",
+            ],
+        );
+        assert_eq!(blocked["ok"], false, "{blocked}");
+        assert_json_string_field(&blocked["error"], &["code"], "repo_sensitivity_required");
+        assert_json_string_field(&blocked["error"], &["operation"], "supersede");
+        assert_json_string_field(&blocked["error"], &["sensitivity"], sensitivity);
+        assert!(
+            !serde_json::to_string(&blocked)
+                .expect("serialize supersede error")
+                .contains(&sentinel)
+        );
+        assert_eq!(
+            fs::read_dir(test_paths(repo.path()).records_dir())
+                .expect("read canonical records")
+                .count(),
+            1,
+            "blocked supersede must not create a replacement"
+        );
+    }
+}
+
+#[test]
+fn cli_proposal_evidence_survives_apply_rebuild_and_recall_separately_from_lineage() {
+    let repo = initialized_temp_repo();
+    let applied = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "decision",
+            "--sensitivity",
+            "repo-safe",
+            "--source-kind",
+            "issue",
+            "--source-ref",
+            "issue://42#trust-contract",
+            "--title",
+            "CLI evidence survives rebuild",
+            "--body",
+            "Zircon provenance remains attached to original evidence.",
+            "--json",
+        ],
+    );
+    let proposal_id = json_string(&applied, "proposal_id").to_owned();
+    let record_id = json_string(&applied, "record_id").to_owned();
+
+    run_json_command(repo.path(), &["rebuild", "--json"]);
+    let recalled = run_json_command(repo.path(), &["search", "zircon provenance", "--json"]);
+    let result = &recalled["records"][0];
+    assert_json_string_field(&result["record"], &["id"], &record_id);
+    assert_json_string_field(&result["record"], &["source_kind"], "issue");
+    assert_json_string_field(
+        &result["record"],
+        &["source_ref"],
+        "issue://42#trust-contract",
+    );
+    assert_json_string_field(&result["record"], &["proposal_id"], &proposal_id);
+    assert_json_string_field(&result["citations"][0], &["source_kind"], "issue");
+    assert_json_string_field(
+        &result["citations"][0],
+        &["source_ref"],
+        "issue://42#trust-contract",
+    );
+    assert!(result["citations"][0].get("proposal_id").is_none());
+}
+
+#[test]
+fn cli_source_reference_does_not_fabricate_an_evidence_kind() {
+    let repo = initialized_temp_repo();
+    let applied = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--sensitivity",
+            "repo-safe",
+            "--source-ref",
+            "issue://42#reference-only",
+            "--title",
+            "Reference-only CLI evidence",
+            "--body",
+            "Topaz reference-only provenance remains independently nullable.",
+            "--json",
+        ],
+    );
+    let proposal_id = json_string(&applied, "proposal_id").to_owned();
+
+    run_json_command(repo.path(), &["rebuild", "--json"]);
+    let recalled = run_json_command(repo.path(), &["search", "topaz reference-only", "--json"]);
+    let result = &recalled["records"][0];
+    assert_eq!(result["record"]["source_kind"], Value::Null);
+    assert_json_string_field(
+        &result["record"],
+        &["source_ref"],
+        "issue://42#reference-only",
+    );
+    assert_json_string_field(&result["record"], &["proposal_id"], &proposal_id);
+    assert_eq!(result["citations"][0]["source_kind"], Value::Null);
+    assert_json_string_field(
+        &result["citations"][0],
+        &["source_ref"],
+        "issue://42#reference-only",
+    );
+}
+
+#[test]
+fn cli_multiline_evidence_round_trips_without_index_drift() {
+    let repo = initialized_temp_repo();
+    let source_ref = "issue://42\nfragment";
+    run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--sensitivity",
+            "repo-safe",
+            "--source-ref",
+            source_ref,
+            "--title",
+            "Multiline evidence encoding",
+            "--body",
+            "Jasper multiline evidence must not create canonical/index drift.",
+            "--json",
+        ],
+    );
+
+    let doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&doctor, "repo_index", "ok");
+    run_json_command(repo.path(), &["rebuild", "--json"]);
+    let recalled = run_json_command(repo.path(), &["search", "jasper multiline", "--json"]);
+    assert_eq!(recalled["records"][0]["record"]["source_ref"], source_ref);
+    assert_eq!(
+        recalled["records"][0]["citations"][0]["source_ref"],
+        source_ref
+    );
+}
+
+#[test]
 fn propose_apply_implies_auto_approval_when_repo_policy_is_manual() {
     let repo = initialized_temp_repo();
     fs::write(
@@ -1273,6 +1558,8 @@ fn propose_apply_implies_auto_approval_when_repo_policy_is_manual() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Apply overrides manual policy",
             "--body",
@@ -1312,6 +1599,8 @@ fn propose_policy_flags_reject_conflicting_combinations() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Conflicting policies",
             "--body",
@@ -1337,6 +1626,8 @@ fn propose_policy_flags_reject_conflicting_combinations() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Manual apply conflict",
             "--body",
@@ -1364,6 +1655,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Human reviews risky memory",
             "--body",
@@ -1385,6 +1678,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Bulk apply first approved proposal",
             "--body",
@@ -1406,6 +1701,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Bulk apply second approved proposal",
             "--body",
@@ -1618,12 +1915,14 @@ fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() 
     write_pending_proposal_file(
         repo.path(),
         "missing-supersedes.md",
-        proposal_markdown_with("semantic", "supersede", "supersedes: []", ""),
+        proposal_markdown_with("semantic", "supersede", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_missing_supersedes"),
     );
     write_pending_proposal_file(
         repo.path(),
         "missing-target.md",
-        proposal_markdown_with("semantic", "tombstone", "supersedes: []", ""),
+        proposal_markdown_with("semantic", "tombstone", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_missing_target"),
     );
 
     let validated =
@@ -1652,10 +1951,10 @@ fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() 
     }
 
     let listed = run_json_command_failure(repo.path(), &["proposal-files", "list", "--json"]);
-    assert_eq!(proposals_from_json(&listed).len(), 1);
+    assert_eq!(proposals_from_json(&listed).len(), 3);
     assert_eq!(
         listed.get("errors").and_then(Value::as_array).map(Vec::len),
-        Some(4)
+        Some(2)
     );
 }
 
@@ -1691,8 +1990,46 @@ fn proposal_files_skip_symlinks_under_pending_directory() {
     );
 }
 
+#[cfg(unix)]
 #[test]
-fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_db_mutation() {
+fn proposal_file_commands_refuse_symlinked_inventory_root_without_reading_outside() {
+    let repo = initialized_temp_repo();
+    let outside = tempfile::tempdir().expect("outside proposal root");
+    let sentinel = "OUTSIDE-PROPOSAL-SENTINEL";
+    fs::write(
+        outside.path().join("outside.md"),
+        valid_proposal_markdown()
+            .replace("title: Valid proposal", &format!("title: {sentinel}"))
+            .replace("# Valid proposal", &format!("# {sentinel}")),
+    )
+    .expect("write outside proposal");
+    let proposals = repo.path().join(".memzoi/proposals");
+    fs::create_dir_all(&proposals).expect("create proposal root");
+    std::os::unix::fs::symlink(outside.path(), proposals.join("pending"))
+        .expect("symlink pending root");
+
+    let listed = run_json_command_failure(repo.path(), &["proposal-files", "list", "--json"]);
+    let rendered = serde_json::to_string(&listed).expect("serialize unsafe-root result");
+    assert!(
+        !rendered.contains(sentinel),
+        "outside packet leaked: {rendered}"
+    );
+    assert_eq!(listed["proposals"].as_array().map(Vec::len), Some(0));
+    assert!(
+        rendered.contains("ancestor must be a real directory"),
+        "unsafe-root result should be actionable: {rendered}"
+    );
+
+    let shown =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "show", "mem_test_valid"]);
+    assert!(
+        !shown.contains(sentinel),
+        "show leaked outside packet: {shown}"
+    );
+}
+
+#[test]
+fn proposal_files_apply_repo_safe_create_resolves_packet_and_updates_runtime_index() {
     let repo = initialized_temp_repo();
     write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
 
@@ -1711,8 +2048,15 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
     assert_json_string_field(&applied, &["action"], "create");
     assert_json_string_field(&applied, &["sensitivity"], "repo-safe");
     assert_json_string_field(&applied, &["title"], "Valid proposal");
-    assert_eq!(applied["runtime_index_updated"], false);
-    assert_json_array_contains(&applied, "next_steps", "memzoi rebuild");
+    assert_json_string_field(&applied, &["status"], "applied");
+    assert_json_string_field(&applied, &["outcome"], "applied");
+    assert_eq!(applied["runtime_index_updated"], true);
+    assert_eq!(applied["already_resolved"], false);
+    assert_json_string_field(
+        &applied,
+        &["resolved_path"],
+        ".memzoi/proposals/resolved/applied/valid-proposal.md",
+    );
 
     let record_path = repo.path().join(json_string(&applied, "record_path"));
     let rendered = fs::read_to_string(&record_path).expect("read canonical record");
@@ -1721,8 +2065,9 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
     assert!(rendered.contains("status: active\n"));
     assert!(rendered.contains("visibility: repo\n"));
     assert!(rendered.contains("confidence: 1\n"));
-    assert!(rendered.contains("source: memzoi-proposal-file\n"));
-    assert!(rendered.contains("source_ref: mem_test_valid\n"));
+    assert!(rendered.contains("source: path\n"));
+    assert!(rendered.contains("source_ref: src/lib.rs\n"));
+    assert!(rendered.contains("proposal_id: mem_test_valid\n"));
     assert!(rendered.contains("# Valid proposal\n\nThis proposal body is valid."));
     for forbidden in [
         "kind:",
@@ -1741,29 +2086,809 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
     }
 
     assert!(
-        repo.path()
+        !repo
+            .path()
             .join(".memzoi/proposals/pending/valid-proposal.md")
-            .is_file(),
-        "apply should leave the pending proposal file in place"
+            .exists(),
+        "apply should remove the resolved packet from pending"
+    );
+    let resolved_path = repo
+        .path()
+        .join(".memzoi/proposals/resolved/applied/valid-proposal.md");
+    let resolved = fs::read_to_string(&resolved_path).expect("read resolved proposal");
+    assert!(resolved.contains("status: applied\n"), "{resolved}");
+    assert!(resolved.contains("outcome: applied\n"), "{resolved}");
+    assert!(resolved.contains("resolved_by: cli\n"), "{resolved}");
+    assert!(
+        resolved.contains("record_id: valid-proposal\n"),
+        "{resolved}"
     );
     let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
     let runtime_records: i64 = conn
         .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))
         .expect("count runtime records");
-    assert_eq!(runtime_records, 0, "Git-plane apply must not write SQLite");
+    assert_eq!(
+        runtime_records, 1,
+        "apply should update derived SQLite state"
+    );
 
-    let stale_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
-    assert_check_status(&stale_doctor, "repo_index", "warning");
-    assert_json_array_contains(&stale_doctor, "next_steps", "memzoi rebuild");
-
-    run_json_command(repo.path(), &["rebuild", "--json"]);
     let current_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
     assert_check_status(&current_doctor, "repo_index", "ok");
+    assert_check_status(&current_doctor, "proposal_files", "ok");
     let search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
     assert_eq!(
         search["records"].as_array().map(Vec::len),
         Some(1),
-        "rebuilt runtime index should recall the applied proposal: {search}"
+        "runtime index should immediately recall the applied proposal: {search}"
+    );
+    let recalled = &search["records"][0]["record"];
+    assert_json_string_field(recalled, &["source_kind"], "path");
+    assert_json_string_field(recalled, &["source_ref"], "src/lib.rs");
+    assert_json_string_field(recalled, &["proposal_id"], "mem_test_valid");
+
+    run_json_command(repo.path(), &["rebuild", "--json"]);
+    let rebuilt_search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    let rebuilt = &rebuilt_search["records"][0]["record"];
+    assert_json_string_field(rebuilt, &["source_kind"], "path");
+    assert_json_string_field(rebuilt, &["source_ref"], "src/lib.rs");
+    assert_json_string_field(rebuilt, &["proposal_id"], "mem_test_valid");
+
+    let pending = run_json_command(repo.path(), &["proposal-files", "list", "--json"]);
+    assert!(proposals_from_json(&pending).is_empty(), "{pending}");
+    let shown = run_json_command(
+        repo.path(),
+        &["proposal-files", "show", "mem_test_valid", "--json"],
+    );
+    assert_json_string_field(&shown, &["status"], "applied");
+    assert_json_string_field(&shown["resolution"], &["outcome"], "applied");
+
+    let resolved_before = fs::read(&resolved_path).expect("read resolved packet before rerun");
+    let record_before = fs::read(&record_path).expect("read record before rerun");
+    let repeated = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repeated["already_resolved"], true);
+    assert_json_string_field(&repeated, &["outcome"], "applied");
+    assert_eq!(
+        fs::read(&resolved_path).expect("read resolved rerun"),
+        resolved_before
+    );
+    assert_eq!(
+        fs::read(&record_path).expect("read record rerun"),
+        record_before
+    );
+}
+
+#[test]
+fn proposal_files_reject_archives_reason_without_creating_canonical_memory() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Reviewer found the evidence too weak.",
+            "--actor",
+            "reviewer:human",
+            "--json",
+        ],
+    );
+    assert_json_string_field(&rejected, &["status"], "rejected");
+    assert_json_string_field(&rejected, &["outcome"], "rejected");
+    assert_eq!(rejected["already_resolved"], false);
+    assert_eq!(rejected["runtime_index_updated"], false);
+    assert!(rejected["record_id"].is_null(), "{rejected}");
+    assert_json_string_field(
+        &rejected["resolution"],
+        &["reason"],
+        "Reviewer found the evidence too weak.",
+    );
+    assert_json_string_field(&rejected["resolution"], &["resolved_by"], "reviewer:human");
+
+    assert_eq!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("read records directory")
+            .count(),
+        0
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".memzoi/proposals/pending/valid-proposal.md")
+            .exists()
+    );
+    let resolved_path = repo
+        .path()
+        .join(".memzoi/proposals/resolved/rejected/valid-proposal.md");
+    let resolved_before = fs::read(&resolved_path).expect("read rejected packet");
+    let rendered = String::from_utf8(resolved_before.clone()).expect("resolved UTF-8");
+    assert!(rendered.contains("status: rejected\n"), "{rendered}");
+    assert!(
+        rendered.contains("reason: Reviewer found the evidence too weak."),
+        "{rendered}"
+    );
+
+    let repeated = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "A different repeated reason is not written.",
+            "--json",
+        ],
+    );
+    assert_eq!(repeated["already_resolved"], true);
+    assert_json_string_field(
+        &repeated["resolution"],
+        &["reason"],
+        "Reviewer found the evidence too weak.",
+    );
+    assert_eq!(
+        fs::read(&resolved_path).expect("read repeated rejection"),
+        resolved_before
+    );
+
+    let conflict =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        conflict.contains("already resolved as rejected"),
+        "{conflict}"
+    );
+    let search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    assert!(search["records"].as_array().is_some_and(Vec::is_empty));
+}
+
+#[test]
+fn proposal_file_validation_and_rejection_never_echo_non_repo_safe_content() {
+    for (sensitivity, sentinel) in [
+        ("secret", "SECRET-CONTENT-SENTINEL"),
+        ("raw-transcript", "RAW-TRANSCRIPT-CONTENT-SENTINEL"),
+        (
+            "private-personal-data",
+            "PRIVATE-PERSONAL-DATA-CONTENT-SENTINEL",
+        ),
+        ("unknown", "UNKNOWN-CONTENT-SENTINEL"),
+    ] {
+        let repo = initialized_temp_repo();
+        let mut proposal = proposal_markdown_with_options(
+            "semantic",
+            "create",
+            "proposed",
+            "supersedes: []",
+            "",
+            sensitivity,
+        )
+        .replace(
+            "title: Valid proposal",
+            &format!("title: \"{sentinel} title\""),
+        )
+        .replace(
+            "description: Valid proposal description.",
+            &format!("description: \"{sentinel} description\""),
+        )
+        .replace("# Valid proposal", &format!("# {sentinel} title"))
+        .replace("This proposal body is valid.", &format!("{sentinel} body"))
+        .replace(
+            "  - path: src/lib.rs",
+            &format!("  - path: \"src/{sentinel}.rs\""),
+        );
+        if sensitivity == "unknown" {
+            proposal = proposal.replace("sensitivity: unknown\n", "");
+        }
+        write_pending_proposal_file(repo.path(), "valid-proposal.md", proposal);
+
+        let validation =
+            run_json_command_failure(repo.path(), &["proposal-files", "validate", "--json"]);
+        let validation_stdout =
+            serde_json::to_string(&validation).expect("serialize validation output");
+        let validation_stderr =
+            run_command_failure_stderr(repo.path(), &["proposal-files", "validate", "--json"]);
+        assert!(
+            !validation_stdout.contains(sentinel),
+            "validation stdout leaked {sensitivity} content: {validation_stdout}"
+        );
+        assert!(
+            !validation_stderr.contains(sentinel),
+            "validation stderr leaked {sensitivity} content: {validation_stderr}"
+        );
+        assert!(
+            validation_stdout.contains(&format!("sensitivity {sensitivity}")),
+            "validation should report the actionable classification: {validation_stdout}"
+        );
+
+        let rejected = run_json_command(
+            repo.path(),
+            &[
+                "proposal-files",
+                "reject",
+                "mem_test_valid",
+                "--reason",
+                "Rejected at the repository trust boundary.",
+                "--actor",
+                "reviewer:human",
+                "--json",
+            ],
+        );
+        let rejected_stdout = serde_json::to_string(&rejected).expect("serialize rejection output");
+        assert!(
+            !rejected_stdout.contains(sentinel),
+            "rejection stdout leaked {sensitivity} content: {rejected_stdout}"
+        );
+        assert!(
+            json_string(&rejected, "proposal_id").starts_with("redacted-identity-"),
+            "{rejected}"
+        );
+        assert!(
+            json_string(&rejected, "file_id").starts_with("redacted-identity-"),
+            "{rejected}"
+        );
+        assert_json_string_field(&rejected, &["outcome"], "rejected");
+        assert_json_string_field(&rejected, &["sensitivity"], sensitivity);
+        assert_json_string_field(&rejected["resolution"], &["resolved_by"], "reviewer:human");
+        assert_json_string_field(
+            &rejected["resolution"],
+            &["reason"],
+            "Rejected at the repository trust boundary.",
+        );
+
+        let resolved_path = repo.path().join(json_string(&rejected, "resolved_path"));
+        let resolved = fs::read_to_string(&resolved_path).expect("read redacted rejection receipt");
+        assert!(
+            !resolved.contains(sentinel),
+            "resolved receipt leaked {sensitivity} content: {resolved}"
+        );
+        assert!(resolved.contains("Content hash (BLAKE3):"), "{resolved}");
+        assert!(resolved.contains("status: rejected\n"), "{resolved}");
+        assert!(resolved.contains("outcome: rejected\n"), "{resolved}");
+        assert!(
+            resolved.contains("resolved_by: reviewer:human\n"),
+            "{resolved}"
+        );
+
+        let repeated = run_json_command(
+            repo.path(),
+            &[
+                "proposal-files",
+                "reject",
+                "mem_test_valid",
+                "--reason",
+                "A repeated request must remain redacted.",
+                "--json",
+            ],
+        );
+        let repeated_stdout = serde_json::to_string(&repeated).expect("serialize repeated output");
+        assert!(!repeated_stdout.contains(sentinel));
+        assert_eq!(repeated["already_resolved"], true);
+    }
+}
+
+#[test]
+fn legacy_file_proposal_shapes_remain_showable_and_rejectable() {
+    let repo = initialized_temp_repo();
+    let legacy = proposal_markdown_with_options(
+        "semantic",
+        "supersede",
+        "proposed",
+        "supersedes:\n  - legacy-target-one\n  - legacy-target-two",
+        "",
+        "repo-safe",
+    )
+    .replace(
+        "  reason: Review packet context should not become canonical frontmatter.\n",
+        "",
+    );
+    write_pending_proposal_file(repo.path(), "legacy-shape.md", legacy);
+
+    let shown = run_json_command(
+        repo.path(),
+        &["proposal-files", "show", "mem_test_valid", "--json"],
+    );
+    assert_json_string_field(&shown, &["action"], "supersede");
+    assert_eq!(
+        shown["supersedes"].as_array().map(Vec::len),
+        Some(2),
+        "{shown}"
+    );
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Legacy packet is reviewable but not applyable.",
+            "--json",
+        ],
+    );
+    assert_json_string_field(&rejected, &["outcome"], "rejected");
+}
+
+#[test]
+fn non_repo_safe_rejection_hashes_packet_id_and_file_id_but_replays_raw_aliases() {
+    let repo = initialized_temp_repo();
+    let raw_id = "secret-proposal-identity-sentinel";
+    let raw_file_id = "secret-file-identity-sentinel";
+    let body_sentinel = "SECRET-IDENTITY-BODY-SENTINEL";
+    let proposal = proposal_markdown_with_options(
+        "semantic",
+        "create",
+        "proposed",
+        "supersedes: []",
+        "",
+        "secret",
+    )
+    .replace("id: mem_test_valid", &format!("id: {raw_id}"))
+    .replace("This proposal body is valid.", body_sentinel);
+    write_pending_proposal_file(repo.path(), &format!("{raw_file_id}.md"), proposal.clone());
+
+    let validation =
+        run_json_command_failure(repo.path(), &["proposal-files", "validate", "--json"]);
+    let validation_json = serde_json::to_string(&validation).expect("serialize validation");
+    for forbidden in [raw_id, raw_file_id, body_sentinel] {
+        assert!(!validation_json.contains(forbidden), "{validation_json}");
+    }
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            raw_id,
+            "--reason",
+            "Rejected without retaining raw packet identity.",
+            "--json",
+        ],
+    );
+    let rejected_json = serde_json::to_string(&rejected).expect("serialize rejection");
+    for forbidden in [raw_id, raw_file_id, body_sentinel] {
+        assert!(!rejected_json.contains(forbidden), "{rejected_json}");
+    }
+    let receipt_id = json_string(&rejected, "proposal_id");
+    let receipt_file_id = json_string(&rejected, "file_id");
+    assert!(receipt_id.starts_with("redacted-identity-"), "{rejected}");
+    assert!(
+        receipt_file_id.starts_with("redacted-identity-"),
+        "{rejected}"
+    );
+    let resolved_path = repo.path().join(json_string(&rejected, "resolved_path"));
+    assert!(resolved_path.is_file(), "{}", resolved_path.display());
+    let receipt = fs::read_to_string(&resolved_path).expect("read rejection receipt");
+    for forbidden in [raw_id, raw_file_id, body_sentinel] {
+        assert!(!receipt.contains(forbidden), "{receipt}");
+    }
+
+    for raw_alias in [raw_id, raw_file_id] {
+        let replayed = run_json_command(
+            repo.path(),
+            &[
+                "proposal-files",
+                "reject",
+                raw_alias,
+                "--reason",
+                "Replay must use the existing hash-only receipt.",
+                "--json",
+            ],
+        );
+        assert_eq!(replayed["already_resolved"], true, "{replayed}");
+        assert_json_string_field(&replayed, &["proposal_id"], receipt_id);
+        assert_json_string_field(&replayed, &["file_id"], receipt_file_id);
+    }
+
+    write_pending_proposal_file(repo.path(), &format!("{raw_file_id}.md"), proposal);
+    let collision = run_command_failure_stderr(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            raw_id,
+            "--reason",
+            "A stale raw packet must not bypass the hash-only resolution.",
+        ],
+    );
+    for forbidden in [raw_id, raw_file_id, body_sentinel] {
+        assert!(!collision.contains(forbidden), "{collision}");
+    }
+    assert!(
+        collision.contains("reintroduces resolved identity")
+            && collision.contains("already rejected"),
+        "{collision}"
+    );
+}
+
+#[test]
+fn malformed_known_non_safe_packet_validates_and_rejects_without_echoing_fields() {
+    let repo = initialized_temp_repo();
+    let raw_id = "secret-malformed-id-sentinel";
+    let raw_file_id = "secret-malformed-file-sentinel";
+    let malformed_type = "secret-malformed-type-sentinel";
+    let proposal = proposal_markdown_with_options(
+        "semantic",
+        "create",
+        "proposed",
+        "supersedes: []",
+        "",
+        "secret",
+    )
+    .replace("id: mem_test_valid", &format!("id: {raw_id}"))
+    .replace("type: decision", &format!("type: {malformed_type}"));
+    write_pending_proposal_file(repo.path(), &format!("{raw_file_id}.md"), proposal);
+
+    let validation =
+        run_json_command_failure(repo.path(), &["proposal-files", "validate", "--json"]);
+    let rendered = serde_json::to_string(&validation).expect("serialize validation");
+    for forbidden in [raw_id, raw_file_id, malformed_type] {
+        assert!(!rendered.contains(forbidden), "{rendered}");
+    }
+    assert!(rendered.contains("sensitivity secret"), "{rendered}");
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            raw_id,
+            "--reason",
+            "Malformed secret packet rejected at preflight.",
+            "--json",
+        ],
+    );
+    assert_json_string_field(&rejected, &["outcome"], "rejected");
+    assert!(json_string(&rejected, "proposal_id").starts_with("redacted-identity-"));
+    let rendered = serde_json::to_string(&rejected).expect("serialize rejection");
+    for forbidden in [raw_id, raw_file_id, malformed_type] {
+        assert!(!rendered.contains(forbidden), "{rendered}");
+    }
+
+    let replayed = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            raw_file_id,
+            "--reason",
+            "Replay malformed packet rejection.",
+            "--json",
+        ],
+    );
+    assert_eq!(replayed["already_resolved"], true, "{replayed}");
+}
+
+#[test]
+fn non_repo_safe_rejection_receipt_hashes_target_lineage_and_proposal_authorship() {
+    let repo = initialized_temp_repo();
+    let proposal = proposal_markdown_with_options(
+        "semantic",
+        "tombstone",
+        "proposed",
+        "supersedes: []",
+        "  target: TARGET-LINEAGE-SENTINEL\n",
+        "secret",
+    )
+    .replace(
+        "reason: Review packet context should not become canonical frontmatter.",
+        "reason: ORIGINAL-PROPOSAL-REASON-SENTINEL",
+    )
+    .replace(
+        "proposed_by: agent",
+        "proposed_by: ORIGINAL-PROPOSER-SENTINEL",
+    )
+    .replace("created_by: agent", "created_by: ORIGINAL-CREATOR-SENTINEL");
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", proposal);
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Rejected at the repository trust boundary.",
+            "--actor",
+            "reviewer:human",
+            "--json",
+        ],
+    );
+    let output = serde_json::to_string(&rejected).expect("serialize rejection output");
+    assert!(!output.contains("SENTINEL"), "{output}");
+    assert_json_string_field(&rejected, &["action"], "create");
+    assert!(rejected["target_id"].is_null(), "{rejected}");
+
+    let resolved_path = repo.path().join(json_string(&rejected, "resolved_path"));
+    let resolved = fs::read_to_string(&resolved_path).expect("read redacted rejection receipt");
+    assert!(!resolved.contains("SENTINEL"), "{resolved}");
+    assert!(resolved.contains("action: create\n"), "{resolved}");
+    assert!(resolved.contains("supersedes: []\n"), "{resolved}");
+    assert!(resolved.contains("Content hash (BLAKE3):"), "{resolved}");
+
+    let repeated = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "A repeated request must remain redacted.",
+            "--json",
+        ],
+    );
+    assert_eq!(repeated["already_resolved"], true);
+    assert!(
+        !serde_json::to_string(&repeated)
+            .expect("serialize repeated rejection")
+            .contains("SENTINEL")
+    );
+}
+
+#[test]
+fn reintroduced_pending_packet_cannot_reverse_a_resolved_outcome() {
+    let rejected_repo = initialized_temp_repo();
+    let proposal = valid_proposal_markdown();
+    write_pending_proposal_file(rejected_repo.path(), "valid-proposal.md", proposal.clone());
+    run_json_command(
+        rejected_repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Reviewed rejection remains final.",
+            "--json",
+        ],
+    );
+    write_pending_proposal_file(rejected_repo.path(), "valid-proposal.md", proposal.clone());
+    let validation = run_json_command_failure(
+        rejected_repo.path(),
+        &["proposal-files", "validate", "--json"],
+    );
+    assert_eq!(validation["valid"], false, "{validation}");
+    assert!(
+        serde_json::to_string(&validation["errors"])
+            .expect("serialize terminal identity errors")
+            .contains("reintroduces resolved identity"),
+        "{validation}"
+    );
+    let doctor = run_json_command(rejected_repo.path(), &["doctor", "--json"]);
+    let proposal_check = doctor["checks"]
+        .as_array()
+        .and_then(|checks| {
+            checks
+                .iter()
+                .find(|check| check["name"] == "proposal_files")
+        })
+        .expect("doctor proposal-files check");
+    assert_eq!(proposal_check["status"], "warning", "{doctor}");
+    assert!(
+        proposal_check["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("reintroduces resolved identity")),
+        "{doctor}"
+    );
+    let rejected_then_apply = run_command_failure_stderr(
+        rejected_repo.path(),
+        &["proposal-files", "apply", "mem_test_valid"],
+    );
+    assert!(
+        rejected_then_apply.contains("reintroduces resolved identity")
+            && rejected_then_apply.contains("already rejected"),
+        "unexpected contradictory apply error: {rejected_then_apply}"
+    );
+    assert!(
+        !rejected_repo
+            .path()
+            .join(".memzoi/records/valid-proposal.md")
+            .exists()
+    );
+
+    let applied_repo = initialized_temp_repo();
+    write_pending_proposal_file(applied_repo.path(), "valid-proposal.md", proposal.clone());
+    run_json_command(
+        applied_repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    let record_path = applied_repo
+        .path()
+        .join(".memzoi/records/valid-proposal.md");
+    let record_before = fs::read(&record_path).expect("read applied record");
+    write_pending_proposal_file(applied_repo.path(), "valid-proposal.md", proposal);
+    let applied_then_reject = run_command_failure_stderr(
+        applied_repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "A stale branch must not reverse apply.",
+        ],
+    );
+    assert!(
+        applied_then_reject.contains("reintroduces resolved identity")
+            && applied_then_reject.contains("already applied"),
+        "unexpected contradictory reject error: {applied_then_reject}"
+    );
+    assert_eq!(
+        fs::read(&record_path).expect("read record after refused rejection"),
+        record_before
+    );
+    assert!(
+        !applied_repo
+            .path()
+            .join(".memzoi/proposals/resolved/rejected/valid-proposal.md")
+            .exists()
+    );
+}
+
+#[test]
+fn proposal_file_apply_detects_duplicate_pending_identity_even_by_unique_file_slug() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    write_pending_proposal_file(repo.path(), "duplicate-slug.md", valid_proposal_markdown());
+
+    let error =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "valid-proposal"]);
+    assert!(
+        error.contains("duplicate pending proposal identity token")
+            && !error.contains("mem_test_valid"),
+        "unexpected duplicate identity error: {error}"
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".memzoi/records/valid-proposal.md")
+            .exists()
+    );
+}
+
+#[test]
+fn applied_replay_repairs_missing_and_stale_derived_rows_from_canonical_truth() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+
+    {
+        let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
+        conn.execute("DELETE FROM memory_record WHERE id = 'valid-proposal'", [])
+            .expect("delete derived row");
+    }
+    let repaired_missing = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repaired_missing["already_resolved"], true);
+    assert_eq!(repaired_missing["runtime_index_updated"], true);
+    let search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    assert_eq!(record_ids_from_json(&search), vec!["valid-proposal"]);
+
+    {
+        let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
+        conn.execute(
+            "UPDATE memory_record SET body = 'stale derived bytes' WHERE id = 'valid-proposal'",
+            [],
+        )
+        .expect("stale derived row");
+    }
+    let repaired_stale = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repaired_stale["runtime_index_updated"], true);
+    let already_current = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(already_current["already_resolved"], true);
+    assert_eq!(already_current["runtime_index_updated"], false);
+}
+
+#[test]
+fn applied_replay_repairs_fts_only_drift_and_doctor_reports_it() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+
+    {
+        let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
+        conn.execute(
+            "INSERT INTO memory_fts(memory_fts, rowid, title, body)
+             SELECT 'delete', rowid, title, body
+             FROM memory_record
+             WHERE id = 'valid-proposal'",
+            [],
+        )
+        .expect("delete only the full-text index entry");
+    }
+    let missing_search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    assert!(record_ids_from_json(&missing_search).is_empty());
+    let stale_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&stale_doctor, "repo_index", "warning");
+    assert!(
+        serde_json::to_string(&stale_doctor)
+            .expect("serialize doctor")
+            .contains("fts_out_of_sync=true"),
+        "{stale_doctor}"
+    );
+
+    let repaired = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repaired["already_resolved"], true);
+    assert_eq!(repaired["runtime_index_updated"], true);
+    let repaired_search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    assert_eq!(
+        record_ids_from_json(&repaired_search),
+        vec!["valid-proposal"]
+    );
+    let healthy_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&healthy_doctor, "repo_index", "ok");
+}
+
+#[test]
+fn applied_replay_refuses_missing_or_changed_canonical_truth() {
+    let missing = initialized_temp_repo();
+    write_pending_proposal_file(
+        missing.path(),
+        "valid-proposal.md",
+        valid_proposal_markdown(),
+    );
+    run_json_command(
+        missing.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    fs::remove_file(missing.path().join(".memzoi/records/valid-proposal.md"))
+        .expect("remove canonical record");
+    let missing_error = run_command_failure_stderr(
+        missing.path(),
+        &["proposal-files", "apply", "mem_test_valid"],
+    );
+    assert!(
+        missing_error.contains("canonical drift") && missing_error.contains("valid-proposal"),
+        "unexpected missing canonical error: {missing_error}"
+    );
+
+    let changed = initialized_temp_repo();
+    write_pending_proposal_file(
+        changed.path(),
+        "valid-proposal.md",
+        valid_proposal_markdown(),
+    );
+    run_json_command(
+        changed.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    let record_path = changed.path().join(".memzoi/records/valid-proposal.md");
+    let changed_bytes = fs::read_to_string(&record_path)
+        .expect("read canonical record")
+        .replace(
+            "This proposal body is valid.",
+            "Human-edited canonical bytes after resolution.",
+        );
+    fs::write(&record_path, &changed_bytes).expect("change canonical bytes");
+    let changed_error = run_command_failure_stderr(
+        changed.path(),
+        &["proposal-files", "apply", "mem_test_valid"],
+    );
+    assert!(
+        changed_error.contains("canonical byte drift"),
+        "unexpected changed canonical error: {changed_error}"
+    );
+    assert_eq!(
+        fs::read_to_string(&record_path).expect("read changed canonical after replay"),
+        changed_bytes,
+        "replay must not overwrite changed canonical truth"
     );
 }
 
@@ -2103,6 +3228,112 @@ candidates:
 }
 
 #[test]
+fn import_cli_redacts_blocked_repo_candidate_from_plan_apply_and_proposal_files() {
+    let repo = initialized_temp_repo();
+    let manifest_path = repo.path().join("blocked-import.yml");
+    fs::write(
+        &manifest_path,
+        r#"version: memzoi/import-v1
+sources:
+  - path: imports/IMPORT-SOURCE-SENTINEL.yml
+candidates:
+  - destination: repo
+    reason: IMPORT-REASON-SENTINEL
+    type: fact
+    title: IMPORT-TITLE-SENTINEL
+    body: IMPORT-BODY-SENTINEL
+    scope:
+      kind: repo
+      paths: [src/IMPORT-PATH-SENTINEL/**]
+  - destination: repo
+    reason: durable project fact
+    type: fact
+    title: Safe imported fact
+    body: This repo-safe candidate may become a reviewed proposal.
+    sensitivity: repo-safe
+"#,
+    )
+    .expect("write blocked import manifest");
+
+    let mut plan_command = memzoi();
+    let plan_assert = plan_command
+        .args([
+            "import",
+            "plan",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let plan_stdout =
+        std::str::from_utf8(&plan_assert.get_output().stdout).expect("plan stdout utf-8");
+    let plan_stderr =
+        std::str::from_utf8(&plan_assert.get_output().stderr).expect("plan stderr utf-8");
+    assert!(!plan_stdout.contains("SENTINEL"), "{plan_stdout}");
+    assert!(!plan_stderr.contains("SENTINEL"), "{plan_stderr}");
+    let plan: Value = serde_json::from_str(plan_stdout).expect("plan stdout JSON");
+    assert_eq!(plan["sources"], serde_json::json!([]));
+    assert_json_string_field(&plan["candidates"][0], &["sensitivity"], "unknown");
+    assert_json_string_field(
+        &plan["candidates"][0],
+        &["title"],
+        "Redacted non-repo-safe import candidate",
+    );
+    assert_json_string_field(&plan["candidates"][0]["action"], &["kind"], "blocked");
+    assert_json_string_field(&plan["candidates"][1]["action"], &["kind"], "blocked");
+    assert!(
+        plan["candidates"][1]["action"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("split the manifest")),
+        "{plan}"
+    );
+    let plan_id = json_string(&plan, "plan_id").to_owned();
+
+    let mut apply_command = memzoi();
+    let apply_assert = apply_command
+        .args([
+            "import",
+            "apply",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--plan-id",
+            &plan_id,
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let apply_stdout =
+        std::str::from_utf8(&apply_assert.get_output().stdout).expect("apply stdout utf-8");
+    let apply_stderr =
+        std::str::from_utf8(&apply_assert.get_output().stderr).expect("apply stderr utf-8");
+    assert!(!apply_stdout.contains("SENTINEL"), "{apply_stdout}");
+    assert!(!apply_stderr.contains("SENTINEL"), "{apply_stderr}");
+    let applied: Value = serde_json::from_str(apply_stdout).expect("apply stdout JSON");
+    assert_eq!(applied["writes"].as_array().map(Vec::len), Some(0));
+
+    let pending = test_paths(repo.path()).proposals_dir().join("pending");
+    let proposal_paths = if pending.is_dir() {
+        fs::read_dir(&pending)
+            .expect("read pending proposals")
+            .map(|entry| entry.expect("read proposal entry").path())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    assert!(proposal_paths.is_empty(), "{proposal_paths:?}");
+    assert!(test_paths(repo.path()).records_dir().is_dir());
+    assert_eq!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("read canonical records")
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn import_plan_and_apply_hide_external_manifest_paths() {
     let repo = initialized_temp_repo();
     let external_dir = tempfile::tempdir().expect("external manifest dir");
@@ -2195,7 +3426,7 @@ fn proposal_files_apply_refuses_existing_canonical_record() {
     let stderr =
         run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
     assert!(
-        stderr.contains("failed to create memory record"),
+        stderr.contains("canonical memory record already exists"),
         "expected collision error, got {stderr}"
     );
     assert_eq!(
@@ -2220,6 +3451,18 @@ fn proposal_files_apply_rejects_non_repo_safe_sensitivity() {
             "secret proposals must not become repo-shared memory",
         ),
         (
+            "raw-transcript",
+            "raw transcripts must not become repo-shared memory",
+        ),
+        (
+            "private-personal-data",
+            "private personal data must not become repo-shared memory",
+        ),
+        (
+            "temporary-state",
+            "temporary task state belongs in local or session memory",
+        ),
+        (
             "unknown",
             "classify the proposal sensitivity before applying it to repo records",
         ),
@@ -2236,6 +3479,21 @@ fn proposal_files_apply_rejects_non_repo_safe_sensitivity() {
                 "",
                 sensitivity,
             ),
+        );
+
+        let blocked = run_json_command_failure(
+            repo.path(),
+            &["proposal-files", "apply", "mem_test_valid", "--json"],
+        );
+        assert_eq!(blocked["ok"], false);
+        assert_json_string_field(&blocked["error"], &["code"], "repo_sensitivity_required");
+        assert_json_string_field(&blocked["error"], &["operation"], "proposal_files_apply");
+        assert_json_string_field(&blocked["error"], &["sensitivity"], sensitivity);
+        let rendered = serde_json::to_string(&blocked).expect("serialize sensitivity error");
+        assert!(rendered.contains(guidance), "{rendered}");
+        assert!(
+            !rendered.contains("This proposal body is valid."),
+            "{rendered}"
         );
 
         let stderr =
@@ -2269,32 +3527,446 @@ fn proposal_files_apply_rejects_non_repo_safe_sensitivity() {
 }
 
 #[test]
-fn proposal_files_apply_rejects_unsupported_actions() {
-    for (action, supersedes_yaml, target_yaml) in [
-        ("supersede", "supersedes:\n  - existing-memory", ""),
-        ("tombstone", "supersedes: []", "  target: existing-memory\n"),
+fn proposal_files_supersede_preserves_target_evidence_and_creates_active_lineage() {
+    let repo = initialized_temp_repo();
+    write_canonical_record_fixture(
+        repo.path(),
+        "legacy-auth-guidance",
+        "repo",
+        None,
+        "active",
+        "2026-07-01T00:00:00Z",
+        "2026-07-01T00:00:00Z",
+    );
+    let proposal = proposal_markdown_with(
+        "semantic",
+        "supersede",
+        "supersedes:\n  - legacy-auth-guidance",
+        "",
+    )
+    .replace("title: Valid proposal", "title: Replacement auth guidance")
+    .replace("# Valid proposal", "# Replacement auth guidance")
+    .replace(
+        "This proposal body is valid.",
+        "Replacement guidance requires server-side session validation.",
+    );
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", proposal);
+
+    let applied = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_json_string_field(&applied, &["action"], "supersede");
+    assert_json_string_field(&applied, &["outcome"], "applied");
+    assert_json_string_field(&applied, &["record_id"], "replacement-auth-guidance");
+    assert_json_string_field(&applied, &["record_status"], "active");
+    assert_json_string_field(&applied, &["target_id"], "legacy-auth-guidance");
+    assert_eq!(applied["runtime_index_updated"], true);
+
+    let old_path = repo.path().join(".memzoi/records/legacy-auth-guidance.md");
+    let old = fs::read_to_string(&old_path).expect("read superseded target");
+    assert!(old.contains("status: superseded\n"), "{old}");
+    assert!(
+        old.contains("source_ref: \"evidence://legacy-auth\"\n"),
+        "{old}"
+    );
+    assert!(old.contains("tags:\n  - legacy-evidence\n"), "{old}");
+    assert!(old.contains("applies_to:\n  - \"src/auth/**\"\n"), "{old}");
+    assert!(
+        old.contains("Original legacy auth evidence remains reviewable."),
+        "{old}"
+    );
+
+    let replacement_path = repo
+        .path()
+        .join(".memzoi/records/replacement-auth-guidance.md");
+    let replacement = fs::read_to_string(&replacement_path).expect("read replacement");
+    assert!(replacement.contains("status: active\n"), "{replacement}");
+    assert!(
+        replacement.contains("supersedes: legacy-auth-guidance\n"),
+        "{replacement}"
+    );
+    assert!(
+        replacement.contains("source: path\n")
+            && replacement.contains("source_ref: src/lib.rs\n")
+            && replacement.contains("proposal_id: mem_test_valid\n"),
+        "{replacement}"
+    );
+
+    let resolved_path = repo
+        .path()
+        .join(".memzoi/proposals/resolved/applied/valid-proposal.md");
+    let resolved = fs::read_to_string(&resolved_path).expect("read resolved supersede packet");
+    assert!(resolved.contains("action: supersede\n"), "{resolved}");
+    assert!(
+        resolved.contains("target_id: legacy-auth-guidance\n"),
+        "{resolved}"
+    );
+    assert!(
+        resolved.contains("reason: Review packet context should not become canonical frontmatter."),
+        "{resolved}"
+    );
+    assert!(resolved.contains("path: src/lib.rs\n"), "{resolved}");
+
+    let search = run_json_command(repo.path(), &["search", "server-side session", "--json"]);
+    assert_eq!(
+        record_ids_from_json(&search),
+        vec!["replacement-auth-guidance"]
+    );
+    let old_search = run_json_command(repo.path(), &["search", "Original legacy", "--json"]);
+    assert!(record_ids_from_json(&old_search).is_empty(), "{old_search}");
+    let doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&doctor, "repo_index", "ok");
+
+    let repeated = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repeated["already_resolved"], true);
+    assert_json_string_field(&repeated, &["target_id"], "legacy-auth-guidance");
+}
+
+#[test]
+fn proposal_files_tombstone_preserves_canonical_evidence_and_removes_target_from_recall() {
+    let repo = initialized_temp_repo();
+    write_canonical_record_fixture(
+        repo.path(),
+        "obsolete-client-auth",
+        "repo",
+        None,
+        "active",
+        "2026-07-01T00:00:00Z",
+        "2026-07-01T00:00:00Z",
+    );
+    write_pending_proposal_file(
+        repo.path(),
+        "valid-proposal.md",
+        proposal_markdown_with(
+            "semantic",
+            "tombstone",
+            "supersedes: []",
+            "  target: obsolete-client-auth\n",
+        ),
+    );
+
+    let applied = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_json_string_field(&applied, &["action"], "tombstone");
+    assert_json_string_field(&applied, &["record_id"], "obsolete-client-auth");
+    assert_json_string_field(&applied, &["record_status"], "tombstoned");
+    assert_json_string_field(&applied, &["target_id"], "obsolete-client-auth");
+
+    let target_path = repo.path().join(".memzoi/records/obsolete-client-auth.md");
+    let target = fs::read_to_string(&target_path).expect("read tombstoned target");
+    assert!(target.contains("status: tombstoned\n"), "{target}");
+    assert!(
+        target.contains("source_ref: \"evidence://legacy-auth\"\n"),
+        "{target}"
+    );
+    assert!(
+        target.contains("Original legacy auth evidence remains reviewable."),
+        "{target}"
+    );
+    let resolved = fs::read_to_string(
+        repo.path()
+            .join(".memzoi/proposals/resolved/applied/valid-proposal.md"),
+    )
+    .expect("read resolved tombstone packet");
+    assert!(resolved.contains("action: tombstone\n"), "{resolved}");
+    assert!(
+        resolved.contains("target_id: obsolete-client-auth\n"),
+        "{resolved}"
+    );
+    assert!(
+        resolved.contains("resolution:\n  outcome: applied\n"),
+        "{resolved}"
+    );
+
+    let search = run_json_command(repo.path(), &["search", "legacy auth evidence", "--json"]);
+    assert!(record_ids_from_json(&search).is_empty(), "{search}");
+    let doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&doctor, "repo_index", "ok");
+
+    let repeated = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repeated["already_resolved"], true);
+    assert_json_string_field(&repeated, &["record_id"], "obsolete-client-auth");
+}
+
+#[test]
+fn proposal_files_validate_rejects_invalid_target_shapes_and_states_before_mutation() {
+    for (case, target, proposal, expected) in [
+        (
+            "missing",
+            None,
+            proposal_markdown_with(
+                "semantic",
+                "supersede",
+                "supersedes:\n  - missing-target",
+                "",
+            ),
+            "target does not exist",
+        ),
+        (
+            "inactive",
+            Some(("repo", None, "tombstoned", "2026-07-01T00:00:00Z")),
+            proposal_markdown_with(
+                "semantic",
+                "tombstone",
+                "supersedes: []",
+                "  target: lifecycle-target\n",
+            ),
+            "is inactive",
+        ),
+        (
+            "cross-scope",
+            Some((
+                "project",
+                Some("other-project"),
+                "active",
+                "2026-07-01T00:00:00Z",
+            )),
+            proposal_markdown_with(
+                "semantic",
+                "supersede",
+                "supersedes:\n  - lifecycle-target",
+                "",
+            ),
+            "cross-scope",
+        ),
+        (
+            "stale",
+            Some(("repo", None, "active", "2026-07-07T00:00:00Z")),
+            proposal_markdown_with(
+                "semantic",
+                "tombstone",
+                "supersedes: []",
+                "  target: lifecycle-target\n",
+            ),
+            "is stale",
+        ),
     ] {
         let repo = initialized_temp_repo();
-        write_pending_proposal_file(
-            repo.path(),
-            "valid-proposal.md",
-            proposal_markdown_with_options(
-                "semantic",
-                action,
-                "proposed",
-                supersedes_yaml,
-                target_yaml,
-                "repo-safe",
-            ),
-        );
+        if let Some((scope, scope_id, status, updated)) = target {
+            write_canonical_record_fixture(
+                repo.path(),
+                "lifecycle-target",
+                scope,
+                scope_id,
+                status,
+                "2026-07-01T00:00:00Z",
+                updated,
+            );
+        }
+        write_pending_proposal_file(repo.path(), "valid-proposal.md", proposal);
+        let pending_path = repo
+            .path()
+            .join(".memzoi/proposals/pending/valid-proposal.md");
+        let pending_before = fs::read(&pending_path).expect("read pending fixture");
+        let target_before = target.map(|_| {
+            fs::read(repo.path().join(".memzoi/records/lifecycle-target.md"))
+                .expect("read target fixture")
+        });
 
-        let stderr =
-            run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
-        assert!(
-            stderr.contains(&format!("action {action} is not supported")),
-            "expected unsupported action rejection for {action}, got {stderr}"
+        let validated =
+            run_json_command_failure(repo.path(), &["proposal-files", "validate", "--json"]);
+        let errors = serde_json::to_string(&validated["errors"]).expect("serialize errors");
+        assert!(errors.contains(expected), "{case}: {validated}");
+        assert_eq!(
+            fs::read(&pending_path).expect("read pending after validate"),
+            pending_before
         );
+        if let Some(target_before) = target_before {
+            assert_eq!(
+                fs::read(repo.path().join(".memzoi/records/lifecycle-target.md"))
+                    .expect("read target after validate"),
+                target_before,
+                "{case} validation mutated canonical target"
+            );
+        }
     }
+
+    let multiple = initialized_temp_repo();
+    write_pending_proposal_file(
+        multiple.path(),
+        "valid-proposal.md",
+        proposal_markdown_with(
+            "semantic",
+            "supersede",
+            "supersedes:\n  - first-target\n  - second-target",
+            "",
+        ),
+    );
+    let invalid =
+        run_json_command_failure(multiple.path(), &["proposal-files", "validate", "--json"]);
+    assert!(
+        serde_json::to_string(&invalid["errors"])
+            .expect("serialize errors")
+            .contains("exactly one supersedes target"),
+        "{invalid}"
+    );
+
+    let missing_reason = initialized_temp_repo();
+    write_pending_proposal_file(
+        missing_reason.path(),
+        "valid-proposal.md",
+        proposal_markdown_with(
+            "semantic",
+            "supersede",
+            "supersedes:\n  - lifecycle-target",
+            "",
+        )
+        .replace(
+            "  reason: Review packet context should not become canonical frontmatter.\n",
+            "",
+        ),
+    );
+    let invalid = run_json_command_failure(
+        missing_reason.path(),
+        &["proposal-files", "validate", "--json"],
+    );
+    assert!(
+        serde_json::to_string(&invalid["errors"])
+            .expect("serialize errors")
+            .contains("must include proposal.reason"),
+        "{invalid}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn proposal_file_target_cannot_escape_records_root_through_symlinked_directory() {
+    let repo = initialized_temp_repo();
+    let outside = tempfile::tempdir().expect("outside records directory");
+    let outside_record = outside.path().join("victim.md");
+    fs::write(
+        &outside_record,
+        r#"---
+type: decision
+lane: semantic
+title: Outside victim
+description: Outside canonical-looking bytes must never be mutated.
+timestamp: 2026-07-01T00:00:00Z
+updated: 2026-07-01T00:00:00Z
+status: active
+scope: repo
+visibility: repo
+confidence: 1
+source: human
+source_ref: evidence://outside
+---
+
+# Outside victim
+
+Outside canonical-looking bytes must never be mutated.
+"#,
+    )
+    .expect("write outside record");
+    let outside_before = fs::read(&outside_record).expect("read outside bytes");
+    let records_root = test_paths(repo.path()).records_dir();
+    std::os::unix::fs::symlink(outside.path(), records_root.join("linked"))
+        .expect("create symlinked records directory");
+
+    write_pending_proposal_file(
+        repo.path(),
+        "valid-proposal.md",
+        proposal_markdown_with(
+            "semantic",
+            "tombstone",
+            "supersedes: []",
+            "  target: linked/victim\n",
+        ),
+    );
+    let error =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        error.contains("target does not exist") || error.contains("unsafe"),
+        "unexpected symlink target error: {error}"
+    );
+    assert_eq!(
+        fs::read(&outside_record).expect("read outside bytes after apply"),
+        outside_before,
+        "file-backed lifecycle apply escaped the canonical records root"
+    );
+}
+
+#[test]
+fn failed_file_supersede_leaves_target_index_and_pending_packet_unchanged() {
+    let repo = initialized_temp_repo();
+    write_canonical_record_fixture(
+        repo.path(),
+        "atomic-target",
+        "repo",
+        None,
+        "active",
+        "2026-07-01T00:00:00Z",
+        "2026-07-01T00:00:00Z",
+    );
+    write_pending_proposal_file(
+        repo.path(),
+        "valid-proposal.md",
+        proposal_markdown_with(
+            "semantic",
+            "supersede",
+            "supersedes:\n  - atomic-target",
+            "",
+        )
+        .replace("title: Valid proposal", "title: Atomic replacement")
+        .replace("# Valid proposal", "# Atomic replacement"),
+    );
+    let applied_root = repo.path().join(".memzoi/proposals/resolved/applied");
+    fs::create_dir_all(applied_root.parent().expect("resolved parent"))
+        .expect("create resolved parent");
+    fs::write(&applied_root, "block resolved directory creation").expect("create resolved blocker");
+
+    let target_path = repo.path().join(".memzoi/records/atomic-target.md");
+    let pending_path = repo
+        .path()
+        .join(".memzoi/proposals/pending/valid-proposal.md");
+    let target_before = fs::read(&target_path).expect("read target before failure");
+    let pending_before = fs::read(&pending_path).expect("read pending before failure");
+    let indexed_before: (String, i64) = Connection::open(test_paths(repo.path()).db_path)
+        .expect("open index before failure")
+        .query_row(
+            "SELECT status, COUNT(*) FROM memory_record WHERE id = 'atomic-target'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read index before failure");
+
+    let error =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        error.contains("failed to inspect resolved proposal packet"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(&target_path).expect("read target after failure"),
+        target_before
+    );
+    assert_eq!(
+        fs::read(&pending_path).expect("read pending after failure"),
+        pending_before
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".memzoi/records/atomic-replacement.md")
+            .exists()
+    );
+    let indexed_after: (String, i64) = Connection::open(test_paths(repo.path()).db_path)
+        .expect("open index after failure")
+        .query_row(
+            "SELECT status, COUNT(*) FROM memory_record WHERE id = 'atomic-target'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read index after failure");
+    assert_eq!(indexed_after, indexed_before);
 }
 
 #[test]
@@ -2389,6 +4061,8 @@ fn reject_json_prevents_apply_from_creating_active_record() {
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Rejected memories do not apply",
             "--body",
@@ -2516,6 +4190,40 @@ fn search_json_filters_scope_type_path_limit_and_excludes_inactive_records() {
     assert_json_does_not_reference_records(
         &search,
         &[wrong_type, wrong_scope, wrong_path, tombstoned],
+    );
+}
+
+#[test]
+fn expiry_command_shows_records_excluded_from_normal_search_and_explains_why() {
+    let repo = initialized_temp_repo();
+    let record_id = create_applied_memory(
+        repo.path(),
+        "warning",
+        "repo",
+        "Expired CLI diagnostic memory",
+        "The expirydiagnostic token should be hidden from normal search.",
+    );
+    let conn = Connection::open(memory_db_path(repo.path())).expect("open runtime database");
+    conn.execute(
+        "UPDATE memory_record SET expires_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
+        [record_id.as_str()],
+    )
+    .expect("set expired diagnostic fixture");
+    drop(conn);
+
+    let search = run_json_command(repo.path(), &["search", "expirydiagnostic", "--json"]);
+    assert!(record_ids_from_json(&search).is_empty());
+
+    let diagnostic = run_json_command(repo.path(), &["expiry", record_id.as_str(), "--json"]);
+    assert_eq!(diagnostic["record"]["id"], record_id);
+    assert_eq!(diagnostic["record"]["status"], "active");
+    assert_eq!(diagnostic["expired"], true);
+    assert_eq!(diagnostic["excluded_from_normal_reads"], true);
+    assert!(
+        diagnostic["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("at or after expiry")),
+        "diagnostic should explain exclusion: {diagnostic}"
     );
 }
 
@@ -3120,29 +4828,50 @@ candidates:
   - destination: repo
     type: decision
     lane: semantic
-    title: Sensitive repo candidate
-    body: This sensitive candidate must block the whole batch.
-    sensitivity: sensitive
+    title: OMITTED-SESSION-TITLE-SENTINEL
+    body: OMITTED-SESSION-BODY-SENTINEL
+    reason: OMITTED-SESSION-REASON-SENTINEL
+    scope:
+      kind: repo
+      paths: [src/OMITTED-SESSION-PATH-SENTINEL/**]
 "#,
     )
     .expect("write invalid session-end input");
 
-    let stderr = run_command_failure_stderr(
+    let result = run_json_command(
         repo,
         &[
             "session-end",
             "--from-file",
             input_path.to_str().expect("session-end path utf-8"),
+            "--json",
         ],
     );
-    assert!(
-        stderr.contains("requires sensitivity repo-safe; got sensitive"),
-        "repo sensitivity validation should fail clearly: {stderr}"
+    let candidates = result["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("blocked session-end result needs candidates: {result}"));
+    assert_eq!(candidates.len(), 2);
+    assert_json_string_field(&candidates[0], &["status"], "blocked");
+    assert_json_string_field(&candidates[0], &["sensitivity"], "unknown");
+    assert_json_string_field(&candidates[1], &["status"], "blocked");
+    assert_json_string_field(&candidates[1], &["sensitivity"], "unknown");
+    assert_json_string_field(
+        &candidates[1],
+        &["title"],
+        "Redacted non-repo-safe candidate",
     );
+    assert!(
+        candidates[1]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("got unknown")),
+        "blocked outcome should explain the explicit unknown classification: {result}"
+    );
+    let rendered = serde_json::to_string(&result).expect("serialize blocked result");
+    assert!(!rendered.contains("SENTINEL"), "{rendered}");
     let local = run_json_command(repo, &["local", "list", "--json"]);
     assert!(
         record_ids_from_json(&local).is_empty(),
-        "invalid session-end batch must not create earlier local rows: {local}"
+        "blocked session-end batch must not create earlier local rows: {local}"
     );
     let pending = repo.join(".memzoi").join("proposals").join("pending");
     assert!(
@@ -3151,8 +4880,59 @@ candidates:
                 .expect("read pending dir")
                 .next()
                 .is_none(),
-        "invalid session-end batch must not write proposal files"
+        "blocked session-end batch must not write proposal files"
     );
+}
+
+#[test]
+fn session_end_blocks_every_non_repo_safe_repo_candidate() {
+    for sensitivity in [
+        "local-only",
+        "sensitive",
+        "secret",
+        "raw-transcript",
+        "private-personal-data",
+        "temporary-state",
+        "unknown",
+    ] {
+        let repo = initialized_temp_repo();
+        let input_path = repo.path().join("blocked-session-end.yml");
+        let sentinel = format!("SESSION-END-{sensitivity}-BODY-SENTINEL");
+        fs::write(
+            &input_path,
+            format!(
+                "task: Block unsafe session-end candidate\ncandidates:\n  - destination: repo\n    type: fact\n    lane: semantic\n    title: Blocked session-end candidate\n    body: {sentinel}\n    sensitivity: {sensitivity}\n"
+            ),
+        )
+        .expect("write blocked session-end input");
+
+        let result = run_json_command(
+            repo.path(),
+            &[
+                "session-end",
+                "--from-file",
+                input_path.to_str().expect("session-end path utf-8"),
+                "--json",
+            ],
+        );
+        let candidate = &result["candidates"][0];
+        assert_json_string_field(candidate, &["status"], "blocked");
+        assert_json_string_field(candidate, &["sensitivity"], sensitivity);
+        assert!(candidate["write"].is_null(), "{result}");
+        assert!(
+            !serde_json::to_string(&result)
+                .expect("serialize blocked session-end result")
+                .contains(&sentinel)
+        );
+        let pending = test_paths(repo.path()).proposals_dir().join("pending");
+        assert!(
+            !pending.exists()
+                || fs::read_dir(pending)
+                    .expect("read pending proposals")
+                    .next()
+                    .is_none()
+        );
+    }
 }
 
 #[test]
@@ -3194,7 +4974,8 @@ candidates:
     assert!(
         stderr.contains("failed to create proposal directory")
             || stderr.contains("failed to create session-end proposal")
-            || stderr.contains("failed to inspect pending proposal"),
+            || stderr.contains("failed to inspect pending proposal")
+            || stderr.contains("pending proposal root ancestor must be a real directory"),
         "session-end should fail clearly on proposal file write errors: {stderr}"
     );
     let local = run_json_command(repo, &["local", "list", "--json"]);
@@ -3596,7 +5377,7 @@ fn context_json_returns_prompt_ready_pack_records_and_citations() {
     assert_json_string_field(citation, &["scope", "scope_kind"], "repo");
     assert_json_string_field(citation, &["destination"], "repo");
     assert_json_string_field(citation, &["visibility"], "repo");
-    assert_json_string_field(citation, &["source_kind"], "cli");
+    assert_eq!(citation["source_kind"], Value::Null);
     assert_json_string_field(citation, &["source_ref"], "issue://cli-context#procedure");
     let first_record = pack["records"]
         .as_array()
@@ -4011,7 +5792,7 @@ fn handoff_requires_task_or_path_at_cli_boundary() {
 }
 
 #[test]
-fn precheck_json_warns_for_risky_path_and_cites_memory() {
+fn precheck_json_warns_for_path_only_governance_and_cites_memory() {
     let repo = initialized_temp_repo();
     let repo = repo.path();
 
@@ -4019,8 +5800,8 @@ fn precheck_json_warns_for_risky_path_and_cites_memory() {
         repo,
         "risk",
         "repo",
-        "Billing file is fragile",
-        "Editing invoice rounding in billing previously broke tax calculation.",
+        "Preserve settlement invariants",
+        "Changing the rounding order previously broke tax calculation.",
     );
     attach_memory_path(repo, &risk, "apps/api/src/billing/invoice.rs");
     update_record_source_ref(repo, &risk, "issue://billing-risk#invoice");
@@ -4040,8 +5821,6 @@ fn precheck_json_warns_for_risky_path_and_cites_memory() {
             "precheck",
             "--path",
             "apps/api/src/billing/invoice.rs",
-            "--action",
-            "change invoice rounding",
             "--json",
         ],
     );
@@ -4059,8 +5838,10 @@ fn precheck_json_warns_for_risky_path_and_cites_memory() {
     assert_json_string_field(warning, &["record_id"], &risk);
     assert_json_string_field(warning, &["severity"], "high");
     assert!(
-        warning.to_string().contains("Billing file is fragile")
-            || warning.to_string().contains("invoice rounding"),
+        warning
+            .to_string()
+            .contains("Preserve settlement invariants")
+            || warning.to_string().contains("rounding order"),
         "warning should explain the matching memory: {warning}"
     );
     assert_json_does_not_reference_records(&precheck, &[unrelated]);
@@ -4226,6 +6007,8 @@ fn rebuild_refuses_to_discard_open_proposals_with_ids_statuses_and_next_steps() 
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Pending rebuild protection",
             "--body",
@@ -4247,6 +6030,8 @@ fn rebuild_refuses_to_discard_open_proposals_with_ids_statuses_and_next_steps() 
             "repo",
             "--visibility",
             "repo",
+            "--sensitivity",
+            "repo-safe",
             "--title",
             "Approved rebuild protection",
             "--body",
@@ -4625,6 +6410,52 @@ fn write_pending_proposal_file(repo: &Path, name: &str, contents: String) {
     fs::write(pending.join(name), contents).expect("write pending proposal fixture");
 }
 
+fn write_canonical_record_fixture(
+    repo: &Path,
+    id: &str,
+    scope: &str,
+    scope_id: Option<&str>,
+    status: &str,
+    created: &str,
+    updated: &str,
+) {
+    let records = test_paths(repo).records_dir();
+    fs::create_dir_all(&records).expect("create records fixture directory");
+    let scope_id = scope_id
+        .map(|scope_id| format!("scope_id: {scope_id}\n"))
+        .unwrap_or_default();
+    fs::write(
+        records.join(format!("{id}.md")),
+        format!(
+            r#"---
+type: decision
+lane: semantic
+title: Legacy auth evidence
+description: Original legacy auth evidence remains reviewable.
+timestamp: {created}
+updated: {updated}
+status: {status}
+scope: {scope}
+{scope_id}visibility: repo
+confidence: 1
+source: reviewed-source
+source_ref: evidence://legacy-auth
+tags:
+  - legacy-evidence
+applies_to:
+  - src/auth/**
+---
+
+# Legacy auth evidence
+
+Original legacy auth evidence remains reviewable.
+"#
+        ),
+    )
+    .expect("write canonical record fixture");
+    run_json_command(repo, &["rebuild", "--json"]);
+}
+
 fn valid_proposal_markdown() -> String {
     proposal_markdown_with("semantic", "create", "supersedes: []", "")
 }
@@ -4795,6 +6626,8 @@ fn create_applied_memory_with_visibility(
             scope_kind,
             "--visibility",
             visibility,
+            "--sensitivity",
+            "repo-safe",
             "--title",
             title,
             "--body",

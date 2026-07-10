@@ -6,13 +6,15 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, HandoffInput, ImportApplyResult,
+    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, FileProposalInventoryEntry,
+    FileProposalInventoryError, FileProposalResolutionResult, HandoffInput, ImportApplyResult,
     ImportPlan, InitRequest, LocalMemoryInput, MemoryDestination, MemoryDraft, MemoryLane,
-    MemoryRecord, MemoryService, MemoryType, OkfProposalFile, PrecheckInput, Proposal,
-    ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus, ProposalStatusFilter,
-    ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult, SessionEndWrite,
-    Visibility, apply_okf_create_proposal_file, discover_paths, parse_import_document,
-    parse_okf_proposal_file, parse_session_end_document,
+    MemoryRecord, MemoryService, MemoryType, OkfProposalOutcome, OkfProposalSensitivity,
+    OkfProposalStatus, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalInboxSummary,
+    ProposalStatus, ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult,
+    SessionEndResult, SessionEndWrite, Visibility, discover_paths,
+    lifecycle_transaction_artifact_count, okf_proposal_matches_identity, parse_import_document,
+    parse_session_end_document, scan_file_proposal_inventory,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -34,6 +36,9 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             memory_type,
             scope_kind,
             visibility,
+            source_kind,
+            source_ref,
+            sensitivity,
             title,
             body,
             actor,
@@ -46,6 +51,9 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 memory_type,
                 scope_kind,
                 visibility,
+                source_kind,
+                source_ref,
+                sensitivity,
                 title,
                 body,
             },
@@ -103,9 +111,17 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 proposal_files_show_command(&proposal_id, json)
             }
             ProposalFileCommands::Validate { json } => proposal_files_validate_command(json),
-            ProposalFileCommands::Apply { proposal_id, json } => {
-                proposal_files_apply_command(&proposal_id, json)
-            }
+            ProposalFileCommands::Apply {
+                proposal_id,
+                actor,
+                json,
+            } => proposal_files_apply_command(&proposal_id, &actor, json),
+            ProposalFileCommands::Reject {
+                proposal_id,
+                reason,
+                actor,
+                json,
+            } => proposal_files_reject_command(&proposal_id, &reason, &actor, json),
         },
         Commands::Local { command } => match command {
             LocalCommands::Add {
@@ -144,6 +160,9 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             memory_type,
             scope_kind,
             visibility,
+            source_kind,
+            source_ref,
+            sensitivity,
             title,
             body,
             actor,
@@ -154,6 +173,9 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 memory_type,
                 scope_kind,
                 visibility,
+                source_kind,
+                source_ref,
+                sensitivity,
                 title,
                 body,
             },
@@ -174,6 +196,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             limit,
             json,
         } => search_command(query, scope_kind, memory_type, path, limit, json),
+        Commands::Expiry { record_id, json } => expiry_command(&record_id, json),
         Commands::Context {
             task,
             path,
@@ -412,13 +435,7 @@ fn propose_command(
     }
 
     let service = open_service()?;
-    let draft = draft_from_args(
-        &draft_args.memory_type,
-        &draft_args.scope_kind,
-        &draft_args.visibility,
-        draft_args.title,
-        draft_args.body,
-    )?;
+    let draft = draft_from_args(draft_args)?;
     let approval_override = match (flags.manual, flags.auto_approve || flags.apply) {
         (true, false) => Some(ProposalApprovalOverride::Manual),
         (false, true) => Some(ProposalApprovalOverride::Auto),
@@ -443,6 +460,7 @@ fn propose_command(
             "record_status": record_status,
             "validation": result.validation,
             "applied": result.applied,
+            "sensitivity": result.proposal.payload.sensitivity.as_str(),
         }))
     } else {
         if let Some(record) = result.record {
@@ -498,6 +516,10 @@ fn reject_command(proposal_id: &str, reason: &str, actor: &str, as_json: bool) -
 
 fn apply_command(proposal_id: &str, actor: &str, as_json: bool) -> Result<()> {
     let service = open_service()?;
+    let proposal = service.show_proposal(proposal_id)?;
+    if proposal.payload.sensitivity != OkfProposalSensitivity::RepoSafe {
+        return blocked_repo_sensitivity_error("apply", proposal.payload.sensitivity, as_json);
+    }
     let record = service.apply_proposal(proposal_id, actor)?;
     if as_json {
         print_json(&json!({
@@ -634,17 +656,8 @@ struct ProposalFileScan {
     errors: Vec<ProposalFileError>,
 }
 
-#[derive(Debug)]
-struct ProposalFileEntry {
-    path: PathBuf,
-    proposal: OkfProposalFile,
-}
-
-#[derive(Debug)]
-struct ProposalFileError {
-    path: PathBuf,
-    error: String,
-}
+type ProposalFileEntry = FileProposalInventoryEntry;
+type ProposalFileError = FileProposalInventoryError;
 
 fn proposal_files_list_command(as_json: bool) -> Result<()> {
     let scan = scan_pending_proposal_files()?;
@@ -667,17 +680,22 @@ fn proposal_files_show_command(proposal_id: &str, as_json: bool) -> Result<()> {
     let matches = scan
         .proposals
         .iter()
-        .filter(|entry| entry.proposal.id == proposal_id || entry.proposal.file_id == proposal_id)
+        .filter(|entry| okf_proposal_matches_identity(&entry.proposal, proposal_id))
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
+        [] if !scan.errors.is_empty() => bail!(
+            "proposal file not found or invalid: {proposal_id}; run `memzoi proposal-files validate` for details"
+        ),
         [] => {
-            if scan.errors.is_empty() {
-                bail!("proposal file not found: {proposal_id}");
+            let resolved = scan_resolved_proposal_files()?;
+            let entry = require_proposal_file_entry(&resolved, proposal_id)?;
+            if as_json {
+                print_json(&proposal_file_json(entry, true))
+            } else {
+                print_proposal_file_detail(entry);
+                Ok(())
             }
-            bail!(
-                "proposal file not found or invalid: {proposal_id}; run `memzoi proposal-files validate` for details"
-            )
         }
         [entry] => {
             if as_json {
@@ -692,15 +710,20 @@ fn proposal_files_show_command(proposal_id: &str, as_json: bool) -> Result<()> {
 }
 
 fn proposal_files_validate_command(as_json: bool) -> Result<()> {
-    let scan = scan_pending_proposal_files()?;
+    let mut scan = scan_pending_proposal_files()?;
+    validate_pending_proposal_scan(&mut scan)?;
     if as_json {
         print_json(&proposal_file_validation_json(&scan))?;
     } else {
         for entry in &scan.proposals {
-            println!("valid\t{}\t{}", entry.path.display(), entry.proposal.id);
+            println!(
+                "valid\t{}\t{}",
+                entry.display_path.display(),
+                entry.proposal.id
+            );
         }
         for error in &scan.errors {
-            println!("invalid\t{}\t{}", error.path.display(), error.error);
+            println!("invalid\t{}\t{}", error.display_path.display(), error.error);
         }
     }
 
@@ -714,41 +737,72 @@ fn proposal_files_validate_command(as_json: bool) -> Result<()> {
     Ok(())
 }
 
-fn proposal_files_apply_command(proposal_id: &str, as_json: bool) -> Result<()> {
+fn validate_pending_proposal_scan(scan: &mut ProposalFileScan) -> Result<()> {
+    let service = open_service()?;
+    let inventory = service.validate_file_proposal_inventory()?;
+    scan.proposals = inventory.pending;
+    scan.errors = inventory.errors;
+    Ok(())
+}
+
+fn proposal_files_apply_command(proposal_id: &str, actor: &str, as_json: bool) -> Result<()> {
     let scan = scan_pending_proposal_files()?;
     if !scan.errors.is_empty() {
         if as_json {
             print_json(&proposal_file_validation_json(&scan))?;
         }
-        bail!("invalid proposal files found; run `memzoi proposal-files validate` for details");
+        bail!(
+            "invalid proposal files found: {}; run `memzoi proposal-files validate` for details",
+            scan.errors
+                .first()
+                .map(|error| error.error.as_str())
+                .unwrap_or("unknown proposal inventory error")
+        );
     }
 
-    let entry = require_proposal_file_entry(&scan, proposal_id)?;
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let paths = discover_paths(&cwd)?;
-    let result = apply_okf_create_proposal_file(paths.records_dir(), &entry.proposal)?;
-    let record_path = result
-        .record_path
-        .strip_prefix(&paths.project_root)
-        .unwrap_or(&result.record_path);
-
-    if as_json {
-        print_json(&json!({
-            "proposal_id": &entry.proposal.id,
-            "file_id": &entry.proposal.file_id,
-            "record_id": &result.record.id,
-            "record_path": record_path,
-            "action": entry.proposal.proposal.action.as_str(),
-            "sensitivity": entry.proposal.sensitivity.as_str(),
-            "title": &entry.proposal.title,
-            "runtime_index_updated": false,
-            "next_steps": ["memzoi rebuild"],
-        }))?;
-    } else {
-        println!("applied\t{}\t{}", result.record.id, record_path.display());
-        println!("next\tmemzoi rebuild");
+    let entry = optional_proposal_file_entry(&scan, proposal_id)?;
+    if let Some(entry) = entry
+        && entry.proposal.sensitivity != OkfProposalSensitivity::RepoSafe
+    {
+        return blocked_repo_sensitivity_error(
+            "proposal_files_apply",
+            entry.proposal.sensitivity,
+            as_json,
+        );
     }
-    Ok(())
+    let service = open_service()?;
+    let result = match entry {
+        Some(entry) => service.apply_file_proposal_inventory_entry(entry, actor)?,
+        None => service.replay_file_proposal(proposal_id, OkfProposalOutcome::Applied, actor)?,
+    };
+    print_file_resolution_result(&result, as_json)
+}
+
+fn proposal_files_reject_command(
+    proposal_id: &str,
+    reason: &str,
+    actor: &str,
+    as_json: bool,
+) -> Result<()> {
+    let scan = scan_pending_proposal_files()?;
+    if !scan.errors.is_empty() {
+        if as_json {
+            print_json(&proposal_file_validation_json(&scan))?;
+        }
+        bail!(
+            "invalid proposal files found: {}; run `memzoi proposal-files validate` for details",
+            scan.errors
+                .first()
+                .map(|error| error.error.as_str())
+                .unwrap_or("unknown proposal inventory error")
+        );
+    }
+    let service = open_service()?;
+    let result = match optional_proposal_file_entry(&scan, proposal_id)? {
+        Some(entry) => service.reject_file_proposal_inventory_entry(entry, actor, reason)?,
+        None => service.replay_file_proposal(proposal_id, OkfProposalOutcome::Rejected, actor)?,
+    };
+    print_file_resolution_result(&result, as_json)
 }
 
 fn local_add_command(
@@ -966,6 +1020,7 @@ fn runtime_record_json(record: &MemoryRecord) -> serde_json::Value {
         "body": &record.body,
         "source_kind": &record.source_kind,
         "source_ref": &record.source_ref,
+        "proposal_id": &record.proposal_id,
         "created_at": &record.created_at,
         "updated_at": &record.updated_at,
     })
@@ -1014,7 +1069,9 @@ fn session_end_result_json(
                 "type": candidate.memory_type.as_str(),
                 "lane": candidate.lane.as_str(),
                 "title": &candidate.title,
+                "sensitivity": candidate.sensitivity.as_str(),
                 "status": candidate.status.as_str(),
+                "reason": &candidate.reason,
                 "write": write,
             })
         }).collect::<Vec<_>>(),
@@ -1025,15 +1082,23 @@ fn require_proposal_file_entry<'a>(
     scan: &'a ProposalFileScan,
     proposal_id: &str,
 ) -> Result<&'a ProposalFileEntry> {
+    optional_proposal_file_entry(scan, proposal_id)?
+        .with_context(|| format!("proposal file not found: {proposal_id}"))
+}
+
+fn optional_proposal_file_entry<'a>(
+    scan: &'a ProposalFileScan,
+    proposal_id: &str,
+) -> Result<Option<&'a ProposalFileEntry>> {
     let matches = scan
         .proposals
         .iter()
-        .filter(|entry| entry.proposal.id == proposal_id || entry.proposal.file_id == proposal_id)
+        .filter(|entry| okf_proposal_matches_identity(&entry.proposal, proposal_id))
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
-        [] => bail!("proposal file not found: {proposal_id}"),
-        [entry] => Ok(entry),
+        [] => Ok(None),
+        [entry] => Ok(Some(entry)),
         _ => bail!("proposal file id {proposal_id:?} matched multiple files"),
     }
 }
@@ -1041,74 +1106,41 @@ fn require_proposal_file_entry<'a>(
 fn scan_pending_proposal_files() -> Result<ProposalFileScan> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let paths = discover_paths(&cwd)?;
-    let proposals_root = paths.proposals_dir().join("pending");
-    let mut files = Vec::new();
-    if proposals_root.exists() {
-        collect_markdown_files(&proposals_root, &mut files)?;
-    }
+    scan_pending_proposal_files_at(&paths)
+}
 
-    let mut proposals = Vec::new();
-    let mut errors = Vec::new();
-    for file in files {
-        match parse_okf_proposal_file(&proposals_root, &file) {
-            Ok(Some(proposal)) => proposals.push(ProposalFileEntry {
-                path: file,
-                proposal,
-            }),
-            Ok(None) => {}
-            Err(error) => errors.push(ProposalFileError {
-                path: file,
-                error: error.to_string(),
-            }),
-        }
-    }
-    proposals.sort_by(|left, right| {
-        left.proposal
-            .id
-            .cmp(&right.proposal.id)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    errors.sort_by(|left, right| left.path.cmp(&right.path));
+fn scan_pending_proposal_files_at(paths: &memzoi_core::MemoryPaths) -> Result<ProposalFileScan> {
+    let proposals_root = paths.proposals_dir().join("pending");
+    let inventory = scan_file_proposal_inventory(paths)?;
 
     Ok(ProposalFileScan {
         proposals_root,
-        proposals,
-        errors,
+        proposals: inventory.pending,
+        errors: inventory.errors,
     })
 }
 
-fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if is_hidden(&path) {
-            continue;
-        }
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_markdown_files(&path, files)?;
-        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
-        {
-            files.push(path);
-        }
-    }
-    Ok(())
+fn scan_resolved_proposal_files() -> Result<ProposalFileScan> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let paths = discover_paths(&cwd)?;
+    scan_resolved_proposal_files_at(&paths)
 }
 
-fn is_hidden(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with('.') && name != ".")
+fn scan_resolved_proposal_files_at(paths: &memzoi_core::MemoryPaths) -> Result<ProposalFileScan> {
+    let proposals_root = paths.proposals_dir().join("resolved");
+    let inventory = scan_file_proposal_inventory(paths)?;
+    Ok(ProposalFileScan {
+        proposals_root,
+        proposals: inventory.resolved,
+        errors: inventory.errors,
+    })
 }
 
 fn print_proposal_file_summary(entry: &ProposalFileEntry) {
     println!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
         entry.proposal.id,
-        entry.path.display(),
+        entry.display_path.display(),
         entry.proposal.proposal.action.as_str(),
         entry.proposal.lane.as_str(),
         entry.proposal.memory_type.as_str(),
@@ -1120,7 +1152,7 @@ fn print_proposal_file_summary(entry: &ProposalFileEntry) {
 fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     println!("id:\t{}", entry.proposal.id);
     println!("file_id:\t{}", entry.proposal.file_id);
-    println!("path:\t{}", entry.path.display());
+    println!("path:\t{}", entry.display_path.display());
     if let Some(kind) = &entry.proposal.kind {
         println!("kind:\t{kind}");
     }
@@ -1217,7 +1249,7 @@ fn proposal_file_errors_json(errors: &[ProposalFileError]) -> Vec<serde_json::Va
         .iter()
         .map(|error| {
             json!({
-                "path": &error.path,
+                "path": &error.display_path,
                 "error": &error.error,
             })
         })
@@ -1229,7 +1261,7 @@ fn proposal_file_json(entry: &ProposalFileEntry, include_body: bool) -> serde_js
     let mut value = json!({
         "id": &proposal.id,
         "file_id": &proposal.file_id,
-        "path": &entry.path,
+        "path": &entry.display_path,
         "kind": &proposal.kind,
         "version": &proposal.version,
         "profile": &proposal.profile,
@@ -1262,11 +1294,79 @@ fn proposal_file_json(entry: &ProposalFileEntry, include_body: bool) -> serde_js
         }).collect::<Vec<_>>(),
         "supersedes": &proposal.supersedes,
         "sensitivity": proposal.sensitivity.as_str(),
+        "resolution": &proposal.resolution,
     });
     if include_body {
         value["body"] = json!(&proposal.body);
     }
     value
+}
+
+fn print_file_resolution_result(
+    result: &FileProposalResolutionResult,
+    as_json: bool,
+) -> Result<()> {
+    let paths =
+        discover_paths(std::env::current_dir().context("failed to read current directory")?)?;
+    let relative = |path: &Path| {
+        path.strip_prefix(&paths.project_root)
+            .unwrap_or(path)
+            .to_path_buf()
+    };
+    let resolved_path = relative(&result.resolved_path);
+    let record_path = result.record_path.as_deref().map(relative);
+    let record_id = result
+        .record
+        .as_ref()
+        .map(|record| record.id.as_str())
+        .or(result.resolution.record_id.as_deref());
+    let record_status = result
+        .record
+        .as_ref()
+        .map(|record| record.status.as_str())
+        .or(
+            (result.resolution.outcome == OkfProposalOutcome::Applied).then_some({
+                match result.proposal.proposal.action {
+                    memzoi_core::OkfProposalAction::Create
+                    | memzoi_core::OkfProposalAction::Supersede => "active",
+                    memzoi_core::OkfProposalAction::Tombstone => "tombstoned",
+                }
+            }),
+        );
+
+    if as_json {
+        print_json(&json!({
+            "proposal_id": &result.proposal.id,
+            "file_id": &result.proposal.file_id,
+            "action": result.proposal.proposal.action.as_str(),
+            "status": result.resolution.outcome.as_str(),
+            "outcome": result.resolution.outcome.as_str(),
+            "sensitivity": result.proposal.sensitivity.as_str(),
+            "title": &result.proposal.title,
+            "record_id": record_id,
+            "record_status": record_status,
+            "record_path": record_path,
+            "target_id": &result.resolution.target_id,
+            "resolved_path": resolved_path,
+            "resolution": &result.resolution,
+            "already_resolved": result.already_resolved,
+            "runtime_index_updated": result.runtime_index_updated,
+        }))
+    } else {
+        println!(
+            "{}\t{}\t{}",
+            result.resolution.outcome.as_str(),
+            result.proposal.id,
+            resolved_path.display()
+        );
+        if let Some(record_id) = record_id {
+            println!("record\t{record_id}");
+        }
+        if result.already_resolved {
+            println!("idempotent\talready resolved");
+        }
+        Ok(())
+    }
 }
 
 fn supersede_command(
@@ -1276,13 +1376,10 @@ fn supersede_command(
     as_json: bool,
 ) -> Result<()> {
     let service = open_service()?;
-    let draft = draft_from_args(
-        &draft_args.memory_type,
-        &draft_args.scope_kind,
-        &draft_args.visibility,
-        draft_args.title,
-        draft_args.body,
-    )?;
+    let draft = draft_from_args(draft_args)?;
+    if draft.sensitivity != OkfProposalSensitivity::RepoSafe {
+        return blocked_repo_sensitivity_error("supersede", draft.sensitivity, as_json);
+    }
     let result = service.supersede_record(record_id, actor, draft)?;
     if as_json {
         print_json(&json!({
@@ -1349,6 +1446,33 @@ fn search_command(
                 result.record.title
             );
         }
+        Ok(())
+    }
+}
+
+fn expiry_command(record_id: &str, as_json: bool) -> Result<()> {
+    let service = open_service()?;
+    let diagnostic = service.inspect_expiry(record_id)?;
+
+    if as_json {
+        print_json(&serde_json::to_value(&diagnostic)?)
+    } else {
+        println!("record_id:\t{}", diagnostic.record.id);
+        println!("title:\t{}", diagnostic.record.title);
+        println!("status:\t{}", diagnostic.record.status.as_str());
+        println!(
+            "expires_at:\t{}",
+            diagnostic.record.expires_at.as_deref().unwrap_or("none")
+        );
+        println!("evaluated_at:\t{}", diagnostic.evaluated_at);
+        println!("expired:\t{}", diagnostic.expired);
+        println!(
+            "excluded_from_normal_reads:\t{}",
+            diagnostic.excluded_from_normal_reads
+        );
+        println!("reason:\t{}", diagnostic.reason);
+        println!();
+        println!("{}", diagnostic.record.body);
         Ok(())
     }
 }
@@ -1555,6 +1679,94 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         push_next_step(&mut next_steps, "memzoi init");
     }
 
+    let proposal_inventory = if paths.config_path.is_file() && paths.db_path.is_file() {
+        MemoryService::open_paths(paths.clone())
+            .and_then(|service| service.validate_file_proposal_inventory())
+    } else {
+        scan_file_proposal_inventory(&paths)
+    };
+    match proposal_inventory {
+        Ok(inventory) => {
+            let invalid = inventory.errors.len();
+            if invalid > 0 {
+                checks.push(check(
+                    "proposal_files",
+                    "warning",
+                    format!(
+                        "{invalid} invalid proposal packet{}: {}",
+                        if invalid == 1 { "" } else { "s" },
+                        inventory
+                            .errors
+                            .first()
+                            .map(|error| error.error.as_str())
+                            .unwrap_or("unknown proposal inventory error")
+                    ),
+                ));
+                push_next_step(&mut next_steps, "memzoi proposal-files validate");
+            } else if inventory.pending.is_empty() {
+                let applied = inventory
+                    .resolved
+                    .iter()
+                    .filter(|entry| entry.proposal.status == OkfProposalStatus::Applied)
+                    .count();
+                let rejected = inventory.resolved.len() - applied;
+                checks.push(check(
+                    "proposal_files",
+                    "ok",
+                    format!(
+                        "no pending file proposals (resolved: applied={applied}, rejected={rejected})"
+                    ),
+                ));
+            } else {
+                checks.push(check(
+                    "proposal_files",
+                    "warning",
+                    format!(
+                        "{} pending file proposal{}",
+                        inventory.pending.len(),
+                        if inventory.pending.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ),
+                ));
+                push_next_step(&mut next_steps, "memzoi proposal-files list");
+            }
+        }
+        Err(error) => {
+            checks.push(check("proposal_files", "warning", error.to_string()));
+        }
+    }
+
+    match lifecycle_transaction_artifact_count(&paths) {
+        Ok(0) => checks.push(check(
+            "lifecycle_transactions",
+            "ok",
+            "no hidden lifecycle transaction artifacts",
+        )),
+        Ok(count) => {
+            checks.push(check(
+                "lifecycle_transactions",
+                "warning",
+                format!(
+                    "{} hidden lifecycle transaction artifact{} require inspection under the Memzoi records/proposals roots",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                ),
+            ));
+            push_next_step(
+                &mut next_steps,
+                "inspect hidden .memzoi lifecycle transaction artifacts before retrying",
+            );
+        }
+        Err(error) => checks.push(check(
+            "lifecycle_transactions",
+            "warning",
+            error.to_string(),
+        )),
+    }
+
     if paths.config_path.is_file() {
         checks.push(check(
             "config",
@@ -1642,10 +1854,11 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                     "repo_index",
                     "warning",
                     format!(
-                        "runtime repo index is stale (missing={}, stale={}, changed={})",
+                        "runtime repo index is stale (missing={}, stale={}, changed={}, fts_out_of_sync={})",
                         drift.missing_from_index.len(),
                         drift.stale_in_index.len(),
                         drift.changed_in_index.len(),
+                        drift.fts_out_of_sync,
                     ),
                 ));
                 push_next_step(&mut next_steps, "memzoi rebuild");
@@ -1770,6 +1983,7 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
             tags: Vec::new(),
             source_kind: Some("quickstart".to_string()),
             source_ref: None,
+            sensitivity: OkfProposalSensitivity::RepoSafe,
             confidence: 1.0,
         };
         let proposal = service.propose_memory("quickstart", draft)?;
@@ -1858,26 +2072,99 @@ fn open_service() -> Result<MemoryService> {
     MemoryService::open(&cwd)
 }
 
-fn draft_from_args(
-    memory_type: &str,
-    scope_kind: &str,
-    visibility: &str,
-    title: String,
-    body: String,
-) -> Result<MemoryDraft> {
+fn draft_from_args(args: DraftCommand) -> Result<MemoryDraft> {
+    let DraftCommand {
+        memory_type,
+        scope_kind,
+        visibility,
+        source_kind,
+        source_ref,
+        sensitivity,
+        title,
+        body,
+    } = args;
     Ok(MemoryDraft {
-        memory_type: parse_memory_type(memory_type)?,
+        memory_type: parse_memory_type(&memory_type)?,
         lane: MemoryLane::Semantic,
-        scope_kind: parse_scope_kind(scope_kind)?,
+        scope_kind: parse_scope_kind(&scope_kind)?,
         scope_id: None,
-        visibility: parse_visibility(visibility)?,
+        visibility: parse_visibility(&visibility)?,
         title,
         body,
         tags: Vec::new(),
-        source_kind: Some("cli".to_string()),
-        source_ref: None,
+        source_kind: normalize_optional_metadata(source_kind, "source-kind")?,
+        source_ref: normalize_optional_metadata(source_ref, "source-ref")?,
+        sensitivity: sensitivity.parse().map_err(anyhow::Error::msg)?,
         confidence: 1.0,
     })
+}
+
+fn blocked_repo_sensitivity_error(
+    operation: &str,
+    sensitivity: OkfProposalSensitivity,
+    as_json: bool,
+) -> Result<()> {
+    let next_step = repo_sensitivity_guidance(sensitivity);
+    let message = if operation == "proposal_files_apply" {
+        format!(
+            "OKF proposal sensitivity {} cannot be applied into repo records; {next_step}",
+            sensitivity.as_str()
+        )
+    } else {
+        format!(
+            "canonical repo apply requires sensitivity repo-safe; got {}; {next_step}",
+            sensitivity.as_str()
+        )
+    };
+    if as_json {
+        print_json(&json!({
+            "ok": false,
+            "error": {
+                "code": "repo_sensitivity_required",
+                "operation": operation,
+                "sensitivity": sensitivity.as_str(),
+                "message": message,
+                "next_step": next_step,
+            }
+        }))?;
+    }
+    bail!(message)
+}
+
+fn repo_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'static str {
+    match sensitivity {
+        OkfProposalSensitivity::RepoSafe => "repo-safe proposals may be applied after review",
+        OkfProposalSensitivity::LocalOnly => {
+            "local-only proposals belong in the future local/runtime memory plane"
+        }
+        OkfProposalSensitivity::Sensitive => {
+            "classify or sanitize sensitive content before applying it to the repo plane"
+        }
+        OkfProposalSensitivity::Secret => "secret proposals must not become repo-shared memory",
+        OkfProposalSensitivity::RawTranscript => {
+            "raw transcripts must not become repo-shared memory"
+        }
+        OkfProposalSensitivity::PrivatePersonalData => {
+            "private personal data must not become repo-shared memory"
+        }
+        OkfProposalSensitivity::TemporaryState => {
+            "temporary task state belongs in local or session memory, not canonical repo memory"
+        }
+        OkfProposalSensitivity::Unknown => {
+            "classify the proposal sensitivity before applying it to repo records"
+        }
+    }
+}
+
+fn normalize_optional_metadata(value: Option<String>, label: &str) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("--{label} cannot be empty");
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn parse_memory_type(value: &str) -> Result<MemoryType> {

@@ -1,13 +1,25 @@
-use anyhow::Result;
-use rusqlite::Connection;
+use std::{cmp::Ordering, collections::BTreeMap};
+
+use anyhow::{Context, Result};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
 
 use crate::{
     events::{AppendEvent, append_event},
-    models::{MemoryCitation, MemoryType, PrecheckWarning, ScopeKind, SearchResult},
-    search::{SearchInput, search_memory},
+    expiry,
+    models::{
+        MemoryCitation, MemoryDestination, MemoryPath, MemoryType, PrecheckWarning, ScopeKind,
+        SearchResult,
+    },
+    search::{
+        SearchInput, citation_for, load_paths, path_matches_request, record_from_row,
+        search_memory_at,
+    },
 };
+
+const PRECHECK_RESULT_LIMIT: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PrecheckInput {
@@ -17,42 +29,284 @@ pub struct PrecheckInput {
     pub scope_kind: Option<ScopeKind>,
 }
 
+#[cfg(test)]
 pub fn precheck(conn: &Connection, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
-    let query = precheck_query(&input);
-    if query.is_empty() {
-        append_precheck_event(conn, &input, &[])?;
-        return Ok(Vec::new());
+    precheck_at(conn, input, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn precheck_at(
+    conn: &Connection,
+    input: PrecheckInput,
+    now: OffsetDateTime,
+) -> Result<Vec<PrecheckWarning>> {
+    let requested_path = normalized_path(input.path.as_deref());
+    let mut candidates = BTreeMap::<String, PrecheckCandidate>::new();
+    let evaluated_at = expiry::format_timestamp(now)?;
+
+    if let Some(requested_path) = requested_path {
+        for (result, path_score) in
+            path_governance_candidates(conn, input.scope_kind, requested_path, &evaluated_at)?
+        {
+            candidates.insert(
+                result.record.id.clone(),
+                PrecheckCandidate {
+                    result,
+                    path_score,
+                    lexical_score: None,
+                },
+            );
+        }
     }
 
-    let results = search_memory(
-        conn,
-        SearchInput {
-            query,
-            scope_kind: input.scope_kind,
-            path_prefix: input.path.clone(),
-            limit: 25,
-            include_inactive: false,
-            ..SearchInput::default()
-        },
-    )?;
-    let warnings = results
+    if let Some(query) = lexical_query(&input) {
+        for result in search_memory_at(
+            conn,
+            SearchInput {
+                query,
+                scope_kind: input.scope_kind,
+                path_prefix: requested_path.map(ToOwned::to_owned),
+                limit: 100,
+                include_inactive: false,
+                ..SearchInput::default()
+            },
+            now,
+        )?
         .into_iter()
         .filter(is_governance_memory)
-        .map(warning_from_result)
+        {
+            let lexical_score = result.score;
+            candidates
+                .entry(result.record.id.clone())
+                .and_modify(|candidate| {
+                    candidate.lexical_score = Some(
+                        candidate
+                            .lexical_score
+                            .map_or(lexical_score, |score| score.max(lexical_score)),
+                    );
+                })
+                .or_insert(PrecheckCandidate {
+                    result,
+                    path_score: 0,
+                    lexical_score: Some(lexical_score),
+                });
+        }
+    }
+
+    let mut candidates = candidates.into_values().collect::<Vec<_>>();
+    candidates.sort_by(compare_precheck_candidates);
+    candidates.truncate(PRECHECK_RESULT_LIMIT);
+    let warnings = candidates
+        .into_iter()
+        .map(|candidate| warning_from_result(candidate.result))
         .collect::<Result<Vec<_>>>()?;
 
     append_precheck_event(conn, &input, &warnings)?;
     Ok(warnings)
 }
 
-fn precheck_query(input: &PrecheckInput) -> String {
-    input
-        .action
-        .as_deref()
-        .or(input.command.as_deref())
-        .or(input.path.as_deref())
-        .unwrap_or_default()
-        .to_owned()
+#[derive(Debug)]
+struct PrecheckCandidate {
+    result: SearchResult,
+    path_score: i64,
+    lexical_score: Option<f64>,
+}
+
+fn normalized_path(path: Option<&str>) -> Option<&str> {
+    path.map(str::trim).filter(|path| !path.is_empty())
+}
+
+fn lexical_query(input: &PrecheckInput) -> Option<String> {
+    let query = [input.action.as_deref(), input.command.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!query.is_empty()).then_some(query)
+}
+
+fn path_governance_candidates(
+    conn: &Connection,
+    scope_kind: Option<ScopeKind>,
+    requested_path: &str,
+    evaluated_at: &str,
+) -> Result<Vec<(SearchResult, i64)>> {
+    let requested_path = requested_path.trim().trim_end_matches('/').to_owned();
+    if requested_path.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let scope_kind = scope_kind.map(|value| value.as_str().to_owned());
+    // The SQLite scalar delegates to the same literal matcher used below, so
+    // SQL candidate discovery cannot diverge on LIKE metacharacters, case, or
+    // trailing slash normalization.
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT memory_record.id, memory_record.type, memory_record.lane,
+                    memory_record.destination, memory_record.scope_kind, memory_record.scope_id,
+                    memory_record.visibility, memory_record.title, memory_record.body,
+                    memory_record.status, memory_record.confidence, memory_record.source_kind,
+                    memory_record.source_ref, memory_record.content_hash, memory_record.created_at,
+                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at,
+                    memory_record.proposal_id
+             FROM memory_path
+             JOIN memory_record ON memory_record.id = memory_path.record_id
+             WHERE memory_record.status = 'active'
+               AND memzoi_is_expired(memory_record.expires_at, ?4) = 0
+               AND memory_record.destination = ?1
+               AND memory_record.type IN ('risk', 'warning', 'failed_attempt')
+               AND (?2 IS NULL OR memory_record.scope_kind = ?2)
+               AND memzoi_path_matches(memory_path.path, ?3) = 1
+             ORDER BY memory_record.updated_at DESC, memory_record.id ASC",
+        )
+        .context("failed to prepare path-scoped precheck candidate query")?;
+    let rows = stmt
+        .query_map(
+            params![
+                MemoryDestination::Repo.as_str(),
+                scope_kind,
+                requested_path,
+                evaluated_at,
+            ],
+            record_from_row,
+        )
+        .context("failed to execute path-scoped precheck candidate query")?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        let record = row.context("failed to read path-scoped precheck candidate")?;
+        let paths = load_paths(conn, record.id.as_str())?;
+        let Some((matching_path, path_score)) = best_matching_path(&paths, &requested_path) else {
+            continue;
+        };
+        let citation = citation_for(&record, Some(matching_path))?;
+        results.push((
+            SearchResult {
+                record,
+                score: path_score as f64,
+                snippet: None,
+                rationale: Some("path binding match".to_owned()),
+                ranking: None,
+                paths,
+                citations: vec![citation],
+            },
+            path_score,
+        ));
+    }
+
+    Ok(results)
+}
+
+fn best_matching_path<'a>(
+    paths: &'a [MemoryPath],
+    requested_path: &str,
+) -> Option<(&'a MemoryPath, i64)> {
+    let mut best: Option<(&MemoryPath, i64)> = None;
+    for path in paths {
+        if !path_matches_request(&path.path, requested_path) {
+            continue;
+        }
+        let score = path_match_score(&path.path, requested_path);
+        if score == 0 {
+            continue;
+        }
+        let replace = match best {
+            None => true,
+            Some((best_path, best_score)) => {
+                score > best_score
+                    || (score == best_score && path.path.as_str() < best_path.path.as_str())
+            }
+        };
+        if replace {
+            best = Some((path, score));
+        }
+    }
+    best
+}
+
+fn path_match_score(stored_path: &str, requested_path: &str) -> i64 {
+    let stored_path = stored_path.trim().trim_end_matches('/');
+    let requested_path = requested_path.trim().trim_end_matches('/');
+    if stored_path.is_empty() || requested_path.is_empty() {
+        return 0;
+    }
+    if stored_path == requested_path {
+        return 5;
+    }
+    if let Some(base) = stored_path.strip_suffix("/**") {
+        return if path_is_or_is_under(requested_path, base) {
+            4
+        } else {
+            0
+        };
+    }
+    if let Some(base) = requested_path.strip_suffix("/**") {
+        return if path_is_or_is_under(stored_path, base) {
+            4
+        } else {
+            0
+        };
+    }
+    if path_is_or_is_under(requested_path, stored_path) {
+        return 3;
+    }
+    if path_is_or_is_under(stored_path, requested_path) {
+        return 2;
+    }
+    0
+}
+
+fn path_is_or_is_under(path: &str, base: &str) -> bool {
+    path == base
+        || path
+            .strip_prefix(base)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn compare_precheck_candidates(left: &PrecheckCandidate, right: &PrecheckCandidate) -> Ordering {
+    right
+        .path_score
+        .cmp(&left.path_score)
+        .then_with(|| {
+            right
+                .lexical_score
+                .is_some()
+                .cmp(&left.lexical_score.is_some())
+        })
+        .then_with(|| lexical_score(right).total_cmp(&lexical_score(left)))
+        .then_with(|| {
+            governance_priority(right.result.record.memory_type)
+                .cmp(&governance_priority(left.result.record.memory_type))
+        })
+        .then_with(|| {
+            right
+                .result
+                .record
+                .confidence
+                .total_cmp(&left.result.record.confidence)
+        })
+        .then_with(|| {
+            right
+                .result
+                .record
+                .updated_at
+                .cmp(&left.result.record.updated_at)
+        })
+        .then_with(|| left.result.record.id.cmp(&right.result.record.id))
+}
+
+fn lexical_score(candidate: &PrecheckCandidate) -> f64 {
+    candidate.lexical_score.unwrap_or(0.0)
+}
+
+fn governance_priority(memory_type: MemoryType) -> i64 {
+    match memory_type {
+        MemoryType::Risk => 3,
+        MemoryType::Warning => 2,
+        MemoryType::FailedAttempt => 1,
+        _ => 0,
+    }
 }
 
 fn is_governance_memory(result: &SearchResult) -> bool {
@@ -140,13 +394,386 @@ fn append_precheck_event(
 mod tests {
     use rusqlite::{Connection, params};
     use tempfile::TempDir;
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-    use super::{PrecheckInput, precheck};
+    use super::{PrecheckInput, precheck, precheck_at};
     use crate::{
         init_database,
         models::{MemoryStatus, MemoryType, ScopeKind},
         open_database,
     };
+
+    #[test]
+    fn precheck_path_only_returns_exact_governance_without_lexical_overlap() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "risk-exact-ledger",
+                memory_type: MemoryType::Risk,
+                title: "Preserve ledger invariants",
+                body: "Changing the rounding order can silently alter settled totals.",
+                path: "apps/api/src/billing/invoice.rs",
+                source_ref: "issue://ledger-invariant",
+            },
+        )?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "warning-unrelated-auth",
+                memory_type: MemoryType::Warning,
+                title: "Keep the migration lock held",
+                body: "Concurrent schema changes can strand partially applied state.",
+                path: "apps/api/src/auth/mod.rs",
+                source_ref: "issue://auth-migration-lock",
+            },
+        )?;
+
+        let warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/api/src/billing/invoice.rs".to_owned()),
+                ..PrecheckInput::default()
+            },
+        )?;
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].record_id, "risk-exact-ledger");
+        assert_eq!(
+            warnings[0].citations[0].path.as_deref(),
+            Some("apps/api/src/billing/invoice.rs")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_only_precheck_excludes_records_at_the_expiry_boundary() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "risk-expired-path-only",
+                memory_type: MemoryType::Risk,
+                title: "Preserve unrelated invariant",
+                body: "This content deliberately has no requested path tokens.",
+                path: "apps/api/src/billing/invoice.rs",
+                source_ref: "issue://expired-path-only",
+            },
+        )?;
+        conn.execute(
+            "UPDATE memory_record SET expires_at = ?1 WHERE id = ?2",
+            params!["2026-07-10T12:00:00Z", "risk-expired-path-only"],
+        )?;
+
+        let warnings = precheck_at(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/api/src/billing/invoice.rs".to_owned()),
+                ..PrecheckInput::default()
+            },
+            OffsetDateTime::parse("2026-07-10T12:00:00Z", &Rfc3339)?,
+        )?;
+
+        assert!(warnings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn precheck_path_only_applies_directory_and_trailing_double_star_bindings() -> anyhow::Result<()>
+    {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "warning-billing-directory",
+                memory_type: MemoryType::Warning,
+                title: "Preserve settlement ordering",
+                body: "The settlement pipeline depends on a stable calculation sequence.",
+                path: "apps/api/src/billing",
+                source_ref: "runbook://settlement-ordering",
+            },
+        )?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "risk-web-glob",
+                memory_type: MemoryType::Risk,
+                title: "Hydration boundary is fragile",
+                body: "Server and client render phases must continue to agree.",
+                path: "apps/web/**",
+                source_ref: "issue://hydration-boundary",
+            },
+        )?;
+
+        let directory_warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/api/src/billing/invoice.rs".to_owned()),
+                ..PrecheckInput::default()
+            },
+        )?;
+        let parent_directory_warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/api/src".to_owned()),
+                ..PrecheckInput::default()
+            },
+        )?;
+        let glob_warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/web/src/App.tsx".to_owned()),
+                ..PrecheckInput::default()
+            },
+        )?;
+
+        assert_eq!(
+            directory_warnings
+                .iter()
+                .map(|warning| warning.record_id.as_str())
+                .collect::<Vec<_>>(),
+            ["warning-billing-directory"]
+        );
+        assert_eq!(
+            parent_directory_warnings
+                .iter()
+                .map(|warning| warning.record_id.as_str())
+                .collect::<Vec<_>>(),
+            ["warning-billing-directory"],
+            "a requested directory should include records bound to descendants"
+        );
+        assert_eq!(
+            glob_warnings
+                .iter()
+                .map(|warning| warning.record_id.as_str())
+                .collect::<Vec<_>>(),
+            ["risk-web-glob"]
+        );
+        assert_eq!(
+            glob_warnings[0].citations[0].path.as_deref(),
+            Some("apps/web/**")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn precheck_uses_lexical_matches_as_an_additional_signal_without_duplicates()
+    -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "warning-key-rotation",
+                memory_type: MemoryType::Warning,
+                title: "Signing key rotation warning",
+                body: "Rotate signing keys only after publishing the overlap window.",
+                path: "config/keys.toml",
+                source_ref: "runbook://key-rotation",
+            },
+        )?;
+        insert_path(
+            &conn,
+            "warning-key-rotation",
+            "config",
+            "path-warning-key-rotation-directory",
+        )?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "risk-key-config",
+                memory_type: MemoryType::Risk,
+                title: "Preserve trust continuity",
+                body: "A malformed transition can invalidate already issued credentials.",
+                path: "config/keys.toml",
+                source_ref: "issue://trust-continuity",
+            },
+        )?;
+
+        let warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("config/keys.toml".to_owned()),
+                action: Some("rotate signing keys".to_owned()),
+                ..PrecheckInput::default()
+            },
+        )?;
+
+        assert_eq!(
+            warnings
+                .iter()
+                .map(|warning| warning.record_id.as_str())
+                .collect::<Vec<_>>(),
+            ["warning-key-rotation", "risk-key-config"],
+            "lexical relevance should rank the matching warning without excluding path-only risk"
+        );
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| warning.record_id == "warning-key-rotation")
+                .count(),
+            1,
+            "a record found through both path and lexical recall must be emitted once"
+        );
+        assert_eq!(
+            warnings[0].citations[0].path.as_deref(),
+            Some("config/keys.toml"),
+            "the citation should use the most specific applicable binding"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn precheck_treats_sql_like_metacharacters_in_paths_literally() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "warning-unrelated-underscore-path",
+                memory_type: MemoryType::Warning,
+                title: "Rotate signing keys carefully",
+                body: "The lexical text matches, but the bound path must remain unrelated.",
+                path: "apps/myXapp/secret/keys.toml",
+                source_ref: "runbook://unrelated-underscore-path",
+            },
+        )?;
+
+        let warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/my_app".to_owned()),
+                action: Some("rotate signing keys".to_owned()),
+                ..PrecheckInput::default()
+            },
+        )?;
+
+        assert!(
+            warnings.is_empty(),
+            "an underscore in the requested path is literal, not a SQLite LIKE wildcard: {warnings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_only_precheck_normalizes_trailing_slash_bindings_before_sql_prefilter()
+    -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "warning-trailing-slash-directory",
+                memory_type: MemoryType::Warning,
+                title: "Preserve the frontend boundary",
+                body: "This warning intentionally has no requested file-name tokens.",
+                path: "apps/web/",
+                source_ref: "runbook://trailing-slash-directory",
+            },
+        )?;
+
+        let warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("apps/web/src/App.tsx".to_owned()),
+                ..PrecheckInput::default()
+            },
+        )?;
+
+        assert_eq!(
+            warnings
+                .iter()
+                .map(|warning| warning.record_id.as_str())
+                .collect::<Vec<_>>(),
+            ["warning-trailing-slash-directory"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn precheck_path_recall_suppresses_inactive_out_of_scope_and_unrelated_records()
+    -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "warning-active-repo",
+                memory_type: MemoryType::Warning,
+                title: "Keep rollout overlap",
+                body: "Removing overlap can interrupt active sessions.",
+                path: "config/deploy.toml",
+                source_ref: "runbook://deploy-overlap",
+            },
+        )?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "risk-inactive-repo",
+                memory_type: MemoryType::Risk,
+                title: "Old rollout hazard",
+                body: "This lifecycle record is no longer active.",
+                path: "config/deploy.toml",
+                source_ref: "issue://old-rollout",
+            },
+        )?;
+        conn.execute(
+            "UPDATE memory_record SET status = ?1 WHERE id = ?2",
+            params![MemoryStatus::Tombstoned.as_str(), "risk-inactive-repo"],
+        )?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "risk-project-scope",
+                memory_type: MemoryType::Risk,
+                title: "Project rollout hazard",
+                body: "This warning belongs to a different requested scope.",
+                path: "config/deploy.toml",
+                source_ref: "issue://project-rollout",
+            },
+        )?;
+        conn.execute(
+            "UPDATE memory_record SET scope_kind = ?1 WHERE id = ?2",
+            params![ScopeKind::Project.as_str(), "risk-project-scope"],
+        )?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "fact-deploy-config",
+                memory_type: MemoryType::Fact,
+                title: "Deploy configuration location",
+                body: "This informational record must not become a precheck warning.",
+                path: "config/deploy.toml",
+                source_ref: "doc://deploy-config",
+            },
+        )?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "warning-unrelated-deploy",
+                memory_type: MemoryType::Warning,
+                title: "Rotate deploy keys carefully",
+                body: "The same action text must not bypass path applicability.",
+                path: "config/other.toml",
+                source_ref: "runbook://other-deploy",
+            },
+        )?;
+
+        let warnings = precheck(
+            &conn,
+            PrecheckInput {
+                path: Some("config/deploy.toml".to_owned()),
+                action: Some("rotate deploy keys".to_owned()),
+                scope_kind: Some(ScopeKind::Repo),
+                ..PrecheckInput::default()
+            },
+        )?;
+
+        assert_eq!(
+            warnings
+                .iter()
+                .map(|warning| warning.record_id.as_str())
+                .collect::<Vec<_>>(),
+            ["warning-active-repo"]
+        );
+        Ok(())
+    }
 
     #[test]
     fn precheck_warns_for_risky_path_memory_and_cites_record() -> anyhow::Result<()> {
@@ -331,10 +958,20 @@ mod tests {
                 format!("hash-{}", memory.id),
             ],
         )?;
+        insert_path(conn, memory.id, memory.path, &format!("path-{}", memory.id))?;
+        Ok(())
+    }
+
+    fn insert_path(
+        conn: &Connection,
+        record_id: &str,
+        path: &str,
+        path_id: &str,
+    ) -> anyhow::Result<()> {
         conn.execute(
             "INSERT INTO memory_path(id, record_id, path, line_start, line_end)
              VALUES (?1, ?2, ?3, 1, 12)",
-            params![format!("path-{}", memory.id), memory.id, memory.path],
+            params![path_id, record_id, path],
         )?;
         Ok(())
     }

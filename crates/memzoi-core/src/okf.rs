@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind,
-    Visibility, proposals::title_to_concept_slug,
+    Visibility, expiry, proposals::title_to_concept_slug,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +25,7 @@ pub struct OkfRecordFile {
     pub updated: Option<String>,
     pub supersedes_id: Option<String>,
     pub expires_at: Option<String>,
+    pub proposal_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,12 +51,27 @@ pub struct OkfProposalFile {
     pub sources: Vec<OkfProposalSource>,
     pub supersedes: Vec<String>,
     pub sensitivity: OkfProposalSensitivity,
+    pub resolution: Option<OkfProposalResolution>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct OkfProposalApplyResult {
-    pub record: MemoryRecord,
-    pub record_path: PathBuf,
+/// Minimal, content-free classification used before parsing any reviewable proposal fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OkfProposalPreflight {
+    pub sensitivity: OkfProposalSensitivity,
+    pub receipt_proposal: OkfProposalFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OkfProposalResolution {
+    pub outcome: OkfProposalOutcome,
+    pub resolved_by: String,
+    pub resolved_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,15 +132,13 @@ pub(crate) fn reserve_okf_proposal_id(
         } else {
             format!("{base_id}-{suffix}")
         };
-        if reserved_ids.contains(&candidate) {
+        let identity_token = okf_proposal_identity_token(&candidate);
+        if reserved_ids.contains(&candidate) || reserved_ids.contains(&identity_token) {
             continue;
         }
-        let path = pending_root.join(format!("{candidate}.md"));
-        if !path
-            .try_exists()
-            .with_context(|| format!("failed to inspect pending proposal {}", path.display()))?
-        {
+        if !proposal_packet_id_exists(pending_root, &candidate)? {
             reserved_ids.insert(candidate.clone());
+            reserved_ids.insert(identity_token);
             return Ok(candidate);
         }
     }
@@ -199,11 +213,8 @@ pub(crate) fn plan_okf_create_proposal(
     validate_okf_create_proposal_draft(draft)?;
     let proposal_id = draft.proposal_id.trim();
     let path = pending_root.join(format!("{proposal_id}.md"));
-    if path
-        .try_exists()
-        .with_context(|| format!("failed to inspect pending proposal {}", path.display()))?
-    {
-        bail!("pending proposal {} already exists", path.display());
+    if proposal_packet_id_exists(pending_root, proposal_id)? {
+        bail!("proposal packet id {proposal_id} already exists in pending or resolved state");
     }
     let markdown = render_okf_create_proposal_markdown(draft)?;
     let parsed = parse_okf_proposal_markdown(pending_root, &path, &markdown)?
@@ -217,6 +228,36 @@ pub(crate) fn plan_okf_create_proposal(
         markdown,
         parsed,
     })
+}
+
+fn proposal_packet_id_exists(pending_root: &Path, proposal_id: &str) -> Result<bool> {
+    let pending_path = pending_root.join(format!("{proposal_id}.md"));
+    if pending_path.try_exists().with_context(|| {
+        format!(
+            "failed to inspect pending proposal {}",
+            pending_path.display()
+        )
+    })? {
+        return Ok(true);
+    }
+    let Some(proposals_root) = pending_root.parent() else {
+        return Ok(false);
+    };
+    for outcome in ["applied", "rejected"] {
+        let resolved_path = proposals_root
+            .join("resolved")
+            .join(outcome)
+            .join(format!("{proposal_id}.md"));
+        if resolved_path.try_exists().with_context(|| {
+            format!(
+                "failed to inspect resolved proposal packet {}",
+                resolved_path.display()
+            )
+        })? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn create_okf_proposal_file(plan: &OkfCreateProposalPlan) -> Result<PathBuf> {
@@ -318,15 +359,28 @@ pub enum OkfProposalAction {
 #[serde(rename_all = "snake_case")]
 pub enum OkfProposalStatus {
     Proposed,
+    Applied,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OkfProposalOutcome {
+    Applied,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OkfProposalSensitivity {
     RepoSafe,
     LocalOnly,
     Sensitive,
     Secret,
+    RawTranscript,
+    PrivatePersonalData,
+    TemporaryState,
+    #[default]
     Unknown,
 }
 
@@ -344,6 +398,17 @@ impl OkfProposalStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Proposed => "proposed",
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+impl OkfProposalOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
         }
     }
 }
@@ -355,6 +420,9 @@ impl OkfProposalSensitivity {
             Self::LocalOnly => "local-only",
             Self::Sensitive => "sensitive",
             Self::Secret => "secret",
+            Self::RawTranscript => "raw-transcript",
+            Self::PrivatePersonalData => "private-personal-data",
+            Self::TemporaryState => "temporary-state",
             Self::Unknown => "unknown",
         }
     }
@@ -379,7 +447,21 @@ impl FromStr for OkfProposalStatus {
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         match value {
             "proposed" => Ok(Self::Proposed),
+            "applied" => Ok(Self::Applied),
+            "rejected" => Ok(Self::Rejected),
             other => Err(format!("unknown OKF proposal status {other:?}")),
+        }
+    }
+}
+
+impl FromStr for OkfProposalOutcome {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "applied" => Ok(Self::Applied),
+            "rejected" => Ok(Self::Rejected),
+            other => Err(format!("unknown OKF proposal outcome {other:?}")),
         }
     }
 }
@@ -393,6 +475,9 @@ impl FromStr for OkfProposalSensitivity {
             "local-only" => Ok(Self::LocalOnly),
             "sensitive" => Ok(Self::Sensitive),
             "secret" => Ok(Self::Secret),
+            "raw-transcript" => Ok(Self::RawTranscript),
+            "private-personal-data" => Ok(Self::PrivatePersonalData),
+            "temporary-state" => Ok(Self::TemporaryState),
             "unknown" => Ok(Self::Unknown),
             other => Err(format!("unknown OKF proposal sensitivity {other:?}")),
         }
@@ -446,13 +531,120 @@ pub fn parse_okf_proposal_file(
     proposals_root: impl AsRef<Path>,
     file_path: impl AsRef<Path>,
 ) -> Result<Option<OkfProposalFile>> {
-    let markdown = fs::read_to_string(file_path.as_ref()).with_context(|| {
-        format!(
-            "failed to read OKF proposal {}",
-            file_path.as_ref().display()
-        )
-    })?;
+    let markdown = fs::read_to_string(file_path.as_ref())
+        .with_context(|| "failed to read proposal during safety preflight".to_owned())?;
     parse_okf_proposal_markdown(proposals_root, file_path, &markdown)
+}
+
+pub fn preflight_okf_proposal_file(
+    proposals_root: impl AsRef<Path>,
+    file_path: impl AsRef<Path>,
+) -> Result<Option<OkfProposalPreflight>> {
+    let markdown = fs::read_to_string(file_path.as_ref())
+        .context("failed to read proposal during safety preflight")?;
+    preflight_okf_proposal_markdown(proposals_root, file_path, &markdown)
+}
+
+pub fn redacted_okf_proposal_path(
+    proposals_root: impl AsRef<Path>,
+    file_path: impl AsRef<Path>,
+) -> Result<PathBuf> {
+    let proposals_root = proposals_root.as_ref();
+    let raw_file_id = raw_proposal_file_id(proposals_root, file_path.as_ref())?;
+    Ok(proposals_root.join(format!("{}.md", okf_proposal_identity_token(&raw_file_id))))
+}
+
+pub fn preflight_okf_proposal_markdown(
+    proposals_root: impl AsRef<Path>,
+    file_path: impl AsRef<Path>,
+    markdown: &str,
+) -> Result<Option<OkfProposalPreflight>> {
+    let proposals_root = proposals_root.as_ref();
+    let file_path = file_path.as_ref();
+    if is_reserved_record_file(file_path) {
+        return Ok(None);
+    }
+
+    let raw_file_id = raw_proposal_file_id(proposals_root, file_path)?;
+    let preflight_frontmatter = proposal_preflight_frontmatter(markdown);
+    let raw_id = unique_top_level_yaml_scalar(preflight_frontmatter, "id");
+    let sensitivity = unique_top_level_yaml_scalar(preflight_frontmatter, "sensitivity")
+        .as_deref()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_default();
+    let digest = rejected_proposal_content_hash(raw_id.as_deref(), &raw_file_id, markdown);
+    let receipt_id = raw_id
+        .as_deref()
+        .map(okf_proposal_identity_token)
+        .unwrap_or_else(|| okf_proposal_identity_token(&format!("missing-id:{digest}")));
+    let receipt_file_id = okf_proposal_identity_token(&raw_file_id);
+    let timestamp = "1970-01-01T00:00:00Z".to_owned();
+    let receipt_proposal = OkfProposalFile {
+        file_id: receipt_file_id,
+        id: receipt_id,
+        kind: None,
+        version: None,
+        profile: None,
+        memory_type: MemoryType::Fact,
+        lane: MemoryLane::Semantic,
+        title: "Redacted non-repo-safe proposal".to_owned(),
+        description: "Original proposal content and identity redacted before archival.".to_owned(),
+        body: format!(
+            "Original non-repo-safe proposal content and identity were redacted before archival.\n\nContent hash (BLAKE3): `{digest}`."
+        ),
+        status: OkfProposalStatus::Proposed,
+        proposal: OkfProposalMetadata {
+            action: OkfProposalAction::Create,
+            proposed_by: "redacted".to_owned(),
+            proposed_at: timestamp.clone(),
+            reason: None,
+            confidence: None,
+            target: None,
+        },
+        scope_kind: ScopeKind::Repo,
+        scope_id: None,
+        applies_to: Vec::new(),
+        tags: Vec::new(),
+        timestamp,
+        created_by: None,
+        sources: Vec::new(),
+        supersedes: Vec::new(),
+        sensitivity,
+        resolution: None,
+    };
+    Ok(Some(OkfProposalPreflight {
+        sensitivity,
+        receipt_proposal,
+    }))
+}
+
+fn proposal_preflight_frontmatter(markdown: &str) -> &str {
+    let Some(rest) = markdown
+        .strip_prefix("---\n")
+        .or_else(|| markdown.strip_prefix("---\r\n"))
+    else {
+        return "";
+    };
+    rest.split_once("\n---")
+        .map_or(rest, |(frontmatter, _)| frontmatter)
+}
+
+fn unique_top_level_yaml_scalar(frontmatter: &str, key: &str) -> Option<String> {
+    let mut values = frontmatter.lines().filter_map(|line| {
+        if line.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let (candidate_key, value) = line.trim_end_matches('\r').split_once(':')?;
+        if candidate_key != key {
+            return None;
+        }
+        serde_yaml::from_str::<serde_yaml::Value>(value.trim())
+            .ok()?
+            .as_str()
+            .map(str::to_owned)
+    });
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
 }
 
 pub fn parse_okf_record_markdown(
@@ -474,26 +666,59 @@ pub fn parse_okf_record_markdown(
     let title = required_string(frontmatter.title, "title")?;
     let memory_type = parse_required_enum::<MemoryType>(frontmatter.memory_type, "type")?;
     let lane = parse_optional_enum::<MemoryLane>(frontmatter.lane, "lane")?.unwrap_or_default();
-    let scope_kind = parse_scope(frontmatter.scope_kind.or(frontmatter.scope))?;
+    let scope_kind = parse_scope(coalesce_string_aliases(
+        frontmatter.scope_kind,
+        frontmatter.scope,
+        "scope_kind",
+        "scope",
+    )?)?;
+    let scope_id = optional_string(frontmatter.scope_id, "scope_id")?;
     let visibility = parse_required_enum::<Visibility>(frontmatter.visibility, "visibility")?;
     let status = parse_status(required_string(frontmatter.status, "status")?)?;
     let confidence = parse_confidence(frontmatter.confidence)?;
-    let source_kind = required_string(frontmatter.source.or(frontmatter.source_kind), "source")?;
-    let created = required_string(
-        frontmatter
-            .created
-            .or(frontmatter.created_at)
-            .or(frontmatter.timestamp),
-        "created",
+    let source_kind = coalesce_string_aliases(
+        frontmatter.source,
+        frontmatter.source_kind,
+        "source",
+        "source_kind",
     )?;
+    let source_ref = optional_string(frontmatter.source_ref, "source_ref")?;
+    let created = coalesce_string_aliases(
+        frontmatter.created,
+        frontmatter.created_at,
+        "created",
+        "created_at",
+    )?;
+    let created = coalesce_string_aliases(created, frontmatter.timestamp, "created", "timestamp")?;
+    let created = required_string(created, "created")?;
     ensure_timestampish(&created, "created")?;
-    let updated = frontmatter.updated.or(frontmatter.updated_at);
+    let updated = coalesce_string_aliases(
+        frontmatter.updated,
+        frontmatter.updated_at,
+        "updated",
+        "updated_at",
+    )?;
     if let Some(updated) = updated.as_deref() {
         ensure_timestampish(updated, "updated")?;
     }
     let applies_to = validate_applies_to(frontmatter.applies_to.unwrap_or_default())?;
-    let supersedes_id = frontmatter.supersedes.or(frontmatter.supersedes_id);
-    let expires_at = frontmatter.expires.or(frontmatter.expires_at);
+    let supersedes_id = coalesce_string_aliases(
+        frontmatter.supersedes,
+        frontmatter.supersedes_id,
+        "supersedes",
+        "supersedes_id",
+    )?;
+    let expires_at = coalesce_string_aliases(
+        frontmatter.expires,
+        frontmatter.expires_at,
+        "expires",
+        "expires_at",
+    )?;
+    let proposal_id = optional_string(frontmatter.proposal_id, "proposal_id")?;
+    if let Some(expires_at) = expires_at.as_deref() {
+        expiry::parse_expires_at(expires_at)
+            .with_context(|| format!("invalid OKF expiry for {concept_id}"))?;
+    }
     let body = body_without_matching_h1(body, &title)?;
 
     Ok(Some(OkfRecordFile {
@@ -502,13 +727,14 @@ pub fn parse_okf_record_markdown(
             memory_type,
             lane,
             scope_kind,
-            scope_id: frontmatter.scope_id,
+            scope_id,
             visibility,
             title,
             body,
             tags: frontmatter.tags.unwrap_or_default(),
-            source_kind: Some(source_kind),
-            source_ref: frontmatter.source_ref.or(Some(concept_id)),
+            source_kind,
+            source_ref,
+            sensitivity: OkfProposalSensitivity::RepoSafe,
             confidence,
         },
         status,
@@ -517,6 +743,7 @@ pub fn parse_okf_record_markdown(
         updated,
         supersedes_id,
         expires_at,
+        proposal_id,
     }))
 }
 
@@ -546,7 +773,8 @@ pub fn parse_okf_proposal_markdown(
     let timestamp = required_string(frontmatter.timestamp, "timestamp")?;
     ensure_timestampish(&timestamp, "timestamp")?;
     let sensitivity =
-        parse_required_enum::<OkfProposalSensitivity>(frontmatter.sensitivity, "sensitivity")?;
+        parse_optional_enum::<OkfProposalSensitivity>(frontmatter.sensitivity, "sensitivity")?
+            .unwrap_or_default();
     let (scope_kind, scope_id, applies_to) = parse_proposal_scope(
         frontmatter.scope,
         frontmatter.scope_kind,
@@ -556,8 +784,9 @@ pub fn parse_okf_proposal_markdown(
     let supersedes =
         validate_string_list(frontmatter.supersedes.unwrap_or_default(), "supersedes")?;
     let proposal = parse_proposal_metadata(frontmatter.proposal)?;
-    validate_proposal_action_shape(proposal.action, &proposal.target, &supersedes)?;
     let sources = validate_proposal_sources(frontmatter.sources.unwrap_or_default())?;
+    let resolution = parse_proposal_resolution(frontmatter.resolution)?;
+    validate_proposal_resolution(status, resolution.as_ref())?;
     let body = body_without_matching_h1(body, &title)?;
     if body.trim().is_empty() {
         bail!("OKF proposal body cannot be empty");
@@ -585,6 +814,7 @@ pub fn parse_okf_proposal_markdown(
         sources,
         supersedes,
         sensitivity,
+        resolution,
     }))
 }
 
@@ -595,62 +825,39 @@ pub fn import_okf_records(conn: &Connection, records: &[OkfRecordFile]) -> Resul
     Ok(records.len())
 }
 
-pub fn write_memory_record_file(records_root: &Path, record: &MemoryRecord) -> Result<PathBuf> {
-    write_memory_record_file_with_tags(records_root, record, &[])
-}
-
-pub fn write_memory_record_file_with_tags(
-    records_root: &Path,
-    record: &MemoryRecord,
-    tags: &[String],
-) -> Result<PathBuf> {
-    write_memory_record_file_with_metadata(records_root, record, tags, &[])
-}
-
-pub fn write_memory_record_file_with_metadata(
-    records_root: &Path,
-    record: &MemoryRecord,
-    tags: &[String],
-    applies_to: &[String],
-) -> Result<PathBuf> {
-    write_memory_record_file_internal(records_root, record, tags, applies_to, WriteMode::Overwrite)
-}
-
-pub fn create_memory_record_file_with_metadata(
-    records_root: &Path,
-    record: &MemoryRecord,
-    tags: &[String],
-    applies_to: &[String],
-) -> Result<PathBuf> {
-    write_memory_record_file_internal(records_root, record, tags, applies_to, WriteMode::CreateNew)
-}
-
-pub fn apply_okf_create_proposal_file(
-    records_root: impl AsRef<Path>,
-    proposal: &OkfProposalFile,
-) -> Result<OkfProposalApplyResult> {
-    if proposal.status != OkfProposalStatus::Proposed {
-        bail!(
-            "OKF proposal {} must have status proposed before apply",
-            proposal.id
-        );
-    }
+pub(crate) fn project_okf_create_proposal(proposal: &OkfProposalFile) -> Result<MemoryRecord> {
+    validate_repo_apply_proposal(proposal)?;
     if proposal.proposal.action != OkfProposalAction::Create {
         bail!(
-            "OKF proposal action {} is not supported by `memzoi proposal-files apply`; only create is supported",
+            "OKF proposal action {} is not supported by create projection",
             proposal.proposal.action.as_str()
         );
     }
-    if proposal.sensitivity != OkfProposalSensitivity::RepoSafe {
+
+    Ok(project_okf_new_record(proposal, None))
+}
+
+pub(crate) fn project_okf_supersede_proposal(
+    proposal: &OkfProposalFile,
+    target_id: &str,
+) -> Result<MemoryRecord> {
+    validate_repo_apply_proposal(proposal)?;
+    if proposal.proposal.action != OkfProposalAction::Supersede {
         bail!(
-            "OKF proposal sensitivity {} cannot be applied into repo records; {}",
-            proposal.sensitivity.as_str(),
-            repo_apply_sensitivity_guidance(proposal.sensitivity)
+            "OKF proposal action {} is not supported by supersede projection",
+            proposal.proposal.action.as_str()
         );
     }
+    Ok(project_okf_new_record(proposal, Some(target_id.to_owned())))
+}
 
+fn project_okf_new_record(
+    proposal: &OkfProposalFile,
+    supersedes_id: Option<String>,
+) -> MemoryRecord {
     let body = proposal.body.trim().to_owned();
-    let record = MemoryRecord {
+    let (source_kind, source_ref) = proposal_primary_evidence(&proposal.sources);
+    MemoryRecord {
         id: title_to_concept_slug(&proposal.title)
             .unwrap_or_else(|| proposal.file_id.replace('_', "-")),
         memory_type: proposal.memory_type,
@@ -663,27 +870,174 @@ pub fn apply_okf_create_proposal_file(
         body,
         status: MemoryStatus::Active,
         confidence: 1.0,
-        source_kind: Some("memzoi-proposal-file".to_owned()),
-        source_ref: Some(proposal.id.clone()),
+        source_kind,
+        source_ref,
+        proposal_id: Some(proposal.id.clone()),
         content_hash: blake3::hash(proposal.body.trim().as_bytes())
             .to_hex()
             .to_string(),
         created_at: proposal.timestamp.clone(),
         updated_at: proposal.timestamp.clone(),
-        supersedes_id: None,
+        supersedes_id,
         expires_at: None,
-    };
-    let record_path = create_memory_record_file_with_metadata(
-        records_root.as_ref(),
-        &record,
-        &proposal.tags,
-        &proposal.applies_to,
-    )?;
+    }
+}
 
-    Ok(OkfProposalApplyResult {
-        record,
-        record_path,
-    })
+pub(crate) fn project_okf_record(record: &OkfRecordFile) -> MemoryRecord {
+    MemoryRecord {
+        id: record.concept_id.clone(),
+        memory_type: record.draft.memory_type,
+        lane: record.draft.lane,
+        destination: MemoryDestination::Repo,
+        scope_kind: record.draft.scope_kind,
+        scope_id: record.draft.scope_id.clone(),
+        visibility: record.draft.visibility,
+        title: record.draft.title.clone(),
+        body: record.draft.body.clone(),
+        status: record.status,
+        confidence: record.draft.confidence,
+        source_kind: record.draft.source_kind.clone(),
+        source_ref: record.draft.source_ref.clone(),
+        proposal_id: record.proposal_id.clone(),
+        content_hash: crate::import::content_hash(&record.draft.body),
+        created_at: record.created.clone(),
+        updated_at: record
+            .updated
+            .clone()
+            .unwrap_or_else(|| record.created.clone()),
+        supersedes_id: record.supersedes_id.clone(),
+        expires_at: record.expires_at.clone(),
+    }
+}
+
+pub(crate) fn validate_repo_apply_proposal(proposal: &OkfProposalFile) -> Result<()> {
+    if proposal.status != OkfProposalStatus::Proposed {
+        bail!(
+            "OKF proposal {} must have status proposed before apply",
+            proposal.id
+        );
+    }
+    if proposal.sensitivity != OkfProposalSensitivity::RepoSafe {
+        bail!(
+            "OKF proposal sensitivity {} cannot be applied into repo records; {}",
+            proposal.sensitivity.as_str(),
+            repo_apply_sensitivity_guidance(proposal.sensitivity)
+        );
+    }
+    validate_proposal_action_shape(
+        proposal.proposal.action,
+        &proposal.proposal.target,
+        &proposal.proposal.reason,
+        &proposal.supersedes,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn render_resolved_okf_proposal_markdown(
+    proposal: &OkfProposalFile,
+    resolution: &OkfProposalResolution,
+) -> Result<String> {
+    if proposal.status != OkfProposalStatus::Proposed || proposal.resolution.is_some() {
+        bail!("only pending proposed packets can be resolved");
+    }
+    let status = match resolution.outcome {
+        OkfProposalOutcome::Applied => OkfProposalStatus::Applied,
+        OkfProposalOutcome::Rejected => OkfProposalStatus::Rejected,
+    };
+    validate_proposal_resolution(status, Some(resolution))?;
+    let frontmatter = OkfResolvedProposalFrontmatter {
+        id: proposal.id.clone(),
+        kind: proposal.kind.clone(),
+        version: proposal.version.clone(),
+        profile: proposal.profile.clone(),
+        memory_type: proposal.memory_type,
+        lane: proposal.lane,
+        title: proposal.title.clone(),
+        description: proposal.description.clone(),
+        status,
+        proposal: OkfResolvedProposalMetadata {
+            action: proposal.proposal.action,
+            proposed_by: proposal.proposal.proposed_by.clone(),
+            proposed_at: proposal.proposal.proposed_at.clone(),
+            reason: proposal.proposal.reason.clone(),
+            confidence: proposal.proposal.confidence.clone(),
+            target: proposal.proposal.target.clone(),
+        },
+        scope: OkfResolvedProposalScope {
+            kind: proposal.scope_kind,
+            id: proposal.scope_id.clone(),
+            paths: proposal.applies_to.clone(),
+        },
+        tags: proposal.tags.clone(),
+        timestamp: proposal.timestamp.clone(),
+        created_by: proposal.created_by.clone(),
+        sources: proposal.sources.clone(),
+        supersedes: proposal.supersedes.clone(),
+        sensitivity: proposal.sensitivity,
+        resolution: resolution.clone(),
+    };
+    let yaml = serde_yaml::to_string(&frontmatter)
+        .context("failed to render resolved OKF proposal frontmatter")?;
+    Ok(format!(
+        "---\n{}---\n\n# {}\n\n{}\n",
+        yaml,
+        proposal.title.trim(),
+        proposal.body.trim()
+    ))
+}
+
+fn rejected_proposal_content_hash(
+    raw_id: Option<&str>,
+    raw_file_id: &str,
+    markdown: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"proposal-id\0");
+    hasher.update(raw_id.unwrap_or("<missing-or-non-string>").as_bytes());
+    hasher.update(b"\0proposal-file-id\0");
+    hasher.update(raw_file_id.as_bytes());
+    hasher.update(b"\0proposal-markdown\0");
+    hasher.update(markdown.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+pub fn okf_proposal_matches_identity(proposal: &OkfProposalFile, identity: &str) -> bool {
+    proposal.id == identity
+        || proposal.file_id == identity
+        || proposal_identity_tokens(proposal).contains(&okf_proposal_identity_token(identity))
+}
+
+pub(crate) fn okf_proposals_share_identity(
+    left: &OkfProposalFile,
+    right: &OkfProposalFile,
+) -> bool {
+    !proposal_identity_tokens(left).is_disjoint(&proposal_identity_tokens(right))
+}
+
+pub(crate) fn proposal_identity_tokens(proposal: &OkfProposalFile) -> BTreeSet<String> {
+    [proposal.id.as_str(), proposal.file_id.as_str()]
+        .into_iter()
+        .map(okf_proposal_identity_token)
+        .collect()
+}
+
+pub(crate) fn okf_proposal_identity_token(identity: &str) -> String {
+    const PREFIX: &str = "redacted-identity-";
+    if identity
+        .strip_prefix(PREFIX)
+        .is_some_and(|digest| digest.len() == 64 && digest.chars().all(|ch| ch.is_ascii_hexdigit()))
+    {
+        return identity.to_owned();
+    }
+    format!("{PREFIX}{}", blake3::hash(identity.as_bytes()).to_hex())
+}
+
+pub(crate) fn render_memory_record_markdown(
+    record: &MemoryRecord,
+    tags: &[String],
+    applies_to: &[String],
+) -> String {
+    render_memory_record(record, tags, applies_to)
 }
 
 fn repo_apply_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'static str {
@@ -696,42 +1050,34 @@ fn repo_apply_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'sta
         OkfProposalSensitivity::LocalOnly => {
             "local-only proposals belong in the future local/runtime memory plane"
         }
+        OkfProposalSensitivity::RawTranscript => {
+            "raw transcripts must not become repo-shared memory"
+        }
+        OkfProposalSensitivity::PrivatePersonalData => {
+            "private personal data must not become repo-shared memory"
+        }
+        OkfProposalSensitivity::TemporaryState => {
+            "temporary task state belongs in local or session memory, not canonical repo memory"
+        }
         OkfProposalSensitivity::Unknown => {
             "classify the proposal sensitivity before applying it to repo records"
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WriteMode {
-    CreateNew,
-    Overwrite,
-}
-
-fn write_memory_record_file_internal(
-    records_root: &Path,
-    record: &MemoryRecord,
-    tags: &[String],
-    applies_to: &[String],
-    mode: WriteMode,
-) -> Result<PathBuf> {
-    let destination = records_root.join(format!("{}.md", record.id));
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create records directory {}", parent.display()))?;
+fn proposal_primary_evidence(sources: &[OkfProposalSource]) -> (Option<String>, Option<String>) {
+    for source in sources {
+        if let Some(path) = trimmed_optional(source.path.as_deref()) {
+            return (Some("path".to_owned()), Some(path));
+        }
+        if let Some(url) = trimmed_optional(source.url.as_deref()) {
+            return (Some("url".to_owned()), Some(url));
+        }
+        if let Some(reference) = trimmed_optional(source.reference.as_deref()) {
+            return (Some("ref".to_owned()), Some(reference));
+        }
     }
-    let markdown = render_memory_record(record, tags, applies_to);
-    match mode {
-        WriteMode::CreateNew => OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, markdown.as_bytes()))
-            .with_context(|| format!("failed to create memory record {}", destination.display()))?,
-        WriteMode::Overwrite => fs::write(&destination, markdown)
-            .with_context(|| format!("failed to write memory record {}", destination.display()))?,
-    }
-    Ok(destination)
+    (None, None)
 }
 
 #[derive(Debug, Serialize)]
@@ -791,6 +1137,7 @@ struct OkfFrontmatter {
     source: Option<String>,
     source_kind: Option<String>,
     source_ref: Option<String>,
+    proposal_id: Option<String>,
     supersedes: Option<String>,
     supersedes_id: Option<String>,
     expires: Option<String>,
@@ -827,6 +1174,68 @@ struct OkfProposalFrontmatter {
     sources: Option<Vec<OkfProposalSource>>,
     supersedes: Option<StringList>,
     sensitivity: Option<String>,
+    resolution: Option<OkfProposalResolutionFrontmatter>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OkfProposalResolutionFrontmatter {
+    outcome: Option<String>,
+    resolved_by: Option<String>,
+    resolved_at: Option<String>,
+    reason: Option<String>,
+    record_id: Option<String>,
+    target_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OkfResolvedProposalFrontmatter {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(rename = "type")]
+    memory_type: MemoryType,
+    lane: MemoryLane,
+    title: String,
+    description: String,
+    status: OkfProposalStatus,
+    proposal: OkfResolvedProposalMetadata,
+    scope: OkfResolvedProposalScope,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_by: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<OkfProposalSource>,
+    supersedes: Vec<String>,
+    sensitivity: OkfProposalSensitivity,
+    resolution: OkfProposalResolution,
+}
+
+#[derive(Debug, Serialize)]
+struct OkfResolvedProposalMetadata {
+    action: OkfProposalAction,
+    proposed_by: String,
+    proposed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OkfResolvedProposalScope {
+    kind: ScopeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -881,16 +1290,19 @@ enum ConfidenceValue {
 }
 
 fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+    for entry in fs::read_dir(dir).context("failed to scan OKF Markdown directory")? {
         let entry = entry?;
         let path = entry.path();
         if is_hidden(&path) {
             continue;
         }
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_markdown_files(&path, files)?;
-        } else if metadata.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
         {
             files.push(path);
         }
@@ -899,15 +1311,33 @@ fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
-    let hash = blake3::hash(record.draft.body.as_bytes())
-        .to_hex()
-        .to_string();
+    let hash = crate::import::content_hash(&record.draft.body);
     let updated = record.updated.as_deref().unwrap_or(record.created.as_str());
-    conn.execute(
-        "INSERT OR REPLACE INTO memory_record (
+    let changed = conn.execute(
+        "INSERT INTO memory_record (
           id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status, confidence,
-          source_kind, source_ref, content_hash, created_at, updated_at, supersedes_id, expires_at
-        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+          source_kind, source_ref, proposal_id, content_hash, created_at, updated_at, supersedes_id, expires_at
+        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+        ON CONFLICT(id) DO UPDATE SET
+          type = excluded.type,
+          lane = excluded.lane,
+          destination = excluded.destination,
+          scope_kind = excluded.scope_kind,
+          scope_id = excluded.scope_id,
+          visibility = excluded.visibility,
+          title = excluded.title,
+          body = excluded.body,
+          status = excluded.status,
+          confidence = excluded.confidence,
+          source_kind = excluded.source_kind,
+          source_ref = excluded.source_ref,
+          proposal_id = excluded.proposal_id,
+          content_hash = excluded.content_hash,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          supersedes_id = excluded.supersedes_id,
+          expires_at = excluded.expires_at
+        WHERE memory_record.destination = 'repo'",
         params![
             record.concept_id,
             record.draft.memory_type.as_str(),
@@ -921,6 +1351,7 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
             record.draft.confidence,
             record.draft.source_kind,
             record.draft.source_ref,
+            record.proposal_id,
             hash,
             record.created,
             updated,
@@ -928,6 +1359,9 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
             record.expires_at,
         ],
     )?;
+    if changed != 1 {
+        bail!("runtime record identity is already owned by non-repo memory");
+    }
     conn.execute(
         "DELETE FROM memory_path WHERE record_id = ?1",
         [&record.concept_id],
@@ -971,13 +1405,14 @@ fn render_memory_record(record: &MemoryRecord, tags: &[String], applies_to: &[St
     }
     push_yaml_string(&mut output, "visibility", record.visibility.as_str());
     output.push_str(&format!("confidence: {}\n", record.confidence));
-    push_yaml_string(
-        &mut output,
-        "source",
-        record.source_kind.as_deref().unwrap_or("memzoi-apply"),
-    );
+    if let Some(source_kind) = &record.source_kind {
+        push_yaml_string(&mut output, "source", source_kind);
+    }
     if let Some(source_ref) = &record.source_ref {
         push_yaml_string(&mut output, "source_ref", source_ref);
+    }
+    if let Some(proposal_id) = &record.proposal_id {
+        push_yaml_string(&mut output, "proposal_id", proposal_id);
     }
     if !tags.is_empty() {
         output.push_str("tags:\n");
@@ -1024,8 +1459,7 @@ fn quote_yaml_string(value: &str) -> String {
     if is_plain_yaml_scalar(value) {
         return value.to_owned();
     }
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    serde_json::to_string(value).expect("serializing a YAML string scalar cannot fail")
 }
 
 fn is_plain_yaml_scalar(value: &str) -> bool {
@@ -1086,7 +1520,7 @@ fn strip_md_extension(path: &Path) -> PathBuf {
     output
 }
 
-fn validate_concept_id(concept: &str) -> Result<()> {
+pub(crate) fn validate_concept_id(concept: &str) -> Result<()> {
     if concept.is_empty() {
         bail!("OKF concept id cannot be empty");
     }
@@ -1116,23 +1550,22 @@ fn validate_concept_id(concept: &str) -> Result<()> {
 }
 
 fn proposal_file_id(bundle_root: &Path, file_path: &Path) -> Result<String> {
+    let file_id = raw_proposal_file_id(bundle_root, file_path)?;
+    validate_proposal_identifier(&file_id)?;
+    Ok(file_id)
+}
+
+fn raw_proposal_file_id(bundle_root: &Path, file_path: &Path) -> Result<String> {
     if file_path
         .extension()
         .and_then(|extension| extension.to_str())
         != Some("md")
     {
-        bail!(
-            "OKF proposal files must use .md extension: {}",
-            file_path.display()
-        );
+        bail!("OKF proposal files must use .md extension");
     }
-    let relative = file_path.strip_prefix(bundle_root).with_context(|| {
-        format!(
-            "OKF proposal path {} is not under proposal root {}",
-            file_path.display(),
-            bundle_root.display()
-        )
-    })?;
+    let relative = file_path
+        .strip_prefix(bundle_root)
+        .context("OKF proposal path is not under proposal root")?;
     let without_extension = strip_md_extension(relative);
     for component in without_extension.components() {
         match component {
@@ -1143,7 +1576,6 @@ fn proposal_file_id(bundle_root: &Path, file_path: &Path) -> Result<String> {
     let file_id = without_extension
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/");
-    validate_proposal_identifier(&file_id)?;
     Ok(file_id)
 }
 
@@ -1215,6 +1647,23 @@ fn optional_string(value: Option<String>, key: &str) -> Result<Option<String>> {
     Ok(Some(trimmed.to_owned()))
 }
 
+fn coalesce_string_aliases(
+    primary: Option<String>,
+    alias: Option<String>,
+    primary_key: &str,
+    alias_key: &str,
+) -> Result<Option<String>> {
+    let primary = optional_string(primary, primary_key)?;
+    let alias = optional_string(alias, alias_key)?;
+    match (primary, alias) {
+        (Some(primary), Some(alias)) if primary != alias => {
+            bail!("{primary_key} and {alias_key} must match when both are present")
+        }
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
 fn parse_required_enum<T>(value: Option<String>, key: &str) -> Result<T>
 where
     T: std::str::FromStr<Err = String>,
@@ -1280,7 +1729,12 @@ fn parse_proposal_metadata(
     ensure_timestampish(&proposed_at, "proposal.proposed_at")?;
     let reason = optional_string(metadata.reason, "proposal.reason")?;
     let confidence = optional_string(metadata.confidence, "proposal.confidence")?;
-    let target = optional_string(metadata.target.or(metadata.target_id), "proposal.target")?;
+    let target = coalesce_string_aliases(
+        metadata.target,
+        metadata.target_id,
+        "proposal.target",
+        "proposal.target_id",
+    )?;
     Ok(OkfProposalMetadata {
         action,
         proposed_by,
@@ -1289,6 +1743,61 @@ fn parse_proposal_metadata(
         confidence,
         target,
     })
+}
+
+fn parse_proposal_resolution(
+    resolution: Option<OkfProposalResolutionFrontmatter>,
+) -> Result<Option<OkfProposalResolution>> {
+    let Some(resolution) = resolution else {
+        return Ok(None);
+    };
+    let outcome =
+        parse_required_enum::<OkfProposalOutcome>(resolution.outcome, "resolution.outcome")?;
+    let resolved_by = required_string(resolution.resolved_by, "resolution.resolved_by")?;
+    let resolved_at = required_string(resolution.resolved_at, "resolution.resolved_at")?;
+    ensure_timestampish(&resolved_at, "resolution.resolved_at")?;
+    Ok(Some(OkfProposalResolution {
+        outcome,
+        resolved_by,
+        resolved_at,
+        reason: optional_string(resolution.reason, "resolution.reason")?,
+        record_id: optional_string(resolution.record_id, "resolution.record_id")?,
+        target_id: optional_string(resolution.target_id, "resolution.target_id")?,
+    }))
+}
+
+fn validate_proposal_resolution(
+    status: OkfProposalStatus,
+    resolution: Option<&OkfProposalResolution>,
+) -> Result<()> {
+    match (status, resolution) {
+        (OkfProposalStatus::Proposed, None) => Ok(()),
+        (OkfProposalStatus::Proposed, Some(_)) => {
+            bail!("proposed OKF packets cannot include a resolution")
+        }
+        (OkfProposalStatus::Applied, Some(resolution))
+            if resolution.outcome == OkfProposalOutcome::Applied
+                && resolution.record_id.is_some() =>
+        {
+            Ok(())
+        }
+        (OkfProposalStatus::Rejected, Some(resolution))
+            if resolution.outcome == OkfProposalOutcome::Rejected
+                && resolution.reason.is_some()
+                && resolution.record_id.is_none() =>
+        {
+            Ok(())
+        }
+        (OkfProposalStatus::Applied, None) | (OkfProposalStatus::Rejected, None) => {
+            bail!("resolved OKF packets must include resolution metadata")
+        }
+        (OkfProposalStatus::Applied, Some(_)) => {
+            bail!("applied OKF packets require an applied outcome and record_id")
+        }
+        (OkfProposalStatus::Rejected, Some(_)) => {
+            bail!("rejected OKF packets require a rejected outcome and reason without record_id")
+        }
+    }
 }
 
 fn parse_proposal_scope(
@@ -1306,8 +1815,13 @@ fn parse_proposal_scope(
         }
         None => (None, None),
     };
-    let scope_kind = parse_scope(scope_kind.or(scope_kind_from_scope))?;
-    let scope_id = optional_string(scope_id.or(scope_id_from_scope), "scope_id")?;
+    let scope_kind = parse_scope(coalesce_string_aliases(
+        scope_kind,
+        scope_kind_from_scope,
+        "scope_kind",
+        "scope.kind",
+    )?)?;
+    let scope_id = coalesce_string_aliases(scope_id, scope_id_from_scope, "scope_id", "scope.id")?;
     scope_paths.extend(applies_to.unwrap_or_default());
     let applies_to = validate_applies_to(scope_paths)?;
     Ok((scope_kind, scope_id, applies_to))
@@ -1316,19 +1830,35 @@ fn parse_proposal_scope(
 fn validate_proposal_action_shape(
     action: OkfProposalAction,
     target: &Option<String>,
+    reason: &Option<String>,
     supersedes: &[String],
 ) -> Result<()> {
     match action {
-        OkfProposalAction::Create => Ok(()),
+        OkfProposalAction::Create => {
+            if target.is_some() || !supersedes.is_empty() {
+                bail!("OKF create proposals cannot name a target or supersedes record");
+            }
+            Ok(())
+        }
         OkfProposalAction::Supersede => {
-            if supersedes.is_empty() {
-                bail!("OKF supersede proposals must include at least one supersedes target");
+            if supersedes.len() != 1 || target.is_some() {
+                bail!(
+                    "OKF supersede proposals must include exactly one supersedes target and no proposal.target"
+                );
+            }
+            if reason.is_none() {
+                bail!("OKF supersede proposals must include proposal.reason");
             }
             Ok(())
         }
         OkfProposalAction::Tombstone => {
-            if target.as_deref().is_none_or(str::is_empty) {
-                bail!("OKF tombstone proposals must include proposal.target");
+            if target.as_deref().is_none_or(str::is_empty) || !supersedes.is_empty() {
+                bail!(
+                    "OKF tombstone proposals must include exactly one proposal.target and no supersedes records"
+                );
+            }
+            if reason.is_none() {
+                bail!("OKF tombstone proposals must include proposal.reason");
             }
             Ok(())
         }
@@ -1439,13 +1969,149 @@ fn body_without_matching_h1(body: &str, title: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::ErrorKind, path::Path};
+    use std::{collections::BTreeSet, fs, io::ErrorKind, path::Path};
 
+    use rusqlite::Connection;
     use tempfile::TempDir;
 
-    use crate::{MemoryLane, MemoryStatus, MemoryType, ScopeKind, Visibility};
+    use crate::{
+        MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind,
+        Visibility,
+    };
 
     const EXAMPLE_MEMORY: &str = include_str!("../../../examples/example-memory.md");
+
+    #[test]
+    fn rejection_digest_and_alias_tokens_cover_raw_proposal_and_file_identities()
+    -> anyhow::Result<()> {
+        let markdown = "---\nid: secret-proposal-id\ntype: [malformed\nsensitivity: secret\n---\nsecret body\n";
+        let base = super::rejected_proposal_content_hash(
+            Some("secret-proposal-id"),
+            "secret-file-id",
+            markdown,
+        );
+        assert_ne!(
+            base,
+            super::rejected_proposal_content_hash(
+                Some("different-proposal-id"),
+                "secret-file-id",
+                markdown,
+            )
+        );
+        assert_ne!(
+            base,
+            super::rejected_proposal_content_hash(
+                Some("secret-proposal-id"),
+                "different-file-id",
+                markdown,
+            )
+        );
+
+        let root = Path::new("/bundle/pending");
+        let preflight =
+            super::preflight_okf_proposal_markdown(root, root.join("secret-file-id.md"), markdown)?
+                .expect("malformed secret packet should still produce a safety receipt");
+        assert_eq!(preflight.sensitivity, super::OkfProposalSensitivity::Secret);
+        assert!(super::okf_proposal_matches_identity(
+            &preflight.receipt_proposal,
+            "secret-proposal-id"
+        ));
+        assert!(super::okf_proposal_matches_identity(
+            &preflight.receipt_proposal,
+            "secret-file-id"
+        ));
+        assert!(!preflight.receipt_proposal.id.contains("secret-proposal-id"));
+        assert!(
+            !preflight
+                .receipt_proposal
+                .file_id
+                .contains("secret-file-id")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_read_failure_does_not_echo_raw_file_identity() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let raw_file_id = "secret-invalid-utf8-file-identity";
+        let path = temp.path().join(format!("{raw_file_id}.md"));
+        fs::write(&path, [0xff, 0xfe])?;
+
+        let error = super::preflight_okf_proposal_file(temp.path(), &path)
+            .expect_err("invalid UTF-8 should fail before proposal parsing");
+        let rendered = format!("{error:#}");
+        assert!(!rendered.contains(raw_file_id), "{rendered}");
+        assert!(
+            rendered.contains("failed to read proposal during safety preflight"),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn internal_record_renderer_preserves_canonical_fields() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let records = temp.path().join("records");
+        let record = MemoryRecord {
+            id: "team/install-risk".to_owned(),
+            memory_type: MemoryType::Risk,
+            lane: MemoryLane::Semantic,
+            destination: MemoryDestination::Repo,
+            scope_kind: ScopeKind::Team,
+            scope_id: Some("platform".to_owned()),
+            visibility: Visibility::Team,
+            title: "Risk: package install".to_owned(),
+            body: "Package installs require review.".to_owned(),
+            status: MemoryStatus::Superseded,
+            confidence: 0.75,
+            source_kind: Some("human-authored".to_owned()),
+            source_ref: Some("issue://42".to_owned()),
+            proposal_id: Some("prop_review_42".to_owned()),
+            content_hash: "hash".to_owned(),
+            created_at: "2026-07-05T00:00:00Z".to_owned(),
+            updated_at: "2026-07-06T00:00:00Z".to_owned(),
+            supersedes_id: Some("team/old-install-risk".to_owned()),
+            expires_at: Some("2027-01-01".to_owned()),
+        };
+
+        let path = records.join(format!("{}.md", record.id));
+        std::fs::create_dir_all(path.parent().expect("record path has parent"))?;
+        let rendered = super::render_memory_record_markdown(&record, &[], &[]);
+        std::fs::write(&path, &rendered)?;
+        assert!(rendered.contains("type: risk\n"));
+        assert!(rendered.contains("title: \"Risk: package install\"\n"));
+        let parsed = super::parse_okf_record_file(&records, &path)?.expect("record parses");
+
+        assert_eq!(parsed.concept_id, "team/install-risk");
+        assert_eq!(parsed.draft.title, "Risk: package install");
+        assert_eq!(parsed.draft.scope_kind, ScopeKind::Team);
+        assert_eq!(parsed.draft.scope_id.as_deref(), Some("platform"));
+        assert_eq!(parsed.status, MemoryStatus::Superseded);
+        assert_eq!(parsed.draft.source_ref.as_deref(), Some("issue://42"));
+        assert_eq!(parsed.proposal_id.as_deref(), Some("prop_review_42"));
+        assert_eq!(
+            parsed.supersedes_id.as_deref(),
+            Some("team/old-install-risk")
+        );
+        assert_eq!(parsed.expires_at.as_deref(), Some("2027-01-01"));
+        Ok(())
+    }
+
+    #[test]
+    fn proposal_id_reservation_never_reuses_resolved_audit_ids() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let pending = temp.path().join("proposals/pending");
+        let applied = temp.path().join("proposals/resolved/applied");
+        std::fs::create_dir_all(&pending)?;
+        std::fs::create_dir_all(&applied)?;
+        std::fs::write(applied.join("mem_example.md"), "resolved evidence")?;
+
+        let reserved =
+            super::reserve_okf_proposal_id(&pending, "mem_example", &mut BTreeSet::new())?;
+
+        assert_eq!(reserved, "mem_example-2");
+        Ok(())
+    }
 
     #[test]
     fn failed_proposal_write_removes_partial_target_and_preserves_cause() -> anyhow::Result<()> {
@@ -1479,6 +2145,81 @@ mod tests {
         assert_eq!(cause.kind(), ErrorKind::Other);
         assert_eq!(cause.to_string(), "forced writer failure");
 
+        Ok(())
+    }
+
+    #[test]
+    fn nullable_evidence_round_trips_without_fabricated_defaults() -> anyhow::Result<()> {
+        let root = Path::new("/bundle/records");
+        let path = root.join("no-evidence.md");
+        let markdown = r#"---
+type: fact
+lane: semantic
+title: No evidence metadata
+scope: repo
+visibility: repo
+status: active
+confidence: confirmed
+created: 2026-07-04T00:00:00Z
+---
+
+# No evidence metadata
+
+Nullable provenance remains nullable.
+"#;
+        let parsed = super::parse_okf_record_markdown(root, &path, markdown)?
+            .expect("record should parse without evidence metadata");
+        assert_eq!(parsed.draft.source_kind, None);
+        assert_eq!(parsed.draft.source_ref, None);
+
+        let record = super::project_okf_record(&parsed);
+        let rendered = super::render_memory_record_markdown(&record, &[], &[]);
+        assert!(!rendered.contains("source:"), "{rendered}");
+        assert!(!rendered.contains("source_ref:"), "{rendered}");
+        let reparsed = super::parse_okf_record_markdown(root, &path, &rendered)?
+            .expect("rendered record should parse");
+        assert_eq!(reparsed.draft.source_kind, None);
+        assert_eq!(reparsed.draft.source_ref, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn record_projection_hashes_the_trimmed_body() -> anyhow::Result<()> {
+        let root = Path::new("/bundle/records");
+        let path = root.join("trimmed-hash.md");
+        let mut parsed = super::parse_okf_record_markdown(root, &path, EXAMPLE_MEMORY)?
+            .expect("example record should parse");
+        parsed.draft.body = "\nCanonical body with edge whitespace.\n\n".to_owned();
+
+        let expected_hash = crate::import::content_hash(&parsed.draft.body);
+        let projected = super::project_okf_record(&parsed);
+        assert_eq!(projected.content_hash, expected_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn record_import_hashes_the_stored_trimmed_body() -> anyhow::Result<()> {
+        let root = Path::new("/bundle/records");
+        let path = root.join("trimmed-hash.md");
+        let mut parsed = super::parse_okf_record_markdown(root, &path, EXAMPLE_MEMORY)?
+            .expect("example record should parse");
+        parsed.draft.body = "\nCanonical body with edge whitespace.\n\n".to_owned();
+
+        let expected_body = parsed.draft.body.trim().to_owned();
+        let expected_hash = crate::import::content_hash(&parsed.draft.body);
+        let conn = Connection::open_in_memory()?;
+        crate::init_database(&conn)?;
+        super::import_okf_records(&conn, std::slice::from_ref(&parsed))?;
+        let (stored_body, stored_hash): (String, String) = conn.query_row(
+            "SELECT body, content_hash FROM memory_record WHERE id = ?1",
+            [&parsed.concept_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        assert_eq!(stored_body, expected_body);
+        assert_eq!(stored_hash, expected_hash);
+        assert_eq!(stored_hash, crate::import::content_hash(&stored_body));
         Ok(())
     }
 

@@ -59,7 +59,15 @@ assert len(lines) == 2, lines
 responses = [json.loads(line) for line in lines]
 assert responses[0]['result']['serverInfo']['name'] == 'memzoi'
 tools = {tool['name'] for tool in responses[1]['result']['tools']}
-expected = {'search_memory', 'build_context_pack', 'propose_memory', 'precheck_path', 'precheck_action', 'precheck_command'}
+expected = {
+    'search_memory',
+    'build_context_pack',
+    'propose_memory',
+    'precheck_path',
+    'precheck_action',
+    'precheck_command',
+    'inspect_memory_expiry',
+}
 assert tools == expected, tools
 print('onboarding smoke OK')
 PY

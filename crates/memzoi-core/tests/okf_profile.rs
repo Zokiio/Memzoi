@@ -4,10 +4,10 @@ use std::{
 };
 
 use memzoi_core::{
-    InitRequest, MemoryDestination, MemoryDraft, MemoryLane, MemoryPaths, MemoryRecord,
-    MemoryService, MemoryStatus, MemoryType, OkfProposalAction, OkfProposalSensitivity,
-    OkfProposalStatus, ScopeKind, Visibility, parse_okf_proposal_markdown, parse_okf_record_file,
-    read_okf_proposal_files, read_okf_record_files, write_memory_record_file,
+    InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryService, MemoryStatus, MemoryType,
+    OkfProposalAction, OkfProposalSensitivity, OkfProposalStatus, ScopeKind, Visibility,
+    parse_okf_proposal_markdown, parse_okf_record_file, parse_okf_record_markdown,
+    read_okf_proposal_files, read_okf_record_files,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -110,6 +110,10 @@ fn compact_canonical_example_parses_without_proposal_metadata() -> anyhow::Resul
         record.draft.source_ref.as_deref(),
         Some("mem_2026_07_06_auth_001")
     );
+    assert_eq!(
+        record.proposal_id, None,
+        "legacy canonical records without proposal_id remain readable"
+    );
     assert!(
         !record.draft.body.contains("proposal:"),
         "canonical record body should not carry proposal metadata"
@@ -185,8 +189,30 @@ fn rejects_unknown_proposal_schema_values() {
 }
 
 #[test]
-fn validates_action_specific_proposal_targets() {
-    let supersede_error = parse_okf_proposal_markdown(
+fn legacy_proposal_without_sensitivity_is_read_as_unknown() -> anyhow::Result<()> {
+    let markdown = proposal_markdown(
+        "create",
+        "semantic",
+        "proposed",
+        "repo-safe",
+        "supersedes: []",
+        "",
+    )
+    .replace("sensitivity: repo-safe\n", "");
+    let parsed = parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/mem_test_proposal.md"),
+        &markdown,
+    )?
+    .expect("legacy proposal should remain reviewable");
+
+    assert_eq!(parsed.sensitivity, OkfProposalSensitivity::Unknown);
+    Ok(())
+}
+
+#[test]
+fn legacy_action_shapes_remain_parseable_for_review() -> anyhow::Result<()> {
+    let supersede = parse_okf_proposal_markdown(
         Path::new("/bundle"),
         Path::new("/bundle/mem_supersede.md"),
         &proposal_markdown(
@@ -197,14 +223,13 @@ fn validates_action_specific_proposal_targets() {
             "supersedes: []",
             "",
         ),
-    )
-    .unwrap_err();
-    assert!(
-        supersede_error.to_string().contains("supersede proposals"),
-        "got {supersede_error:#}"
-    );
+    )?
+    .expect("legacy supersede packet should remain reviewable");
+    assert_eq!(supersede.proposal.action, OkfProposalAction::Supersede);
+    assert!(supersede.supersedes.is_empty());
+    assert!(supersede.proposal.reason.is_none());
 
-    let tombstone_error = parse_okf_proposal_markdown(
+    let tombstone = parse_okf_proposal_markdown(
         Path::new("/bundle"),
         Path::new("/bundle/mem_tombstone.md"),
         &proposal_markdown(
@@ -215,12 +240,190 @@ fn validates_action_specific_proposal_targets() {
             "supersedes: []",
             "",
         ),
-    )
-    .unwrap_err();
-    assert!(
-        tombstone_error.to_string().contains("proposal.target"),
-        "got {tombstone_error:#}"
+    )?
+    .expect("legacy tombstone packet should remain reviewable");
+    assert_eq!(tombstone.proposal.action, OkfProposalAction::Tombstone);
+    assert!(tombstone.proposal.target.is_none());
+    assert!(tombstone.proposal.reason.is_none());
+    Ok(())
+}
+
+#[test]
+fn proposal_aliases_allow_equal_or_legacy_values_and_reject_conflicts() -> anyhow::Result<()> {
+    let legacy_target = proposal_markdown(
+        "tombstone",
+        "semantic",
+        "proposed",
+        "repo-safe",
+        "supersedes: []",
+        "  target_id: semantic/legacy-target\n",
     );
+    let parsed = parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/legacy-target.md"),
+        &legacy_target,
+    )?
+    .expect("target_id-only packet should remain compatible");
+    assert_eq!(
+        parsed.proposal.target.as_deref(),
+        Some("semantic/legacy-target")
+    );
+
+    let equal_targets = legacy_target.replace(
+        "  target_id: semantic/legacy-target\n",
+        "  target: semantic/legacy-target\n  target_id: \" semantic/legacy-target \"\n",
+    );
+    parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/equal-targets.md"),
+        &equal_targets,
+    )?
+    .expect("equal target aliases should parse");
+
+    let conflicting_targets = equal_targets.replace(
+        "target_id: \" semantic/legacy-target \"",
+        "target_id: semantic/other-target",
+    );
+    let error = parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/conflicting-targets.md"),
+        &conflicting_targets,
+    )
+    .expect_err("conflicting target aliases must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("proposal.target and proposal.target_id must match")
+    );
+    assert!(!error.to_string().contains("other-target"));
+
+    for (markdown, expected) in [
+        (
+            proposal_markdown(
+                "create",
+                "semantic",
+                "proposed",
+                "repo-safe",
+                "supersedes: []",
+                "",
+            )
+            .replace(
+                "scope:\n  kind: repo\n",
+                "scope_kind: project\nscope:\n  kind: repo\n",
+            ),
+            "scope_kind and scope.kind must match",
+        ),
+        (
+            proposal_markdown(
+                "create",
+                "semantic",
+                "proposed",
+                "repo-safe",
+                "supersedes: []",
+                "",
+            )
+            .replace(
+                "scope:\n  kind: repo\n",
+                "scope_id: top-level\nscope:\n  kind: repo\n  id: nested\n",
+            ),
+            "scope_id and scope.id must match",
+        ),
+    ] {
+        let error = parse_okf_proposal_markdown(
+            Path::new("/bundle"),
+            Path::new("/bundle/conflicting-scope.md"),
+            &markdown,
+        )
+        .expect_err("conflicting scope aliases must fail");
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+    Ok(())
+}
+
+#[test]
+fn canonical_aliases_are_normalized_and_conflicts_are_rejected() -> anyhow::Result<()> {
+    let markdown = r#"---
+type: fact
+lane: semantic
+title: Alias fixture
+scope: " repo "
+scope_kind: repo
+scope_id: " team-a "
+visibility: repo
+status: active
+confidence: 1.0
+source: " human "
+source_kind: human
+created: 2026-07-01T00:00:00Z
+created_at: " 2026-07-01T00:00:00Z "
+timestamp: 2026-07-01T00:00:00Z
+updated: 2026-07-02T00:00:00Z
+updated_at: " 2026-07-02T00:00:00Z "
+supersedes: old-record
+supersedes_id: " old-record "
+expires: 2099-01-01T00:00:00Z
+expires_at: " 2099-01-01T00:00:00Z "
+---
+
+# Alias fixture
+
+Alias fixture body.
+"#;
+    let parsed = parse_okf_record_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/alias-fixture.md"),
+        markdown,
+    )?
+    .expect("equal aliases should parse");
+    assert_eq!(parsed.draft.scope_id.as_deref(), Some("team-a"));
+    assert_eq!(parsed.draft.source_kind.as_deref(), Some("human"));
+
+    for (needle, replacement, expected) in [
+        (
+            "scope_kind: repo",
+            "scope_kind: project",
+            "scope_kind and scope must match",
+        ),
+        (
+            "source_kind: human",
+            "source_kind: agent",
+            "source and source_kind must match",
+        ),
+        (
+            "created_at: \" 2026-07-01T00:00:00Z \"",
+            "created_at: 2026-07-03T00:00:00Z",
+            "created and created_at must match",
+        ),
+        (
+            "timestamp: 2026-07-01T00:00:00Z",
+            "timestamp: 2026-07-03T00:00:00Z",
+            "created and timestamp must match",
+        ),
+        (
+            "updated_at: \" 2026-07-02T00:00:00Z \"",
+            "updated_at: 2026-07-03T00:00:00Z",
+            "updated and updated_at must match",
+        ),
+        (
+            "supersedes_id: \" old-record \"",
+            "supersedes_id: other-record",
+            "supersedes and supersedes_id must match",
+        ),
+        (
+            "expires_at: \" 2099-01-01T00:00:00Z \"",
+            "expires_at: 2098-01-01T00:00:00Z",
+            "expires and expires_at must match",
+        ),
+    ] {
+        let error = parse_okf_record_markdown(
+            Path::new("/bundle"),
+            Path::new("/bundle/alias-fixture.md"),
+            &markdown.replace(needle, replacement),
+        )
+        .expect_err("conflicting aliases must fail");
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+    Ok(())
 }
 
 #[test]
@@ -303,52 +506,6 @@ Do not allow uppercase or underscores in concept IDs.
         .to_string();
 
     assert!(error.contains("OKF concept id"), "got {error}");
-}
-
-#[test]
-fn rendered_records_are_valid_yaml_and_preserve_core_fields() -> anyhow::Result<()> {
-    let temp = TempDir::new()?;
-    let records = temp.path().join("records");
-    let record = MemoryRecord {
-        id: "team/install-risk".to_owned(),
-        memory_type: MemoryType::Risk,
-        lane: MemoryLane::Semantic,
-        destination: MemoryDestination::Repo,
-        scope_kind: ScopeKind::Team,
-        scope_id: Some("platform".to_owned()),
-        visibility: Visibility::Team,
-        title: "Risk: package install".to_owned(),
-        body: "Package installs require review.".to_owned(),
-        status: MemoryStatus::Superseded,
-        confidence: 0.75,
-        source_kind: Some("human-authored".to_owned()),
-        source_ref: Some("issue://42".to_owned()),
-        content_hash: "hash".to_owned(),
-        created_at: "2026-07-05T00:00:00Z".to_owned(),
-        updated_at: "2026-07-06T00:00:00Z".to_owned(),
-        supersedes_id: Some("team/old-install-risk".to_owned()),
-        expires_at: Some("2027-01-01".to_owned()),
-    };
-
-    let path = write_memory_record_file(&records, &record)?;
-    let rendered = fs::read_to_string(&path)?;
-    assert!(rendered.contains("type: risk\n"));
-    assert!(rendered.contains("title: \"Risk: package install\"\n"));
-    let parsed = parse_okf_record_file(&records, &path)?.expect("rendered record parses");
-
-    assert_eq!(parsed.concept_id, "team/install-risk");
-    assert_eq!(parsed.draft.title, "Risk: package install");
-    assert_eq!(parsed.draft.scope_kind, ScopeKind::Team);
-    assert_eq!(parsed.draft.scope_id.as_deref(), Some("platform"));
-    assert_eq!(parsed.status, MemoryStatus::Superseded);
-    assert_eq!(parsed.draft.source_ref.as_deref(), Some("issue://42"));
-    assert_eq!(
-        parsed.supersedes_id.as_deref(),
-        Some("team/old-install-risk")
-    );
-    assert_eq!(parsed.expires_at.as_deref(), Some("2027-01-01"));
-
-    Ok(())
 }
 
 #[test]
@@ -452,7 +609,7 @@ fn apply_refuses_to_overwrite_existing_canonical_file_outside_db() -> anyhow::Re
         .expect_err("apply should not overwrite an existing canonical file")
         .to_string();
     assert!(
-        error.contains("failed to create memory record"),
+        error.contains("canonical memory record already exists"),
         "got {error}"
     );
     assert_eq!(
@@ -612,7 +769,7 @@ fn apply_rolls_back_db_state_when_canonical_file_write_fails() -> anyhow::Result
         .expect_err("apply should fail when canonical record path cannot be written")
         .to_string();
     assert!(
-        error.contains("failed to create records directory"),
+        error.contains("failed to inspect canonical memory record"),
         "got {error}"
     );
 
@@ -756,6 +913,7 @@ fn memory_draft(title: &str, body: &str, tags: Vec<String>) -> MemoryDraft {
         tags,
         source_kind: Some("test".to_owned()),
         source_ref: Some("okf-profile-test".to_owned()),
+        sensitivity: memzoi_core::OkfProposalSensitivity::RepoSafe,
         confidence: 0.9,
     }
 }

@@ -1,15 +1,36 @@
-use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, functions::FunctionFlags, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
 
 use crate::{
     events::{AppendEvent, append_event},
+    expiry,
     models::{
         MemoryCitation, MemoryDestination, MemoryPath, MemoryRecord, MemoryType, ScopeKind,
         SearchResult,
     },
 };
+
+pub(crate) const SQL_PATH_MATCHES_REQUEST: &str = "memzoi_path_matches";
+
+pub(crate) fn register_sqlite_functions(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        SQL_PATH_MATCHES_REQUEST,
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let stored_path = context.get::<String>(0)?;
+            let requested_path = context.get::<String>(1)?;
+            Ok(i64::from(path_matches_request(
+                &stored_path,
+                &requested_path,
+            )))
+        },
+    )?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SearchInput {
@@ -23,7 +44,16 @@ pub struct SearchInput {
     pub include_inactive: bool,
 }
 
+#[cfg(test)]
 pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<SearchResult>> {
+    search_memory_at(conn, input, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn search_memory_at(
+    conn: &Connection,
+    input: SearchInput,
+    now: OffsetDateTime,
+) -> Result<Vec<SearchResult>> {
     let fts_query = fts_query(&input.query);
     if fts_query.is_empty() {
         return Ok(Vec::new());
@@ -34,8 +64,14 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(ToOwned::to_owned);
+    let scope_id = match input.scope_id.as_deref() {
+        Some(scope_id) if scope_id.trim().is_empty() => bail!("scope_id cannot be empty"),
+        Some(scope_id) => Some(scope_id.trim().to_owned()),
+        None => None,
+    };
 
     let limit = normalized_limit(input.limit);
+    let evaluated_at = expiry::format_timestamp(now)?;
     let status_filter = if input.include_inactive {
         "1 = 1"
     } else {
@@ -46,7 +82,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
     } else {
         "1 = 1"
     };
-    let scope_id_filter = if input.scope_id.is_some() {
+    let scope_id_filter = if scope_id.is_some() {
         "memory_record.scope_id = ?3"
     } else {
         "1 = 1"
@@ -57,30 +93,12 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
         "1 = 1"
     };
     let destination = input.destination.unwrap_or(MemoryDestination::Repo);
-    let destination_filter = "memory_record.destination = ?7";
+    let destination_filter = "memory_record.destination = ?6";
     let path_filter = if path_prefix.is_some() {
         "EXISTS (
             SELECT 1 FROM memory_path
             WHERE memory_path.record_id = memory_record.id
-              AND (
-                memory_path.path = ?5
-                OR memory_path.path LIKE ?6
-                OR ?5 LIKE memory_path.path || '/%'
-                OR (
-                    memory_path.path LIKE '%/**'
-                    AND (
-                        ?5 = substr(memory_path.path, 1, length(memory_path.path) - 3)
-                        OR ?5 LIKE substr(memory_path.path, 1, length(memory_path.path) - 2) || '%'
-                    )
-                )
-                OR (
-                    ?5 LIKE '%/**'
-                    AND (
-                        memory_path.path = substr(?5, 1, length(?5) - 3)
-                        OR memory_path.path LIKE substr(?5, 1, length(?5) - 2) || '%'
-                    )
-                )
-              )
+              AND memzoi_path_matches(memory_path.path, ?5) = 1
         )"
     } else {
         "1 = 1"
@@ -92,26 +110,25 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
                 memory_record.title, memory_record.body, memory_record.status,
                 memory_record.confidence, memory_record.source_kind, memory_record.source_ref,
                 memory_record.content_hash, memory_record.created_at, memory_record.updated_at,
-                memory_record.supersedes_id, memory_record.expires_at, bm25(memory_fts) AS rank
+                memory_record.supersedes_id, memory_record.expires_at, memory_record.proposal_id,
+                bm25(memory_fts) AS rank
          FROM memory_fts
          JOIN memory_record ON memory_record.rowid = memory_fts.rowid
          WHERE memory_fts MATCH ?1
            AND {status_filter}
+           AND memzoi_is_expired(memory_record.expires_at, ?8) = 0
            AND {destination_filter}
            AND {scope_filter}
            AND {scope_id_filter}
            AND {type_filter}
            AND {path_filter}
          ORDER BY rank ASC, memory_record.updated_at DESC, memory_record.id ASC
-         LIMIT ?8"
+         LIMIT ?7"
     );
 
     let scope_kind = input.scope_kind.map(|value| value.as_str().to_owned());
     let memory_type = input.memory_type.map(|value| value.as_str().to_owned());
     let destination = destination.as_str().to_owned();
-    let path_like = path_prefix
-        .as_ref()
-        .map(|path| format!("{}/%", path.trim_end_matches('/')));
     let mut stmt = conn
         .prepare(&sql)
         .context("failed to prepare memory search")?;
@@ -120,16 +137,16 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
             params![
                 fts_query,
                 scope_kind,
-                input.scope_id,
+                scope_id,
                 memory_type,
-                path_prefix,
-                path_like,
+                path_prefix.as_deref(),
                 destination,
                 limit as i64,
+                evaluated_at,
             ],
             |row| {
                 let record = record_from_row(row)?;
-                let rank: f64 = row.get(18)?;
+                let rank: f64 = row.get(19)?;
                 Ok((record, rank))
             },
         )
@@ -139,7 +156,15 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
     for row in rows {
         let (record, rank) = row.context("failed to read memory search row")?;
         let paths = load_paths(conn, &record.id)?;
-        let citation = citation_for(&record, paths.first())?;
+        let citation_path = path_prefix
+            .as_deref()
+            .and_then(|requested_path| {
+                paths
+                    .iter()
+                    .find(|path| path_matches_request(&path.path, requested_path))
+            })
+            .or_else(|| paths.first());
+        let citation = citation_for(&record, citation_path)?;
         results.push(SearchResult {
             score: -rank,
             snippet: Some(snippet(&record, &input.query)),
@@ -163,6 +188,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
                 "destination": destination,
                 "path_prefix": input.path_prefix,
                 "limit": limit,
+                "evaluated_at": evaluated_at,
                 "result_ids": results.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
             }),
             record_id: None,
@@ -229,6 +255,7 @@ pub(crate) fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memor
         confidence: row.get(10)?,
         source_kind: row.get(11)?,
         source_ref: row.get(12)?,
+        proposal_id: row.get(18)?,
         content_hash: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
@@ -558,6 +585,57 @@ mod tests {
                 .any(|path| path.path == "apps/web/**"),
             "search result should expose the stored glob path: {results:?}"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_memory_normalizes_non_empty_scope_id_filters() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "rec-team-scope",
+                memory_type: MemoryType::Decision,
+                scope_kind: ScopeKind::Team,
+                status: MemoryStatus::Active,
+                title: "Team scope normalization",
+                body: "Scoped recall uses one normalized identifier contract.",
+                path: None,
+                source_ref: Some("issue://42"),
+            },
+        )?;
+        conn.execute(
+            "UPDATE memory_record SET scope_id = 'team-alpha' WHERE id = 'rec-team-scope'",
+            [],
+        )?;
+
+        let results = search_memory(
+            &conn,
+            SearchInput {
+                query: "normalized identifier".to_owned(),
+                scope_kind: Some(ScopeKind::Team),
+                scope_id: Some("  team-alpha  ".to_owned()),
+                limit: 10,
+                ..SearchInput::default()
+            },
+        )?;
+        assert_eq!(
+            result_ids(&results)?,
+            HashSet::from(["rec-team-scope".to_owned()])
+        );
+
+        let error = search_memory(
+            &conn,
+            SearchInput {
+                query: "normalized identifier".to_owned(),
+                scope_id: Some("   ".to_owned()),
+                limit: 10,
+                ..SearchInput::default()
+            },
+        )
+        .expect_err("empty scope identifiers must be rejected");
+        assert!(error.to_string().contains("scope_id cannot be empty"));
 
         Ok(())
     }

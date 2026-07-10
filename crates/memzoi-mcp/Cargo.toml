@@ -16,7 +16,7 @@ name = "memzoi-mcp"
 path = "src/main.rs"
 
 [dependencies]
-memzoi-core = { version = "0.3.0", path = "../memzoi-core" }
+memzoi-core = { version = "0.3.1", path = "../memzoi-core" }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

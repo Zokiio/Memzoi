@@ -3,7 +3,8 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
     ContextPackInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryService, MemoryType,
-    PrecheckInput, ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, Visibility,
+    OkfProposalSensitivity, PrecheckInput, Proposal, ProposalApprovalOverride, ProposeOptions,
+    ScopeKind, SearchInput, Visibility,
 };
 use serde_json::{Value, json};
 
@@ -135,6 +136,17 @@ fn tools_list_result() -> Value {
                 })
             ),
             tool_schema(
+                "inspect_memory_expiry",
+                "Show a record even when expired and explain why normal reads include or exclude it.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "record_id": { "type": "string" }
+                    },
+                    "required": ["record_id"]
+                })
+            ),
+            tool_schema(
                 "build_context_pack",
                 "Build a prompt-ready context pack for a task.",
                 json!({
@@ -167,6 +179,10 @@ fn tools_list_result() -> Value {
                         "tags": { "type": "array", "items": { "type": "string" } },
                         "source_kind": { "type": "string" },
                         "source_ref": { "type": "string" },
+                        "sensitivity": {
+                            "type": "string",
+                            "enum": ["repo-safe", "local-only", "sensitive", "secret", "raw-transcript", "private-personal-data", "temporary-state", "unknown"]
+                        },
                         "confidence": { "type": "number" },
                         "actor": { "type": "string" },
                         "approval_mode": {
@@ -242,6 +258,9 @@ fn tools_call(service: &MemoryService, params: Value) -> Result<Value> {
         "search_memory" => json!({
             "records": service.search_memory(search_input(&arguments)?)?,
         }),
+        "inspect_memory_expiry" => {
+            serde_json::to_value(service.inspect_expiry(required_str(&arguments, "record_id")?)?)?
+        }
         "build_context_pack" => {
             serde_json::to_value(service.build_context_pack(context_input(&arguments)?)?)?
         }
@@ -329,14 +348,31 @@ fn propose_memory_output(service: &MemoryService, arguments: &Value) -> Result<V
     let validation = result
         .validation
         .or_else(|| result.proposal.validation.clone());
+    let proposal = proposal_for_mcp_response(result.proposal);
 
     Ok(json!({
-        "proposal": result.proposal,
+        "proposal": proposal,
         "proposal_id": proposal_id,
         "status": status,
         "validation": validation,
         "applied": false,
     }))
+}
+
+fn proposal_for_mcp_response(mut proposal: Proposal) -> Proposal {
+    if proposal.payload.sensitivity == OkfProposalSensitivity::RepoSafe {
+        return proposal;
+    }
+
+    proposal.payload.title = "Redacted non-repo-safe proposal".to_owned();
+    proposal.payload.body =
+        "Original non-repo-safe proposal content was redacted from this response.".to_owned();
+    proposal.payload.scope_id = None;
+    proposal.payload.tags.clear();
+    proposal.payload.source_kind = None;
+    proposal.payload.source_ref = None;
+    proposal.actor = "redacted".to_owned();
+    proposal
 }
 
 fn memory_draft(arguments: &Value) -> Result<MemoryDraft> {
@@ -351,6 +387,7 @@ fn memory_draft(arguments: &Value) -> Result<MemoryDraft> {
         tags: optional_string_array(arguments, "tags")?,
         source_kind: optional_string(arguments, "source_kind"),
         source_ref: optional_string(arguments, "source_ref"),
+        sensitivity: optional_sensitivity(arguments)?.unwrap_or_default(),
         confidence: optional_f64(arguments, "confidence")?.unwrap_or(1.0),
     })
 }
@@ -391,6 +428,13 @@ fn optional_visibility(value: &Value) -> Result<Option<Visibility>> {
         .map(str::parse)
         .transpose()
         .map_err(|error: String| anyhow!(error))
+}
+
+fn optional_sensitivity(value: &Value) -> Result<Option<OkfProposalSensitivity>> {
+    optional_str(value, "sensitivity")
+        .map(str::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)
 }
 
 fn optional_approval_override(value: &Value) -> Result<Option<ProposalApprovalOverride>> {
@@ -501,6 +545,7 @@ mod tests {
             tags: Vec::new(),
             source_kind: Some("test".to_owned()),
             source_ref: Some("mcp-smoke".to_owned()),
+            sensitivity: OkfProposalSensitivity::RepoSafe,
             confidence: 1.0,
         }
     }
@@ -584,6 +629,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let expected = BTreeSet::from([
             "search_memory",
+            "inspect_memory_expiry",
             "build_context_pack",
             "propose_memory",
             "precheck_path",
@@ -623,9 +669,13 @@ mod tests {
                         "actor": "mcp-smoke",
                         "type": "decision",
                         "scope_kind": "repo",
+                        "scope_id": "  team-alpha  ",
                         "visibility": "repo",
-                        "title": "Keep MCP smoke tests focused",
-                        "body": "MCP smoke tests cover the JSON-RPC tool contract."
+                        "sensitivity": "repo-safe",
+                        "source_kind": "  issue  ",
+                        "source_ref": "  issue://42  ",
+                        "title": "  Keep MCP smoke tests focused  ",
+                        "body": "\n  MCP smoke tests cover the JSON-RPC tool contract.  \n"
                     }
                 }
             }),
@@ -656,7 +706,11 @@ mod tests {
         assert_eq!(proposal["actor"], "mcp-smoke");
         assert_eq!(proposal["payload"]["memory_type"], "decision");
         assert_eq!(proposal["payload"]["scope_kind"], "repo");
+        assert_eq!(proposal["payload"]["scope_id"], "team-alpha");
         assert_eq!(proposal["payload"]["visibility"], "repo");
+        assert_eq!(proposal["payload"]["sensitivity"], "repo-safe");
+        assert_eq!(proposal["payload"]["source_kind"], "issue");
+        assert_eq!(proposal["payload"]["source_ref"], "issue://42");
         assert_eq!(proposal["payload"]["title"], "Keep MCP smoke tests focused");
         assert_eq!(
             proposal["payload"]["body"],
@@ -707,6 +761,7 @@ mod tests {
                     "arguments": {
                         "title": "Auto MCP proposal",
                         "body": "Auto approval approves this MCP proposal without applying it.",
+                        "sensitivity": "repo-safe",
                         "approval_mode": "auto"
                     }
                 }
@@ -718,6 +773,72 @@ mod tests {
         assert_eq!(structured["proposal"]["status"], "approved");
         assert_eq!(structured["validation"]["is_valid"], true);
         assert_eq!(structured["applied"], false);
+    }
+
+    #[test]
+    fn propose_memory_tool_treats_omitted_sensitivity_as_unknown() {
+        let (_temp, service) = test_service();
+        let sentinels = [
+            "MCP-UNKNOWN-TITLE-SENTINEL",
+            "MCP-UNKNOWN-BODY-SENTINEL",
+            "MCP-UNKNOWN-SCOPE-SENTINEL",
+            "MCP-UNKNOWN-TAG-SENTINEL",
+            "MCP-UNKNOWN-SOURCE-KIND-SENTINEL",
+            "MCP-UNKNOWN-SOURCE-REF-SENTINEL",
+            "MCP-UNKNOWN-ACTOR-SENTINEL",
+        ];
+
+        let response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "unknown-sensitivity",
+                "method": "tools/call",
+                "params": {
+                    "name": "propose_memory",
+                    "arguments": {
+                        "actor": sentinels[6],
+                        "title": sentinels[0],
+                        "body": sentinels[1],
+                        "scope_id": sentinels[2],
+                        "tags": [sentinels[3]],
+                        "source_kind": sentinels[4],
+                        "source_ref": sentinels[5],
+                        "approval_mode": "auto"
+                    }
+                }
+            }),
+        );
+
+        let structured = &response["result"]["structuredContent"];
+        assert_eq!(structured["status"], "pending");
+        assert_eq!(structured["proposal"]["payload"]["sensitivity"], "unknown");
+        assert_eq!(
+            structured["proposal"]["payload"]["title"],
+            "Redacted non-repo-safe proposal"
+        );
+        assert_eq!(structured["proposal"]["payload"]["scope_id"], Value::Null);
+        assert_eq!(
+            structured["proposal"]["payload"]["source_kind"],
+            Value::Null
+        );
+        assert_eq!(structured["proposal"]["payload"]["source_ref"], Value::Null);
+        assert_eq!(structured["validation"]["is_valid"], false);
+        assert!(
+            structured["validation"]["issues"]
+                .as_array()
+                .is_some_and(|issues| issues
+                    .iter()
+                    .any(|issue| { issue["code"] == "repo_sensitivity_required" }))
+        );
+        assert_eq!(structured["applied"], false);
+        let rendered = serde_json::to_string(&response).expect("serialize MCP response");
+        for sentinel in sentinels {
+            assert!(
+                !rendered.contains(sentinel),
+                "non-repo-safe MCP response leaked {sentinel}: {rendered}"
+            );
+        }
     }
 
     #[test]
@@ -829,6 +950,58 @@ mod tests {
                 .unwrap()
                 .to_ascii_lowercase()
                 .contains("narwhal")
+        );
+    }
+
+    #[test]
+    fn inspect_memory_expiry_tool_explains_an_expired_record() {
+        let temp = TempDir::new().unwrap();
+        MemoryService::initialize(temp.path(), InitRequest { force: false }).unwrap();
+        fs::write(
+            temp.path()
+                .join(".memzoi/records/expired-mcp-diagnostic.md"),
+            r#"---
+type: fact
+title: Expired MCP diagnostic
+timestamp: 2026-01-01T00:00:00Z
+status: active
+visibility: repo
+confidence: confirmed
+scope: repo
+source: test
+expires: 2000-01-01T00:00:00Z
+---
+
+# Expired MCP diagnostic
+
+The mcpexpirydiagnostic token should be hidden from normal search.
+"#,
+        )
+        .unwrap();
+        MemoryService::rebuild_at(temp.path()).unwrap();
+        let service = MemoryService::open(temp.path()).unwrap();
+
+        let response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "expiry-inspect",
+                "method": "tools/call",
+                "params": {
+                    "name": "inspect_memory_expiry",
+                    "arguments": { "record_id": "expired-mcp-diagnostic" }
+                }
+            }),
+        );
+
+        let diagnostic = &response["result"]["structuredContent"];
+        assert_eq!(diagnostic["record"]["status"], "active");
+        assert_eq!(diagnostic["expired"], true);
+        assert_eq!(diagnostic["excluded_from_normal_reads"], true);
+        assert!(
+            diagnostic["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("at or after expiry"))
         );
     }
 

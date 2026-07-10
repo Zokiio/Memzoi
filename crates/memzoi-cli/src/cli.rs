@@ -34,6 +34,15 @@ pub(crate) enum Commands {
         scope_kind: String,
         #[arg(long, default_value = "repo")]
         visibility: String,
+        /// Optional evidence source kind, such as issue, PR, commit, or document.
+        #[arg(long = "source-kind")]
+        source_kind: Option<String>,
+        /// Optional durable evidence locator kept separate from proposal lineage.
+        #[arg(long = "source-ref")]
+        source_ref: Option<String>,
+        /// Repo sharing classification. Canonical apply requires repo-safe.
+        #[arg(long, default_value = "unknown")]
+        sensitivity: String,
         #[arg(long)]
         title: String,
         #[arg(long)]
@@ -135,6 +144,15 @@ pub(crate) enum Commands {
         scope_kind: String,
         #[arg(long, default_value = "repo")]
         visibility: String,
+        /// Optional evidence source kind for the replacement record.
+        #[arg(long = "source-kind")]
+        source_kind: Option<String>,
+        /// Optional durable evidence locator for the replacement record.
+        #[arg(long = "source-ref")]
+        source_ref: Option<String>,
+        /// Repo sharing classification. Canonical replacement requires repo-safe.
+        #[arg(long, default_value = "unknown")]
+        sensitivity: String,
         #[arg(long)]
         title: String,
         #[arg(long)]
@@ -168,6 +186,14 @@ pub(crate) enum Commands {
         path: Option<String>,
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect a record's expiry and explain normal-read eligibility.
+    Expiry {
+        /// Record ID to inspect, including records excluded from normal reads.
+        record_id: String,
         #[arg(long)]
         json: bool,
     },
@@ -351,9 +377,22 @@ pub(crate) enum ProposalFileCommands {
         json: bool,
     },
 
-    /// Apply one repo-safe create proposal file into canonical records.
+    /// Apply one repo-safe proposal file and archive its resolved packet.
     Apply {
         proposal_id: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Reject one proposal file with a reviewable reason.
+    Reject {
+        proposal_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
         #[arg(long)]
         json: bool,
     },
@@ -482,6 +521,9 @@ pub(crate) struct DraftCommand {
     pub(crate) memory_type: String,
     pub(crate) scope_kind: String,
     pub(crate) visibility: String,
+    pub(crate) source_kind: Option<String>,
+    pub(crate) source_ref: Option<String>,
+    pub(crate) sensitivity: String,
     pub(crate) title: String,
     pub(crate) body: String,
 }

@@ -7,17 +7,20 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    events::{AppendEvent, append_event, now_utc},
+    events::{AppendEvent, append_event},
+    expiry,
     models::{
         ContextPack, ContextPackBudget, ContextPackIncludedItem, ContextPackOmittedItem,
         ContextPackPolicy, ContextPackWarning, MemoryCitation, MemoryDestination, MemoryLane,
         MemoryPath, MemoryRecord, MemoryType, SearchRanking, SearchRankingSignals, SearchResult,
     },
     search::{
-        SearchInput, citation_for, load_paths, path_matches_request, record_from_row, search_memory,
+        SearchInput, citation_for, load_paths, path_matches_request, record_from_row,
+        search_memory_at,
     },
 };
 
@@ -32,7 +35,16 @@ pub struct ContextPackInput {
     pub include_session: bool,
 }
 
+#[cfg(test)]
 pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<ContextPack> {
+    build_context_pack_at(conn, input, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn build_context_pack_at(
+    conn: &Connection,
+    input: ContextPackInput,
+    now: OffsetDateTime,
+) -> Result<ContextPack> {
     let path_prefix = input
         .path_prefix
         .as_deref()
@@ -43,7 +55,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
     let mut candidates = HashMap::<String, ContextCandidate>::new();
 
     for destination in &requested_destinations {
-        for result in search_memory(
+        for result in search_memory_at(
             conn,
             SearchInput {
                 query: input.task.clone(),
@@ -52,6 +64,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
                 include_inactive: false,
                 ..SearchInput::default()
             },
+            now,
         )? {
             insert_candidate(&mut candidates, ContextCandidate::fts(result));
         }
@@ -59,7 +72,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
 
     if let Some(path_prefix) = path_prefix.as_deref() {
         for destination in &requested_destinations {
-            for result in path_candidates(conn, *destination, path_prefix, 50)? {
+            for result in path_candidates(conn, *destination, path_prefix, 50, now)? {
                 insert_candidate(&mut candidates, ContextCandidate::path(result));
             }
         }
@@ -125,7 +138,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
         omitted,
         warnings,
         next_queries: Vec::new(),
-        created_at: now_utc()?,
+        created_at: expiry::format_timestamp(now)?,
     };
     let mut pack = pack;
     pack.budget.selected_records = pack.records.len();
@@ -226,12 +239,12 @@ fn path_candidates(
     destination: MemoryDestination,
     path_prefix: &str,
     limit: usize,
+    now: OffsetDateTime,
 ) -> Result<Vec<SearchResult>> {
     let requested_path = path_prefix.trim().trim_end_matches('/').to_owned();
     if requested_path.is_empty() {
         return Ok(Vec::new());
     }
-    let path_like = format!("{}/%", requested_path);
     let mut stmt = conn
         .prepare(
             "SELECT DISTINCT memory_record.id, memory_record.type, memory_record.lane,
@@ -239,32 +252,16 @@ fn path_candidates(
                     memory_record.visibility, memory_record.title, memory_record.body,
                     memory_record.status, memory_record.confidence, memory_record.source_kind,
                     memory_record.source_ref, memory_record.content_hash, memory_record.created_at,
-                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at
+                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at,
+                    memory_record.proposal_id
              FROM memory_path
              JOIN memory_record ON memory_record.id = memory_path.record_id
              WHERE memory_record.status = 'active'
+               AND memzoi_is_expired(memory_record.expires_at, ?4) = 0
                AND memory_record.destination = ?1
-               AND (
-                 memory_path.path = ?2
-                 OR memory_path.path LIKE ?3
-                 OR ?2 LIKE memory_path.path || '/%'
-                 OR (
-                     memory_path.path LIKE '%/**'
-                     AND (
-                         ?2 = substr(memory_path.path, 1, length(memory_path.path) - 3)
-                         OR ?2 LIKE substr(memory_path.path, 1, length(memory_path.path) - 2) || '%'
-                     )
-                 )
-                 OR (
-                     ?2 LIKE '%/**'
-                     AND (
-                         memory_path.path = substr(?2, 1, length(?2) - 3)
-                         OR memory_path.path LIKE substr(?2, 1, length(?2) - 2) || '%'
-                     )
-                 )
-               )
+               AND memzoi_path_matches(memory_path.path, ?2) = 1
              ORDER BY memory_record.updated_at DESC, memory_record.id ASC
-             LIMIT ?4",
+             LIMIT ?3",
         )
         .context("failed to prepare path-scoped context candidate query")?;
     let rows = stmt
@@ -272,8 +269,8 @@ fn path_candidates(
             params![
                 destination.as_str(),
                 requested_path,
-                path_like,
-                limit as i64
+                limit as i64,
+                expiry::format_timestamp(now)?,
             ],
             record_from_row,
         )
@@ -289,7 +286,10 @@ fn path_candidates(
         {
             continue;
         }
-        let citation = citation_for(&record, paths.first())?;
+        let citation_path = paths
+            .iter()
+            .find(|path| path_matches_request(&path.path, path_prefix));
+        let citation = citation_for(&record, citation_path)?;
         results.push(SearchResult {
             record,
             score: 0.0,
@@ -1278,6 +1278,73 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn path_candidate_limit_is_applied_after_literal_path_applicability() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "rec-literal-path-match",
+                memory_type: MemoryType::Warning,
+                scope_kind: ScopeKind::Repo,
+                status: MemoryStatus::Active,
+                title: "Applicable frontend boundary",
+                body: "This warning is recalled from its literal directory binding.",
+                path: Some("apps/my_app/"),
+                source_ref: Some("runbook://literal-path-match"),
+            },
+        )?;
+        conn.execute(
+            "UPDATE memory_record SET updated_at = '2026-07-01T00:00:00Z' WHERE id = ?1",
+            ["rec-literal-path-match"],
+        )?;
+
+        for index in 0..50 {
+            let id = format!("rec-like-false-positive-{index:02}");
+            let path = format!("apps/myXapp/unrelated-{index:02}.rs");
+            insert_memory(
+                &conn,
+                MemoryFixture {
+                    id: &id,
+                    memory_type: MemoryType::Fact,
+                    scope_kind: ScopeKind::Repo,
+                    status: MemoryStatus::Active,
+                    title: "Unrelated LIKE candidate",
+                    body: "SQLite wildcard candidates must not consume the path recall limit.",
+                    path: Some(&path),
+                    source_ref: Some("test://like-false-positive"),
+                },
+            )?;
+            conn.execute(
+                "UPDATE memory_record SET updated_at = '2026-07-11T00:00:00Z' WHERE id = ?1",
+                [&id],
+            )?;
+        }
+
+        let pack = build_context_pack(
+            &conn,
+            ContextPackInput {
+                task: "zzzz-no-lexical-overlap".to_owned(),
+                path_prefix: Some("apps/my_app/src/App.tsx".to_owned()),
+                token_budget: Some(160),
+                include_local: false,
+                include_session: false,
+            },
+        )?;
+        let ids = record_ids_from_pack(&serde_json::to_value(&pack)?);
+
+        assert!(
+            ids.iter().any(|id| id == "rec-literal-path-match"),
+            "false LIKE candidates must not starve the applicable path record: {ids:?}"
+        );
+        assert!(
+            ids.iter()
+                .all(|id| !id.starts_with("rec-like-false-positive")),
+            "SQL path applicability must be literal and case-sensitive: {ids:?}"
+        );
+        Ok(())
+    }
+
     fn initialized_database() -> anyhow::Result<(TempDir, Connection)> {
         let temp = TempDir::new()?;
         let db_path = temp.path().join("memory.db");
@@ -1360,6 +1427,7 @@ mod tests {
                 confidence: 0.88,
                 source_kind: Some("test".to_owned()),
                 source_ref: None,
+                proposal_id: None,
                 content_hash: format!("hash-{id}"),
                 created_at: "2026-07-09T00:00:00Z".to_owned(),
                 updated_at: "2026-07-09T00:00:00Z".to_owned(),

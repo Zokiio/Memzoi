@@ -125,6 +125,8 @@ pub struct MemoryRecord {
     pub confidence: f64,
     pub source_kind: Option<String>,
     pub source_ref: Option<String>,
+    /// Review packet that approved this canonical record, kept separate from evidence provenance.
+    pub proposal_id: Option<String>,
     pub content_hash: String,
     pub created_at: String,
     pub updated_at: String,

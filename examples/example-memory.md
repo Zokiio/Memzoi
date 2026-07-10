@@ -13,6 +13,7 @@ visibility: team
 confidence: confirmed
 scope: repo
 source: human
+source_ref: memories/repo/frontend/swedish-first
 applies_to:
   - apps/web/**
 tags:

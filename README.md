@@ -109,6 +109,7 @@ The documentation site covers installation, memory lifecycle, recall, prechecks,
 - [MCP and agent integration](website/docs/mcp-and-agent-integration.md)
 - [Reference](website/docs/reference.md)
 - [Development](website/docs/development.md)
+- [Product roadmap](docs/roadmap.md)
 
 Run the docs site locally:
 
@@ -140,6 +141,7 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
 - Deterministic generated exports: OKF Markdown projections, `AGENTS.memory.md`, and `CLAUDE.memory.md`.
 - Minimal stdio MCP server with safe tools:
   - `search_memory`
+  - `inspect_memory_expiry`
   - `build_context_pack`
   - `propose_memory`
   - `precheck_path`

@@ -6,12 +6,36 @@ pub fn init(conn: &Connection) -> Result<()> {
         .context("failed to initialize SQLite schema")?;
     ensure_memory_lane_column(conn)?;
     ensure_memory_destination_column(conn)?;
+    ensure_memory_proposal_id_column(conn)?;
     conn.execute_batch(
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);",
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);",
     )
-    .context("failed to record schema migrations 2 and 3")?;
+    .context("failed to record schema migrations 2, 3, and 4")?;
     Ok(())
+}
+
+fn ensure_memory_proposal_id_column(conn: &Connection) -> Result<()> {
+    let has_proposal_id: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+              SELECT 1 FROM pragma_table_info('memory_record') WHERE name = 'proposal_id'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to inspect memory_record proposal lineage schema")?;
+
+    if !has_proposal_id {
+        conn.execute_batch("ALTER TABLE memory_record ADD COLUMN proposal_id TEXT;")
+            .context("failed to add memory_record.proposal_id column")?;
+    }
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memory_record_proposal_id ON memory_record(proposal_id);",
+    )
+    .context("failed to create memory proposal lineage index")
 }
 
 fn ensure_memory_lane_column(conn: &Connection) -> Result<()> {
@@ -95,6 +119,7 @@ CREATE TABLE IF NOT EXISTS memory_record (
   confidence REAL NOT NULL DEFAULT 1.0 CHECK (confidence >= 0.0 AND confidence <= 1.0),
   source_kind TEXT,
   source_ref TEXT,
+  proposal_id TEXT,
   content_hash TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
