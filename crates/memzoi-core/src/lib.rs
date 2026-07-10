@@ -29,7 +29,7 @@ pub use handoff::HandoffInput;
 pub use import::{
     ImportApplyResult, ImportCandidate, ImportCandidateAction, ImportCandidateInput,
     ImportDocument, ImportDuplicate, ImportDuplicateKind, ImportPlan, ImportPlanCandidate,
-    ImportPlanSummary, ImportProposalWrite, ImportScope, parse_import_document,
+    ImportPlanSummary, ImportScope, ImportWrite, parse_import_document,
 };
 pub use memory_policy::{
     MemoryDestinationPolicy, MemoryPlane, MemoryReviewRequirement, MemoryWriteRoute,
@@ -59,7 +59,7 @@ pub use search::SearchInput;
 pub use service::{
     CheckpointInput, ExportFormat, ExportInput, ExportResult, InitBundleResult, InitRequest,
     InitResult, LocalMemoryInput, MemoryService, ProposalApprovalOverride, ProposeOptions,
-    ProposeResult, RebuildResult, init_bundle,
+    ProposeResult, RebuildResult, RepoIndexDrift, init_bundle,
 };
 pub use session_end::{
     SessionEndCandidate, SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument,

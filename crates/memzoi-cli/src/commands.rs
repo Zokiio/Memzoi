@@ -741,9 +741,12 @@ fn proposal_files_apply_command(proposal_id: &str, as_json: bool) -> Result<()> 
             "action": entry.proposal.proposal.action.as_str(),
             "sensitivity": entry.proposal.sensitivity.as_str(),
             "title": &entry.proposal.title,
+            "runtime_index_updated": false,
+            "next_steps": ["memzoi rebuild"],
         }))?;
     } else {
         println!("applied\t{}\t{}", result.record.id, record_path.display());
+        println!("next\tmemzoi rebuild");
     }
     Ok(())
 }
@@ -1626,6 +1629,28 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                 }
             }
             Err(error) => checks.push(check("proposals", "warning", error.to_string())),
+        }
+
+        match MemoryService::open_paths(paths.clone())
+            .and_then(|service| service.repo_index_drift())
+        {
+            Ok(drift) if drift.is_current() => {
+                checks.push(check("repo_index", "ok", "runtime repo index is current"));
+            }
+            Ok(drift) => {
+                checks.push(check(
+                    "repo_index",
+                    "warning",
+                    format!(
+                        "runtime repo index is stale (missing={}, stale={}, changed={})",
+                        drift.missing_from_index.len(),
+                        drift.stale_in_index.len(),
+                        drift.changed_in_index.len(),
+                    ),
+                ));
+                push_next_step(&mut next_steps, "memzoi rebuild");
+            }
+            Err(error) => checks.push(check("repo_index", "warning", error.to_string())),
         }
     }
 

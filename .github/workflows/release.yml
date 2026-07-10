@@ -6,16 +6,60 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag to upload assets to"
+      ref:
+        description: "Git ref to build; use main for a dry run or vX.Y.Z for upload"
         required: true
-        default: "v0.1.0"
+        default: "main"
+      upload:
+        description: "Upload assets to the matching GitHub release"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      build_ref: ${{ steps.metadata.outputs.build_ref }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+    steps:
+      - name: Checkout requested ref
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+      - name: Validate release metadata
+        id: metadata
+        shell: bash
+        env:
+          BUILD_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          UPLOAD: ${{ inputs.upload }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "Unable to read workspace version from Cargo.toml" >&2
+            exit 1
+          fi
+          release_tag="v$version"
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" != "$release_tag" ]; then
+            echo "Tag $REF_NAME does not match workspace version $release_tag" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$UPLOAD" = "true" ] && [ "$BUILD_REF" != "$release_tag" ]; then
+            echo "Uploads require ref $release_tag; got $BUILD_REF" >&2
+            exit 1
+          fi
+          scripts/check-release-metadata.sh "$release_tag"
+          echo "build_ref=$BUILD_REF" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: preflight
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -38,7 +82,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.preflight.outputs.build_ref }}
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -51,30 +95,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
-          fi
+          tag="${{ needs.preflight.outputs.release_tag }}"
+          archive="memzoi-$tag-${{ matrix.target }}.tar.gz"
           mkdir -p dist/package
           cp "target/${{ matrix.target }}/release/memzoi" dist/package/memzoi
           cp "target/${{ matrix.target }}/release/memzoi-mcp" dist/package/memzoi-mcp
           chmod +x dist/package/memzoi dist/package/memzoi-mcp
-          tar -C dist/package -czf "dist/memzoi-$tag-${{ matrix.target }}.tar.gz" memzoi memzoi-mcp
-          shasum -a 256 "dist/memzoi-$tag-${{ matrix.target }}.tar.gz" > "dist/memzoi-$tag-${{ matrix.target }}.tar.gz.sha256"
+          tar -C dist/package -czf "dist/$archive" memzoi memzoi-mcp
+          (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
       - name: Package Windows binaries
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $tag = "${env:GITHUB_REF_NAME}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ inputs.tag }}"
-          }
+          $tag = "${{ needs.preflight.outputs.release_tag }}"
+          $archive = "memzoi-$tag-${{ matrix.target }}.zip"
           New-Item -ItemType Directory -Force -Path dist/package | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/memzoi.exe" "dist/package/memzoi.exe"
           Copy-Item "target/${{ matrix.target }}/release/memzoi-mcp.exe" "dist/package/memzoi-mcp.exe"
-          Compress-Archive -Path "dist/package/memzoi.exe", "dist/package/memzoi-mcp.exe" -DestinationPath "dist/memzoi-$tag-${{ matrix.target }}.zip" -Force
-          $hash = Get-FileHash "dist/memzoi-$tag-${{ matrix.target }}.zip" -Algorithm SHA256
-          "$($hash.Hash.ToLower())  memzoi-$tag-${{ matrix.target }}.zip" | Set-Content "dist/memzoi-$tag-${{ matrix.target }}.zip.sha256"
+          Compress-Archive -Path "dist/package/memzoi.exe", "dist/package/memzoi-mcp.exe" -DestinationPath "dist/$archive" -Force
+          $hash = Get-FileHash "dist/$archive" -Algorithm SHA256
+          $manifest = "$($hash.Hash.ToLower())  $archive`n"
+          [System.IO.File]::WriteAllText(
+            "dist/$archive.sha256",
+            $manifest,
+            [System.Text.UTF8Encoding]::new($false)
+          )
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
@@ -84,7 +129,8 @@ jobs:
   upload:
     name: Upload release assets
     runs-on: ubuntu-latest
-    needs: build
+    needs: [preflight, build]
+    if: github.event_name == 'push' || inputs.upload == true
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v8
@@ -94,7 +140,7 @@ jobs:
       - name: Upload assets
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG_NAME: ${{ needs.preflight.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail

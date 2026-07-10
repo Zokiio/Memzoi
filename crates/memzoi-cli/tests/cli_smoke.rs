@@ -1711,6 +1711,8 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
     assert_json_string_field(&applied, &["action"], "create");
     assert_json_string_field(&applied, &["sensitivity"], "repo-safe");
     assert_json_string_field(&applied, &["title"], "Valid proposal");
+    assert_eq!(applied["runtime_index_updated"], false);
+    assert_json_array_contains(&applied, "next_steps", "memzoi rebuild");
 
     let record_path = repo.path().join(json_string(&applied, "record_path"));
     let rendered = fs::read_to_string(&record_path).expect("read canonical record");
@@ -1749,6 +1751,20 @@ fn proposal_files_apply_repo_safe_create_writes_compact_record_without_runtime_d
         .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))
         .expect("count runtime records");
     assert_eq!(runtime_records, 0, "Git-plane apply must not write SQLite");
+
+    let stale_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&stale_doctor, "repo_index", "warning");
+    assert_json_array_contains(&stale_doctor, "next_steps", "memzoi rebuild");
+
+    run_json_command(repo.path(), &["rebuild", "--json"]);
+    let current_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&current_doctor, "repo_index", "ok");
+    let search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    assert_eq!(
+        search["records"].as_array().map(Vec::len),
+        Some(1),
+        "rebuilt runtime index should recall the applied proposal: {search}"
+    );
 }
 
 #[test]
@@ -1846,8 +1862,8 @@ candidates:
         serde_json::json!({
             "total": 5,
             "create_proposals": 1,
-            "deferred_local": 1,
-            "deferred_session": 1,
+            "local_writes": 1,
+            "session_writes": 1,
             "duplicates": 0,
             "discarded": 1,
             "needs_review": 1,
@@ -1860,8 +1876,8 @@ candidates:
     assert_eq!(planned_candidates.len(), 5);
     for (candidate, (destination, action)) in planned_candidates.iter().zip([
         ("repo", "create_proposal"),
-        ("local", "deferred"),
-        ("session", "deferred"),
+        ("local", "create_runtime"),
+        ("session", "create_runtime"),
         ("discard", "no_write"),
         ("needs_review", "blocked"),
     ]) {
@@ -1910,9 +1926,10 @@ candidates:
         .unwrap_or_else(|| panic!("apply should include writes: {applied}"));
     assert_eq!(
         writes.len(),
-        1,
-        "only repo should produce a write: {applied}"
+        3,
+        "repo/local/session should write: {applied}"
     );
+    assert_json_string_field(&writes[0], &["kind"], "proposal_file");
     assert_eq!(writes[0]["index"], 0);
     assert_json_string_field(&writes[0], &["proposal_id"], &repo_proposal_id);
     assert_json_string_field(
@@ -1920,14 +1937,20 @@ candidates:
         &["path"],
         &format!(".memzoi/proposals/pending/{repo_proposal_id}.md"),
     );
+    assert_json_string_field(&writes[1], &["kind"], "runtime_record");
+    assert_eq!(writes[1]["index"], 1);
+    assert_json_string_field(&writes[1], &["destination"], "local");
+    assert_json_string_field(&writes[2], &["kind"], "runtime_record");
+    assert_eq!(writes[2]["index"], 2);
+    assert_json_string_field(&writes[2], &["destination"], "session");
     let applied_candidates = applied["candidates"]
         .as_array()
         .unwrap_or_else(|| panic!("apply should include candidates: {applied}"));
     assert_eq!(applied_candidates.len(), 5);
     for (candidate, (destination, action)) in applied_candidates.iter().zip([
         ("repo", "create_proposal"),
-        ("local", "deferred"),
-        ("session", "deferred"),
+        ("local", "create_runtime"),
+        ("session", "create_runtime"),
         ("discard", "no_write"),
         ("needs_review", "blocked"),
     ]) {
@@ -1949,10 +1972,10 @@ candidates:
         records_before,
         "import apply must not create canonical records"
     );
-    assert_eq!(
-        fs::read(&paths.db_path).expect("read runtime db after apply"),
-        database_before,
-        "import apply must not write runtime memory"
+    let database_after_apply = fs::read(&paths.db_path).expect("read runtime db after apply");
+    assert_ne!(
+        database_after_apply, database_before,
+        "import apply should write local/session runtime memory"
     );
     let pending_path = paths
         .proposals_dir()
@@ -1980,14 +2003,34 @@ candidates:
     }
 
     let local = run_json_command(repo_path, &["local", "list", "--json"]);
-    assert!(
-        local["records"].as_array().is_some_and(Vec::is_empty),
-        "local destination must remain deferred: {local}"
+    let local_records = local["records"]
+        .as_array()
+        .unwrap_or_else(|| panic!("local list should include records: {local}"));
+    assert_eq!(
+        local_records.len(),
+        1,
+        "local import should write once: {local}"
+    );
+    assert_json_string_field(&local_records[0], &["destination"], "local");
+    assert_json_string_field(
+        &local_records[0],
+        &["body"],
+        "Keep this preference in local runtime memory only.",
     );
     let session = run_json_command(repo_path, &["checkpoint", "list", "--json"]);
-    assert!(
-        session["records"].as_array().is_some_and(Vec::is_empty),
-        "session destination must remain deferred: {session}"
+    let session_records = session["records"]
+        .as_array()
+        .unwrap_or_else(|| panic!("checkpoint list should include records: {session}"));
+    assert_eq!(
+        session_records.len(),
+        1,
+        "session import should write once: {session}"
+    );
+    assert_json_string_field(&session_records[0], &["destination"], "session");
+    assert_json_string_field(
+        &session_records[0],
+        &["body"],
+        "Resume the import review in the next session.",
     );
 
     let validated = run_json_command(repo_path, &["proposal-files", "validate", "--json"]);
@@ -2054,7 +2097,7 @@ candidates:
     );
     assert_eq!(
         fs::read(&paths.db_path).expect("read runtime db after stale plan"),
-        database_before,
+        database_after_apply,
         "stale plan must not mutate runtime state"
     );
 }

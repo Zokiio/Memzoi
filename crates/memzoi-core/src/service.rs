@@ -103,6 +103,21 @@ pub struct RebuildResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoIndexDrift {
+    pub missing_from_index: Vec<String>,
+    pub stale_in_index: Vec<String>,
+    pub changed_in_index: Vec<String>,
+}
+
+impl RepoIndexDrift {
+    pub fn is_current(&self) -> bool {
+        self.missing_from_index.is_empty()
+            && self.stale_in_index.is_empty()
+            && self.changed_in_index.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalMemoryInput {
     pub memory_type: MemoryType,
     pub lane: MemoryLane,
@@ -356,6 +371,44 @@ impl MemoryService {
         search::search_memory(&self.conn, input)
     }
 
+    pub fn repo_index_drift(&self) -> Result<RepoIndexDrift> {
+        let canonical = okf::read_okf_record_files(self.paths.records_dir())?
+            .into_iter()
+            .filter(|record| record.status == MemoryStatus::Active)
+            .map(|record| (record.concept_id.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let indexed = active_records_for_destination(&self.conn, MemoryDestination::Repo)?
+            .into_iter()
+            .map(|record| (record.id.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+
+        let missing_from_index = canonical
+            .keys()
+            .filter(|id| !indexed.contains_key(*id))
+            .cloned()
+            .collect();
+        let stale_in_index = indexed
+            .keys()
+            .filter(|id| !canonical.contains_key(*id))
+            .cloned()
+            .collect();
+        let changed_in_index = canonical
+            .iter()
+            .filter_map(|(id, canonical)| {
+                indexed
+                    .get(id)
+                    .filter(|indexed| !repo_record_matches(canonical, indexed))
+                    .map(|_| id.clone())
+            })
+            .collect();
+
+        Ok(RepoIndexDrift {
+            missing_from_index,
+            stale_in_index,
+            changed_in_index,
+        })
+    }
+
     pub fn create_local_memory(
         &self,
         actor: &str,
@@ -572,30 +625,69 @@ impl MemoryService {
             };
             let draft =
                 import::proposal_draft(candidate, actor, &timestamp, proposal_id, &plan.sources);
-            planned.push(okf::plan_okf_create_proposal(&pending_root, &draft)?);
+            planned.push((
+                candidate.index,
+                okf::plan_okf_create_proposal(&pending_root, &draft)?,
+            ));
         }
         let mut writes = Vec::new();
         let mut created = Vec::new();
         let result = (|| -> Result<()> {
-            for (idx, proposal) in planned.iter().enumerate() {
+            for (candidate_index, proposal) in &planned {
                 let path = okf::create_okf_proposal_file(proposal)?;
                 created.push(path.clone());
-                let candidate_plan = plan.candidates.iter().find(|c| matches!(&c.action, import::ImportCandidateAction::CreateProposal { proposal_id, .. } if proposal_id == &proposal.proposal_id));
-                let candidate_index = candidate_plan.map(|c| c.index).unwrap_or(idx);
-                let display_path = candidate_plan
-                    .and_then(|c| match &c.action {
-                        import::ImportCandidateAction::CreateProposal { path, .. } => {
-                            Some(path.clone())
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| path.clone());
-                writes.push(crate::ImportProposalWrite {
-                    index: candidate_index,
+                let candidate_plan = plan
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.index == *candidate_index)
+                    .context("import proposal candidate should remain in the plan")?;
+                let display_path = match &candidate_plan.action {
+                    import::ImportCandidateAction::CreateProposal { path, .. } => path.clone(),
+                    _ => bail!("import proposal candidate action changed before apply"),
+                };
+                writes.push(crate::ImportWrite::ProposalFile {
+                    index: *candidate_index,
                     proposal_id: proposal.proposal_id.clone(),
                     path: display_path,
                 });
             }
+
+            let tx = self.conn.unchecked_transaction()?;
+            for candidate in &plan.candidates {
+                let import::ImportCandidateAction::CreateRuntime { route } = candidate.action
+                else {
+                    continue;
+                };
+                let record = match route {
+                    crate::MemoryWriteRoute::RuntimeLocal => create_local_memory_with_conn(
+                        &tx,
+                        actor,
+                        &LocalMemoryInput {
+                            memory_type: candidate.memory_type,
+                            lane: candidate.lane,
+                            title: candidate.title.clone(),
+                            body: candidate.body.clone(),
+                        },
+                        &timestamp,
+                    )?,
+                    crate::MemoryWriteRoute::RuntimeSession => create_checkpoint_with_conn(
+                        &tx,
+                        actor,
+                        &CheckpointInput {
+                            task: candidate.title.clone(),
+                            note: candidate.body.clone(),
+                        },
+                        &timestamp,
+                    )?,
+                    _ => bail!("import runtime candidate has invalid route {route}"),
+                };
+                writes.push(crate::ImportWrite::RuntimeRecord {
+                    index: candidate.index,
+                    record_id: record.id,
+                    destination: record.destination,
+                });
+            }
+            tx.commit()?;
             Ok(())
         })();
         if let Err(error) = result {
@@ -605,6 +697,10 @@ impl MemoryService {
             }
             return Err(error);
         }
+        writes.sort_by_key(|write| match write {
+            crate::ImportWrite::ProposalFile { index, .. }
+            | crate::ImportWrite::RuntimeRecord { index, .. } => *index,
+        });
         Ok(ImportApplyResult { plan, writes })
     }
 
@@ -709,6 +805,27 @@ impl MemoryService {
                 .collect(),
         })
     }
+}
+
+fn repo_record_matches(canonical: &okf::OkfRecordFile, indexed: &MemoryRecord) -> bool {
+    let draft = &canonical.draft;
+    indexed.memory_type == draft.memory_type
+        && indexed.lane == draft.lane
+        && indexed.destination == MemoryDestination::Repo
+        && indexed.scope_kind == draft.scope_kind
+        && indexed.scope_id == draft.scope_id
+        && indexed.visibility == draft.visibility
+        && indexed.title == draft.title
+        && indexed.body == draft.body
+        && indexed.status == canonical.status
+        && indexed.confidence == draft.confidence
+        && indexed.source_kind == draft.source_kind
+        && indexed.source_ref == draft.source_ref
+        && indexed.content_hash == blake3::hash(draft.body.as_bytes()).to_hex().to_string()
+        && indexed.created_at == canonical.created
+        && indexed.updated_at == canonical.updated.as_deref().unwrap_or(&canonical.created)
+        && indexed.supersedes_id == canonical.supersedes_id
+        && indexed.expires_at == canonical.expires_at
 }
 
 pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult> {
