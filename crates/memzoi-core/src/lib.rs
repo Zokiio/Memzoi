@@ -12,6 +12,7 @@ mod models;
 mod okf;
 mod precheck;
 mod proposals;
+mod recall_eval;
 mod schema;
 mod search;
 mod service;
@@ -56,6 +57,11 @@ pub use precheck::PrecheckInput;
 pub use proposals::{
     MemoryDraft, Proposal, ProposalStatus, ProposalStatusFilter, SupersedeResult, ValidationIssue,
     ValidationResult,
+};
+pub use recall_eval::{
+    RECALL_EVAL_CORPUS_VERSION, RECALL_EVAL_REPORT_VERSION, RecallEvalAggregate, RecallEvalCase,
+    RecallEvalCaseReport, RecallEvalCorpus, RecallEvalReport, RecallEvalRetrievedRecord,
+    RecallEvalThresholdResults, RecallEvalThresholds, run_recall_eval,
 };
 pub use search::SearchInput;
 pub use service::{

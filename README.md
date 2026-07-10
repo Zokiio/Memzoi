@@ -91,6 +91,7 @@ memzoi search quickstart
 memzoi context --task "remember quickstart setup"
 memzoi handoff --task "switch agents after quickstart"
 memzoi precheck --command "rm -rf .memzoi"
+memzoi eval recall --corpus evals/recall/v1/corpus.yaml
 memzoi export agents-md
 memzoi mcp config --project-root .
 ```
@@ -137,6 +138,7 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
 - Deterministic planning for explicitly classified `memzoi/import-v1` candidates creates reviewable repo proposal files and private local/session runtime records on guarded apply. See the [import reference](website/docs/reference.md#classified-import).
 - Rebuild from canonical records with `memzoi rebuild` when the derived runtime index needs to be regenerated.
 - Text search, prompt-ready context packs, and CLI handoff packs.
+- File-native recall evaluation with isolated fixtures, stable reports, and threshold-based regression exits.
 - Pre-action governance checks with citations and suggested next steps.
 - Deterministic generated exports: OKF Markdown projections, `AGENTS.memory.md`, and `CLAUDE.memory.md`.
 - Minimal stdio MCP server with safe tools:

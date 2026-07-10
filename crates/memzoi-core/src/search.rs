@@ -8,8 +8,8 @@ use crate::{
     events::{AppendEvent, append_event},
     expiry,
     models::{
-        MemoryCitation, MemoryDestination, MemoryPath, MemoryRecord, MemoryType, ScopeKind,
-        SearchResult,
+        MemoryCitation, MemoryDestination, MemoryLane, MemoryPath, MemoryRecord, MemoryType,
+        ScopeKind, SearchResult,
     },
 };
 
@@ -38,6 +38,7 @@ pub struct SearchInput {
     pub scope_kind: Option<ScopeKind>,
     pub scope_id: Option<String>,
     pub memory_type: Option<MemoryType>,
+    pub lane: Option<MemoryLane>,
     pub destination: Option<MemoryDestination>,
     pub path_prefix: Option<String>,
     pub limit: usize,
@@ -92,6 +93,7 @@ pub(crate) fn search_memory_at(
     } else {
         "1 = 1"
     };
+    let lane_filter = "(?9 IS NULL OR memory_record.lane = ?9)";
     let destination = input.destination.unwrap_or(MemoryDestination::Repo);
     let destination_filter = "memory_record.destination = ?6";
     let path_filter = if path_prefix.is_some() {
@@ -121,6 +123,7 @@ pub(crate) fn search_memory_at(
            AND {scope_filter}
            AND {scope_id_filter}
            AND {type_filter}
+           AND {lane_filter}
            AND {path_filter}
          ORDER BY rank ASC, memory_record.updated_at DESC, memory_record.id ASC
          LIMIT ?7"
@@ -128,6 +131,7 @@ pub(crate) fn search_memory_at(
 
     let scope_kind = input.scope_kind.map(|value| value.as_str().to_owned());
     let memory_type = input.memory_type.map(|value| value.as_str().to_owned());
+    let lane = input.lane.map(|value| value.as_str().to_owned());
     let destination = destination.as_str().to_owned();
     let mut stmt = conn
         .prepare(&sql)
@@ -143,6 +147,7 @@ pub(crate) fn search_memory_at(
                 destination,
                 limit as i64,
                 evaluated_at,
+                lane,
             ],
             |row| {
                 let record = record_from_row(row)?;
@@ -185,6 +190,7 @@ pub(crate) fn search_memory_at(
                 "query": input.query,
                 "scope_kind": scope_kind,
                 "type": memory_type,
+                "lane": lane,
                 "destination": destination,
                 "path_prefix": input.path_prefix,
                 "limit": limit,
@@ -338,7 +344,7 @@ mod tests {
     use super::{SearchInput, search_memory};
     use crate::{
         init_database,
-        models::{MemoryStatus, MemoryType, ScopeKind},
+        models::{MemoryLane, MemoryStatus, MemoryType, ScopeKind},
         open_database,
     };
 
@@ -541,6 +547,45 @@ mod tests {
             "the limited result must still come from the filtered candidate set: {limited:?}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn search_memory_filters_lane_before_applying_limit() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        for id in ["rec-procedural-lane", "rec-semantic-lane"] {
+            insert_memory(
+                &conn,
+                MemoryFixture {
+                    id,
+                    memory_type: MemoryType::Procedure,
+                    scope_kind: ScopeKind::Repo,
+                    status: MemoryStatus::Active,
+                    title: "Verdant lane recall",
+                    body: "The verdant lane token appears in both candidates.",
+                    path: None,
+                    source_ref: Some("fixture://lane-filter"),
+                },
+            )?;
+        }
+        conn.execute(
+            "UPDATE memory_record SET lane = ?1 WHERE id = 'rec-procedural-lane'",
+            [MemoryLane::Procedural.as_str()],
+        )?;
+
+        let results = search_memory(
+            &conn,
+            SearchInput {
+                query: "verdant lane".to_owned(),
+                lane: Some(MemoryLane::Procedural),
+                limit: 1,
+                ..SearchInput::default()
+            },
+        )?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].record.id, "rec-procedural-lane");
+        assert_eq!(results[0].record.lane, MemoryLane::Procedural);
         Ok(())
     }
 

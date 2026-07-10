@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- File-native `memzoi eval recall` golden suites with isolated disposable state, versioned YAML corpora, stable human/JSON reports, configurable recall/MRR/forbidden-hit/latency thresholds, and non-zero regression exits.
+- A proposed evidence-backed capture and extractor boundary RFC whose high-level v0.4 plan/review/apply direction is maintainer-endorsed.
+
 ## [0.3.1] - 2026-07-10
 
 ### Added

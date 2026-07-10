@@ -31,6 +31,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi export` | Export active repo memory into reviewable files. |
 | `memzoi rebuild` | Rebuild the derived SQLite database from canonical `.memzoi/records/` files. |
 | `memzoi doctor` | Check installation and repo memory readiness. |
+| `memzoi eval recall` | Evaluate recall against a versioned file-native corpus in disposable isolated state. |
 | `memzoi quickstart` | Print or run a tiny first-run workflow. |
 | `memzoi update` | Check for or apply a Memzoi release update. |
 | `memzoi mcp` | Print MCP integration configuration. |
@@ -72,12 +73,61 @@ Run `memzoi <command> --help` for exact options.
 | `export` | `<format>`, `--scope-kind`, `--json` |
 | `rebuild` | `--json` |
 | `doctor` | `--project-root`, `--json` |
+| `eval recall` | `--corpus <path>`, `--json` |
 | `quickstart` | `--apply-sample`, `--json` |
 | `update` | `--check`, `--ref`, `--json` |
 | `mcp config` | `--project-root` |
 | `integrate list` | `--json` |
 | `integrate prompt` | `--profile` |
 | `integrate instructions` | `--profile`, `--file`, `--json` |
+
+## Recall evaluation
+
+Run a checked-in golden corpus without opening or mutating the current project's
+canonical records, proposal inbox, runtime database, exports, or event log:
+
+```bash
+memzoi eval recall --corpus evals/recall/v1/corpus.yaml
+memzoi eval recall --corpus evals/recall/v1/corpus.yaml --json
+```
+
+The explicit corpus is strict YAML with version
+`memzoi-recall-corpus/v1`. It references real OKF Markdown fixtures relative
+to the corpus file, fixes the evaluation clock, declares aggregate thresholds,
+and defines ordered cases:
+
+```yaml
+version: memzoi-recall-corpus/v1
+name: project-recall-v1
+evaluated_at: 2026-07-10T12:00:00Z
+records_root: records
+records:
+  - package-manager.md
+thresholds:
+  min_mean_recall_at_k: 1.0
+  min_mean_mrr: 1.0
+  max_forbidden_hits: 0
+  # max_mean_latency_ms: 50
+cases:
+  - id: package-manager-decision
+    query: package manager
+    relevant_ids: [package-manager]
+    forbidden_ids: []
+    scope_kind: repo
+    scope_id: null
+    type: decision
+    lane: semantic
+    path: package.json
+    k: 5
+```
+
+Every case can constrain scope kind/ID, memory type, lane, and path before the
+top-k limit is applied. JSON output uses `memzoi-recall-report/v1` and includes
+ordered retrieved IDs, citations, recall@k, MRR, forbidden hits, latency, and
+aggregate threshold results. A valid corpus always prints its complete report;
+if an aggregate threshold fails, the command then exits non-zero so CI can gate
+regressions. Corpus or fixture validation errors also exit non-zero but do not
+produce a report.
 
 ## Classified import
 

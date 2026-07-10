@@ -19,6 +19,26 @@ Search is backed by SQLite FTS over active, unexpired record titles and bodies. 
 
 Path filtering matches records bound to the exact path, descendants of the path, or ancestors of the path. That lets a record attached to `apps/web` apply when the user is working in `apps/web/src/App.tsx`.
 
+## Evaluate recall with a golden corpus
+
+```bash
+memzoi eval recall --corpus evals/recall/v1/corpus.yaml
+memzoi eval recall --corpus evals/recall/v1/corpus.yaml --json
+```
+
+`eval recall` loads an explicit versioned YAML corpus and its referenced OKF
+Markdown fixtures into a fresh temporary canonical/runtime bundle. It never
+opens or mutates the current project's records, proposals, normal index,
+exports, checkpoints, or event log.
+
+Cases declare relevant and forbidden record IDs, `k`, and optional scope,
+scope-ID, type, lane, and path filters. Reports include ordered results and
+citations plus recall@k, MRR, forbidden hits, latency, and aggregate threshold
+checks. Passing reports exit zero. A threshold regression prints the complete
+human or JSON report first and then exits non-zero, making the corpus usable as
+a local or CI quality gate. See the [reference](./reference.md#recall-evaluation)
+for the corpus contract.
+
 ## Build a context pack
 
 ```bash

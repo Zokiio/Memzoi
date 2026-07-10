@@ -311,6 +311,7 @@ fn search_input(arguments: &Value) -> Result<SearchInput> {
         scope_kind: optional_scope_kind(arguments)?,
         scope_id: optional_string(arguments, "scope_id"),
         memory_type: optional_memory_type(arguments)?,
+        lane: None,
         destination: Some(MemoryDestination::Repo),
         path_prefix: optional_string(arguments, "path_prefix")
             .or_else(|| optional_string(arguments, "path")),
