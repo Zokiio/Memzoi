@@ -4101,7 +4101,7 @@ fn handoff_requires_task_or_path_at_cli_boundary() {
 }
 
 #[test]
-fn precheck_json_warns_for_risky_path_and_cites_memory() {
+fn precheck_json_warns_for_path_only_governance_and_cites_memory() {
     let repo = initialized_temp_repo();
     let repo = repo.path();
 
@@ -4109,8 +4109,8 @@ fn precheck_json_warns_for_risky_path_and_cites_memory() {
         repo,
         "risk",
         "repo",
-        "Billing file is fragile",
-        "Editing invoice rounding in billing previously broke tax calculation.",
+        "Preserve settlement invariants",
+        "Changing the rounding order previously broke tax calculation.",
     );
     attach_memory_path(repo, &risk, "apps/api/src/billing/invoice.rs");
     update_record_source_ref(repo, &risk, "issue://billing-risk#invoice");
@@ -4130,8 +4130,6 @@ fn precheck_json_warns_for_risky_path_and_cites_memory() {
             "precheck",
             "--path",
             "apps/api/src/billing/invoice.rs",
-            "--action",
-            "change invoice rounding",
             "--json",
         ],
     );
@@ -4149,8 +4147,10 @@ fn precheck_json_warns_for_risky_path_and_cites_memory() {
     assert_json_string_field(warning, &["record_id"], &risk);
     assert_json_string_field(warning, &["severity"], "high");
     assert!(
-        warning.to_string().contains("Billing file is fragile")
-            || warning.to_string().contains("invoice rounding"),
+        warning
+            .to_string()
+            .contains("Preserve settlement invariants")
+            || warning.to_string().contains("rounding order"),
         "warning should explain the matching memory: {warning}"
     );
     assert_json_does_not_reference_records(&precheck, &[unrelated]);

@@ -99,6 +99,13 @@ Precheck searches active memory and returns warnings only for governance memory 
 - `warning`
 - `failed_attempt`
 
+When `--path` is supplied, an active governance record is applicable when its
+binding is the exact path, an ancestor or descendant directory, or a trailing
+`/**` scope that contains the requested path. Path applicability does not
+require the record title or body to repeat tokens from the path. Action and
+command text remain lexical ranking signals among applicable records, while
+records bound only to unrelated paths stay excluded.
+
 Warnings include a severity, cited record id, message, and suggested next step.
 
 ## Interpreting warnings
