@@ -6,15 +6,15 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, FileProposalResolutionResult,
-    HandoffInput, ImportApplyResult, ImportPlan, InitRequest, LocalMemoryInput, MemoryDestination,
-    MemoryDraft, MemoryLane, MemoryRecord, MemoryService, MemoryType, OkfProposalFile,
-    OkfProposalOutcome, OkfProposalSensitivity, OkfProposalStatus, PrecheckInput, Proposal,
-    ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus, ProposalStatusFilter,
-    ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult, SessionEndWrite,
-    Visibility, discover_paths, okf_proposal_matches_identity, parse_import_document,
-    parse_okf_proposal_file, parse_session_end_document, preflight_okf_proposal_file,
-    redacted_okf_proposal_path,
+    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, FileProposalInventoryEntry,
+    FileProposalInventoryError, FileProposalResolutionResult, HandoffInput, ImportApplyResult,
+    ImportPlan, InitRequest, LocalMemoryInput, MemoryDestination, MemoryDraft, MemoryLane,
+    MemoryRecord, MemoryService, MemoryType, OkfProposalOutcome, OkfProposalSensitivity,
+    OkfProposalStatus, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalInboxSummary,
+    ProposalStatus, ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult,
+    SessionEndResult, SessionEndWrite, Visibility, discover_paths,
+    lifecycle_transaction_artifact_count, okf_proposal_matches_identity, parse_import_document,
+    parse_session_end_document, scan_file_proposal_inventory,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -656,18 +656,8 @@ struct ProposalFileScan {
     errors: Vec<ProposalFileError>,
 }
 
-#[derive(Debug)]
-struct ProposalFileEntry {
-    path: PathBuf,
-    display_path: PathBuf,
-    proposal: OkfProposalFile,
-}
-
-#[derive(Debug)]
-struct ProposalFileError {
-    path: PathBuf,
-    error: String,
-}
+type ProposalFileEntry = FileProposalInventoryEntry;
+type ProposalFileError = FileProposalInventoryError;
 
 fn proposal_files_list_command(as_json: bool) -> Result<()> {
     let scan = scan_pending_proposal_files()?;
@@ -733,7 +723,7 @@ fn proposal_files_validate_command(as_json: bool) -> Result<()> {
             );
         }
         for error in &scan.errors {
-            println!("invalid\t{}\t{}", error.path.display(), error.error);
+            println!("invalid\t{}\t{}", error.display_path.display(), error.error);
         }
     }
 
@@ -749,19 +739,9 @@ fn proposal_files_validate_command(as_json: bool) -> Result<()> {
 
 fn validate_pending_proposal_scan(scan: &mut ProposalFileScan) -> Result<()> {
     let service = open_service()?;
-    let mut valid = Vec::with_capacity(scan.proposals.len());
-    for entry in scan.proposals.drain(..) {
-        match service.validate_file_proposal(&entry.proposal) {
-            Ok(()) => valid.push(entry),
-            Err(error) => scan.errors.push(ProposalFileError {
-                path: entry.display_path,
-                error: error.to_string(),
-            }),
-        }
-    }
-    scan.proposals = valid;
-    scan.errors
-        .sort_by(|left, right| left.path.cmp(&right.path));
+    let inventory = service.validate_file_proposal_inventory()?;
+    scan.proposals = inventory.pending;
+    scan.errors = inventory.errors;
     Ok(())
 }
 
@@ -771,7 +751,13 @@ fn proposal_files_apply_command(proposal_id: &str, actor: &str, as_json: bool) -
         if as_json {
             print_json(&proposal_file_validation_json(&scan))?;
         }
-        bail!("invalid proposal files found; run `memzoi proposal-files validate` for details");
+        bail!(
+            "invalid proposal files found: {}; run `memzoi proposal-files validate` for details",
+            scan.errors
+                .first()
+                .map(|error| error.error.as_str())
+                .unwrap_or("unknown proposal inventory error")
+        );
     }
 
     let entry = optional_proposal_file_entry(&scan, proposal_id)?;
@@ -786,7 +772,7 @@ fn proposal_files_apply_command(proposal_id: &str, actor: &str, as_json: bool) -
     }
     let service = open_service()?;
     let result = match entry {
-        Some(entry) => service.apply_file_proposal(&entry.path, actor)?,
+        Some(entry) => service.apply_file_proposal_inventory_entry(entry, actor)?,
         None => service.replay_file_proposal(proposal_id, OkfProposalOutcome::Applied, actor)?,
     };
     print_file_resolution_result(&result, as_json)
@@ -803,11 +789,17 @@ fn proposal_files_reject_command(
         if as_json {
             print_json(&proposal_file_validation_json(&scan))?;
         }
-        bail!("invalid proposal files found; run `memzoi proposal-files validate` for details");
+        bail!(
+            "invalid proposal files found: {}; run `memzoi proposal-files validate` for details",
+            scan.errors
+                .first()
+                .map(|error| error.error.as_str())
+                .unwrap_or("unknown proposal inventory error")
+        );
     }
     let service = open_service()?;
     let result = match optional_proposal_file_entry(&scan, proposal_id)? {
-        Some(entry) => service.reject_file_proposal(&entry.path, actor, reason)?,
+        Some(entry) => service.reject_file_proposal_inventory_entry(entry, actor, reason)?,
         None => service.replay_file_proposal(proposal_id, OkfProposalOutcome::Rejected, actor)?,
     };
     print_file_resolution_result(&result, as_json)
@@ -1119,72 +1111,12 @@ fn scan_pending_proposal_files() -> Result<ProposalFileScan> {
 
 fn scan_pending_proposal_files_at(paths: &memzoi_core::MemoryPaths) -> Result<ProposalFileScan> {
     let proposals_root = paths.proposals_dir().join("pending");
-    let mut files = Vec::new();
-    if proposals_root.exists() {
-        collect_markdown_files(&proposals_root, &mut files)?;
-    }
-
-    let mut proposals = Vec::new();
-    let mut errors = Vec::new();
-    for file in files {
-        match preflight_okf_proposal_file(&proposals_root, &file) {
-            Ok(Some(preflight)) if preflight.sensitivity != OkfProposalSensitivity::RepoSafe => {
-                let display_path =
-                    proposals_root.join(format!("{}.md", preflight.receipt_proposal.file_id));
-                proposals.push(ProposalFileEntry {
-                    path: file,
-                    display_path,
-                    proposal: preflight.receipt_proposal,
-                });
-                continue;
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => continue,
-            Err(error) => {
-                let display_path = redacted_okf_proposal_path(&proposals_root, &file)
-                    .unwrap_or_else(|_| proposals_root.join("redacted-proposal.md"));
-                errors.push(ProposalFileError {
-                    path: display_path,
-                    error: error.to_string(),
-                });
-                continue;
-            }
-        }
-        match parse_okf_proposal_file(&proposals_root, &file) {
-            Ok(Some(proposal)) if proposal.status == OkfProposalStatus::Proposed => {
-                proposals.push(ProposalFileEntry {
-                    display_path: file.clone(),
-                    path: file,
-                    proposal,
-                })
-            }
-            Ok(Some(proposal)) => errors.push(ProposalFileError {
-                path: file,
-                error: format!(
-                    "pending proposal {} has resolved status {}",
-                    proposal.id,
-                    proposal.status.as_str()
-                ),
-            }),
-            Ok(None) => {}
-            Err(error) => errors.push(ProposalFileError {
-                path: file,
-                error: error.to_string(),
-            }),
-        }
-    }
-    proposals.sort_by(|left, right| {
-        left.proposal
-            .id
-            .cmp(&right.proposal.id)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    errors.sort_by(|left, right| left.path.cmp(&right.path));
+    let inventory = scan_file_proposal_inventory(paths)?;
 
     Ok(ProposalFileScan {
         proposals_root,
-        proposals,
-        errors,
+        proposals: inventory.pending,
+        errors: inventory.errors,
     })
 }
 
@@ -1196,81 +1128,12 @@ fn scan_resolved_proposal_files() -> Result<ProposalFileScan> {
 
 fn scan_resolved_proposal_files_at(paths: &memzoi_core::MemoryPaths) -> Result<ProposalFileScan> {
     let proposals_root = paths.proposals_dir().join("resolved");
-    let mut proposals = Vec::new();
-    let mut errors = Vec::new();
-    for (directory, expected) in [
-        ("applied", OkfProposalStatus::Applied),
-        ("rejected", OkfProposalStatus::Rejected),
-    ] {
-        let outcome_root = proposals_root.join(directory);
-        let mut files = Vec::new();
-        if outcome_root.exists() {
-            collect_markdown_files(&outcome_root, &mut files)?;
-        }
-        for file in files {
-            match parse_okf_proposal_file(&outcome_root, &file) {
-                Ok(Some(proposal)) if proposal.status == expected => {
-                    proposals.push(ProposalFileEntry {
-                        display_path: file.clone(),
-                        path: file,
-                        proposal,
-                    })
-                }
-                Ok(Some(proposal)) => errors.push(ProposalFileError {
-                    path: file,
-                    error: format!(
-                        "resolved proposal {} has status {} under {directory}",
-                        proposal.id,
-                        proposal.status.as_str()
-                    ),
-                }),
-                Ok(None) => {}
-                Err(error) => errors.push(ProposalFileError {
-                    path: file,
-                    error: error.to_string(),
-                }),
-            }
-        }
-    }
-    proposals.sort_by(|left, right| {
-        left.proposal
-            .id
-            .cmp(&right.proposal.id)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    errors.sort_by(|left, right| left.path.cmp(&right.path));
+    let inventory = scan_file_proposal_inventory(paths)?;
     Ok(ProposalFileScan {
         proposals_root,
-        proposals,
-        errors,
+        proposals: inventory.resolved,
+        errors: inventory.errors,
     })
-}
-
-fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).context("failed to scan proposal directory")? {
-        let entry = entry?;
-        let path = entry.path();
-        if is_hidden(&path) {
-            continue;
-        }
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_markdown_files(&path, files)?;
-        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
-        {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn is_hidden(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with('.') && name != ".")
 }
 
 fn print_proposal_file_summary(entry: &ProposalFileEntry) {
@@ -1386,7 +1249,7 @@ fn proposal_file_errors_json(errors: &[ProposalFileError]) -> Vec<serde_json::Va
         .iter()
         .map(|error| {
             json!({
-                "path": &error.path,
+                "path": &error.display_path,
                 "error": &error.error,
             })
         })
@@ -1816,47 +1679,37 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         push_next_step(&mut next_steps, "memzoi init");
     }
 
-    match (
-        scan_pending_proposal_files_at(&paths),
-        scan_resolved_proposal_files_at(&paths),
-    ) {
-        (Ok(mut pending), Ok(resolved)) => {
-            if paths.config_path.is_file()
-                && paths.db_path.is_file()
-                && let Ok(service) = MemoryService::open_paths(paths.clone())
-            {
-                let mut valid = Vec::with_capacity(pending.proposals.len());
-                for entry in pending.proposals.drain(..) {
-                    match service.validate_file_proposal(&entry.proposal) {
-                        Ok(()) => valid.push(entry),
-                        Err(error) => pending.errors.push(ProposalFileError {
-                            path: entry.display_path,
-                            error: error.to_string(),
-                        }),
-                    }
-                }
-                pending.proposals = valid;
-            }
-            let invalid = pending.errors.len() + resolved.errors.len();
+    let proposal_inventory = if paths.config_path.is_file() && paths.db_path.is_file() {
+        MemoryService::open_paths(paths.clone())
+            .and_then(|service| service.validate_file_proposal_inventory())
+    } else {
+        scan_file_proposal_inventory(&paths)
+    };
+    match proposal_inventory {
+        Ok(inventory) => {
+            let invalid = inventory.errors.len();
             if invalid > 0 {
                 checks.push(check(
                     "proposal_files",
                     "warning",
                     format!(
-                        "{invalid} invalid proposal packet{} (pending={}, resolved={})",
+                        "{invalid} invalid proposal packet{}: {}",
                         if invalid == 1 { "" } else { "s" },
-                        pending.errors.len(),
-                        resolved.errors.len()
+                        inventory
+                            .errors
+                            .first()
+                            .map(|error| error.error.as_str())
+                            .unwrap_or("unknown proposal inventory error")
                     ),
                 ));
                 push_next_step(&mut next_steps, "memzoi proposal-files validate");
-            } else if pending.proposals.is_empty() {
-                let applied = resolved
-                    .proposals
+            } else if inventory.pending.is_empty() {
+                let applied = inventory
+                    .resolved
                     .iter()
                     .filter(|entry| entry.proposal.status == OkfProposalStatus::Applied)
                     .count();
-                let rejected = resolved.proposals.len() - applied;
+                let rejected = inventory.resolved.len() - applied;
                 checks.push(check(
                     "proposal_files",
                     "ok",
@@ -1870,8 +1723,8 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                     "warning",
                     format!(
                         "{} pending file proposal{}",
-                        pending.proposals.len(),
-                        if pending.proposals.len() == 1 {
+                        inventory.pending.len(),
+                        if inventory.pending.len() == 1 {
                             ""
                         } else {
                             "s"
@@ -1881,9 +1734,37 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                 push_next_step(&mut next_steps, "memzoi proposal-files list");
             }
         }
-        (Err(error), _) | (_, Err(error)) => {
+        Err(error) => {
             checks.push(check("proposal_files", "warning", error.to_string()));
         }
+    }
+
+    match lifecycle_transaction_artifact_count(&paths) {
+        Ok(0) => checks.push(check(
+            "lifecycle_transactions",
+            "ok",
+            "no hidden lifecycle transaction artifacts",
+        )),
+        Ok(count) => {
+            checks.push(check(
+                "lifecycle_transactions",
+                "warning",
+                format!(
+                    "{} hidden lifecycle transaction artifact{} require inspection under the Memzoi records/proposals roots",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                ),
+            ));
+            push_next_step(
+                &mut next_steps,
+                "inspect hidden .memzoi lifecycle transaction artifacts before retrying",
+            );
+        }
+        Err(error) => checks.push(check(
+            "lifecycle_transactions",
+            "warning",
+            error.to_string(),
+        )),
     }
 
     if paths.config_path.is_file() {
@@ -1973,10 +1854,11 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                     "repo_index",
                     "warning",
                     format!(
-                        "runtime repo index is stale (missing={}, stale={}, changed={})",
+                        "runtime repo index is stale (missing={}, stale={}, changed={}, fts_out_of_sync={})",
                         drift.missing_from_index.len(),
                         drift.stale_in_index.len(),
                         drift.changed_in_index.len(),
+                        drift.fts_out_of_sync,
                     ),
                 ));
                 push_next_step(&mut next_steps, "memzoi rebuild");

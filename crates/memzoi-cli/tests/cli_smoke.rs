@@ -248,6 +248,28 @@ fn doctor_json_reports_ready_after_init_and_warns_when_mcp_binary_is_missing() {
 }
 
 #[test]
+fn doctor_warns_about_hidden_lifecycle_artifacts_without_exposing_their_identity() {
+    let repo = initialized_temp_repo();
+    let pending = repo.path().join(".memzoi/proposals/pending");
+    fs::create_dir_all(&pending).expect("create pending root");
+    let sentinel = "RAW-SECRET-IDENTITY-SENTINEL";
+    fs::write(
+        pending.join(format!(".{sentinel}.nonce.pending.tmp")),
+        "unresolved transaction bytes",
+    )
+    .expect("write transaction artifact");
+
+    let doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&doctor, "lifecycle_transactions", "warning");
+    let rendered = serde_json::to_string(&doctor).expect("serialize doctor output");
+    assert!(rendered.contains("1 hidden lifecycle transaction artifact"));
+    assert!(
+        !rendered.contains(sentinel),
+        "doctor leaked the transaction identity: {rendered}"
+    );
+}
+
+#[test]
 fn doctor_json_warns_about_open_proposals_and_prints_next_steps() {
     let repo = initialized_temp_repo();
     run_json_command(
@@ -1893,12 +1915,14 @@ fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() 
     write_pending_proposal_file(
         repo.path(),
         "missing-supersedes.md",
-        proposal_markdown_with("semantic", "supersede", "supersedes: []", ""),
+        proposal_markdown_with("semantic", "supersede", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_missing_supersedes"),
     );
     write_pending_proposal_file(
         repo.path(),
         "missing-target.md",
-        proposal_markdown_with("semantic", "tombstone", "supersedes: []", ""),
+        proposal_markdown_with("semantic", "tombstone", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_missing_target"),
     );
 
     let validated =
@@ -1927,10 +1951,10 @@ fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() 
     }
 
     let listed = run_json_command_failure(repo.path(), &["proposal-files", "list", "--json"]);
-    assert_eq!(proposals_from_json(&listed).len(), 1);
+    assert_eq!(proposals_from_json(&listed).len(), 3);
     assert_eq!(
         listed.get("errors").and_then(Value::as_array).map(Vec::len),
-        Some(4)
+        Some(2)
     );
 }
 
@@ -1963,6 +1987,44 @@ fn proposal_files_skip_symlinks_under_pending_directory() {
         validated.get("invalid_count").and_then(Value::as_u64),
         Some(0),
         "skipped symlinks should not become validation errors: {validated}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn proposal_file_commands_refuse_symlinked_inventory_root_without_reading_outside() {
+    let repo = initialized_temp_repo();
+    let outside = tempfile::tempdir().expect("outside proposal root");
+    let sentinel = "OUTSIDE-PROPOSAL-SENTINEL";
+    fs::write(
+        outside.path().join("outside.md"),
+        valid_proposal_markdown()
+            .replace("title: Valid proposal", &format!("title: {sentinel}"))
+            .replace("# Valid proposal", &format!("# {sentinel}")),
+    )
+    .expect("write outside proposal");
+    let proposals = repo.path().join(".memzoi/proposals");
+    fs::create_dir_all(&proposals).expect("create proposal root");
+    std::os::unix::fs::symlink(outside.path(), proposals.join("pending"))
+        .expect("symlink pending root");
+
+    let listed = run_json_command_failure(repo.path(), &["proposal-files", "list", "--json"]);
+    let rendered = serde_json::to_string(&listed).expect("serialize unsafe-root result");
+    assert!(
+        !rendered.contains(sentinel),
+        "outside packet leaked: {rendered}"
+    );
+    assert_eq!(listed["proposals"].as_array().map(Vec::len), Some(0));
+    assert!(
+        rendered.contains("ancestor must be a real directory"),
+        "unsafe-root result should be actionable: {rendered}"
+    );
+
+    let shown =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "show", "mem_test_valid"]);
+    assert!(
+        !shown.contains(sentinel),
+        "show leaked outside packet: {shown}"
     );
 }
 
@@ -2308,6 +2370,48 @@ fn proposal_file_validation_and_rejection_never_echo_non_repo_safe_content() {
 }
 
 #[test]
+fn legacy_file_proposal_shapes_remain_showable_and_rejectable() {
+    let repo = initialized_temp_repo();
+    let legacy = proposal_markdown_with_options(
+        "semantic",
+        "supersede",
+        "proposed",
+        "supersedes:\n  - legacy-target-one\n  - legacy-target-two",
+        "",
+        "repo-safe",
+    )
+    .replace(
+        "  reason: Review packet context should not become canonical frontmatter.\n",
+        "",
+    );
+    write_pending_proposal_file(repo.path(), "legacy-shape.md", legacy);
+
+    let shown = run_json_command(
+        repo.path(),
+        &["proposal-files", "show", "mem_test_valid", "--json"],
+    );
+    assert_json_string_field(&shown, &["action"], "supersede");
+    assert_eq!(
+        shown["supersedes"].as_array().map(Vec::len),
+        Some(2),
+        "{shown}"
+    );
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Legacy packet is reviewable but not applyable.",
+            "--json",
+        ],
+    );
+    assert_json_string_field(&rejected, &["outcome"], "rejected");
+}
+
+#[test]
 fn non_repo_safe_rejection_hashes_packet_id_and_file_id_but_replays_raw_aliases() {
     let repo = initialized_temp_repo();
     let raw_id = "secret-proposal-identity-sentinel";
@@ -2540,6 +2644,33 @@ fn reintroduced_pending_packet_cannot_reverse_a_resolved_outcome() {
         ],
     );
     write_pending_proposal_file(rejected_repo.path(), "valid-proposal.md", proposal.clone());
+    let validation = run_json_command_failure(
+        rejected_repo.path(),
+        &["proposal-files", "validate", "--json"],
+    );
+    assert_eq!(validation["valid"], false, "{validation}");
+    assert!(
+        serde_json::to_string(&validation["errors"])
+            .expect("serialize terminal identity errors")
+            .contains("reintroduces resolved identity"),
+        "{validation}"
+    );
+    let doctor = run_json_command(rejected_repo.path(), &["doctor", "--json"]);
+    let proposal_check = doctor["checks"]
+        .as_array()
+        .and_then(|checks| {
+            checks
+                .iter()
+                .find(|check| check["name"] == "proposal_files")
+        })
+        .expect("doctor proposal-files check");
+    assert_eq!(proposal_check["status"], "warning", "{doctor}");
+    assert!(
+        proposal_check["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("reintroduces resolved identity")),
+        "{doctor}"
+    );
     let rejected_then_apply = run_command_failure_stderr(
         rejected_repo.path(),
         &["proposal-files", "apply", "mem_test_valid"],
@@ -2603,7 +2734,8 @@ fn proposal_file_apply_detects_duplicate_pending_identity_even_by_unique_file_sl
     let error =
         run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "valid-proposal"]);
     assert!(
-        error.contains("duplicate pending proposal identity") && error.contains("mem_test_valid"),
+        error.contains("duplicate pending proposal identity token")
+            && !error.contains("mem_test_valid"),
         "unexpected duplicate identity error: {error}"
     );
     assert!(
@@ -2656,6 +2788,52 @@ fn applied_replay_repairs_missing_and_stale_derived_rows_from_canonical_truth() 
     );
     assert_eq!(already_current["already_resolved"], true);
     assert_eq!(already_current["runtime_index_updated"], false);
+}
+
+#[test]
+fn applied_replay_repairs_fts_only_drift_and_doctor_reports_it() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+
+    {
+        let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
+        conn.execute(
+            "INSERT INTO memory_fts(memory_fts, rowid, title, body)
+             SELECT 'delete', rowid, title, body
+             FROM memory_record
+             WHERE id = 'valid-proposal'",
+            [],
+        )
+        .expect("delete only the full-text index entry");
+    }
+    let missing_search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    assert!(record_ids_from_json(&missing_search).is_empty());
+    let stale_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&stale_doctor, "repo_index", "warning");
+    assert!(
+        serde_json::to_string(&stale_doctor)
+            .expect("serialize doctor")
+            .contains("fts_out_of_sync=true"),
+        "{stale_doctor}"
+    );
+
+    let repaired = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repaired["already_resolved"], true);
+    assert_eq!(repaired["runtime_index_updated"], true);
+    let repaired_search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    assert_eq!(
+        record_ids_from_json(&repaired_search),
+        vec!["valid-proposal"]
+    );
+    let healthy_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&healthy_doctor, "repo_index", "ok");
 }
 
 #[test]
@@ -4796,7 +4974,8 @@ candidates:
     assert!(
         stderr.contains("failed to create proposal directory")
             || stderr.contains("failed to create session-end proposal")
-            || stderr.contains("failed to inspect pending proposal"),
+            || stderr.contains("failed to inspect pending proposal")
+            || stderr.contains("pending proposal root ancestor must be a real directory"),
         "session-end should fail clearly on proposal file write errors: {stderr}"
     );
     let local = run_json_command(repo, &["local", "list", "--json"]);

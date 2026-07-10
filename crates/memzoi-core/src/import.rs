@@ -422,6 +422,7 @@ pub(crate) fn build_plan(
     doc: &ImportDocument,
     existing: &[ExistingDuplicate],
     pending_root: &Path,
+    reserved_proposal_ids: &BTreeSet<String>,
 ) -> Result<ImportPlan> {
     validate_document(doc)?;
     let normalized = normalize_document(doc)?;
@@ -444,7 +445,7 @@ pub(crate) fn build_plan(
     }
     sources.sort_by(|a, b| source_key(a).cmp(&source_key(b)));
 
-    let mut used_ids = BTreeSet::new();
+    let mut used_ids = reserved_proposal_ids.clone();
     for e in existing {
         used_ids.insert(e.id.clone());
     }

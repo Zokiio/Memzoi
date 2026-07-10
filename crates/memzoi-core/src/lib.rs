@@ -59,10 +59,11 @@ pub use proposals::{
 };
 pub use search::SearchInput;
 pub use service::{
-    CheckpointInput, ExportFormat, ExportInput, ExportResult, FileProposalResolutionResult,
+    CheckpointInput, ExportFormat, ExportInput, ExportResult, FileProposalInventory,
+    FileProposalInventoryEntry, FileProposalInventoryError, FileProposalResolutionResult,
     InitBundleResult, InitRequest, InitResult, LocalMemoryInput, MemoryService,
     ProposalApprovalOverride, ProposeOptions, ProposeResult, RebuildResult, RepoIndexDrift,
-    init_bundle,
+    init_bundle, lifecycle_transaction_artifact_count, scan_file_proposal_inventory,
 };
 pub use session_end::{
     SessionEndCandidate, SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument,

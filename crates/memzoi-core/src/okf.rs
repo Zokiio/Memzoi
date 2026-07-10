@@ -61,12 +61,6 @@ pub struct OkfProposalPreflight {
     pub receipt_proposal: OkfProposalFile,
 }
 
-#[derive(Debug)]
-pub(crate) struct OkfProposalInventoryFile {
-    pub(crate) path: PathBuf,
-    pub(crate) proposal: OkfProposalFile,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OkfProposalResolution {
     pub outcome: OkfProposalOutcome,
@@ -138,11 +132,13 @@ pub(crate) fn reserve_okf_proposal_id(
         } else {
             format!("{base_id}-{suffix}")
         };
-        if reserved_ids.contains(&candidate) {
+        let identity_token = okf_proposal_identity_token(&candidate);
+        if reserved_ids.contains(&candidate) || reserved_ids.contains(&identity_token) {
             continue;
         }
         if !proposal_packet_id_exists(pending_root, &candidate)? {
             reserved_ids.insert(candidate.clone());
+            reserved_ids.insert(identity_token);
             return Ok(candidate);
         }
     }
@@ -522,40 +518,6 @@ pub fn read_okf_proposal_files(proposals_root: impl AsRef<Path>) -> Result<Vec<O
     Ok(proposals)
 }
 
-pub(crate) fn read_pending_okf_proposal_inventory_files(
-    proposals_root: impl AsRef<Path>,
-) -> Result<Vec<OkfProposalInventoryFile>> {
-    let proposals_root = proposals_root.as_ref();
-    if !proposals_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut files = Vec::new();
-    collect_markdown_files(proposals_root, &mut files)?;
-    let mut proposals = Vec::new();
-    for file in files {
-        let Some(preflight) = preflight_okf_proposal_file(proposals_root, &file)? else {
-            continue;
-        };
-        let proposal = if preflight.sensitivity == OkfProposalSensitivity::RepoSafe {
-            parse_okf_proposal_file(proposals_root, &file)?
-                .with_context(|| format!("pending proposal was ignored: {}", file.display()))?
-        } else {
-            preflight.receipt_proposal
-        };
-        proposals.push(OkfProposalInventoryFile {
-            path: file,
-            proposal,
-        });
-    }
-    proposals.sort_by(|left, right| {
-        left.proposal
-            .id
-            .cmp(&right.proposal.id)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    Ok(proposals)
-}
-
 pub fn parse_okf_record_file(
     bundle_root: impl AsRef<Path>,
     file_path: impl AsRef<Path>,
@@ -704,27 +666,54 @@ pub fn parse_okf_record_markdown(
     let title = required_string(frontmatter.title, "title")?;
     let memory_type = parse_required_enum::<MemoryType>(frontmatter.memory_type, "type")?;
     let lane = parse_optional_enum::<MemoryLane>(frontmatter.lane, "lane")?.unwrap_or_default();
-    let scope_kind = parse_scope(frontmatter.scope_kind.or(frontmatter.scope))?;
+    let scope_kind = parse_scope(coalesce_string_aliases(
+        frontmatter.scope_kind,
+        frontmatter.scope,
+        "scope_kind",
+        "scope",
+    )?)?;
+    let scope_id = optional_string(frontmatter.scope_id, "scope_id")?;
     let visibility = parse_required_enum::<Visibility>(frontmatter.visibility, "visibility")?;
     let status = parse_status(required_string(frontmatter.status, "status")?)?;
     let confidence = parse_confidence(frontmatter.confidence)?;
-    let source_kind = optional_string(frontmatter.source.or(frontmatter.source_kind), "source")?;
-    let source_ref = optional_string(frontmatter.source_ref, "source_ref")?;
-    let created = required_string(
-        frontmatter
-            .created
-            .or(frontmatter.created_at)
-            .or(frontmatter.timestamp),
-        "created",
+    let source_kind = coalesce_string_aliases(
+        frontmatter.source,
+        frontmatter.source_kind,
+        "source",
+        "source_kind",
     )?;
+    let source_ref = optional_string(frontmatter.source_ref, "source_ref")?;
+    let created = coalesce_string_aliases(
+        frontmatter.created,
+        frontmatter.created_at,
+        "created",
+        "created_at",
+    )?;
+    let created = coalesce_string_aliases(created, frontmatter.timestamp, "created", "timestamp")?;
+    let created = required_string(created, "created")?;
     ensure_timestampish(&created, "created")?;
-    let updated = frontmatter.updated.or(frontmatter.updated_at);
+    let updated = coalesce_string_aliases(
+        frontmatter.updated,
+        frontmatter.updated_at,
+        "updated",
+        "updated_at",
+    )?;
     if let Some(updated) = updated.as_deref() {
         ensure_timestampish(updated, "updated")?;
     }
     let applies_to = validate_applies_to(frontmatter.applies_to.unwrap_or_default())?;
-    let supersedes_id = frontmatter.supersedes.or(frontmatter.supersedes_id);
-    let expires_at = frontmatter.expires.or(frontmatter.expires_at);
+    let supersedes_id = coalesce_string_aliases(
+        frontmatter.supersedes,
+        frontmatter.supersedes_id,
+        "supersedes",
+        "supersedes_id",
+    )?;
+    let expires_at = coalesce_string_aliases(
+        frontmatter.expires,
+        frontmatter.expires_at,
+        "expires",
+        "expires_at",
+    )?;
     let proposal_id = optional_string(frontmatter.proposal_id, "proposal_id")?;
     if let Some(expires_at) = expires_at.as_deref() {
         expiry::parse_expires_at(expires_at)
@@ -738,7 +727,7 @@ pub fn parse_okf_record_markdown(
             memory_type,
             lane,
             scope_kind,
-            scope_id: frontmatter.scope_id,
+            scope_id,
             visibility,
             title,
             body,
@@ -795,12 +784,6 @@ pub fn parse_okf_proposal_markdown(
     let supersedes =
         validate_string_list(frontmatter.supersedes.unwrap_or_default(), "supersedes")?;
     let proposal = parse_proposal_metadata(frontmatter.proposal)?;
-    validate_proposal_action_shape(
-        proposal.action,
-        &proposal.target,
-        &proposal.reason,
-        &supersedes,
-    )?;
     let sources = validate_proposal_sources(frontmatter.sources.unwrap_or_default())?;
     let resolution = parse_proposal_resolution(frontmatter.resolution)?;
     validate_proposal_resolution(status, resolution.as_ref())?;
@@ -943,6 +926,12 @@ pub(crate) fn validate_repo_apply_proposal(proposal: &OkfProposalFile) -> Result
             repo_apply_sensitivity_guidance(proposal.sensitivity)
         );
     }
+    validate_proposal_action_shape(
+        proposal.proposal.action,
+        &proposal.proposal.target,
+        &proposal.proposal.reason,
+        &proposal.supersedes,
+    )?;
     Ok(())
 }
 
@@ -1034,7 +1023,7 @@ pub(crate) fn proposal_identity_tokens(proposal: &OkfProposalFile) -> BTreeSet<S
         .collect()
 }
 
-fn okf_proposal_identity_token(identity: &str) -> String {
+pub(crate) fn okf_proposal_identity_token(identity: &str) -> String {
     const PREFIX: &str = "redacted-identity-";
     if identity
         .strip_prefix(PREFIX)
@@ -1328,11 +1317,31 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
         .to_hex()
         .to_string();
     let updated = record.updated.as_deref().unwrap_or(record.created.as_str());
-    conn.execute(
-        "INSERT OR REPLACE INTO memory_record (
+    let changed = conn.execute(
+        "INSERT INTO memory_record (
           id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status, confidence,
           source_kind, source_ref, proposal_id, content_hash, created_at, updated_at, supersedes_id, expires_at
-        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+        ON CONFLICT(id) DO UPDATE SET
+          type = excluded.type,
+          lane = excluded.lane,
+          destination = excluded.destination,
+          scope_kind = excluded.scope_kind,
+          scope_id = excluded.scope_id,
+          visibility = excluded.visibility,
+          title = excluded.title,
+          body = excluded.body,
+          status = excluded.status,
+          confidence = excluded.confidence,
+          source_kind = excluded.source_kind,
+          source_ref = excluded.source_ref,
+          proposal_id = excluded.proposal_id,
+          content_hash = excluded.content_hash,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          supersedes_id = excluded.supersedes_id,
+          expires_at = excluded.expires_at
+        WHERE memory_record.destination = 'repo'",
         params![
             record.concept_id,
             record.draft.memory_type.as_str(),
@@ -1354,6 +1363,9 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
             record.expires_at,
         ],
     )?;
+    if changed != 1 {
+        bail!("runtime record identity is already owned by non-repo memory");
+    }
     conn.execute(
         "DELETE FROM memory_path WHERE record_id = ?1",
         [&record.concept_id],
@@ -1639,6 +1651,23 @@ fn optional_string(value: Option<String>, key: &str) -> Result<Option<String>> {
     Ok(Some(trimmed.to_owned()))
 }
 
+fn coalesce_string_aliases(
+    primary: Option<String>,
+    alias: Option<String>,
+    primary_key: &str,
+    alias_key: &str,
+) -> Result<Option<String>> {
+    let primary = optional_string(primary, primary_key)?;
+    let alias = optional_string(alias, alias_key)?;
+    match (primary, alias) {
+        (Some(primary), Some(alias)) if primary != alias => {
+            bail!("{primary_key} and {alias_key} must match when both are present")
+        }
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
 fn parse_required_enum<T>(value: Option<String>, key: &str) -> Result<T>
 where
     T: std::str::FromStr<Err = String>,
@@ -1704,7 +1733,12 @@ fn parse_proposal_metadata(
     ensure_timestampish(&proposed_at, "proposal.proposed_at")?;
     let reason = optional_string(metadata.reason, "proposal.reason")?;
     let confidence = optional_string(metadata.confidence, "proposal.confidence")?;
-    let target = optional_string(metadata.target.or(metadata.target_id), "proposal.target")?;
+    let target = coalesce_string_aliases(
+        metadata.target,
+        metadata.target_id,
+        "proposal.target",
+        "proposal.target_id",
+    )?;
     Ok(OkfProposalMetadata {
         action,
         proposed_by,
@@ -1785,8 +1819,13 @@ fn parse_proposal_scope(
         }
         None => (None, None),
     };
-    let scope_kind = parse_scope(scope_kind.or(scope_kind_from_scope))?;
-    let scope_id = optional_string(scope_id.or(scope_id_from_scope), "scope_id")?;
+    let scope_kind = parse_scope(coalesce_string_aliases(
+        scope_kind,
+        scope_kind_from_scope,
+        "scope_kind",
+        "scope.kind",
+    )?)?;
+    let scope_id = coalesce_string_aliases(scope_id, scope_id_from_scope, "scope_id", "scope.id")?;
     scope_paths.extend(applies_to.unwrap_or_default());
     let applies_to = validate_applies_to(scope_paths)?;
     Ok((scope_kind, scope_id, applies_to))

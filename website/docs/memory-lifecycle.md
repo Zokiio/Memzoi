@@ -164,7 +164,9 @@ separate explicit operation (`apply`, `proposals apply --all-approved`,
 `proposal-files apply`, or the explicit `propose --apply` shortcut). With
 `manual`, proposals remain pending until an explicit approval and apply when no
 per-call `auto` override is supplied (for example, a plain `propose` call).
-`reject` closes a proposal without creating a canonical record.
+`reject` closes a proposal without creating a canonical record. Terminal DB
+proposal states (`applied` and `rejected`) cannot be reopened; repeated
+same-state approval or rejection requests are idempotent.
 
 The Git review rule is:
 
@@ -189,10 +191,19 @@ original content, scope, authorship, target, lineage, proposal ID, and file ID
 do not enter Git history or command output. The receipt frontmatter and filename
 use deterministic hash-only identities, while replay by either original alias
 hashes the lookup and finds the receipt without echoing that alias.
-Repeating an apply verifies the stored resolution against canonical bytes and
-lineage, repairing only missing or stale disposable SQLite rows. Repeating a
-rejection returns the stored resolution without writing again; attempting the
-opposite outcome is refused.
+Repeating an apply verifies create/replacement bytes plus lifecycle status,
+scope, and lineage while treating current target bytes as canonical truth. It
+repairs missing or stale relational rows and full-text index drift
+transactionally. Repeating a rejection returns the stored resolution without
+writing again; attempting the opposite outcome is refused.
+
+List, show, validate, apply, reject, replay, and doctor share one contained
+proposal inventory. The inventory refuses symlinked proposal roots, enforces
+unique file and packet identities across pending and resolved directories, and
+treats an applied or rejected identity as terminal. Session-end and import
+proposal creation reserve those same global identities while holding the repo
+lifecycle lock, so they cannot recreate an already resolved packet under a new
+filename.
 
 File-backed `supersede` and `tombstone` actions must name exactly one target and
 include a reason. Apply accepts only a repo-safe packet whose target still
@@ -205,8 +216,11 @@ reported by the command rolls back the target, replacement set, index, and
 pending packet. A repo lifecycle lock prevents concurrent Memzoi writers, and
 captured canonical hashes reject targets changed after validation. This is not
 a claim of crash-atomicity across SQLite and multiple filesystem renames: after
-process termination or power loss, run `memzoi doctor` and inspect hidden
-transaction artifacts before retrying or repairing from canonical Git truth.
+process termination or power loss, run `memzoi doctor`. It warns about full-text
+index drift and hidden transaction artifacts without exposing unsafe artifact
+identities. Reported cleanup and rollback failures remain errors rather than
+being presented as successful resolutions; inspect the Git-safe roots before
+retrying or repairing from canonical Git truth.
 
 Runtime promotion follows the same boundary: local/session rows are not
 directly promoted to canonical files. To promote an explicit durable finding,

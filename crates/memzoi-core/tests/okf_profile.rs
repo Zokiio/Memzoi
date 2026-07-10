@@ -6,8 +6,8 @@ use std::{
 use memzoi_core::{
     InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryService, MemoryStatus, MemoryType,
     OkfProposalAction, OkfProposalSensitivity, OkfProposalStatus, ScopeKind, Visibility,
-    parse_okf_proposal_markdown, parse_okf_record_file, read_okf_proposal_files,
-    read_okf_record_files,
+    parse_okf_proposal_markdown, parse_okf_record_file, parse_okf_record_markdown,
+    read_okf_proposal_files, read_okf_record_files,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -211,8 +211,8 @@ fn legacy_proposal_without_sensitivity_is_read_as_unknown() -> anyhow::Result<()
 }
 
 #[test]
-fn validates_action_specific_proposal_targets() {
-    let supersede_error = parse_okf_proposal_markdown(
+fn legacy_action_shapes_remain_parseable_for_review() -> anyhow::Result<()> {
+    let supersede = parse_okf_proposal_markdown(
         Path::new("/bundle"),
         Path::new("/bundle/mem_supersede.md"),
         &proposal_markdown(
@@ -223,14 +223,13 @@ fn validates_action_specific_proposal_targets() {
             "supersedes: []",
             "",
         ),
-    )
-    .unwrap_err();
-    assert!(
-        supersede_error.to_string().contains("supersede proposals"),
-        "got {supersede_error:#}"
-    );
+    )?
+    .expect("legacy supersede packet should remain reviewable");
+    assert_eq!(supersede.proposal.action, OkfProposalAction::Supersede);
+    assert!(supersede.supersedes.is_empty());
+    assert!(supersede.proposal.reason.is_none());
 
-    let tombstone_error = parse_okf_proposal_markdown(
+    let tombstone = parse_okf_proposal_markdown(
         Path::new("/bundle"),
         Path::new("/bundle/mem_tombstone.md"),
         &proposal_markdown(
@@ -241,12 +240,190 @@ fn validates_action_specific_proposal_targets() {
             "supersedes: []",
             "",
         ),
-    )
-    .unwrap_err();
-    assert!(
-        tombstone_error.to_string().contains("proposal.target"),
-        "got {tombstone_error:#}"
+    )?
+    .expect("legacy tombstone packet should remain reviewable");
+    assert_eq!(tombstone.proposal.action, OkfProposalAction::Tombstone);
+    assert!(tombstone.proposal.target.is_none());
+    assert!(tombstone.proposal.reason.is_none());
+    Ok(())
+}
+
+#[test]
+fn proposal_aliases_allow_equal_or_legacy_values_and_reject_conflicts() -> anyhow::Result<()> {
+    let legacy_target = proposal_markdown(
+        "tombstone",
+        "semantic",
+        "proposed",
+        "repo-safe",
+        "supersedes: []",
+        "  target_id: semantic/legacy-target\n",
     );
+    let parsed = parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/legacy-target.md"),
+        &legacy_target,
+    )?
+    .expect("target_id-only packet should remain compatible");
+    assert_eq!(
+        parsed.proposal.target.as_deref(),
+        Some("semantic/legacy-target")
+    );
+
+    let equal_targets = legacy_target.replace(
+        "  target_id: semantic/legacy-target\n",
+        "  target: semantic/legacy-target\n  target_id: \" semantic/legacy-target \"\n",
+    );
+    parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/equal-targets.md"),
+        &equal_targets,
+    )?
+    .expect("equal target aliases should parse");
+
+    let conflicting_targets = equal_targets.replace(
+        "target_id: \" semantic/legacy-target \"",
+        "target_id: semantic/other-target",
+    );
+    let error = parse_okf_proposal_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/conflicting-targets.md"),
+        &conflicting_targets,
+    )
+    .expect_err("conflicting target aliases must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("proposal.target and proposal.target_id must match")
+    );
+    assert!(!error.to_string().contains("other-target"));
+
+    for (markdown, expected) in [
+        (
+            proposal_markdown(
+                "create",
+                "semantic",
+                "proposed",
+                "repo-safe",
+                "supersedes: []",
+                "",
+            )
+            .replace(
+                "scope:\n  kind: repo\n",
+                "scope_kind: project\nscope:\n  kind: repo\n",
+            ),
+            "scope_kind and scope.kind must match",
+        ),
+        (
+            proposal_markdown(
+                "create",
+                "semantic",
+                "proposed",
+                "repo-safe",
+                "supersedes: []",
+                "",
+            )
+            .replace(
+                "scope:\n  kind: repo\n",
+                "scope_id: top-level\nscope:\n  kind: repo\n  id: nested\n",
+            ),
+            "scope_id and scope.id must match",
+        ),
+    ] {
+        let error = parse_okf_proposal_markdown(
+            Path::new("/bundle"),
+            Path::new("/bundle/conflicting-scope.md"),
+            &markdown,
+        )
+        .expect_err("conflicting scope aliases must fail");
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+    Ok(())
+}
+
+#[test]
+fn canonical_aliases_are_normalized_and_conflicts_are_rejected() -> anyhow::Result<()> {
+    let markdown = r#"---
+type: fact
+lane: semantic
+title: Alias fixture
+scope: " repo "
+scope_kind: repo
+scope_id: " team-a "
+visibility: repo
+status: active
+confidence: 1.0
+source: " human "
+source_kind: human
+created: 2026-07-01T00:00:00Z
+created_at: " 2026-07-01T00:00:00Z "
+timestamp: 2026-07-01T00:00:00Z
+updated: 2026-07-02T00:00:00Z
+updated_at: " 2026-07-02T00:00:00Z "
+supersedes: old-record
+supersedes_id: " old-record "
+expires: 2099-01-01T00:00:00Z
+expires_at: " 2099-01-01T00:00:00Z "
+---
+
+# Alias fixture
+
+Alias fixture body.
+"#;
+    let parsed = parse_okf_record_markdown(
+        Path::new("/bundle"),
+        Path::new("/bundle/alias-fixture.md"),
+        markdown,
+    )?
+    .expect("equal aliases should parse");
+    assert_eq!(parsed.draft.scope_id.as_deref(), Some("team-a"));
+    assert_eq!(parsed.draft.source_kind.as_deref(), Some("human"));
+
+    for (needle, replacement, expected) in [
+        (
+            "scope_kind: repo",
+            "scope_kind: project",
+            "scope_kind and scope must match",
+        ),
+        (
+            "source_kind: human",
+            "source_kind: agent",
+            "source and source_kind must match",
+        ),
+        (
+            "created_at: \" 2026-07-01T00:00:00Z \"",
+            "created_at: 2026-07-03T00:00:00Z",
+            "created and created_at must match",
+        ),
+        (
+            "timestamp: 2026-07-01T00:00:00Z",
+            "timestamp: 2026-07-03T00:00:00Z",
+            "created and timestamp must match",
+        ),
+        (
+            "updated_at: \" 2026-07-02T00:00:00Z \"",
+            "updated_at: 2026-07-03T00:00:00Z",
+            "updated and updated_at must match",
+        ),
+        (
+            "supersedes_id: \" old-record \"",
+            "supersedes_id: other-record",
+            "supersedes and supersedes_id must match",
+        ),
+        (
+            "expires_at: \" 2099-01-01T00:00:00Z \"",
+            "expires_at: 2098-01-01T00:00:00Z",
+            "expires and expires_at must match",
+        ),
+    ] {
+        let error = parse_okf_record_markdown(
+            Path::new("/bundle"),
+            Path::new("/bundle/alias-fixture.md"),
+            &markdown.replace(needle, replacement),
+        )
+        .expect_err("conflicting aliases must fail");
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+    Ok(())
 }
 
 #[test]
