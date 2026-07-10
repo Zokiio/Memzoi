@@ -899,9 +899,7 @@ pub(crate) fn project_okf_record(record: &OkfRecordFile) -> MemoryRecord {
         source_kind: record.draft.source_kind.clone(),
         source_ref: record.draft.source_ref.clone(),
         proposal_id: record.proposal_id.clone(),
-        content_hash: blake3::hash(record.draft.body.as_bytes())
-            .to_hex()
-            .to_string(),
+        content_hash: crate::import::content_hash(&record.draft.body),
         created_at: record.created.clone(),
         updated_at: record
             .updated
@@ -1313,9 +1311,7 @@ fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
-    let hash = blake3::hash(record.draft.body.as_bytes())
-        .to_hex()
-        .to_string();
+    let hash = crate::import::content_hash(&record.draft.body);
     let updated = record.updated.as_deref().unwrap_or(record.created.as_str());
     let changed = conn.execute(
         "INSERT INTO memory_record (
@@ -1975,6 +1971,7 @@ fn body_without_matching_h1(body: &str, title: &str) -> Result<String> {
 mod tests {
     use std::{collections::BTreeSet, fs, io::ErrorKind, path::Path};
 
+    use rusqlite::Connection;
     use tempfile::TempDir;
 
     use crate::{
@@ -2184,6 +2181,45 @@ Nullable provenance remains nullable.
         assert_eq!(reparsed.draft.source_kind, None);
         assert_eq!(reparsed.draft.source_ref, None);
 
+        Ok(())
+    }
+
+    #[test]
+    fn record_projection_hashes_the_trimmed_body() -> anyhow::Result<()> {
+        let root = Path::new("/bundle/records");
+        let path = root.join("trimmed-hash.md");
+        let mut parsed = super::parse_okf_record_markdown(root, &path, EXAMPLE_MEMORY)?
+            .expect("example record should parse");
+        parsed.draft.body = "\nCanonical body with edge whitespace.\n\n".to_owned();
+
+        let expected_hash = crate::import::content_hash(&parsed.draft.body);
+        let projected = super::project_okf_record(&parsed);
+        assert_eq!(projected.content_hash, expected_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn record_import_hashes_the_stored_trimmed_body() -> anyhow::Result<()> {
+        let root = Path::new("/bundle/records");
+        let path = root.join("trimmed-hash.md");
+        let mut parsed = super::parse_okf_record_markdown(root, &path, EXAMPLE_MEMORY)?
+            .expect("example record should parse");
+        parsed.draft.body = "\nCanonical body with edge whitespace.\n\n".to_owned();
+
+        let expected_body = parsed.draft.body.trim().to_owned();
+        let expected_hash = crate::import::content_hash(&parsed.draft.body);
+        let conn = Connection::open_in_memory()?;
+        crate::init_database(&conn)?;
+        super::import_okf_records(&conn, std::slice::from_ref(&parsed))?;
+        let (stored_body, stored_hash): (String, String) = conn.query_row(
+            "SELECT body, content_hash FROM memory_record WHERE id = ?1",
+            [&parsed.concept_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        assert_eq!(stored_body, expected_body);
+        assert_eq!(stored_hash, expected_hash);
+        assert_eq!(stored_hash, crate::import::content_hash(&stored_body));
         Ok(())
     }
 
