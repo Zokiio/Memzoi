@@ -109,6 +109,7 @@ The documentation site covers installation, memory lifecycle, recall, prechecks,
 - [MCP and agent integration](website/docs/mcp-and-agent-integration.md)
 - [Reference](website/docs/reference.md)
 - [Development](website/docs/development.md)
+- [Product roadmap](docs/roadmap.md)
 
 Run the docs site locally:
 
