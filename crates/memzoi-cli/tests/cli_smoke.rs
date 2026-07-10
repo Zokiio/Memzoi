@@ -2229,6 +2229,197 @@ fn non_repo_safe_rejection_receipt_hashes_target_lineage_and_proposal_authorship
 }
 
 #[test]
+fn reintroduced_pending_packet_cannot_reverse_a_resolved_outcome() {
+    let rejected_repo = initialized_temp_repo();
+    let proposal = valid_proposal_markdown();
+    write_pending_proposal_file(rejected_repo.path(), "valid-proposal.md", proposal.clone());
+    run_json_command(
+        rejected_repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Reviewed rejection remains final.",
+            "--json",
+        ],
+    );
+    write_pending_proposal_file(rejected_repo.path(), "valid-proposal.md", proposal.clone());
+    let rejected_then_apply = run_command_failure_stderr(
+        rejected_repo.path(),
+        &["proposal-files", "apply", "mem_test_valid"],
+    );
+    assert!(
+        rejected_then_apply.contains("reintroduces resolved identity")
+            && rejected_then_apply.contains("already rejected"),
+        "unexpected contradictory apply error: {rejected_then_apply}"
+    );
+    assert!(
+        !rejected_repo
+            .path()
+            .join(".memzoi/records/valid-proposal.md")
+            .exists()
+    );
+
+    let applied_repo = initialized_temp_repo();
+    write_pending_proposal_file(applied_repo.path(), "valid-proposal.md", proposal.clone());
+    run_json_command(
+        applied_repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    let record_path = applied_repo
+        .path()
+        .join(".memzoi/records/valid-proposal.md");
+    let record_before = fs::read(&record_path).expect("read applied record");
+    write_pending_proposal_file(applied_repo.path(), "valid-proposal.md", proposal);
+    let applied_then_reject = run_command_failure_stderr(
+        applied_repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "A stale branch must not reverse apply.",
+        ],
+    );
+    assert!(
+        applied_then_reject.contains("reintroduces resolved identity")
+            && applied_then_reject.contains("already applied"),
+        "unexpected contradictory reject error: {applied_then_reject}"
+    );
+    assert_eq!(
+        fs::read(&record_path).expect("read record after refused rejection"),
+        record_before
+    );
+    assert!(
+        !applied_repo
+            .path()
+            .join(".memzoi/proposals/resolved/rejected/valid-proposal.md")
+            .exists()
+    );
+}
+
+#[test]
+fn proposal_file_apply_detects_duplicate_pending_identity_even_by_unique_file_slug() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    write_pending_proposal_file(repo.path(), "duplicate-slug.md", valid_proposal_markdown());
+
+    let error =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "valid-proposal"]);
+    assert!(
+        error.contains("duplicate pending proposal identity") && error.contains("mem_test_valid"),
+        "unexpected duplicate identity error: {error}"
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".memzoi/records/valid-proposal.md")
+            .exists()
+    );
+}
+
+#[test]
+fn applied_replay_repairs_missing_and_stale_derived_rows_from_canonical_truth() {
+    let repo = initialized_temp_repo();
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+
+    {
+        let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
+        conn.execute("DELETE FROM memory_record WHERE id = 'valid-proposal'", [])
+            .expect("delete derived row");
+    }
+    let repaired_missing = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repaired_missing["already_resolved"], true);
+    assert_eq!(repaired_missing["runtime_index_updated"], true);
+    let search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    assert_eq!(record_ids_from_json(&search), vec!["valid-proposal"]);
+
+    {
+        let conn = Connection::open(test_paths(repo.path()).db_path).expect("open runtime db");
+        conn.execute(
+            "UPDATE memory_record SET body = 'stale derived bytes' WHERE id = 'valid-proposal'",
+            [],
+        )
+        .expect("stale derived row");
+    }
+    let repaired_stale = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(repaired_stale["runtime_index_updated"], true);
+    let already_current = run_json_command(
+        repo.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    assert_eq!(already_current["already_resolved"], true);
+    assert_eq!(already_current["runtime_index_updated"], false);
+}
+
+#[test]
+fn applied_replay_refuses_missing_or_changed_canonical_truth() {
+    let missing = initialized_temp_repo();
+    write_pending_proposal_file(
+        missing.path(),
+        "valid-proposal.md",
+        valid_proposal_markdown(),
+    );
+    run_json_command(
+        missing.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    fs::remove_file(missing.path().join(".memzoi/records/valid-proposal.md"))
+        .expect("remove canonical record");
+    let missing_error = run_command_failure_stderr(
+        missing.path(),
+        &["proposal-files", "apply", "mem_test_valid"],
+    );
+    assert!(
+        missing_error.contains("canonical drift") && missing_error.contains("valid-proposal"),
+        "unexpected missing canonical error: {missing_error}"
+    );
+
+    let changed = initialized_temp_repo();
+    write_pending_proposal_file(
+        changed.path(),
+        "valid-proposal.md",
+        valid_proposal_markdown(),
+    );
+    run_json_command(
+        changed.path(),
+        &["proposal-files", "apply", "mem_test_valid", "--json"],
+    );
+    let record_path = changed.path().join(".memzoi/records/valid-proposal.md");
+    let changed_bytes = fs::read_to_string(&record_path)
+        .expect("read canonical record")
+        .replace(
+            "This proposal body is valid.",
+            "Human-edited canonical bytes after resolution.",
+        );
+    fs::write(&record_path, &changed_bytes).expect("change canonical bytes");
+    let changed_error = run_command_failure_stderr(
+        changed.path(),
+        &["proposal-files", "apply", "mem_test_valid"],
+    );
+    assert!(
+        changed_error.contains("canonical byte drift"),
+        "unexpected changed canonical error: {changed_error}"
+    );
+    assert_eq!(
+        fs::read_to_string(&record_path).expect("read changed canonical after replay"),
+        changed_bytes,
+        "replay must not overwrite changed canonical truth"
+    );
+}
+
+#[test]
 fn import_plan_and_apply_mixed_destinations_preserve_boundaries() {
     let repo = initialized_temp_repo();
     let repo_path = repo.path();
@@ -3135,6 +3326,63 @@ fn proposal_files_validate_rejects_invalid_target_shapes_and_states_before_mutat
             .expect("serialize errors")
             .contains("must include proposal.reason"),
         "{invalid}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn proposal_file_target_cannot_escape_records_root_through_symlinked_directory() {
+    let repo = initialized_temp_repo();
+    let outside = tempfile::tempdir().expect("outside records directory");
+    let outside_record = outside.path().join("victim.md");
+    fs::write(
+        &outside_record,
+        r#"---
+type: decision
+lane: semantic
+title: Outside victim
+description: Outside canonical-looking bytes must never be mutated.
+timestamp: 2026-07-01T00:00:00Z
+updated: 2026-07-01T00:00:00Z
+status: active
+scope: repo
+visibility: repo
+confidence: 1
+source: human
+source_ref: evidence://outside
+---
+
+# Outside victim
+
+Outside canonical-looking bytes must never be mutated.
+"#,
+    )
+    .expect("write outside record");
+    let outside_before = fs::read(&outside_record).expect("read outside bytes");
+    let records_root = test_paths(repo.path()).records_dir();
+    std::os::unix::fs::symlink(outside.path(), records_root.join("linked"))
+        .expect("create symlinked records directory");
+
+    write_pending_proposal_file(
+        repo.path(),
+        "valid-proposal.md",
+        proposal_markdown_with(
+            "semantic",
+            "tombstone",
+            "supersedes: []",
+            "  target: linked/victim\n",
+        ),
+    );
+    let error =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        error.contains("target does not exist") || error.contains("unsafe"),
+        "unexpected symlink target error: {error}"
+    );
+    assert_eq!(
+        fs::read(&outside_record).expect("read outside bytes after apply"),
+        outside_before,
+        "file-backed lifecycle apply escaped the canonical records root"
     );
 }
 

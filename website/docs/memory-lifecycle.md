@@ -181,10 +181,14 @@ packet output identifies the proposal that authorized the canonical change.
 
 To close a packet without a canonical write, run
 `memzoi proposal-files reject <proposal-id> --reason "..."`. Rejection moves
-the packet to `.memzoi/proposals/resolved/rejected/` with the reviewer,
-timestamp, outcome, and reason embedded in its frontmatter. Repeating the same
-apply or reject command returns the stored resolution without writing again;
-attempting the opposite outcome is refused.
+a repo-safe packet to `.memzoi/proposals/resolved/rejected/` with the reviewer,
+timestamp, outcome, and reason embedded in its frontmatter. A non-repo-safe
+packet is replaced there by a create-shaped hash receipt so its original
+content, scope, authorship, target, and lineage do not enter Git history.
+Repeating an apply verifies the stored resolution against canonical bytes and
+lineage, repairing only missing or stale disposable SQLite rows. Repeating a
+rejection returns the stored resolution without writing again; attempting the
+opposite outcome is refused.
 
 File-backed `supersede` and `tombstone` actions must name exactly one target and
 include a reason. Apply accepts only a repo-safe packet whose target still
@@ -193,7 +197,12 @@ updated after `proposal.proposed_at`. Supersede retains the old evidence as a
 `superseded` record and creates an active replacement with explicit lineage.
 Tombstone retains the target evidence as a `tombstoned` record while the
 resolved packet preserves the reason. Any validation, file, or index failure
-leaves the target, replacement set, index, and pending packet unchanged.
+reported by the command rolls back the target, replacement set, index, and
+pending packet. A repo lifecycle lock prevents concurrent Memzoi writers, and
+captured canonical hashes reject targets changed after validation. This is not
+a claim of crash-atomicity across SQLite and multiple filesystem renames: after
+process termination or power loss, run `memzoi doctor` and inspect hidden
+transaction artifacts before retrying or repairing from canonical Git truth.
 
 Runtime promotion follows the same boundary: local/session rows are not
 directly promoted to canonical files. To promote an explicit durable finding,

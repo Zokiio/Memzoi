@@ -1166,10 +1166,13 @@ fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         if is_hidden(&path) {
             continue;
         }
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_markdown_files(&path, files)?;
-        } else if metadata.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
         {
             files.push(path);
         }
@@ -1367,7 +1370,7 @@ fn strip_md_extension(path: &Path) -> PathBuf {
     output
 }
 
-fn validate_concept_id(concept: &str) -> Result<()> {
+pub(crate) fn validate_concept_id(concept: &str) -> Result<()> {
     if concept.is_empty() {
         bail!("OKF concept id cannot be empty");
     }

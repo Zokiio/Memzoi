@@ -4,7 +4,7 @@ use std::{
     fs::OpenOptions,
     io::ErrorKind,
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     str::FromStr,
     sync::Arc,
 };
@@ -195,6 +195,7 @@ struct CanonicalFileWrite {
     path: PathBuf,
     markdown: String,
     mode: FileWriteMode,
+    expected_existing_hash: Option<String>,
 }
 
 #[derive(Debug)]
@@ -202,7 +203,19 @@ struct StagedCanonicalFileWrite {
     path: PathBuf,
     temp_path: PathBuf,
     backup_path: Option<PathBuf>,
+    mode: FileWriteMode,
+    expected_existing_hash: Option<String>,
     installed: bool,
+}
+
+#[derive(Debug)]
+struct FileProposalInventoryEntry {
+    proposal: OkfProposalFile,
+    path: PathBuf,
+}
+
+struct RepoLifecycleLock {
+    _file: fs::File,
 }
 
 impl MemoryService {
@@ -348,11 +361,12 @@ impl MemoryService {
     }
 
     pub fn apply_proposal(&self, proposal_id: &str, actor: &str) -> Result<MemoryRecord> {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let tx = self.conn.unchecked_transaction()?;
         let record = proposals::apply_proposal(&tx, proposal_id, actor)?;
         let write =
             self.prepare_record_file_write_with_conn(&tx, &record, FileWriteMode::CreateNew)?;
-        commit_db_and_canonical_writes(tx, &[write])?;
+        commit_db_and_canonical_writes(&self.paths, tx, &[write])?;
         Ok(record)
     }
 
@@ -362,8 +376,10 @@ impl MemoryService {
         actor: &str,
     ) -> Result<FileProposalResolutionResult> {
         validate_resolution_actor(actor)?;
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let proposal_path = proposal_path.as_ref();
         let proposal = self.load_pending_file_proposal(proposal_path)?;
+        self.validate_fresh_file_proposal_identity(&proposal)?;
         let resolved_at = expiry::format_timestamp(self.now())?;
         let plan = self.build_file_proposal_apply_plan(&proposal, &resolved_at)?;
         let resolution = OkfProposalResolution {
@@ -380,7 +396,7 @@ impl MemoryService {
             .join("resolved")
             .join("applied")
             .join(format!("{}.md", proposal.file_id));
-        ensure_path_absent(&resolved_path, "resolved proposal packet")?;
+        self.prepare_resolution_destination(&resolved_path)?;
 
         let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
         let nonce = Uuid::now_v7().to_string();
@@ -435,6 +451,9 @@ impl MemoryService {
         let mut pending_moved = false;
         let mut resolved_installed = false;
         let install_result = (|| -> Result<()> {
+            for write in &staged_writes {
+                validate_canonical_write_precondition(&self.paths, write)?;
+            }
             fs::rename(proposal_path, &pending_backup).with_context(|| {
                 format!(
                     "failed to stage pending proposal {} for resolution",
@@ -442,13 +461,8 @@ impl MemoryService {
                 )
             })?;
             pending_moved = true;
-            install_staged_canonical_writes(&mut staged_writes, |_| Ok(()))?;
-            fs::rename(&resolved_temp, &resolved_path).with_context(|| {
-                format!(
-                    "failed to install resolved proposal {}",
-                    resolved_path.display()
-                )
-            })?;
+            install_staged_canonical_writes(&self.paths, &mut staged_writes, |_| Ok(()))?;
+            install_staged_file_no_replace(&resolved_temp, &resolved_path)?;
             resolved_installed = true;
             Ok(())
         })();
@@ -495,6 +509,410 @@ impl MemoryService {
     pub fn validate_file_proposal(&self, proposal: &OkfProposalFile) -> Result<()> {
         self.build_file_proposal_apply_plan(proposal, &expiry::format_timestamp(self.now())?)?;
         Ok(())
+    }
+
+    pub fn replay_file_proposal(
+        &self,
+        proposal_identity: &str,
+        requested_outcome: OkfProposalOutcome,
+        actor: &str,
+    ) -> Result<FileProposalResolutionResult> {
+        validate_resolution_actor(actor)?;
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        let pending = self.load_pending_file_proposal_inventory()?;
+        let resolved = self.load_resolved_file_proposal_inventory()?;
+        validate_unique_proposal_identities(&pending, "pending")?;
+        validate_unique_proposal_identities(&resolved, "resolved")?;
+        validate_no_cross_state_identity_collisions(&pending, &resolved)?;
+
+        let matches = resolved
+            .iter()
+            .filter(|entry| proposal_matches_identity(&entry.proposal, proposal_identity))
+            .collect::<Vec<_>>();
+        let entry = match matches.as_slice() {
+            [] => bail!("proposal file not found: {proposal_identity}"),
+            [entry] => *entry,
+            _ => bail!(
+                "proposal file identity {proposal_identity:?} matched multiple resolved packets"
+            ),
+        };
+        let resolution = entry
+            .proposal
+            .resolution
+            .clone()
+            .context("resolved proposal is missing resolution metadata")?;
+        if resolution.outcome != requested_outcome {
+            bail!(
+                "proposal file {} is already resolved as {}; cannot resolve as {}",
+                entry.proposal.id,
+                resolution.outcome.as_str(),
+                requested_outcome.as_str()
+            );
+        }
+
+        if requested_outcome == OkfProposalOutcome::Rejected {
+            return Ok(FileProposalResolutionResult {
+                proposal: entry.proposal.clone(),
+                resolution,
+                resolved_path: entry.path.clone(),
+                record: None,
+                record_path: None,
+                already_resolved: true,
+                runtime_index_updated: false,
+            });
+        }
+
+        let (canonical_records, primary_index) =
+            self.validate_resolved_apply_canonical_truth(&entry.proposal, &resolution)?;
+        let mut runtime_index_updated = false;
+        for canonical in &canonical_records {
+            if !self.indexed_record_matches_canonical(canonical)? {
+                let tx = self.conn.unchecked_transaction()?;
+                okf::import_okf_records(&tx, &canonical_records)?;
+                append_event(
+                    &tx,
+                    AppendEvent {
+                        event_type: "proposal_file.index_repaired".to_owned(),
+                        actor: actor.trim().to_owned(),
+                        payload: json!({
+                            "proposal_id": entry.proposal.id,
+                            "file_id": entry.proposal.file_id,
+                            "record_ids": canonical_records
+                                .iter()
+                                .map(|record| record.concept_id.as_str())
+                                .collect::<Vec<_>>(),
+                            "resolved_path": entry.path,
+                        }),
+                        record_id: resolution.record_id.clone(),
+                        proposal_id: Some(entry.proposal.id.clone()),
+                    },
+                )?;
+                tx.commit()?;
+                runtime_index_updated = true;
+                break;
+            }
+        }
+
+        let canonical = &canonical_records[primary_index];
+        let record = okf::project_okf_record(canonical);
+        let record_path = self.canonical_record_path(&record.id)?;
+        Ok(FileProposalResolutionResult {
+            proposal: entry.proposal.clone(),
+            resolution,
+            resolved_path: entry.path.clone(),
+            record: Some(record),
+            record_path: Some(record_path),
+            already_resolved: true,
+            runtime_index_updated,
+        })
+    }
+
+    fn validate_fresh_file_proposal_identity(&self, proposal: &OkfProposalFile) -> Result<()> {
+        let pending = self.load_pending_file_proposal_inventory()?;
+        let resolved = self.load_resolved_file_proposal_inventory()?;
+        validate_unique_proposal_identities(&pending, "pending")?;
+        validate_unique_proposal_identities(&resolved, "resolved")?;
+        validate_no_cross_state_identity_collisions(&pending, &resolved)?;
+        if resolved
+            .iter()
+            .any(|entry| proposals_share_identity(proposal, &entry.proposal))
+        {
+            bail!("pending proposal {} is already resolved", proposal.id);
+        }
+        Ok(())
+    }
+
+    fn load_pending_file_proposal_inventory(&self) -> Result<Vec<FileProposalInventoryEntry>> {
+        let pending_root = self.paths.proposals_dir().join("pending");
+        if !pending_root.try_exists()? {
+            return Ok(Vec::new());
+        }
+        ensure_safe_directory(
+            &self.paths.project_root,
+            &pending_root,
+            false,
+            "pending proposal root",
+        )?;
+        let mut entries = Vec::new();
+        for proposal in okf::read_okf_proposal_files(&pending_root)? {
+            if proposal.status != crate::OkfProposalStatus::Proposed
+                || proposal.resolution.is_some()
+            {
+                bail!("pending proposal {} must be unresolved", proposal.id);
+            }
+            let path = pending_root.join(format!("{}.md", proposal.file_id));
+            ensure_safe_existing_file(
+                &self.paths.project_root,
+                &pending_root,
+                &path,
+                "pending proposal",
+            )?;
+            entries.push(FileProposalInventoryEntry { proposal, path });
+        }
+        Ok(entries)
+    }
+
+    fn load_resolved_file_proposal_inventory(&self) -> Result<Vec<FileProposalInventoryEntry>> {
+        let proposals_root = self.paths.proposals_dir();
+        let resolved_root = proposals_root.join("resolved");
+        if !resolved_root.try_exists()? {
+            return Ok(Vec::new());
+        }
+        ensure_safe_directory(
+            &self.paths.project_root,
+            &resolved_root,
+            false,
+            "resolved proposal root",
+        )
+        .context("failed to inspect resolved proposal packet")?;
+        let mut entries = Vec::new();
+        for (directory, expected_status, expected_outcome) in [
+            (
+                "applied",
+                crate::OkfProposalStatus::Applied,
+                OkfProposalOutcome::Applied,
+            ),
+            (
+                "rejected",
+                crate::OkfProposalStatus::Rejected,
+                OkfProposalOutcome::Rejected,
+            ),
+        ] {
+            let outcome_root = resolved_root.join(directory);
+            if !outcome_root.try_exists()? {
+                continue;
+            }
+            ensure_safe_directory(
+                &self.paths.project_root,
+                &outcome_root,
+                false,
+                "resolved proposal outcome root",
+            )
+            .context("failed to inspect resolved proposal packet")?;
+            for proposal in okf::read_okf_proposal_files(&outcome_root)? {
+                let resolution = proposal
+                    .resolution
+                    .as_ref()
+                    .context("resolved proposal is missing resolution metadata")?;
+                if proposal.status != expected_status || resolution.outcome != expected_outcome {
+                    bail!(
+                        "resolved proposal {} has outcome inconsistent with {} directory",
+                        proposal.id,
+                        directory
+                    );
+                }
+                let path = outcome_root.join(format!("{}.md", proposal.file_id));
+                ensure_safe_existing_file(
+                    &self.paths.project_root,
+                    &outcome_root,
+                    &path,
+                    "resolved proposal",
+                )?;
+                entries.push(FileProposalInventoryEntry { proposal, path });
+            }
+        }
+        Ok(entries)
+    }
+
+    fn prepare_resolution_destination(&self, path: &Path) -> Result<()> {
+        let proposals_root = self.paths.proposals_dir();
+        ensure_safe_path_parent(
+            &self.paths.project_root,
+            &proposals_root,
+            path,
+            true,
+            "resolved proposal packet",
+        )?;
+        ensure_path_absent(path, "resolved proposal packet")
+    }
+
+    fn validate_resolved_apply_canonical_truth(
+        &self,
+        proposal: &OkfProposalFile,
+        resolution: &OkfProposalResolution,
+    ) -> Result<(Vec<okf::OkfRecordFile>, usize)> {
+        let mut pending_shape = proposal.clone();
+        pending_shape.status = crate::OkfProposalStatus::Proposed;
+        pending_shape.resolution = None;
+        okf::validate_repo_apply_proposal(&pending_shape)?;
+        let record_id = resolution
+            .record_id
+            .as_deref()
+            .context("applied resolution is missing record_id")?;
+
+        match proposal.proposal.action {
+            OkfProposalAction::Create => {
+                if resolution.target_id.is_some() {
+                    bail!(
+                        "resolved create proposal {} unexpectedly names a target",
+                        proposal.id
+                    );
+                }
+                let expected = okf::project_okf_create_proposal(&pending_shape)?;
+                if expected.id != record_id {
+                    bail!(
+                        "resolved proposal {} record lineage drift: expected {}, found {}",
+                        proposal.id,
+                        expected.id,
+                        record_id
+                    );
+                }
+                let (canonical, path, markdown) = self.load_canonical_record(record_id)?;
+                ensure_expected_canonical_bytes(
+                    proposal,
+                    &expected,
+                    &proposal.tags,
+                    &proposal.applies_to,
+                    &path,
+                    &markdown,
+                )?;
+                Ok((vec![canonical], 0))
+            }
+            OkfProposalAction::Supersede => {
+                let target_id = proposal
+                    .supersedes
+                    .first()
+                    .context("resolved supersede proposal is missing target")?;
+                if proposal.supersedes.len() != 1
+                    || resolution.target_id.as_deref() != Some(target_id.as_str())
+                {
+                    bail!(
+                        "resolved supersede proposal {} has inconsistent target lineage",
+                        proposal.id
+                    );
+                }
+                let expected = okf::project_okf_supersede_proposal(&pending_shape, target_id)?;
+                if expected.id != record_id {
+                    bail!(
+                        "resolved proposal {} record lineage drift: expected {}, found {}",
+                        proposal.id,
+                        expected.id,
+                        record_id
+                    );
+                }
+                let (target, _, _) = self.load_canonical_record(target_id)?;
+                if target.status != MemoryStatus::Superseded
+                    || target.draft.scope_kind != proposal.scope_kind
+                    || target.draft.scope_id != proposal.scope_id
+                    || target.updated.as_deref() != Some(resolution.resolved_at.as_str())
+                {
+                    bail!(
+                        "resolved supersede proposal {} has canonical target drift at {}",
+                        proposal.id,
+                        target_id
+                    );
+                }
+                let (replacement, path, markdown) = self.load_canonical_record(record_id)?;
+                ensure_expected_canonical_bytes(
+                    proposal,
+                    &expected,
+                    &proposal.tags,
+                    &proposal.applies_to,
+                    &path,
+                    &markdown,
+                )?;
+                Ok((vec![target, replacement], 1))
+            }
+            OkfProposalAction::Tombstone => {
+                let target_id = proposal
+                    .proposal
+                    .target
+                    .as_deref()
+                    .context("resolved tombstone proposal is missing target")?;
+                if resolution.target_id.as_deref() != Some(target_id) || record_id != target_id {
+                    bail!(
+                        "resolved tombstone proposal {} has inconsistent target lineage",
+                        proposal.id
+                    );
+                }
+                let (target, _, _) = self.load_canonical_record(target_id)?;
+                if target.status != MemoryStatus::Tombstoned
+                    || target.draft.scope_kind != proposal.scope_kind
+                    || target.draft.scope_id != proposal.scope_id
+                    || target.updated.as_deref() != Some(resolution.resolved_at.as_str())
+                {
+                    bail!(
+                        "resolved tombstone proposal {} has canonical target drift at {}",
+                        proposal.id,
+                        target_id
+                    );
+                }
+                Ok((vec![target], 0))
+            }
+        }
+    }
+
+    fn load_canonical_record(
+        &self,
+        record_id: &str,
+    ) -> Result<(okf::OkfRecordFile, PathBuf, String)> {
+        let path = self.canonical_record_path(record_id)?;
+        ensure_regular_file(&path, "canonical memory record").with_context(|| {
+            format!("resolved proposal canonical drift: record {record_id} is missing or unsafe")
+        })?;
+        let markdown = fs::read_to_string(&path).with_context(|| {
+            format!("failed to read canonical memory record {}", path.display())
+        })?;
+        let record = okf::parse_okf_record_markdown(self.paths.records_dir(), &path, &markdown)?
+            .with_context(|| {
+                format!("resolved proposal canonical drift: record {record_id} was ignored")
+            })?;
+        if record.concept_id != record_id {
+            bail!(
+                "resolved proposal canonical drift: expected record {record_id}, found {}",
+                record.concept_id
+            );
+        }
+        Ok((record, path, markdown))
+    }
+
+    fn canonical_record_path(&self, record_id: &str) -> Result<PathBuf> {
+        okf::validate_concept_id(record_id)
+            .with_context(|| format!("invalid canonical record lineage id {record_id:?}"))?;
+        let records_root = self.paths.records_dir();
+        let path = records_root.join(format!("{record_id}.md"));
+        ensure_safe_path_parent(
+            &self.paths.project_root,
+            &records_root,
+            &path,
+            false,
+            "canonical memory record",
+        )
+        .with_context(|| {
+            format!(
+                "failed to inspect canonical memory record {}",
+                path.display()
+            )
+        })?;
+        Ok(path)
+    }
+
+    fn indexed_record_matches_canonical(&self, canonical: &okf::OkfRecordFile) -> Result<bool> {
+        let Some(indexed) = record_by_id(&self.conn, &canonical.concept_id)? else {
+            return Ok(false);
+        };
+        if !repo_record_matches(canonical, &indexed) {
+            return Ok(false);
+        }
+
+        let expected_tags = canonical
+            .draft
+            .tags
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if record_tags(&self.conn, &canonical.concept_id)? != expected_tags {
+            return Ok(false);
+        }
+        let mut expected_paths = canonical.applies_to.clone();
+        expected_paths.sort();
+        let actual_paths = search::load_paths(&self.conn, &canonical.concept_id)?
+            .into_iter()
+            .map(|path| path.path)
+            .collect::<Vec<_>>();
+        Ok(actual_paths == expected_paths)
     }
 
     fn build_file_proposal_apply_plan(
@@ -600,10 +1018,27 @@ impl MemoryService {
     ) -> Result<CanonicalFileWrite> {
         let records_root = self.paths.records_dir();
         let path = records_root.join(format!("{}.md", record.id));
+        ensure_safe_path_parent(
+            &self.paths.project_root,
+            &records_root,
+            &path,
+            false,
+            "canonical memory record",
+        )
+        .with_context(|| {
+            format!(
+                "failed to inspect canonical memory record {}",
+                path.display()
+            )
+        })?;
         match mode {
             FileWriteMode::CreateNew => ensure_path_absent(&path, "canonical memory record")?,
             FileWriteMode::Overwrite => ensure_regular_file(&path, "canonical memory record")?,
         }
+        let expected_existing_hash = match mode {
+            FileWriteMode::CreateNew => None,
+            FileWriteMode::Overwrite => Some(file_content_hash(&path)?),
+        };
         let markdown = okf::render_memory_record_markdown(&record, &tags, &applies_to);
         let record_file = okf::parse_okf_record_markdown(&records_root, &path, &markdown)?
             .context("projected canonical record was ignored")?;
@@ -612,6 +1047,7 @@ impl MemoryService {
             path,
             markdown,
             mode,
+            expected_existing_hash,
         })
     }
 
@@ -665,8 +1101,10 @@ impl MemoryService {
         if reason.is_empty() {
             bail!("proposal-file rejection reason cannot be empty");
         }
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let proposal_path = proposal_path.as_ref();
         let proposal = self.load_pending_file_proposal(proposal_path)?;
+        self.validate_fresh_file_proposal_identity(&proposal)?;
         let mut resolution = OkfProposalResolution {
             outcome: OkfProposalOutcome::Rejected,
             resolved_by: actor.trim().to_owned(),
@@ -688,7 +1126,7 @@ impl MemoryService {
             .join("resolved")
             .join("rejected")
             .join(format!("{}.md", proposal.file_id));
-        ensure_path_absent(&resolved_path, "resolved proposal packet")?;
+        self.prepare_resolution_destination(&resolved_path)?;
         let archived_proposal = okf::proposal_for_rejection_archive(&proposal);
         let resolved_markdown =
             okf::render_resolved_okf_proposal_markdown(&archived_proposal, &resolution)?;
@@ -705,12 +1143,7 @@ impl MemoryService {
             remove_staged_file(&resolved_temp);
             return Err(error);
         }
-        if let Err(error) = fs::rename(&resolved_temp, &resolved_path).with_context(|| {
-            format!(
-                "failed to install rejected proposal {}",
-                resolved_path.display()
-            )
-        }) {
+        if let Err(error) = install_staged_file_no_replace(&resolved_temp, &resolved_path) {
             let _ = fs::rename(&pending_backup, proposal_path);
             remove_staged_file(&resolved_temp);
             return Err(error);
@@ -730,25 +1163,12 @@ impl MemoryService {
 
     fn load_pending_file_proposal(&self, proposal_path: &Path) -> Result<OkfProposalFile> {
         let pending_root = self.paths.proposals_dir().join("pending");
-        proposal_path.strip_prefix(&pending_root).with_context(|| {
-            format!(
-                "proposal path {} is not under pending proposal root {}",
-                proposal_path.display(),
-                pending_root.display()
-            )
-        })?;
-        let metadata = fs::symlink_metadata(proposal_path).with_context(|| {
-            format!(
-                "failed to inspect pending proposal {}",
-                proposal_path.display()
-            )
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!(
-                "pending proposal path must be a regular file: {}",
-                proposal_path.display()
-            );
-        }
+        ensure_safe_existing_file(
+            &self.paths.project_root,
+            &pending_root,
+            proposal_path,
+            "pending proposal",
+        )?;
         let proposal = okf::parse_okf_proposal_file(&pending_root, proposal_path)?
             .with_context(|| format!("pending proposal {} was ignored", proposal_path.display()))?;
         if proposal.status != crate::OkfProposalStatus::Proposed || proposal.resolution.is_some() {
@@ -778,6 +1198,7 @@ impl MemoryService {
         BeforeInstall: FnMut(usize) -> Result<()>,
         BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
     {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let tx = self.conn.unchecked_transaction()?;
         let target = record_by_id(&tx, record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -803,6 +1224,7 @@ impl MemoryService {
             FileWriteMode::CreateNew,
         )?;
         commit_db_and_canonical_writes_with_hooks(
+            &self.paths,
             tx,
             &[previous_write, replacement_write],
             before_install,
@@ -817,6 +1239,7 @@ impl MemoryService {
         actor: &str,
         reason: &str,
     ) -> Result<MemoryRecord> {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let tx = self.conn.unchecked_transaction()?;
         let target = record_by_id(&tx, record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -824,7 +1247,7 @@ impl MemoryService {
         let record = proposals::tombstone_record(&tx, record_id, actor, reason)?;
         let write =
             self.prepare_record_file_write_with_conn(&tx, &record, FileWriteMode::Overwrite)?;
-        commit_db_and_canonical_writes(tx, &[write])?;
+        commit_db_and_canonical_writes(&self.paths, tx, &[write])?;
         Ok(record)
     }
 
@@ -1305,6 +1728,7 @@ impl MemoryService {
     }
 
     pub fn rebuild_paths(paths: MemoryPaths) -> Result<RebuildResult> {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
         let records_root = paths.records_dir();
         let records = okf::read_okf_record_files(&records_root)?;
         guard_no_open_proposals(&paths.db_path)?;
@@ -1378,6 +1802,290 @@ fn blocked_session_end_result(document: SessionEndDocument) -> SessionEndResult 
         task: document.task.trim().to_owned(),
         candidates,
     }
+}
+
+impl RepoLifecycleLock {
+    fn acquire(paths: &MemoryPaths) -> Result<Self> {
+        fs::create_dir_all(&paths.runtime_dir).with_context(|| {
+            format!(
+                "failed to create runtime directory {}",
+                paths.runtime_dir.display()
+            )
+        })?;
+        let lock_path = paths.runtime_dir.join("repo-lifecycle.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open lifecycle lock {}", lock_path.display()))?;
+        file.try_lock().with_context(|| {
+            format!(
+                "another repo lifecycle operation is in progress; retry after {} is unlocked",
+                lock_path.display()
+            )
+        })?;
+        Ok(Self { _file: file })
+    }
+}
+
+fn proposal_matches_identity(proposal: &OkfProposalFile, identity: &str) -> bool {
+    proposal.id == identity || proposal.file_id == identity
+}
+
+fn proposal_identities(proposal: &OkfProposalFile) -> BTreeSet<&str> {
+    [proposal.id.as_str(), proposal.file_id.as_str()]
+        .into_iter()
+        .collect()
+}
+
+fn proposals_share_identity(left: &OkfProposalFile, right: &OkfProposalFile) -> bool {
+    !proposal_identities(left).is_disjoint(&proposal_identities(right))
+}
+
+fn validate_unique_proposal_identities(
+    entries: &[FileProposalInventoryEntry],
+    state: &str,
+) -> Result<()> {
+    let mut identities = BTreeMap::<&str, &Path>::new();
+    for entry in entries {
+        for identity in proposal_identities(&entry.proposal) {
+            if let Some(previous) = identities.insert(identity, &entry.path)
+                && previous != entry.path
+            {
+                bail!(
+                    "duplicate {state} proposal identity {identity:?} in {} and {}",
+                    previous.display(),
+                    entry.path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_no_cross_state_identity_collisions(
+    pending: &[FileProposalInventoryEntry],
+    resolved: &[FileProposalInventoryEntry],
+) -> Result<()> {
+    for pending_entry in pending {
+        for resolved_entry in resolved {
+            let overlap = proposal_identities(&pending_entry.proposal)
+                .intersection(&proposal_identities(&resolved_entry.proposal))
+                .next()
+                .copied();
+            if let Some(identity) = overlap {
+                let outcome = resolved_entry
+                    .proposal
+                    .resolution
+                    .as_ref()
+                    .context("resolved proposal is missing resolution metadata")?
+                    .outcome;
+                bail!(
+                    "pending proposal {} reintroduces resolved identity {identity:?} already {} at {}",
+                    pending_entry.path.display(),
+                    outcome.as_str(),
+                    resolved_entry.path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_expected_canonical_bytes(
+    proposal: &OkfProposalFile,
+    expected: &MemoryRecord,
+    tags: &[String],
+    applies_to: &[String],
+    path: &Path,
+    actual_markdown: &str,
+) -> Result<()> {
+    let expected_markdown = okf::render_memory_record_markdown(expected, tags, applies_to);
+    if actual_markdown != expected_markdown {
+        bail!(
+            "resolved proposal {} canonical byte drift at {}",
+            proposal.id,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_safe_directory(
+    project_root: &Path,
+    directory: &Path,
+    create_missing: bool,
+    label: &str,
+) -> Result<()> {
+    ensure_directory_chain(project_root, directory, create_missing, label)?;
+    let canonical_project = fs::canonicalize(project_root).with_context(|| {
+        format!(
+            "failed to canonicalize project root {}",
+            project_root.display()
+        )
+    })?;
+    let canonical_directory = fs::canonicalize(directory)
+        .with_context(|| format!("failed to canonicalize {label} {}", directory.display()))?;
+    if !canonical_directory.starts_with(&canonical_project) {
+        bail!("{label} escapes project root: {}", directory.display());
+    }
+    Ok(())
+}
+
+fn ensure_directory_chain(
+    root: &Path,
+    directory: &Path,
+    create_missing: bool,
+    label: &str,
+) -> Result<()> {
+    let relative = directory.strip_prefix(root).with_context(|| {
+        format!(
+            "{label} {} is not under trusted root {}",
+            directory.display(),
+            root.display()
+        )
+    })?;
+    let root_metadata = fs::symlink_metadata(root)
+        .with_context(|| format!("failed to inspect trusted root {}", root.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        bail!("trusted root must be a real directory: {}", root.display());
+    }
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            bail!("{label} path contains traversal or an unsafe component");
+        };
+        current.push(component);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound && create_missing => {
+                fs::create_dir(&current).with_context(|| {
+                    format!("failed to create {label} directory {}", current.display())
+                })?;
+                fs::symlink_metadata(&current)?
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {label} {}", current.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!(
+                "{label} ancestor must be a real directory: {}",
+                current.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ensure_safe_path_parent(
+    project_root: &Path,
+    trusted_root: &Path,
+    path: &Path,
+    create_missing_parent: bool,
+    label: &str,
+) -> Result<()> {
+    ensure_safe_directory(project_root, trusted_root, false, label)?;
+    let relative = path.strip_prefix(trusted_root).with_context(|| {
+        format!(
+            "{label} {} is not under trusted root {}",
+            path.display(),
+            trusted_root.display()
+        )
+    })?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!("{label} path contains traversal or an unsafe component");
+    }
+    let parent = path.parent().context("safe destination has no parent")?;
+    ensure_directory_chain(trusted_root, parent, create_missing_parent, label)?;
+    let canonical_root = fs::canonicalize(trusted_root).with_context(|| {
+        format!(
+            "failed to canonicalize trusted root {}",
+            trusted_root.display()
+        )
+    })?;
+    let canonical_parent = fs::canonicalize(parent)
+        .with_context(|| format!("failed to canonicalize {label} parent {}", parent.display()))?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        bail!(
+            "{label} destination escapes trusted root: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_safe_existing_file(
+    project_root: &Path,
+    trusted_root: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<()> {
+    ensure_safe_path_parent(project_root, trusted_root, path, false, label)?;
+    ensure_regular_file(path, label)
+}
+
+fn file_content_hash(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn validate_canonical_write_precondition(
+    paths: &MemoryPaths,
+    write: &StagedCanonicalFileWrite,
+) -> Result<()> {
+    let records_root = paths.records_dir();
+    ensure_safe_path_parent(
+        &paths.project_root,
+        &records_root,
+        &write.path,
+        false,
+        "canonical memory record",
+    )?;
+    match write.mode {
+        FileWriteMode::CreateNew => ensure_path_absent(&write.path, "canonical memory record"),
+        FileWriteMode::Overwrite => {
+            ensure_regular_file(&write.path, "canonical memory record")?;
+            let expected = write
+                .expected_existing_hash
+                .as_deref()
+                .context("overwrite write is missing captured canonical hash")?;
+            let actual = file_content_hash(&write.path)?;
+            if actual != expected {
+                bail!(
+                    "canonical target changed after validation: {}",
+                    write.path.display()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn install_staged_file_no_replace(staged: &Path, destination: &Path) -> Result<()> {
+    fs::hard_link(staged, destination).with_context(|| {
+        format!(
+            "failed to install {} without replacing an existing file",
+            destination.display()
+        )
+    })?;
+    if let Err(error) = fs::remove_file(staged) {
+        let _ = fs::remove_file(destination);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to finalize no-replace install {}",
+                destination.display()
+            )
+        });
+    }
+    Ok(())
 }
 
 fn repo_record_matches(canonical: &okf::OkfRecordFile, indexed: &MemoryRecord) -> bool {
@@ -1526,6 +2234,8 @@ fn stage_canonical_writes(
             path: write.path.clone(),
             temp_path,
             backup_path,
+            mode: write.mode,
+            expected_existing_hash: write.expected_existing_hash.clone(),
             installed: false,
         });
     }
@@ -1533,6 +2243,7 @@ fn stage_canonical_writes(
 }
 
 fn install_staged_canonical_writes<BeforeInstall>(
+    paths: &MemoryPaths,
     writes: &mut [StagedCanonicalFileWrite],
     mut before_install: BeforeInstall,
 ) -> Result<()>
@@ -1541,7 +2252,9 @@ where
 {
     for (index, write) in writes.iter_mut().enumerate() {
         before_install(index)?;
+        validate_canonical_write_precondition(paths, write)?;
         if let Some(backup_path) = &write.backup_path {
+            validate_canonical_write_precondition(paths, write)?;
             fs::rename(&write.path, backup_path).with_context(|| {
                 format!(
                     "failed to stage canonical memory record {}",
@@ -1549,8 +2262,16 @@ where
                 )
             })?;
         }
-        fs::rename(&write.temp_path, &write.path)
-            .with_context(|| format!("failed to install memory record {}", write.path.display()))?;
+        match write.mode {
+            FileWriteMode::CreateNew => {
+                install_staged_file_no_replace(&write.temp_path, &write.path)?;
+            }
+            FileWriteMode::Overwrite => {
+                fs::rename(&write.temp_path, &write.path).with_context(|| {
+                    format!("failed to install memory record {}", write.path.display())
+                })?;
+            }
+        }
         write.installed = true;
     }
     Ok(())
@@ -1581,13 +2302,15 @@ fn finalize_staged_canonical_writes(writes: &[StagedCanonicalFileWrite]) {
 }
 
 fn commit_db_and_canonical_writes(
+    paths: &MemoryPaths,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
 ) -> Result<()> {
-    commit_db_and_canonical_writes_with_hooks(tx, writes, |_| Ok(()), |_| Ok(()))
+    commit_db_and_canonical_writes_with_hooks(paths, tx, writes, |_| Ok(()), |_| Ok(()))
 }
 
 fn commit_db_and_canonical_writes_with_hooks<BeforeInstall, BeforeCommit>(
+    paths: &MemoryPaths,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
     before_install: BeforeInstall,
@@ -1599,7 +2322,7 @@ where
 {
     let nonce = Uuid::now_v7().to_string();
     let mut staged = stage_canonical_writes(writes, &nonce)?;
-    if let Err(error) = install_staged_canonical_writes(&mut staged, before_install) {
+    if let Err(error) = install_staged_canonical_writes(paths, &mut staged, before_install) {
         rollback_staged_canonical_writes(&mut staged);
         return Err(error);
     }
@@ -2147,6 +2870,68 @@ mod tests {
     use super::*;
     use crate::{MemoryLane, MemoryStatus, MemoryType, ProposalStatus, ScopeKind, Visibility};
     use tempfile::TempDir;
+
+    #[test]
+    fn repo_lifecycle_lock_refuses_concurrent_mutation() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let _first = RepoLifecycleLock::acquire(&service.paths)?;
+        let error = RepoLifecycleLock::acquire(&service.paths)
+            .err()
+            .context("second lifecycle lock should be refused")?;
+        assert!(
+            error
+                .to_string()
+                .contains("another repo lifecycle operation is in progress"),
+            "unexpected lock contention error: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_canonical_target_fails_captured_hash_revalidation() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let path = service.paths.records_dir().join("captured-target.md");
+        fs::write(&path, "original canonical bytes")?;
+        let staged = path.with_file_name(".captured-target.write.tmp");
+        fs::write(&staged, "replacement bytes")?;
+        let write = StagedCanonicalFileWrite {
+            path: path.clone(),
+            temp_path: staged,
+            backup_path: Some(path.with_file_name(".captured-target.backup.tmp")),
+            mode: FileWriteMode::Overwrite,
+            expected_existing_hash: Some(file_content_hash(&path)?),
+            installed: false,
+        };
+        fs::write(&path, "concurrent human edit")?;
+
+        let error = validate_canonical_write_precondition(&service.paths, &write)
+            .expect_err("changed target must fail before install");
+        assert!(
+            error.to_string().contains("changed after validation"),
+            "unexpected changed-target error: {error:#}"
+        );
+        assert_eq!(fs::read_to_string(&path)?, "concurrent human edit");
+        Ok(())
+    }
+
+    #[test]
+    fn create_new_install_never_replaces_a_concurrent_destination() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let staged = temp.path().join("staged.tmp");
+        let destination = temp.path().join("record.md");
+        fs::write(&staged, "new proposal bytes")?;
+        fs::write(&destination, "concurrent canonical bytes")?;
+
+        let error = install_staged_file_no_replace(&staged, &destination)
+            .expect_err("no-replace install must refuse a concurrent destination");
+        assert!(error.to_string().contains("without replacing"));
+        assert_eq!(
+            fs::read_to_string(&destination)?,
+            "concurrent canonical bytes"
+        );
+        assert_eq!(fs::read_to_string(&staged)?, "new proposal bytes");
+        Ok(())
+    }
 
     #[test]
     fn propose_with_options_auto_approves_unique_proposals_by_default() -> anyhow::Result<()> {

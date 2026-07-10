@@ -764,18 +764,11 @@ fn proposal_files_apply_command(proposal_id: &str, actor: &str, as_json: bool) -
         bail!("invalid proposal files found; run `memzoi proposal-files validate` for details");
     }
 
-    let entry = match require_proposal_file_entry(&scan, proposal_id) {
-        Ok(entry) => entry,
-        Err(_) => {
-            return print_idempotent_file_resolution(
-                proposal_id,
-                OkfProposalOutcome::Applied,
-                as_json,
-            );
-        }
-    };
     let service = open_service()?;
-    let result = service.apply_file_proposal(&entry.path, actor)?;
+    let result = match optional_proposal_file_entry(&scan, proposal_id)? {
+        Some(entry) => service.apply_file_proposal(&entry.path, actor)?,
+        None => service.replay_file_proposal(proposal_id, OkfProposalOutcome::Applied, actor)?,
+    };
     print_file_resolution_result(&result, as_json)
 }
 
@@ -792,18 +785,11 @@ fn proposal_files_reject_command(
         }
         bail!("invalid proposal files found; run `memzoi proposal-files validate` for details");
     }
-    let entry = match require_proposal_file_entry(&scan, proposal_id) {
-        Ok(entry) => entry,
-        Err(_) => {
-            return print_idempotent_file_resolution(
-                proposal_id,
-                OkfProposalOutcome::Rejected,
-                as_json,
-            );
-        }
-    };
     let service = open_service()?;
-    let result = service.reject_file_proposal(&entry.path, actor, reason)?;
+    let result = match optional_proposal_file_entry(&scan, proposal_id)? {
+        Some(entry) => service.reject_file_proposal(&entry.path, actor, reason)?,
+        None => service.replay_file_proposal(proposal_id, OkfProposalOutcome::Rejected, actor)?,
+    };
     print_file_resolution_result(&result, as_json)
 }
 
@@ -1084,6 +1070,14 @@ fn require_proposal_file_entry<'a>(
     scan: &'a ProposalFileScan,
     proposal_id: &str,
 ) -> Result<&'a ProposalFileEntry> {
+    optional_proposal_file_entry(scan, proposal_id)?
+        .with_context(|| format!("proposal file not found: {proposal_id}"))
+}
+
+fn optional_proposal_file_entry<'a>(
+    scan: &'a ProposalFileScan,
+    proposal_id: &str,
+) -> Result<Option<&'a ProposalFileEntry>> {
     let matches = scan
         .proposals
         .iter()
@@ -1091,8 +1085,8 @@ fn require_proposal_file_entry<'a>(
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
-        [] => bail!("proposal file not found: {proposal_id}"),
-        [entry] => Ok(entry),
+        [] => Ok(None),
+        [entry] => Ok(Some(entry)),
         _ => bail!("proposal file id {proposal_id:?} matched multiple files"),
     }
 }
@@ -1465,47 +1459,6 @@ fn print_file_resolution_result(
         }
         Ok(())
     }
-}
-
-fn print_idempotent_file_resolution(
-    proposal_id: &str,
-    requested_outcome: OkfProposalOutcome,
-    as_json: bool,
-) -> Result<()> {
-    let scan = scan_resolved_proposal_files()?;
-    if !scan.errors.is_empty() {
-        bail!("invalid resolved proposal files found; inspect .memzoi/proposals/resolved");
-    }
-    let entry = require_proposal_file_entry(&scan, proposal_id)?;
-    let resolution = entry
-        .proposal
-        .resolution
-        .clone()
-        .context("resolved proposal is missing resolution metadata")?;
-    if resolution.outcome != requested_outcome {
-        bail!(
-            "proposal file {} is already resolved as {}; cannot resolve as {}",
-            entry.proposal.id,
-            resolution.outcome.as_str(),
-            requested_outcome.as_str()
-        );
-    }
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let paths = discover_paths(&cwd)?;
-    let record_path = resolution
-        .record_id
-        .as_ref()
-        .map(|record_id| paths.records_dir().join(format!("{record_id}.md")));
-    let result = FileProposalResolutionResult {
-        proposal: entry.proposal.clone(),
-        resolution,
-        resolved_path: entry.path.clone(),
-        record: None,
-        record_path,
-        already_resolved: true,
-        runtime_index_updated: requested_outcome == OkfProposalOutcome::Applied,
-    };
-    print_file_resolution_result(&result, as_json)
 }
 
 fn supersede_command(
