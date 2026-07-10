@@ -434,16 +434,7 @@ fn propose_command(
     }
 
     let service = open_service()?;
-    let draft = draft_from_args(
-        &draft_args.memory_type,
-        &draft_args.scope_kind,
-        &draft_args.visibility,
-        draft_args.source_kind,
-        draft_args.source_ref,
-        &draft_args.sensitivity,
-        draft_args.title,
-        draft_args.body,
-    )?;
+    let draft = draft_from_args(draft_args)?;
     let approval_override = match (flags.manual, flags.auto_approve || flags.apply) {
         (true, false) => Some(ProposalApprovalOverride::Manual),
         (false, true) => Some(ProposalApprovalOverride::Auto),
@@ -1524,16 +1515,7 @@ fn supersede_command(
     as_json: bool,
 ) -> Result<()> {
     let service = open_service()?;
-    let draft = draft_from_args(
-        &draft_args.memory_type,
-        &draft_args.scope_kind,
-        &draft_args.visibility,
-        draft_args.source_kind,
-        draft_args.source_ref,
-        &draft_args.sensitivity,
-        draft_args.title,
-        draft_args.body,
-    )?;
+    let draft = draft_from_args(draft_args)?;
     let result = service.supersede_record(record_id, actor, draft)?;
     if as_json {
         print_json(&json!({
@@ -2207,22 +2189,23 @@ fn open_service() -> Result<MemoryService> {
     MemoryService::open(&cwd)
 }
 
-fn draft_from_args(
-    memory_type: &str,
-    scope_kind: &str,
-    visibility: &str,
-    source_kind: Option<String>,
-    source_ref: Option<String>,
-    sensitivity: &str,
-    title: String,
-    body: String,
-) -> Result<MemoryDraft> {
+fn draft_from_args(args: DraftCommand) -> Result<MemoryDraft> {
+    let DraftCommand {
+        memory_type,
+        scope_kind,
+        visibility,
+        source_kind,
+        source_ref,
+        sensitivity,
+        title,
+        body,
+    } = args;
     Ok(MemoryDraft {
-        memory_type: parse_memory_type(memory_type)?,
+        memory_type: parse_memory_type(&memory_type)?,
         lane: MemoryLane::Semantic,
-        scope_kind: parse_scope_kind(scope_kind)?,
+        scope_kind: parse_scope_kind(&scope_kind)?,
         scope_id: None,
-        visibility: parse_visibility(visibility)?,
+        visibility: parse_visibility(&visibility)?,
         title,
         body,
         tags: Vec::new(),

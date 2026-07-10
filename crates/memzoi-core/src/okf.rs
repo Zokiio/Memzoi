@@ -688,56 +688,6 @@ pub fn import_okf_records(conn: &Connection, records: &[OkfRecordFile]) -> Resul
     Ok(records.len())
 }
 
-pub(crate) fn write_memory_record_file_with_metadata(
-    records_root: &Path,
-    record: &MemoryRecord,
-    tags: &[String],
-    applies_to: &[String],
-) -> Result<PathBuf> {
-    write_memory_record_file_internal(records_root, record, tags, applies_to, WriteMode::Overwrite)
-}
-
-pub(crate) fn create_memory_record_file_with_metadata(
-    records_root: &Path,
-    record: &MemoryRecord,
-    tags: &[String],
-    applies_to: &[String],
-) -> Result<PathBuf> {
-    write_memory_record_file_internal(records_root, record, tags, applies_to, WriteMode::CreateNew)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WriteMode {
-    CreateNew,
-    Overwrite,
-}
-
-fn write_memory_record_file_internal(
-    records_root: &Path,
-    record: &MemoryRecord,
-    tags: &[String],
-    applies_to: &[String],
-    mode: WriteMode,
-) -> Result<PathBuf> {
-    let destination = records_root.join(format!("{}.md", record.id));
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create records directory {}", parent.display()))?;
-    }
-    let markdown = render_memory_record(record, tags, applies_to);
-    match mode {
-        WriteMode::CreateNew => OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, markdown.as_bytes()))
-            .with_context(|| format!("failed to create memory record {}", destination.display()))?,
-        WriteMode::Overwrite => fs::write(&destination, markdown)
-            .with_context(|| format!("failed to write memory record {}", destination.display()))?,
-    }
-    Ok(destination)
-}
-
 pub(crate) fn project_okf_create_proposal(proposal: &OkfProposalFile) -> Result<MemoryRecord> {
     validate_repo_apply_proposal(proposal)?;
     if proposal.proposal.action != OkfProposalAction::Create {
@@ -1878,8 +1828,10 @@ mod tests {
             expires_at: Some("2027-01-01".to_owned()),
         };
 
-        let path = super::write_memory_record_file_with_metadata(&records, &record, &[], &[])?;
-        let rendered = std::fs::read_to_string(&path)?;
+        let path = records.join(format!("{}.md", record.id));
+        std::fs::create_dir_all(path.parent().expect("record path has parent"))?;
+        let rendered = super::render_memory_record_markdown(&record, &[], &[]);
+        std::fs::write(&path, &rendered)?;
         assert!(rendered.contains("type: risk\n"));
         assert!(rendered.contains("title: \"Risk: package install\"\n"));
         let parsed = super::parse_okf_record_file(&records, &path)?.expect("record parses");
