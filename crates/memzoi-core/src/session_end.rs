@@ -23,7 +23,7 @@ pub struct SessionEndCandidate {
     pub title: String,
     pub body: String,
     #[serde(default)]
-    pub sensitivity: Option<OkfProposalSensitivity>,
+    pub sensitivity: OkfProposalSensitivity,
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
@@ -56,7 +56,10 @@ pub struct SessionEndCandidateResult {
     pub memory_type: MemoryType,
     pub lane: MemoryLane,
     pub title: String,
+    pub sensitivity: OkfProposalSensitivity,
     pub status: SessionEndCandidateStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write: Option<SessionEndWrite>,
 }
@@ -106,9 +109,9 @@ pub(crate) fn session_end_proposal_draft(
         id: None,
         paths: Vec::new(),
     });
-    let sensitivity = candidate
-        .sensitivity
-        .context("repo candidate sensitivity should be validated")?;
+    if candidate.sensitivity != OkfProposalSensitivity::RepoSafe {
+        bail!("{}", repo_sensitivity_block_reason(candidate.sensitivity));
+    }
     Ok(OkfCreateProposalDraft {
         proposal_id,
         memory_type: candidate.memory_type,
@@ -123,7 +126,7 @@ pub(crate) fn session_end_proposal_draft(
         applies_to: scope.paths,
         tags: candidate.tags.clone(),
         sources: Vec::new(),
-        sensitivity,
+        sensitivity: candidate.sensitivity,
     })
 }
 
@@ -198,16 +201,7 @@ fn validate_session_end_candidate(index: usize, candidate: &SessionEndCandidate)
     }
 
     match candidate.destination {
-        MemoryDestination::Repo => match candidate.sensitivity {
-            Some(OkfProposalSensitivity::RepoSafe) => {}
-            Some(sensitivity) => bail!(
-                "session-end candidate {index} destination repo requires sensitivity repo-safe; got {}",
-                sensitivity.as_str()
-            ),
-            None => bail!(
-                "session-end candidate {index} destination repo requires sensitivity repo-safe"
-            ),
-        },
+        MemoryDestination::Repo => {}
         MemoryDestination::Session => {
             if candidate.memory_type != MemoryType::Episode {
                 bail!(
@@ -224,6 +218,13 @@ fn validate_session_end_candidate(index: usize, candidate: &SessionEndCandidate)
     }
 
     Ok(())
+}
+
+pub(crate) fn repo_sensitivity_block_reason(sensitivity: OkfProposalSensitivity) -> String {
+    format!(
+        "repo destination requires sensitivity repo-safe; got {}; classify the candidate as repo-safe or choose a non-repo destination",
+        sensitivity.as_str()
+    )
 }
 
 fn validate_relative_path(value: &str) -> Result<()> {

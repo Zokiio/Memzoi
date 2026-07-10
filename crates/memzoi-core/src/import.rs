@@ -31,7 +31,8 @@ pub struct ImportCandidateInput {
     pub lane: Option<MemoryLane>,
     pub title: String,
     pub body: String,
-    pub sensitivity: Option<OkfProposalSensitivity>,
+    #[serde(default)]
+    pub sensitivity: OkfProposalSensitivity,
     pub scope: Option<ImportScope>,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -61,7 +62,7 @@ pub struct ImportCandidate {
     pub lane: MemoryLane,
     pub title: String,
     pub body: String,
-    pub sensitivity: Option<OkfProposalSensitivity>,
+    pub sensitivity: OkfProposalSensitivity,
     pub scope: ImportScope,
     pub tags: Vec<String>,
     pub content_hash: String,
@@ -141,7 +142,7 @@ pub struct ImportPlanCandidate {
     pub lane: MemoryLane,
     pub title: String,
     pub body: String,
-    pub sensitivity: Option<OkfProposalSensitivity>,
+    pub sensitivity: OkfProposalSensitivity,
     pub scope: ImportScope,
     pub tags: Vec<String>,
     pub content_hash: String,
@@ -323,12 +324,6 @@ fn normalize_candidate(index: usize, raw: &ImportCandidateInput) -> Result<Impor
         bail!("candidate {index} reason is required");
     }
 
-    if raw.destination == MemoryDestination::Repo
-        && raw.sensitivity != Some(OkfProposalSensitivity::RepoSafe)
-    {
-        bail!("candidate {index} destination repo requires sensitivity repo-safe");
-    }
-
     let mut tags = Vec::with_capacity(raw.tags.len());
     for tag in &raw.tags {
         let t = tag.trim().to_owned();
@@ -430,7 +425,18 @@ pub(crate) fn build_plan(
 ) -> Result<ImportPlan> {
     validate_document(doc)?;
     let normalized = normalize_document(doc)?;
-    let mut sources = doc.sources.clone();
+    let has_blocked_repo_candidate = normalized.iter().any(|candidate| {
+        candidate.classification.destination == MemoryDestination::Repo
+            && candidate.sensitivity != OkfProposalSensitivity::RepoSafe
+    });
+    // Sources apply to the whole manifest, so they cannot be safely attributed to only the
+    // allowed candidates once any repo candidate is blocked. Omit them instead of leaking a
+    // prohibited locator or fabricating evidence provenance for the safe subset.
+    let mut sources = if has_blocked_repo_candidate {
+        Vec::new()
+    } else {
+        doc.sources.clone()
+    };
     for source in &mut sources {
         source.path = source.path.take().map(|v| v.trim().to_owned());
         source.url = source.url.take().map(|v| v.trim().to_owned());
@@ -467,8 +473,14 @@ pub(crate) fn build_plan(
     };
     let mut prior: BTreeMap<String, usize> = BTreeMap::new();
     for c in normalized {
-        let mut duplicates = by_hash.get(&c.content_hash).cloned().unwrap_or_default();
-        if let Some(index) = prior.get(&c.content_hash).copied() {
+        let blocked_repo = c.classification.destination == MemoryDestination::Repo
+            && c.sensitivity != OkfProposalSensitivity::RepoSafe;
+        let mut duplicates = if blocked_repo {
+            Vec::new()
+        } else {
+            by_hash.get(&c.content_hash).cloned().unwrap_or_default()
+        };
+        if !blocked_repo && let Some(index) = prior.get(&c.content_hash).copied() {
             duplicates.push(ImportDuplicate {
                 kind: ImportDuplicateKind::EarlierCandidate,
                 id: format!("candidate-{index}"),
@@ -479,7 +491,12 @@ pub(crate) fn build_plan(
         duplicates.sort_by(|a, b| duplicate_sort_key(a).cmp(&duplicate_sort_key(b)));
         duplicates.dedup_by(|a, b| a.kind == b.kind && a.id == b.id);
 
-        let action = if !duplicates.is_empty() {
+        let action = if blocked_repo {
+            summary.needs_review += 1;
+            ImportCandidateAction::Blocked {
+                reason: repo_sensitivity_block_reason(c.sensitivity),
+            }
+        } else if !duplicates.is_empty() {
             summary.duplicates += 1;
             ImportCandidateAction::Duplicate {
                 matches: duplicates.clone(),
@@ -524,18 +541,39 @@ pub(crate) fn build_plan(
                 }
             }
         };
-        prior.entry(c.content_hash.clone()).or_insert(c.index);
+        if !blocked_repo {
+            prior.entry(c.content_hash.clone()).or_insert(c.index);
+        }
+        let (classification, title, body, scope, tags) = if blocked_repo {
+            (
+                MemoryDestinationClassification {
+                    destination: MemoryDestination::Repo,
+                    reason: "non-repo-safe repo candidate requires classification or rerouting"
+                        .to_owned(),
+                },
+                "Redacted non-repo-safe import candidate".to_owned(),
+                "Original non-repo-safe import candidate content was redacted.".to_owned(),
+                ImportScope {
+                    kind: c.scope.kind,
+                    id: None,
+                    paths: Vec::new(),
+                },
+                Vec::new(),
+            )
+        } else {
+            (c.classification, c.title, c.body, c.scope, c.tags)
+        };
         candidates.push(ImportPlanCandidate {
             index: c.index,
-            classification: c.classification,
+            classification,
             policy: c.policy,
             memory_type: c.memory_type,
             lane: c.lane,
-            title: c.title,
-            body: c.body,
+            title,
+            body,
             sensitivity: c.sensitivity,
-            scope: c.scope,
-            tags: c.tags,
+            scope,
+            tags,
             content_hash: c.content_hash,
             duplicates,
             action,
@@ -625,6 +663,13 @@ pub(crate) fn proposal_draft(
         applies_to: candidate.scope.paths.clone(),
         tags: candidate.tags.clone(),
         sources: sources.to_vec(),
-        sensitivity: OkfProposalSensitivity::RepoSafe,
+        sensitivity: candidate.sensitivity,
     }
+}
+
+fn repo_sensitivity_block_reason(sensitivity: OkfProposalSensitivity) -> String {
+    format!(
+        "repo destination requires sensitivity repo-safe; got {}; classify the candidate as repo-safe or choose a non-repo destination",
+        sensitivity.as_str()
+    )
 }

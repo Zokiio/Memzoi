@@ -4,10 +4,10 @@ use std::{
 };
 
 use memzoi_core::{
-    InitRequest, MemoryDestination, MemoryDraft, MemoryLane, MemoryPaths, MemoryRecord,
-    MemoryService, MemoryStatus, MemoryType, OkfProposalAction, OkfProposalSensitivity,
-    OkfProposalStatus, ScopeKind, Visibility, parse_okf_proposal_markdown, parse_okf_record_file,
-    read_okf_proposal_files, read_okf_record_files, write_memory_record_file,
+    InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryService, MemoryStatus, MemoryType,
+    OkfProposalAction, OkfProposalSensitivity, OkfProposalStatus, ScopeKind, Visibility,
+    parse_okf_proposal_markdown, parse_okf_record_file, read_okf_proposal_files,
+    read_okf_record_files,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -329,54 +329,6 @@ Do not allow uppercase or underscores in concept IDs.
         .to_string();
 
     assert!(error.contains("OKF concept id"), "got {error}");
-}
-
-#[test]
-fn rendered_records_are_valid_yaml_and_preserve_core_fields() -> anyhow::Result<()> {
-    let temp = TempDir::new()?;
-    let records = temp.path().join("records");
-    let record = MemoryRecord {
-        id: "team/install-risk".to_owned(),
-        memory_type: MemoryType::Risk,
-        lane: MemoryLane::Semantic,
-        destination: MemoryDestination::Repo,
-        scope_kind: ScopeKind::Team,
-        scope_id: Some("platform".to_owned()),
-        visibility: Visibility::Team,
-        title: "Risk: package install".to_owned(),
-        body: "Package installs require review.".to_owned(),
-        status: MemoryStatus::Superseded,
-        confidence: 0.75,
-        source_kind: Some("human-authored".to_owned()),
-        source_ref: Some("issue://42".to_owned()),
-        proposal_id: Some("prop_review_42".to_owned()),
-        content_hash: "hash".to_owned(),
-        created_at: "2026-07-05T00:00:00Z".to_owned(),
-        updated_at: "2026-07-06T00:00:00Z".to_owned(),
-        supersedes_id: Some("team/old-install-risk".to_owned()),
-        expires_at: Some("2027-01-01".to_owned()),
-    };
-
-    let path = write_memory_record_file(&records, &record)?;
-    let rendered = fs::read_to_string(&path)?;
-    assert!(rendered.contains("type: risk\n"));
-    assert!(rendered.contains("title: \"Risk: package install\"\n"));
-    let parsed = parse_okf_record_file(&records, &path)?.expect("rendered record parses");
-
-    assert_eq!(parsed.concept_id, "team/install-risk");
-    assert_eq!(parsed.draft.title, "Risk: package install");
-    assert_eq!(parsed.draft.scope_kind, ScopeKind::Team);
-    assert_eq!(parsed.draft.scope_id.as_deref(), Some("platform"));
-    assert_eq!(parsed.status, MemoryStatus::Superseded);
-    assert_eq!(parsed.draft.source_ref.as_deref(), Some("issue://42"));
-    assert_eq!(parsed.proposal_id.as_deref(), Some("prop_review_42"));
-    assert_eq!(
-        parsed.supersedes_id.as_deref(),
-        Some("team/old-install-risk")
-    );
-    assert_eq!(parsed.expires_at.as_deref(), Some("2027-01-01"));
-
-    Ok(())
 }
 
 #[test]

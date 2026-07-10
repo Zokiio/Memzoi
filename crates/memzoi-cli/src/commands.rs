@@ -1080,7 +1080,9 @@ fn session_end_result_json(
                 "type": candidate.memory_type.as_str(),
                 "lane": candidate.lane.as_str(),
                 "title": &candidate.title,
+                "sensitivity": candidate.sensitivity.as_str(),
                 "status": candidate.status.as_str(),
+                "reason": &candidate.reason,
                 "write": write,
             })
         }).collect::<Vec<_>>(),

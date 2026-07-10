@@ -259,6 +259,10 @@ For each candidate, the current behavior is deterministic:
 - `discard` writes nothing and reports `skipped`; and
 - `needs_review` writes nothing and reports `blocked`.
 
+Omitted sensitivity normalizes to `unknown`. If any `repo` candidate is not
+`repo-safe`, its content is replaced by a classification-only blocked result and
+the whole session-end batch performs no writes.
+
 Promotion is transactional across the session-end operation: if a runtime
 write or proposal-file write fails, created proposal files are cleaned up. A
 successful `repo` route still requires the separate review/apply step above.
@@ -288,6 +292,14 @@ state. The destination outcomes are:
 - `session`: create a private session checkpoint;
 - `discard`: no write; and
 - `needs_review`: blocked, with no write until a human decides.
+
+Only `repo-safe` repo candidates receive `create_proposal`; omitted sensitivity
+normalizes to `unknown`, and other classifications receive a redacted `blocked`
+action. Import plans are explicitly per-candidate, so applying a reviewed plan may
+write its allowed candidates while the blocked candidate remains a no-write. If a
+manifest contains any blocked repo candidate, its document-wide source locators are
+omitted from the plan and from allowed proposal files because they cannot be safely
+attributed to only the allowed subset.
 
 After reviewing an imported repo proposal, use the separate explicit proposal
 review/apply workflow described in [Approval, review, and promotion](#approval-review-and-promotion),

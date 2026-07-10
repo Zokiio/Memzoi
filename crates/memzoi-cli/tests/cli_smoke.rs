@@ -2042,6 +2042,193 @@ fn proposal_files_reject_archives_reason_without_creating_canonical_memory() {
 }
 
 #[test]
+fn proposal_file_validation_and_rejection_never_echo_non_repo_safe_content() {
+    for (sensitivity, sentinel) in [
+        ("secret", "SECRET-CONTENT-SENTINEL"),
+        ("raw-transcript", "RAW-TRANSCRIPT-CONTENT-SENTINEL"),
+        (
+            "private-personal-data",
+            "PRIVATE-PERSONAL-DATA-CONTENT-SENTINEL",
+        ),
+        ("unknown", "UNKNOWN-CONTENT-SENTINEL"),
+    ] {
+        let repo = initialized_temp_repo();
+        let mut proposal = proposal_markdown_with_options(
+            "semantic",
+            "create",
+            "proposed",
+            "supersedes: []",
+            "",
+            sensitivity,
+        )
+        .replace(
+            "title: Valid proposal",
+            &format!("title: \"{sentinel} title\""),
+        )
+        .replace(
+            "description: Valid proposal description.",
+            &format!("description: \"{sentinel} description\""),
+        )
+        .replace("# Valid proposal", &format!("# {sentinel} title"))
+        .replace("This proposal body is valid.", &format!("{sentinel} body"))
+        .replace(
+            "  - path: src/lib.rs",
+            &format!("  - path: \"src/{sentinel}.rs\""),
+        );
+        if sensitivity == "unknown" {
+            proposal = proposal.replace("sensitivity: unknown\n", "");
+        }
+        write_pending_proposal_file(repo.path(), "valid-proposal.md", proposal);
+
+        let validation =
+            run_json_command_failure(repo.path(), &["proposal-files", "validate", "--json"]);
+        let validation_stdout =
+            serde_json::to_string(&validation).expect("serialize validation output");
+        let validation_stderr =
+            run_command_failure_stderr(repo.path(), &["proposal-files", "validate", "--json"]);
+        assert!(
+            !validation_stdout.contains(sentinel),
+            "validation stdout leaked {sensitivity} content: {validation_stdout}"
+        );
+        assert!(
+            !validation_stderr.contains(sentinel),
+            "validation stderr leaked {sensitivity} content: {validation_stderr}"
+        );
+        assert!(
+            validation_stdout.contains(&format!("sensitivity {sensitivity}")),
+            "validation should report the actionable classification: {validation_stdout}"
+        );
+
+        let rejected = run_json_command(
+            repo.path(),
+            &[
+                "proposal-files",
+                "reject",
+                "mem_test_valid",
+                "--reason",
+                "Rejected at the repository trust boundary.",
+                "--actor",
+                "reviewer:human",
+                "--json",
+            ],
+        );
+        let rejected_stdout = serde_json::to_string(&rejected).expect("serialize rejection output");
+        assert!(
+            !rejected_stdout.contains(sentinel),
+            "rejection stdout leaked {sensitivity} content: {rejected_stdout}"
+        );
+        assert_json_string_field(&rejected, &["proposal_id"], "mem_test_valid");
+        assert_json_string_field(&rejected, &["outcome"], "rejected");
+        assert_json_string_field(&rejected, &["sensitivity"], sensitivity);
+        assert_json_string_field(&rejected["resolution"], &["resolved_by"], "reviewer:human");
+        assert_json_string_field(
+            &rejected["resolution"],
+            &["reason"],
+            "Rejected at the repository trust boundary.",
+        );
+
+        let resolved_path = repo
+            .path()
+            .join(".memzoi/proposals/resolved/rejected/valid-proposal.md");
+        let resolved = fs::read_to_string(&resolved_path).expect("read redacted rejection receipt");
+        assert!(
+            !resolved.contains(sentinel),
+            "resolved receipt leaked {sensitivity} content: {resolved}"
+        );
+        assert!(resolved.contains("Content hash (BLAKE3):"), "{resolved}");
+        assert!(resolved.contains("status: rejected\n"), "{resolved}");
+        assert!(resolved.contains("outcome: rejected\n"), "{resolved}");
+        assert!(
+            resolved.contains("resolved_by: reviewer:human\n"),
+            "{resolved}"
+        );
+
+        let repeated = run_json_command(
+            repo.path(),
+            &[
+                "proposal-files",
+                "reject",
+                "mem_test_valid",
+                "--reason",
+                "A repeated request must remain redacted.",
+                "--json",
+            ],
+        );
+        let repeated_stdout = serde_json::to_string(&repeated).expect("serialize repeated output");
+        assert!(!repeated_stdout.contains(sentinel));
+        assert_eq!(repeated["already_resolved"], true);
+    }
+}
+
+#[test]
+fn non_repo_safe_rejection_receipt_hashes_target_lineage_and_proposal_authorship() {
+    let repo = initialized_temp_repo();
+    let proposal = proposal_markdown_with_options(
+        "semantic",
+        "tombstone",
+        "proposed",
+        "supersedes: []",
+        "  target: TARGET-LINEAGE-SENTINEL\n",
+        "secret",
+    )
+    .replace(
+        "reason: Review packet context should not become canonical frontmatter.",
+        "reason: ORIGINAL-PROPOSAL-REASON-SENTINEL",
+    )
+    .replace(
+        "proposed_by: agent",
+        "proposed_by: ORIGINAL-PROPOSER-SENTINEL",
+    )
+    .replace("created_by: agent", "created_by: ORIGINAL-CREATOR-SENTINEL");
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", proposal);
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Rejected at the repository trust boundary.",
+            "--actor",
+            "reviewer:human",
+            "--json",
+        ],
+    );
+    let output = serde_json::to_string(&rejected).expect("serialize rejection output");
+    assert!(!output.contains("SENTINEL"), "{output}");
+    assert_json_string_field(&rejected, &["action"], "create");
+    assert!(rejected["target_id"].is_null(), "{rejected}");
+
+    let resolved_path = repo
+        .path()
+        .join(".memzoi/proposals/resolved/rejected/valid-proposal.md");
+    let resolved = fs::read_to_string(&resolved_path).expect("read redacted rejection receipt");
+    assert!(!resolved.contains("SENTINEL"), "{resolved}");
+    assert!(resolved.contains("action: create\n"), "{resolved}");
+    assert!(resolved.contains("supersedes: []\n"), "{resolved}");
+    assert!(resolved.contains("Content hash (BLAKE3):"), "{resolved}");
+
+    let repeated = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "A repeated request must remain redacted.",
+            "--json",
+        ],
+    );
+    assert_eq!(repeated["already_resolved"], true);
+    assert!(
+        !serde_json::to_string(&repeated)
+            .expect("serialize repeated rejection")
+            .contains("SENTINEL")
+    );
+}
+
+#[test]
 fn import_plan_and_apply_mixed_destinations_preserve_boundaries() {
     let repo = initialized_temp_repo();
     let repo_path = repo.path();
@@ -2373,6 +2560,104 @@ candidates:
         fs::read(&paths.db_path).expect("read runtime db after stale plan"),
         database_after_apply,
         "stale plan must not mutate runtime state"
+    );
+}
+
+#[test]
+fn import_cli_redacts_blocked_repo_candidate_from_plan_apply_and_proposal_files() {
+    let repo = initialized_temp_repo();
+    let manifest_path = repo.path().join("blocked-import.yml");
+    fs::write(
+        &manifest_path,
+        r#"version: memzoi/import-v1
+sources:
+  - path: imports/IMPORT-SOURCE-SENTINEL.yml
+candidates:
+  - destination: repo
+    reason: IMPORT-REASON-SENTINEL
+    type: fact
+    title: IMPORT-TITLE-SENTINEL
+    body: IMPORT-BODY-SENTINEL
+    scope:
+      kind: repo
+      paths: [src/IMPORT-PATH-SENTINEL/**]
+  - destination: repo
+    reason: durable project fact
+    type: fact
+    title: Safe imported fact
+    body: This repo-safe candidate may become a reviewed proposal.
+    sensitivity: repo-safe
+"#,
+    )
+    .expect("write blocked import manifest");
+
+    let mut plan_command = memzoi();
+    let plan_assert = plan_command
+        .args([
+            "import",
+            "plan",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let plan_stdout =
+        std::str::from_utf8(&plan_assert.get_output().stdout).expect("plan stdout utf-8");
+    let plan_stderr =
+        std::str::from_utf8(&plan_assert.get_output().stderr).expect("plan stderr utf-8");
+    assert!(!plan_stdout.contains("SENTINEL"), "{plan_stdout}");
+    assert!(!plan_stderr.contains("SENTINEL"), "{plan_stderr}");
+    let plan: Value = serde_json::from_str(plan_stdout).expect("plan stdout JSON");
+    assert_eq!(plan["sources"], serde_json::json!([]));
+    assert_json_string_field(&plan["candidates"][0], &["sensitivity"], "unknown");
+    assert_json_string_field(
+        &plan["candidates"][0],
+        &["title"],
+        "Redacted non-repo-safe import candidate",
+    );
+    assert_json_string_field(&plan["candidates"][0]["action"], &["kind"], "blocked");
+    let plan_id = json_string(&plan, "plan_id").to_owned();
+
+    let mut apply_command = memzoi();
+    let apply_assert = apply_command
+        .args([
+            "import",
+            "apply",
+            "--from-file",
+            manifest_path.to_str().expect("manifest path utf-8"),
+            "--plan-id",
+            &plan_id,
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let apply_stdout =
+        std::str::from_utf8(&apply_assert.get_output().stdout).expect("apply stdout utf-8");
+    let apply_stderr =
+        std::str::from_utf8(&apply_assert.get_output().stderr).expect("apply stderr utf-8");
+    assert!(!apply_stdout.contains("SENTINEL"), "{apply_stdout}");
+    assert!(!apply_stderr.contains("SENTINEL"), "{apply_stderr}");
+    let applied: Value = serde_json::from_str(apply_stdout).expect("apply stdout JSON");
+    assert_eq!(applied["writes"].as_array().map(Vec::len), Some(1));
+
+    let pending = test_paths(repo.path()).proposals_dir().join("pending");
+    let proposal_paths = fs::read_dir(&pending)
+        .expect("read pending proposals")
+        .map(|entry| entry.expect("read proposal entry").path())
+        .collect::<Vec<_>>();
+    assert_eq!(proposal_paths.len(), 1);
+    let proposal = fs::read_to_string(&proposal_paths[0]).expect("read allowed proposal");
+    assert!(!proposal.contains("SENTINEL"), "{proposal}");
+    assert!(!proposal.contains("sources:"), "{proposal}");
+    assert!(test_paths(repo.path()).records_dir().is_dir());
+    assert_eq!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("read canonical records")
+            .count(),
+        0
     );
 }
 
@@ -3787,29 +4072,50 @@ candidates:
   - destination: repo
     type: decision
     lane: semantic
-    title: Sensitive repo candidate
-    body: This sensitive candidate must block the whole batch.
-    sensitivity: sensitive
+    title: OMITTED-SESSION-TITLE-SENTINEL
+    body: OMITTED-SESSION-BODY-SENTINEL
+    reason: OMITTED-SESSION-REASON-SENTINEL
+    scope:
+      kind: repo
+      paths: [src/OMITTED-SESSION-PATH-SENTINEL/**]
 "#,
     )
     .expect("write invalid session-end input");
 
-    let stderr = run_command_failure_stderr(
+    let result = run_json_command(
         repo,
         &[
             "session-end",
             "--from-file",
             input_path.to_str().expect("session-end path utf-8"),
+            "--json",
         ],
     );
-    assert!(
-        stderr.contains("requires sensitivity repo-safe; got sensitive"),
-        "repo sensitivity validation should fail clearly: {stderr}"
+    let candidates = result["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("blocked session-end result needs candidates: {result}"));
+    assert_eq!(candidates.len(), 2);
+    assert_json_string_field(&candidates[0], &["status"], "blocked");
+    assert_json_string_field(&candidates[0], &["sensitivity"], "unknown");
+    assert_json_string_field(&candidates[1], &["status"], "blocked");
+    assert_json_string_field(&candidates[1], &["sensitivity"], "unknown");
+    assert_json_string_field(
+        &candidates[1],
+        &["title"],
+        "Redacted non-repo-safe candidate",
     );
+    assert!(
+        candidates[1]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("got unknown")),
+        "blocked outcome should explain the explicit unknown classification: {result}"
+    );
+    let rendered = serde_json::to_string(&result).expect("serialize blocked result");
+    assert!(!rendered.contains("SENTINEL"), "{rendered}");
     let local = run_json_command(repo, &["local", "list", "--json"]);
     assert!(
         record_ids_from_json(&local).is_empty(),
-        "invalid session-end batch must not create earlier local rows: {local}"
+        "blocked session-end batch must not create earlier local rows: {local}"
     );
     let pending = repo.join(".memzoi").join("proposals").join("pending");
     assert!(
@@ -3818,7 +4124,7 @@ candidates:
                 .expect("read pending dir")
                 .next()
                 .is_none(),
-        "invalid session-end batch must not write proposal files"
+        "blocked session-end batch must not write proposal files"
     );
 }
 

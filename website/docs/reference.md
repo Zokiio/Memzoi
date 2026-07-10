@@ -115,7 +115,9 @@ candidates:
     lane: semantic                  # optional
     title: Explicit candidate title
     body: Explicit candidate body
-    sensitivity: repo-safe          # repo-safe | local-only | sensitive | secret | unknown
+    sensitivity: repo-safe          # repo-safe | local-only | sensitive | secret |
+                                    # raw-transcript | private-personal-data |
+                                    # temporary-state | unknown; omitted => unknown
     scope:
       kind: repo                    # optional; defaults to repo
       id: null                      # optional
@@ -127,8 +129,10 @@ There must be at least one source and one candidate. Each source needs a non-emp
 `path`, `url`, or `ref`; a `path` must be a POSIX project-relative path and cannot be
 absolute or contain `.`/`..` components, backslashes, or a drive prefix. Candidate
 `destination`, `reason`, `title`, and `body` are required and are trimmed before use.
-`repo` candidates must declare `sensitivity: repo-safe`. Scope paths have the same
-project-relative validation, and tags cannot be empty.
+Only a `repo` candidate with `sensitivity: repo-safe` can create a pending proposal.
+Omitted sensitivity normalizes to `unknown`; any other repo sensitivity produces a
+structured `blocked`/no-write result. Scope paths have the same project-relative
+validation, and tags cannot be empty.
 
 The parser is strict at every manifest object (`version`, `sources`, `candidates`,
 source fields, candidate fields, and scope fields). It rejects malformed YAML, an empty
@@ -165,8 +169,15 @@ commit plan output.
 The summary always contains these counters: `total`, `create_proposals`,
 `local_writes`, `session_writes`, `duplicates`, `discarded`, and `needs_review`.
 Each candidate includes `index`, `classification`, `policy`, normalized `type`, `lane`,
-`title`, `body`, optional `sensitivity`, `scope`, `tags`, a trimmed-body BLAKE3
+`title`, `body`, explicit `sensitivity`, `scope`, `tags`, a trimmed-body BLAKE3
 `content_hash`, `duplicates`, and `action`.
+
+Blocked non-repo-safe candidates use classification-only placeholders for title, body,
+reason, tags, and scope metadata; their original content is represented only by the
+`content_hash`. Because manifest `sources` are document-wide rather than candidate-scoped,
+the plan omits all source locators when any repo candidate is blocked. This avoids leaking
+the blocked candidate's locator or falsely attributing that evidence to the safe subset;
+allowed candidates in that mixed batch therefore create proposals without source entries.
 
 Action JSON is tagged by `action.kind`:
 
@@ -400,7 +411,7 @@ memzoi proposal-files apply <proposal-id>
 memzoi proposal-files reject <proposal-id> --reason "..."
 ```
 
-`list`, `show`, and `validate` are read-only. `list` and `validate` describe the pending inbox; `show` can also inspect a resolved packet. `validate` includes target existence, active-state, scope, and freshness checks for supersede/tombstone packets. `apply` accepts a `status: proposed`, `sensitivity: repo-safe` packet, writes its canonical changes and derived SQLite rows atomically, then moves the packet to `.memzoi/proposals/resolved/applied/`. Create writes one active record; supersede preserves the target as `superseded` and creates one lineage-linked active replacement; tombstone preserves the target evidence with `status: tombstoned`. `reject` creates no canonical record and moves the packet to `.memzoi/proposals/resolved/rejected/` with an explicit reason. Resolution metadata records the outcome, actor, timestamp, reason, and affected record IDs. Repeating the same outcome is an auditable no-op; requesting the opposite outcome is refused.
+`list`, `show`, and `validate` are read-only. `list` and `validate` describe the pending inbox; `show` can also inspect a resolved packet. `validate` includes target existence, active-state, scope, and freshness checks for repo-safe supersede/tombstone packets, while non-repo-safe packets are invalid with classification-only remediation. `apply` accepts a `status: proposed`, `sensitivity: repo-safe` packet, writes its canonical changes and derived SQLite rows atomically, then moves the packet to `.memzoi/proposals/resolved/applied/`. Create writes one active record; supersede preserves the target as `superseded` and creates one lineage-linked active replacement; tombstone preserves the target evidence with `status: tombstoned`. `reject` creates no canonical record and moves the packet to `.memzoi/proposals/resolved/rejected/` with an explicit reason. A rejected non-repo-safe packet is archived as a create-shaped hash receipt: its original title, body, source, scope, authorship, action target, and lineage are not copied into Git-visible history. Resolution metadata preserves the proposal ID, outcome, reviewing actor, timestamp, and rejection reason. Repeating the same outcome is an auditable no-op; requesting the opposite outcome is refused.
 
 Git-plane apply blocks every value except `repo-safe`, including `secret`, `sensitive`, `local-only`, `raw-transcript`, `private-personal-data`, `temporary-state`, and `unknown`; there is no override flag. Missing legacy sensitivity is treated as `unknown`. Classify or sanitize blocked proposals before repo apply, or route local/session content to the runtime plane.
 
@@ -462,7 +473,15 @@ candidates:
       - security
 ```
 
-Memzoi validates the whole batch and prepares repo proposal files before writing. `repo` candidates must be `repo-safe` and become pending `.memzoi/proposals/pending/*.md` proposal files only; they are not applied and do not write canonical `.memzoi/records/*.md` files. `local` candidates create private runtime records. `session` candidates create runtime checkpoint records. Runtime row writes are transactional, and created proposal files are cleaned up if a later promotion step fails. `discard` and `needs_review` candidates create no writes.
+Memzoi validates the whole batch and prepares repo proposal files before writing. `repo`
+candidates must be `repo-safe` and become pending `.memzoi/proposals/pending/*.md`
+proposal files only; omitted sensitivity normalizes to `unknown`. If any repo candidate is
+not repo-safe, the command returns structured blocked results, redacts that candidate's
+title from output, and performs no writes for the entire batch. Otherwise, `local`
+candidates create private runtime records and `session` candidates create runtime
+checkpoint records. Runtime row writes are transactional, and created proposal files are
+cleaned up if a later promotion step fails. `discard` and `needs_review` candidates create
+no writes.
 
 `session-end` does not inspect transcripts, chat logs, shell history, hidden agent state, or context packs. Free-text notes and checkpoints are rejected until a future extraction workflow exists.
 

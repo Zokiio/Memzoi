@@ -54,12 +54,6 @@ pub struct OkfProposalFile {
     pub resolution: Option<OkfProposalResolution>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct OkfProposalApplyResult {
-    pub record: MemoryRecord,
-    pub record_path: PathBuf,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OkfProposalResolution {
     pub outcome: OkfProposalOutcome,
@@ -694,19 +688,7 @@ pub fn import_okf_records(conn: &Connection, records: &[OkfRecordFile]) -> Resul
     Ok(records.len())
 }
 
-pub fn write_memory_record_file(records_root: &Path, record: &MemoryRecord) -> Result<PathBuf> {
-    write_memory_record_file_with_tags(records_root, record, &[])
-}
-
-pub fn write_memory_record_file_with_tags(
-    records_root: &Path,
-    record: &MemoryRecord,
-    tags: &[String],
-) -> Result<PathBuf> {
-    write_memory_record_file_with_metadata(records_root, record, tags, &[])
-}
-
-pub fn write_memory_record_file_with_metadata(
+pub(crate) fn write_memory_record_file_with_metadata(
     records_root: &Path,
     record: &MemoryRecord,
     tags: &[String],
@@ -715,7 +697,7 @@ pub fn write_memory_record_file_with_metadata(
     write_memory_record_file_internal(records_root, record, tags, applies_to, WriteMode::Overwrite)
 }
 
-pub fn create_memory_record_file_with_metadata(
+pub(crate) fn create_memory_record_file_with_metadata(
     records_root: &Path,
     record: &MemoryRecord,
     tags: &[String],
@@ -724,22 +706,36 @@ pub fn create_memory_record_file_with_metadata(
     write_memory_record_file_internal(records_root, record, tags, applies_to, WriteMode::CreateNew)
 }
 
-pub fn apply_okf_create_proposal_file(
-    records_root: impl AsRef<Path>,
-    proposal: &OkfProposalFile,
-) -> Result<OkfProposalApplyResult> {
-    let record = project_okf_create_proposal(proposal)?;
-    let record_path = create_memory_record_file_with_metadata(
-        records_root.as_ref(),
-        &record,
-        &proposal.tags,
-        &proposal.applies_to,
-    )?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteMode {
+    CreateNew,
+    Overwrite,
+}
 
-    Ok(OkfProposalApplyResult {
-        record,
-        record_path,
-    })
+fn write_memory_record_file_internal(
+    records_root: &Path,
+    record: &MemoryRecord,
+    tags: &[String],
+    applies_to: &[String],
+    mode: WriteMode,
+) -> Result<PathBuf> {
+    let destination = records_root.join(format!("{}.md", record.id));
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create records directory {}", parent.display()))?;
+    }
+    let markdown = render_memory_record(record, tags, applies_to);
+    match mode {
+        WriteMode::CreateNew => OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, markdown.as_bytes()))
+            .with_context(|| format!("failed to create memory record {}", destination.display()))?,
+        WriteMode::Overwrite => fs::write(&destination, markdown)
+            .with_context(|| format!("failed to write memory record {}", destination.display()))?,
+    }
+    Ok(destination)
 }
 
 pub(crate) fn project_okf_create_proposal(proposal: &OkfProposalFile) -> Result<MemoryRecord> {
@@ -899,6 +895,63 @@ pub(crate) fn render_resolved_okf_proposal_markdown(
     ))
 }
 
+pub(crate) fn proposal_for_rejection_archive(proposal: &OkfProposalFile) -> OkfProposalFile {
+    if proposal.sensitivity == OkfProposalSensitivity::RepoSafe {
+        return proposal.clone();
+    }
+
+    let digest = rejected_proposal_content_hash(proposal);
+    let mut redacted = proposal.clone();
+    redacted.kind = None;
+    redacted.version = None;
+    redacted.profile = None;
+    redacted.title = "Redacted non-repo-safe proposal".to_owned();
+    redacted.description = "Original proposal content redacted before archival.".to_owned();
+    redacted.body = format!(
+        "Original non-repo-safe proposal content was redacted before archival.\n\nContent hash (BLAKE3): `{digest}`."
+    );
+    redacted.proposal.action = OkfProposalAction::Create;
+    redacted.proposal.proposed_by = "redacted".to_owned();
+    redacted.proposal.reason = None;
+    redacted.proposal.confidence = None;
+    redacted.proposal.target = None;
+    redacted.scope_id = None;
+    redacted.applies_to.clear();
+    redacted.tags.clear();
+    redacted.created_by = None;
+    redacted.sources.clear();
+    redacted.supersedes.clear();
+    redacted
+}
+
+fn rejected_proposal_content_hash(proposal: &OkfProposalFile) -> String {
+    let bytes = serde_json::to_vec(&(
+        (
+            &proposal.kind,
+            &proposal.version,
+            &proposal.profile,
+            &proposal.title,
+            &proposal.description,
+            &proposal.body,
+        ),
+        (
+            &proposal.proposal.action,
+            &proposal.proposal.proposed_by,
+            &proposal.proposal.reason,
+            &proposal.proposal.confidence,
+            &proposal.proposal.target,
+            &proposal.scope_id,
+            &proposal.applies_to,
+            &proposal.tags,
+            &proposal.created_by,
+            &proposal.sources,
+            &proposal.supersedes,
+        ),
+    ))
+    .expect("rejected proposal digest input is serializable");
+    blake3::hash(&bytes).to_hex().to_string()
+}
+
 pub(crate) fn render_memory_record_markdown(
     record: &MemoryRecord,
     tags: &[String],
@@ -945,38 +998,6 @@ fn proposal_primary_evidence(sources: &[OkfProposalSource]) -> (Option<String>, 
         }
     }
     (None, None)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WriteMode {
-    CreateNew,
-    Overwrite,
-}
-
-fn write_memory_record_file_internal(
-    records_root: &Path,
-    record: &MemoryRecord,
-    tags: &[String],
-    applies_to: &[String],
-    mode: WriteMode,
-) -> Result<PathBuf> {
-    let destination = records_root.join(format!("{}.md", record.id));
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create records directory {}", parent.display()))?;
-    }
-    let markdown = render_memory_record(record, tags, applies_to);
-    match mode {
-        WriteMode::CreateNew => OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, markdown.as_bytes()))
-            .with_context(|| format!("failed to create memory record {}", destination.display()))?,
-        WriteMode::Overwrite => fs::write(&destination, markdown)
-            .with_context(|| format!("failed to write memory record {}", destination.display()))?,
-    }
-    Ok(destination)
 }
 
 #[derive(Debug, Serialize)]
@@ -1824,9 +1845,59 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::{MemoryLane, MemoryStatus, MemoryType, ScopeKind, Visibility};
+    use crate::{
+        MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind,
+        Visibility,
+    };
 
     const EXAMPLE_MEMORY: &str = include_str!("../../../examples/example-memory.md");
+
+    #[test]
+    fn internal_record_renderer_preserves_canonical_fields() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let records = temp.path().join("records");
+        let record = MemoryRecord {
+            id: "team/install-risk".to_owned(),
+            memory_type: MemoryType::Risk,
+            lane: MemoryLane::Semantic,
+            destination: MemoryDestination::Repo,
+            scope_kind: ScopeKind::Team,
+            scope_id: Some("platform".to_owned()),
+            visibility: Visibility::Team,
+            title: "Risk: package install".to_owned(),
+            body: "Package installs require review.".to_owned(),
+            status: MemoryStatus::Superseded,
+            confidence: 0.75,
+            source_kind: Some("human-authored".to_owned()),
+            source_ref: Some("issue://42".to_owned()),
+            proposal_id: Some("prop_review_42".to_owned()),
+            content_hash: "hash".to_owned(),
+            created_at: "2026-07-05T00:00:00Z".to_owned(),
+            updated_at: "2026-07-06T00:00:00Z".to_owned(),
+            supersedes_id: Some("team/old-install-risk".to_owned()),
+            expires_at: Some("2027-01-01".to_owned()),
+        };
+
+        let path = super::write_memory_record_file_with_metadata(&records, &record, &[], &[])?;
+        let rendered = std::fs::read_to_string(&path)?;
+        assert!(rendered.contains("type: risk\n"));
+        assert!(rendered.contains("title: \"Risk: package install\"\n"));
+        let parsed = super::parse_okf_record_file(&records, &path)?.expect("record parses");
+
+        assert_eq!(parsed.concept_id, "team/install-risk");
+        assert_eq!(parsed.draft.title, "Risk: package install");
+        assert_eq!(parsed.draft.scope_kind, ScopeKind::Team);
+        assert_eq!(parsed.draft.scope_id.as_deref(), Some("platform"));
+        assert_eq!(parsed.status, MemoryStatus::Superseded);
+        assert_eq!(parsed.draft.source_ref.as_deref(), Some("issue://42"));
+        assert_eq!(parsed.proposal_id.as_deref(), Some("prop_review_42"));
+        assert_eq!(
+            parsed.supersedes_id.as_deref(),
+            Some("team/old-install-risk")
+        );
+        assert_eq!(parsed.expires_at.as_deref(), Some("2027-01-01"));
+        Ok(())
+    }
 
     #[test]
     fn proposal_id_reservation_never_reuses_resolved_audit_ids() -> anyhow::Result<()> {

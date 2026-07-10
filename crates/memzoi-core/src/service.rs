@@ -35,7 +35,8 @@ use crate::{
     exporters, handoff, okf, precheck, proposals, search,
     session_end::{
         SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument, SessionEndResult,
-        SessionEndWrite, session_end_proposal_draft, validate_session_end_document,
+        SessionEndWrite, repo_sensitivity_block_reason, session_end_proposal_draft,
+        validate_session_end_document,
     },
 };
 
@@ -492,12 +493,7 @@ impl MemoryService {
     }
 
     pub fn validate_file_proposal(&self, proposal: &OkfProposalFile) -> Result<()> {
-        let mut structurally_reviewed = proposal.clone();
-        structurally_reviewed.sensitivity = crate::OkfProposalSensitivity::RepoSafe;
-        self.build_file_proposal_apply_plan(
-            &structurally_reviewed,
-            &expiry::format_timestamp(self.now())?,
-        )?;
+        self.build_file_proposal_apply_plan(proposal, &expiry::format_timestamp(self.now())?)?;
         Ok(())
     }
 
@@ -671,7 +667,7 @@ impl MemoryService {
         }
         let proposal_path = proposal_path.as_ref();
         let proposal = self.load_pending_file_proposal(proposal_path)?;
-        let resolution = OkfProposalResolution {
+        let mut resolution = OkfProposalResolution {
             outcome: OkfProposalOutcome::Rejected,
             resolved_by: actor.trim().to_owned(),
             resolved_at: expiry::format_timestamp(self.now())?,
@@ -683,6 +679,9 @@ impl MemoryService {
                 .clone()
                 .or_else(|| proposal.supersedes.first().cloned()),
         };
+        if proposal.sensitivity != crate::OkfProposalSensitivity::RepoSafe {
+            resolution.target_id = None;
+        }
         let resolved_path = self
             .paths
             .proposals_dir()
@@ -690,7 +689,9 @@ impl MemoryService {
             .join("rejected")
             .join(format!("{}.md", proposal.file_id));
         ensure_path_absent(&resolved_path, "resolved proposal packet")?;
-        let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
+        let archived_proposal = okf::proposal_for_rejection_archive(&proposal);
+        let resolved_markdown =
+            okf::render_resolved_okf_proposal_markdown(&archived_proposal, &resolution)?;
         let nonce = Uuid::now_v7().to_string();
         let resolved_temp = stage_file(&resolved_path, &resolved_markdown, &nonce)?;
         let pending_backup = sibling_transaction_path(proposal_path, &nonce, "pending");
@@ -717,7 +718,7 @@ impl MemoryService {
         remove_staged_file(&pending_backup);
 
         Ok(FileProposalResolutionResult {
-            proposal,
+            proposal: archived_proposal,
             resolution,
             resolved_path,
             record: None,
@@ -936,6 +937,12 @@ impl MemoryService {
         document: SessionEndDocument,
     ) -> Result<SessionEndResult> {
         validate_session_end_document(&document)?;
+        if document.candidates.iter().any(|candidate| {
+            candidate.destination == MemoryDestination::Repo
+                && candidate.sensitivity != crate::OkfProposalSensitivity::RepoSafe
+        }) {
+            return Ok(blocked_session_end_result(document));
+        }
         let timestamp = self.now_timestamp()?;
         let pending_root = self.paths.proposals_dir().join("pending");
         let mut reserved_proposal_ids = BTreeSet::new();
@@ -1058,7 +1065,19 @@ impl MemoryService {
                 memory_type: candidate.memory_type,
                 lane: candidate.lane,
                 title,
+                sensitivity: candidate.sensitivity,
                 status,
+                reason: match candidate.destination {
+                    MemoryDestination::Discard => {
+                        Some("discard destination performs no write".to_owned())
+                    }
+                    MemoryDestination::NeedsReview => {
+                        Some("candidate requires human review before writing".to_owned())
+                    }
+                    MemoryDestination::Repo
+                    | MemoryDestination::Local
+                    | MemoryDestination::Session => None,
+                },
                 write,
             });
         }
@@ -1304,6 +1323,60 @@ impl MemoryService {
                 .map(|record| record.concept_id)
                 .collect(),
         })
+    }
+}
+
+fn blocked_session_end_result(document: SessionEndDocument) -> SessionEndResult {
+    let candidates = document
+        .candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let non_repo_safe = candidate.destination == MemoryDestination::Repo
+                && candidate.sensitivity != crate::OkfProposalSensitivity::RepoSafe;
+            let (title, status, reason) = if non_repo_safe {
+                (
+                    "Redacted non-repo-safe candidate".to_owned(),
+                    SessionEndCandidateStatus::Blocked,
+                    Some(repo_sensitivity_block_reason(candidate.sensitivity)),
+                )
+            } else {
+                let status = match candidate.destination {
+                    MemoryDestination::Discard => SessionEndCandidateStatus::Skipped,
+                    MemoryDestination::Repo
+                    | MemoryDestination::Local
+                    | MemoryDestination::Session
+                    | MemoryDestination::NeedsReview => SessionEndCandidateStatus::Blocked,
+                };
+                let reason = match candidate.destination {
+                    MemoryDestination::Discard => {
+                        "discard destination performs no write".to_owned()
+                    }
+                    MemoryDestination::NeedsReview => {
+                        "candidate requires human review before writing".to_owned()
+                    }
+                    MemoryDestination::Repo
+                    | MemoryDestination::Local
+                    | MemoryDestination::Session => "session-end batch contains a non-repo-safe repo candidate; no writes were performed".to_owned(),
+                };
+                (candidate.title.trim().to_owned(), status, Some(reason))
+            };
+            SessionEndCandidateResult {
+                index,
+                destination: candidate.destination,
+                memory_type: candidate.memory_type,
+                lane: candidate.lane,
+                title,
+                sensitivity: candidate.sensitivity,
+                status,
+                reason,
+                write: None,
+            }
+        })
+        .collect();
+    SessionEndResult {
+        task: document.task.trim().to_owned(),
+        candidates,
     }
 }
 
