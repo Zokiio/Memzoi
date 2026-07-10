@@ -19,25 +19,45 @@ Search is backed by SQLite FTS over active, unexpired record titles and bodies. 
 
 Path filtering matches records bound to the exact path, descendants of the path, or ancestors of the path. That lets a record attached to `apps/web` apply when the user is working in `apps/web/src/App.tsx`.
 
-## Evaluate recall with a golden corpus
+## Evaluate trust with a golden corpus
 
 ```bash
-memzoi eval recall --corpus evals/recall/v1/corpus.yaml
-memzoi eval recall --corpus evals/recall/v1/corpus.yaml --json
+memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json
+memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --json
 ```
 
-`eval recall` loads an explicit versioned YAML corpus and its referenced OKF
-Markdown fixtures into a fresh temporary canonical/runtime bundle. It never
+`eval recall` loads the strict v2 YAML corpus and its OKF, proposal, and private
+runtime fixtures into a fresh temporary canonical/runtime bundle. It never
 opens or mutates the current project's records, proposals, normal index,
 exports, checkpoints, or event log.
 
-Cases declare relevant and forbidden record IDs, `k`, and optional scope,
-scope-ID, type, lane, and path filters. Reports include ordered results and
-citations plus recall@k, MRR, forbidden hits, latency, and aggregate threshold
-checks. Passing reports exit zero. A threshold regression prints the complete
-human or JSON report first and then exits non-zero, making the corpus usable as
-a local or CI quality gate. See the [reference](./reference.md#recall-evaluation)
-for the corpus contract.
+Each case is tagged with one evaluated surface:
+
+- `search` measures recall, ranking, lifecycle and scope suppression, citations,
+  and proposal evidence round trips.
+- `precheck` measures warning precision and recall, including path-only
+  governance warnings.
+- `context` verifies token usage and explicit local/session destination opt-in.
+- `write_gate` proves prohibited candidates cannot enter repository memory.
+
+The v2 report includes versioned metric definitions, runtime metadata, search
+recall/MRR, precheck precision/recall, categorized leakage and forbidden-hit
+rates, citation/provenance integrity, estimated usage, p50/p95 latency, and the
+case pass rate. Corpus thresholds determine pass/fail. Runtime metadata and
+latency are excluded from deterministic baseline comparison. Latency affects
+pass/fail only when the corpus declares an explicit threshold.
+
+`--baseline` compares against the typed local baseline without network access.
+Use `--update-baseline` only after reviewing an intentional change:
+
+```bash
+memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --update-baseline
+```
+
+Normal evaluation is read-only. See the
+[reference](./reference.md#recall-evaluation) for the contracts and the
+[contributor guide](https://github.com/Zokiio/Memzoi/blob/main/docs/evaluation.md)
+for adding cases and updating the baseline.
 
 ## Build a context pack
 

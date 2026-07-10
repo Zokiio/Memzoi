@@ -1,0 +1,19 @@
+---
+type: fact
+lane: semantic
+title: Magenta precheck sentinel same-path fact
+timestamp: "2026-07-01T00:00:00Z"
+updated: "2026-07-01T00:00:00Z"
+status: active
+scope: repo
+visibility: repo
+confidence: 1
+source: eval
+source_ref: fixture://precheck-path-fact
+applies_to:
+  - crates/memzoi-core/src/precheck.rs
+---
+
+# Magenta precheck sentinel same-path fact
+
+The same path contains an informational fact that is not governance memory.

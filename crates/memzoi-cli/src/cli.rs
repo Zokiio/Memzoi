@@ -317,6 +317,12 @@ pub(crate) enum EvalCommands {
         /// Explicit path to the recall corpus YAML file.
         #[arg(long)]
         corpus: PathBuf,
+        /// Compare deterministic results with this local baseline artifact.
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        /// Replace the selected baseline before comparing it.
+        #[arg(long, requires = "baseline")]
+        update_baseline: bool,
         /// Emit the stable machine-readable report.
         #[arg(long)]
         json: bool,

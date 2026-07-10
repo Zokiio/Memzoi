@@ -243,7 +243,12 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
         Commands::Rebuild { json } => rebuild_command(json),
         Commands::Doctor { project_root, json } => doctor_command(project_root, json),
         Commands::Eval { command } => match command {
-            EvalCommands::Recall { corpus, json } => eval::recall_eval_command(corpus, json),
+            EvalCommands::Recall {
+                corpus,
+                baseline,
+                update_baseline,
+                json,
+            } => eval::recall_eval_command(corpus, baseline, update_baseline, json),
         },
         Commands::Quickstart { apply_sample, json } => quickstart_command(apply_sample, json),
         Commands::Update {

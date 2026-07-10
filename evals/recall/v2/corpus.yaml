@@ -1,0 +1,195 @@
+version: memzoi-recall-corpus/v2
+name: memzoi-trust-contract-v2
+evaluated_at: 2026-07-10T12:00:00Z
+records_root: records
+records:
+  - citation-target.md
+  - expiry-boundary.md
+  - expiry-live.md
+  - lane-distractor.md
+  - lane-target.md
+  - lexical-target.md
+  - lifecycle-active.md
+  - lifecycle-superseded.md
+  - lifecycle-tombstoned.md
+  - path-distractor.md
+  - path-target.md
+  - plane-repo.md
+  - precheck-path-fact.md
+  - precheck-path-target.md
+  - precheck-path-unrelated.md
+  - scope-alpha.md
+  - scope-beta.md
+  - scope-repo.md
+proposals_root: proposals
+proposal_fixtures:
+  - path: evidence-round-trip.md
+    proposal_id: mem_eval_evidence_round_trip
+    expected_record_id: proposal-evidence-round-trip
+    expected_source_kind: path
+    expected_source_ref: docs/rfcs/0001-evidence-backed-capture.md
+    expected_applies_to:
+      - crates/memzoi-core/src/recall_eval.rs
+runtime_fixtures:
+  - id: local-onyx-memory-plane-sentinel-local
+    destination: local
+    type: fact
+    lane: semantic
+    title: Onyx memory plane sentinel local
+    body: The onyx memory plane sentinel local fixture is available only after explicit local opt-in.
+  - id: session-onyx-memory-plane-sentinel-session
+    destination: session
+    type: episode
+    lane: session
+    title: Onyx memory plane sentinel session
+    body: The onyx memory plane sentinel session fixture is available only after explicit session opt-in.
+thresholds:
+  min_mean_recall_at_k: 1.0
+  min_mean_mrr: 1.0
+  min_precheck_precision: 1.0
+  min_precheck_recall: 1.0
+  max_stale_leakage_rate: 0.0
+  max_expired_leakage_rate: 0.0
+  max_scope_leakage_rate: 0.0
+  max_forbidden_hit_rate: 0.0
+  min_citation_integrity: 1.0
+  min_provenance_integrity: 1.0
+  min_case_pass_rate: 1.0
+  max_estimated_usage: 500
+cases:
+  - surface: search
+    id: lexical-title-and-body
+    query: quartz lexical sentinel
+    relevant_ids: [lexical-target]
+    scope_kind: repo
+    type: fact
+    lane: semantic
+    k: 3
+  - surface: search
+    id: path-filter-before-limit
+    query: cerulean path sentinel
+    relevant_ids: [path-target]
+    forbidden:
+      scope: [path-distractor]
+    scope_kind: repo
+    type: decision
+    lane: semantic
+    path: crates/memzoi-core/src/search.rs
+    k: 1
+  - surface: search
+    id: scope-filter-before-limit
+    query: amber scope sentinel
+    relevant_ids: [scope-alpha]
+    forbidden:
+      scope: [scope-beta, scope-repo]
+    scope_kind: team
+    scope_id: team-alpha
+    type: procedure
+    lane: procedural
+    k: 1
+  - surface: search
+    id: lane-filter-before-limit
+    query: verdant lane sentinel
+    relevant_ids: [lane-target]
+    forbidden:
+      other: [lane-distractor]
+    scope_kind: repo
+    type: procedure
+    lane: procedural
+    k: 1
+  - surface: search
+    id: lifecycle-suppression
+    query: crimson lifecycle sentinel
+    relevant_ids: [lifecycle-active]
+    forbidden:
+      stale: [lifecycle-superseded, lifecycle-tombstoned]
+    scope_kind: repo
+    type: warning
+    lane: semantic
+    path: crates/memzoi-core/src/service.rs
+    k: 3
+  - surface: search
+    id: expiry-boundary
+    query: saffron expiry sentinel
+    relevant_ids: [expiry-live]
+    forbidden:
+      expired: [expiry-boundary]
+    scope_kind: repo
+    type: warning
+    lane: semantic
+    path: crates/memzoi-core/src/expiry.rs
+    k: 3
+  - surface: search
+    id: citation-integrity
+    query: indigo citation sentinel
+    relevant_ids: [citation-target]
+    scope_kind: repo
+    type: decision
+    lane: semantic
+    path: docs/roadmap.md
+    k: 3
+  - surface: search
+    id: proposal-evidence-round-trip
+    query: opaline proposal evidence sentinel
+    relevant_ids: [proposal-evidence-round-trip]
+    scope_kind: repo
+    type: decision
+    lane: semantic
+    path: crates/memzoi-core/src/recall_eval.rs
+    k: 3
+    proposal_fixture: proposal-evidence-round-trip
+  - surface: precheck
+    id: precheck-path-only-warning
+    path: crates/memzoi-core/src/precheck.rs
+    scope_kind: repo
+    relevant_ids: [precheck-path-target]
+    forbidden:
+      scope: [precheck-path-unrelated]
+      other: [precheck-path-fact]
+  - surface: context
+    id: context-default-plane
+    task: onyx memory plane sentinel
+    token_budget: 500
+    relevant_ids: [plane-repo]
+    forbidden:
+      destination:
+        - local-onyx-memory-plane-sentinel-local
+        - session-onyx-memory-plane-sentinel-session
+  - surface: context
+    id: context-local-opt-in
+    task: onyx memory plane sentinel
+    token_budget: 500
+    include_local: true
+    relevant_ids:
+      - plane-repo
+      - local-onyx-memory-plane-sentinel-local
+    forbidden:
+      destination: [session-onyx-memory-plane-sentinel-session]
+  - surface: context
+    id: context-session-opt-in
+    task: onyx memory plane sentinel
+    token_budget: 500
+    include_session: true
+    relevant_ids:
+      - plane-repo
+      - session-onyx-memory-plane-sentinel-session
+    forbidden:
+      destination: [local-onyx-memory-plane-sentinel-local]
+  - surface: context
+    id: context-all-planes-opt-in
+    task: onyx memory plane sentinel
+    token_budget: 500
+    include_local: true
+    include_session: true
+    relevant_ids:
+      - plane-repo
+      - local-onyx-memory-plane-sentinel-local
+      - session-onyx-memory-plane-sentinel-session
+  - surface: write_gate
+    id: prohibited-repo-write
+    title: Forbidden canary sentinel
+    body: The ultraviolet prohibited write canary must never enter canonical repository memory.
+    query: ultraviolet prohibited write canary
+    sensitivity: secret
+    expected_issue_code: repo_sensitivity_required
+    forbidden_record_id: forbidden-canary-sentinel

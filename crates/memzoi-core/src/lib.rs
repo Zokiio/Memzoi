@@ -59,9 +59,18 @@ pub use proposals::{
     ValidationResult,
 };
 pub use recall_eval::{
-    RECALL_EVAL_CORPUS_VERSION, RECALL_EVAL_REPORT_VERSION, RecallEvalAggregate, RecallEvalCase,
-    RecallEvalCaseReport, RecallEvalCorpus, RecallEvalReport, RecallEvalRetrievedRecord,
-    RecallEvalThresholdResults, RecallEvalThresholds, run_recall_eval,
+    RECALL_EVAL_BASELINE_VERSION, RECALL_EVAL_CORPUS_VERSION,
+    RECALL_EVAL_METRIC_DEFINITIONS_VERSION, RECALL_EVAL_REPORT_VERSION, RecallEvalBaseline,
+    RecallEvalBaselineCase, RecallEvalBaselineComparison, RecallEvalBaselineCorpus,
+    RecallEvalBaselineMetrics, RecallEvalBaselineStatus, RecallEvalCase, RecallEvalCaseReport,
+    RecallEvalCorpus, RecallEvalCorpusMetadata, RecallEvalForbiddenIds, RecallEvalIntegrityMetric,
+    RecallEvalLatencyMetrics, RecallEvalLeakageMetric, RecallEvalLeakageMetrics,
+    RecallEvalMetricDefinitions, RecallEvalMetricDelta, RecallEvalMetrics,
+    RecallEvalPrecheckMetrics, RecallEvalProposalFixture, RecallEvalProposalFixtureReport,
+    RecallEvalRatioMetric, RecallEvalReport, RecallEvalRetrievedRecord, RecallEvalRuntimeFixture,
+    RecallEvalRuntimeMetadata, RecallEvalSearchMetrics, RecallEvalSurface,
+    RecallEvalThresholdResults, RecallEvalThresholds, RecallEvalTokenUsageMetrics,
+    attach_recall_eval_baseline, run_recall_eval, write_recall_eval_baseline,
 };
 pub use search::SearchInput;
 pub use service::{
