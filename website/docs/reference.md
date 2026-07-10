@@ -175,9 +175,11 @@ Each candidate includes `index`, `classification`, `policy`, normalized `type`, 
 Blocked non-repo-safe candidates use classification-only placeholders for title, body,
 reason, tags, and scope metadata; their original content is represented only by the
 `content_hash`. Because manifest `sources` are document-wide rather than candidate-scoped,
-the plan omits all source locators when any repo candidate is blocked. This avoids leaking
-the blocked candidate's locator or falsely attributing that evidence to the safe subset;
-allowed candidates in that mixed batch therefore create proposals without source entries.
+the plan omits all source locators when any repo candidate is blocked. It also blocks every
+other repo candidate in that manifest with guidance to split the manifest before retrying;
+this prevents a partial repo write from consuming ambiguous provenance. Local and session
+candidates may still create private runtime records, while blocked repo candidates create no
+proposal or canonical file.
 
 Action JSON is tagged by `action.kind`:
 
@@ -411,9 +413,17 @@ memzoi proposal-files apply <proposal-id>
 memzoi proposal-files reject <proposal-id> --reason "..."
 ```
 
-`list`, `show`, and `validate` are read-only. `list` and `validate` describe the pending inbox; `show` can also inspect a resolved packet. `validate` includes target existence, active-state, scope, and freshness checks for repo-safe supersede/tombstone packets, while non-repo-safe packets are invalid with classification-only remediation. `apply` accepts a `status: proposed`, `sensitivity: repo-safe` packet, holds the repo lifecycle lock, writes its canonical changes and derived SQLite rows with rollback for reported failures, then moves the packet to `.memzoi/proposals/resolved/applied/`. Create writes one active record; supersede preserves the target as `superseded` and creates one lineage-linked active replacement; tombstone preserves the target evidence with `status: tombstoned`. `reject` holds the same lock, creates no canonical record, and moves the packet to `.memzoi/proposals/resolved/rejected/` with an explicit reason. A rejected non-repo-safe packet is archived as a create-shaped hash receipt: its original title, body, source, scope, authorship, action target, and lineage are not copied into Git-visible history. Resolution metadata preserves the proposal ID, outcome, reviewing actor, timestamp, rejection reason, and safe affected-record identifiers. Repeating an applied outcome verifies canonical bytes and lineage, repairing only disposable SQLite drift; repeating a rejection is an auditable no-op; requesting the opposite outcome is refused. The multi-file filesystem and SQLite operation is not crash-atomic across process termination or power loss; run `memzoi doctor` and inspect transaction artifacts before recovery.
+`list`, `show`, and `validate` are read-only. `list` and `validate` describe the pending inbox; `show` can also inspect a resolved packet. `validate` includes target existence, active-state, scope, and freshness checks for repo-safe supersede/tombstone packets, while non-repo-safe packets are invalid with classification-only remediation. Sensitivity is preflighted before the rest of a packet is parsed, so a malformed packet already classified as non-repo-safe is represented by a generic, structurally parseable receipt rather than echoing malformed fields; it remains invalid for repo apply because of its sensitivity. `apply` accepts a `status: proposed`, `sensitivity: repo-safe` packet, holds the repo lifecycle lock, writes its canonical changes and derived SQLite rows with rollback for reported failures, then moves the packet to `.memzoi/proposals/resolved/applied/`. Create writes one active record; supersede preserves the target as `superseded` and creates one lineage-linked active replacement; tombstone preserves the target evidence with `status: tombstoned`. `reject` holds the same lock, creates no canonical record, and moves the packet to `.memzoi/proposals/resolved/rejected/` with an explicit reason.
+
+A rejected non-repo-safe packet is archived as a create-shaped hash receipt: its original title, body, source, scope, authorship, action target, lineage, proposal ID, and file ID are not copied into Git-visible history or command output. The receipt frontmatter and resolved filename use separate deterministic `redacted-identity-…` values for the proposal and file identities, and its content digest covers both raw identities plus the original packet bytes. Replay remains available by either original alias: Memzoi hashes the lookup value and matches the hash-only receipt without printing the alias. Repo-safe resolutions preserve their normal identifiers and metadata. Repeating an applied outcome verifies canonical bytes and lineage, repairing only disposable SQLite drift; repeating a rejection is an auditable no-op; requesting the opposite outcome is refused. The multi-file filesystem and SQLite operation is not crash-atomic across process termination or power loss; run `memzoi doctor` and inspect transaction artifacts before recovery.
 
 Git-plane apply blocks every value except `repo-safe`, including `secret`, `sensitive`, `local-only`, `raw-transcript`, `private-personal-data`, `temporary-state`, and `unknown`; there is no override flag. Missing legacy sensitivity is treated as `unknown`. Classify or sanitize blocked proposals before repo apply, or route local/session content to the runtime plane.
+
+With `--json`, sensitivity-blocked `apply`, `supersede`, and `proposal-files apply`
+commands exit nonzero after emitting a content-free error object on stdout. The envelope
+uses `ok: false` and an `error` object containing `code: repo_sensitivity_required`, the
+operation, classification, message, and next step; proposal bodies and other rejected fields
+are not included.
 
 ## Local runtime memory
 

@@ -12,8 +12,9 @@ use memzoi_core::{
     OkfProposalOutcome, OkfProposalSensitivity, OkfProposalStatus, PrecheckInput, Proposal,
     ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus, ProposalStatusFilter,
     ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult, SessionEndWrite,
-    Visibility, discover_paths, parse_import_document, parse_okf_proposal_file,
-    parse_session_end_document,
+    Visibility, discover_paths, okf_proposal_matches_identity, parse_import_document,
+    parse_okf_proposal_file, parse_session_end_document, preflight_okf_proposal_file,
+    redacted_okf_proposal_path,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -515,6 +516,10 @@ fn reject_command(proposal_id: &str, reason: &str, actor: &str, as_json: bool) -
 
 fn apply_command(proposal_id: &str, actor: &str, as_json: bool) -> Result<()> {
     let service = open_service()?;
+    let proposal = service.show_proposal(proposal_id)?;
+    if proposal.payload.sensitivity != OkfProposalSensitivity::RepoSafe {
+        return blocked_repo_sensitivity_error("apply", proposal.payload.sensitivity, as_json);
+    }
     let record = service.apply_proposal(proposal_id, actor)?;
     if as_json {
         print_json(&json!({
@@ -654,6 +659,7 @@ struct ProposalFileScan {
 #[derive(Debug)]
 struct ProposalFileEntry {
     path: PathBuf,
+    display_path: PathBuf,
     proposal: OkfProposalFile,
 }
 
@@ -684,7 +690,7 @@ fn proposal_files_show_command(proposal_id: &str, as_json: bool) -> Result<()> {
     let matches = scan
         .proposals
         .iter()
-        .filter(|entry| entry.proposal.id == proposal_id || entry.proposal.file_id == proposal_id)
+        .filter(|entry| okf_proposal_matches_identity(&entry.proposal, proposal_id))
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
@@ -720,7 +726,11 @@ fn proposal_files_validate_command(as_json: bool) -> Result<()> {
         print_json(&proposal_file_validation_json(&scan))?;
     } else {
         for entry in &scan.proposals {
-            println!("valid\t{}\t{}", entry.path.display(), entry.proposal.id);
+            println!(
+                "valid\t{}\t{}",
+                entry.display_path.display(),
+                entry.proposal.id
+            );
         }
         for error in &scan.errors {
             println!("invalid\t{}\t{}", error.path.display(), error.error);
@@ -744,7 +754,7 @@ fn validate_pending_proposal_scan(scan: &mut ProposalFileScan) -> Result<()> {
         match service.validate_file_proposal(&entry.proposal) {
             Ok(()) => valid.push(entry),
             Err(error) => scan.errors.push(ProposalFileError {
-                path: entry.path,
+                path: entry.display_path,
                 error: error.to_string(),
             }),
         }
@@ -764,8 +774,18 @@ fn proposal_files_apply_command(proposal_id: &str, actor: &str, as_json: bool) -
         bail!("invalid proposal files found; run `memzoi proposal-files validate` for details");
     }
 
+    let entry = optional_proposal_file_entry(&scan, proposal_id)?;
+    if let Some(entry) = entry
+        && entry.proposal.sensitivity != OkfProposalSensitivity::RepoSafe
+    {
+        return blocked_repo_sensitivity_error(
+            "proposal_files_apply",
+            entry.proposal.sensitivity,
+            as_json,
+        );
+    }
     let service = open_service()?;
-    let result = match optional_proposal_file_entry(&scan, proposal_id)? {
+    let result = match entry {
         Some(entry) => service.apply_file_proposal(&entry.path, actor)?,
         None => service.replay_file_proposal(proposal_id, OkfProposalOutcome::Applied, actor)?,
     };
@@ -1081,7 +1101,7 @@ fn optional_proposal_file_entry<'a>(
     let matches = scan
         .proposals
         .iter()
-        .filter(|entry| entry.proposal.id == proposal_id || entry.proposal.file_id == proposal_id)
+        .filter(|entry| okf_proposal_matches_identity(&entry.proposal, proposal_id))
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
@@ -1107,9 +1127,33 @@ fn scan_pending_proposal_files_at(paths: &memzoi_core::MemoryPaths) -> Result<Pr
     let mut proposals = Vec::new();
     let mut errors = Vec::new();
     for file in files {
+        match preflight_okf_proposal_file(&proposals_root, &file) {
+            Ok(Some(preflight)) if preflight.sensitivity != OkfProposalSensitivity::RepoSafe => {
+                let display_path =
+                    proposals_root.join(format!("{}.md", preflight.receipt_proposal.file_id));
+                proposals.push(ProposalFileEntry {
+                    path: file,
+                    display_path,
+                    proposal: preflight.receipt_proposal,
+                });
+                continue;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => continue,
+            Err(error) => {
+                let display_path = redacted_okf_proposal_path(&proposals_root, &file)
+                    .unwrap_or_else(|_| proposals_root.join("redacted-proposal.md"));
+                errors.push(ProposalFileError {
+                    path: display_path,
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        }
         match parse_okf_proposal_file(&proposals_root, &file) {
             Ok(Some(proposal)) if proposal.status == OkfProposalStatus::Proposed => {
                 proposals.push(ProposalFileEntry {
+                    display_path: file.clone(),
                     path: file,
                     proposal,
                 })
@@ -1167,6 +1211,7 @@ fn scan_resolved_proposal_files_at(paths: &memzoi_core::MemoryPaths) -> Result<P
             match parse_okf_proposal_file(&outcome_root, &file) {
                 Ok(Some(proposal)) if proposal.status == expected => {
                     proposals.push(ProposalFileEntry {
+                        display_path: file.clone(),
                         path: file,
                         proposal,
                     })
@@ -1202,7 +1247,7 @@ fn scan_resolved_proposal_files_at(paths: &memzoi_core::MemoryPaths) -> Result<P
 }
 
 fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+    for entry in fs::read_dir(dir).context("failed to scan proposal directory")? {
         let entry = entry?;
         let path = entry.path();
         if is_hidden(&path) {
@@ -1232,7 +1277,7 @@ fn print_proposal_file_summary(entry: &ProposalFileEntry) {
     println!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
         entry.proposal.id,
-        entry.path.display(),
+        entry.display_path.display(),
         entry.proposal.proposal.action.as_str(),
         entry.proposal.lane.as_str(),
         entry.proposal.memory_type.as_str(),
@@ -1244,7 +1289,7 @@ fn print_proposal_file_summary(entry: &ProposalFileEntry) {
 fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     println!("id:\t{}", entry.proposal.id);
     println!("file_id:\t{}", entry.proposal.file_id);
-    println!("path:\t{}", entry.path.display());
+    println!("path:\t{}", entry.display_path.display());
     if let Some(kind) = &entry.proposal.kind {
         println!("kind:\t{kind}");
     }
@@ -1353,7 +1398,7 @@ fn proposal_file_json(entry: &ProposalFileEntry, include_body: bool) -> serde_js
     let mut value = json!({
         "id": &proposal.id,
         "file_id": &proposal.file_id,
-        "path": &entry.path,
+        "path": &entry.display_path,
         "kind": &proposal.kind,
         "version": &proposal.version,
         "profile": &proposal.profile,
@@ -1469,6 +1514,9 @@ fn supersede_command(
 ) -> Result<()> {
     let service = open_service()?;
     let draft = draft_from_args(draft_args)?;
+    if draft.sensitivity != OkfProposalSensitivity::RepoSafe {
+        return blocked_repo_sensitivity_error("supersede", draft.sensitivity, as_json);
+    }
     let result = service.supersede_record(record_id, actor, draft)?;
     if as_json {
         print_json(&json!({
@@ -1782,7 +1830,7 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                     match service.validate_file_proposal(&entry.proposal) {
                         Ok(()) => valid.push(entry),
                         Err(error) => pending.errors.push(ProposalFileError {
-                            path: entry.path,
+                            path: entry.display_path,
                             error: error.to_string(),
                         }),
                     }
@@ -2167,6 +2215,63 @@ fn draft_from_args(args: DraftCommand) -> Result<MemoryDraft> {
         sensitivity: sensitivity.parse().map_err(anyhow::Error::msg)?,
         confidence: 1.0,
     })
+}
+
+fn blocked_repo_sensitivity_error(
+    operation: &str,
+    sensitivity: OkfProposalSensitivity,
+    as_json: bool,
+) -> Result<()> {
+    let next_step = repo_sensitivity_guidance(sensitivity);
+    let message = if operation == "proposal_files_apply" {
+        format!(
+            "OKF proposal sensitivity {} cannot be applied into repo records; {next_step}",
+            sensitivity.as_str()
+        )
+    } else {
+        format!(
+            "canonical repo apply requires sensitivity repo-safe; got {}; {next_step}",
+            sensitivity.as_str()
+        )
+    };
+    if as_json {
+        print_json(&json!({
+            "ok": false,
+            "error": {
+                "code": "repo_sensitivity_required",
+                "operation": operation,
+                "sensitivity": sensitivity.as_str(),
+                "message": message,
+                "next_step": next_step,
+            }
+        }))?;
+    }
+    bail!(message)
+}
+
+fn repo_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'static str {
+    match sensitivity {
+        OkfProposalSensitivity::RepoSafe => "repo-safe proposals may be applied after review",
+        OkfProposalSensitivity::LocalOnly => {
+            "local-only proposals belong in the future local/runtime memory plane"
+        }
+        OkfProposalSensitivity::Sensitive => {
+            "classify or sanitize sensitive content before applying it to the repo plane"
+        }
+        OkfProposalSensitivity::Secret => "secret proposals must not become repo-shared memory",
+        OkfProposalSensitivity::RawTranscript => {
+            "raw transcripts must not become repo-shared memory"
+        }
+        OkfProposalSensitivity::PrivatePersonalData => {
+            "private personal data must not become repo-shared memory"
+        }
+        OkfProposalSensitivity::TemporaryState => {
+            "temporary task state belongs in local or session memory, not canonical repo memory"
+        }
+        OkfProposalSensitivity::Unknown => {
+            "classify the proposal sensitivity before applying it to repo records"
+        }
+    }
 }
 
 fn normalize_optional_metadata(value: Option<String>, label: &str) -> Result<Option<String>> {

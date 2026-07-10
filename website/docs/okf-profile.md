@@ -266,8 +266,13 @@ Proposal-to-record mapping:
 ```
 
 Rejected packets move to `resolved/rejected/` instead and create no canonical
-record. The resolved packet retains the reviewed proposal evidence and adds a
-Git-readable outcome, reviewer, timestamp, reason, and affected record IDs.
+record. A repo-safe resolved packet retains the reviewed proposal evidence and
+adds a Git-readable outcome, reviewer, timestamp, reason, and affected record
+IDs. A non-repo-safe packet instead becomes a generic create-shaped receipt:
+its proposal ID, file ID, content, and review-only fields are replaced by
+deterministic hash-only identities and a content digest. Either original alias
+can still replay the stored rejection through a hashed lookup that does not
+echo the alias.
 
 For an applied packet, canonical `source`/`source_ref` point to its original
 evidence locator (for example `path` plus `src/auth/session.ts`), while

@@ -293,12 +293,16 @@ candidates:
     let plan_json = serde_json::to_value(&plan)?;
     assert_eq!(candidate(&plan_json, 0)["sensitivity"], "unknown");
     assert_eq!(action_kind(candidate(&plan_json, 0)), "blocked");
-    assert_eq!(action_kind(candidate(&plan_json, 1)), "create_proposal");
+    assert_eq!(action_kind(candidate(&plan_json, 1)), "blocked");
     let blocked_reason = candidate(&plan_json, 0)["action"]["reason"]
         .as_str()
         .expect("blocked import candidate should include a reason");
     assert!(blocked_reason.contains("got unknown"));
     assert!(!blocked_reason.contains("SENTINEL"));
+    let safe_repo_reason = candidate(&plan_json, 1)["action"]["reason"]
+        .as_str()
+        .expect("safe repo candidate in a mixed batch should be blocked");
+    assert!(safe_repo_reason.contains("split the manifest"));
     let rendered_plan = serde_json::to_string(&plan)?;
     for sentinel in [
         "IMPORT-SOURCE-SENTINEL",
@@ -314,19 +318,104 @@ candidates:
     }
 
     let result = service.apply_import("test", document, &plan.plan_id)?;
-    assert_eq!(result.writes.len(), 1);
-    assert_eq!(result.plan.summary.create_proposals, 1);
-    assert_eq!(result.plan.summary.needs_review, 1);
+    assert_eq!(result.writes.len(), 0);
+    assert_eq!(result.plan.summary.create_proposals, 0);
+    assert_eq!(result.plan.summary.needs_review, 2);
     let pending = service.paths().proposals_dir().join("pending");
     let proposals = read_okf_proposal_files(&pending)?;
-    assert_eq!(proposals.len(), 1);
-    let rendered = fs::read_to_string(pending.join(format!("{}.md", proposals[0].file_id)))?;
-    assert!(!rendered.contains("SENTINEL"));
+    assert!(proposals.is_empty());
     assert_eq!(file_names(&service.paths().records_dir())?, before_records);
-    assert_ne!(
+    assert_eq!(
         file_names(&service.paths().proposals_dir())?,
         before_proposals
     );
+    Ok(())
+}
+
+#[test]
+fn mixed_unsafe_repo_manifest_omits_sources_but_keeps_local_and_session_writes()
+-> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let service = initialized_service(&temp)?;
+    let manifest = r#"
+version: memzoi/import-v1
+sources:
+  - ref: issue://41#mixed-route-provenance
+candidates:
+  - destination: repo
+    reason: unsafe repo candidate
+    type: fact
+    title: Unsafe repository candidate
+    body: This candidate cannot enter repository memory.
+    sensitivity: sensitive
+  - destination: repo
+    reason: safe repo candidate shares document provenance
+    type: decision
+    title: Safe repository candidate
+    body: This candidate must wait for a split manifest.
+    sensitivity: repo-safe
+  - destination: local
+    reason: private local continuity
+    type: preference
+    title: Local import candidate
+    body: Keep this in local runtime memory.
+    sensitivity: local-only
+  - destination: session
+    reason: short-lived session continuity
+    type: episode
+    title: Session import candidate
+    body: Keep this in session runtime memory.
+    sensitivity: temporary-state
+"#;
+    let document = parse_import_document(manifest)?;
+    let plan = service.plan_import("test", document.clone())?;
+
+    assert!(plan.sources.is_empty());
+    assert_eq!(plan.summary.create_proposals, 0);
+    assert_eq!(plan.summary.needs_review, 2);
+    assert_eq!(plan.summary.local_writes, 1);
+    assert_eq!(plan.summary.session_writes, 1);
+    assert!(matches!(
+        plan.candidates[0].action,
+        memzoi_core::ImportCandidateAction::Blocked { .. }
+    ));
+    assert!(matches!(
+        plan.candidates[1].action,
+        memzoi_core::ImportCandidateAction::Blocked { .. }
+    ));
+
+    let result = service.apply_import("test", document, &plan.plan_id)?;
+    assert!(result.plan.sources.is_empty());
+    assert_eq!(result.writes.len(), 2);
+    assert_eq!(service.list_local_memory()?.len(), 1);
+    assert_eq!(service.list_checkpoints()?.len(), 1);
+    assert!(read_okf_proposal_files(service.paths().proposals_dir().join("pending"))?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn every_non_repo_safe_import_sensitivity_is_blocked() -> anyhow::Result<()> {
+    for sensitivity in [
+        "local-only",
+        "sensitive",
+        "secret",
+        "raw-transcript",
+        "private-personal-data",
+        "temporary-state",
+        "unknown",
+    ] {
+        let temp = tempdir()?;
+        let service = initialized_service(&temp)?;
+        let manifest = format!(
+            "version: memzoi/import-v1\nsources:\n  - ref: issue://41\ncandidates:\n  - destination: repo\n    reason: route parity\n    type: fact\n    title: Blocked import candidate\n    body: blocked body\n    sensitivity: {sensitivity}\n"
+        );
+        let plan = service.plan_import("test", parse_import_document(&manifest)?)?;
+        let value = serde_json::to_value(&plan)?;
+        assert_eq!(action_kind(candidate(&value, 0)), "blocked");
+        assert_eq!(candidate(&value, 0)["sensitivity"], sensitivity);
+        assert_eq!(plan.summary.create_proposals, 0);
+        assert_eq!(plan.summary.needs_review, 1);
+    }
     Ok(())
 }
 

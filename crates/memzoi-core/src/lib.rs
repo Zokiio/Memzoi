@@ -46,10 +46,11 @@ pub use models::{
 };
 pub use okf::{
     OkfProposalAction, OkfProposalFile, OkfProposalMetadata, OkfProposalOutcome,
-    OkfProposalResolution, OkfProposalSensitivity, OkfProposalSource, OkfProposalStatus,
-    OkfRecordFile, import_okf_records, parse_okf_proposal_file, parse_okf_proposal_markdown,
-    parse_okf_record_file, parse_okf_record_markdown, read_okf_proposal_files,
-    read_okf_record_files,
+    OkfProposalPreflight, OkfProposalResolution, OkfProposalSensitivity, OkfProposalSource,
+    OkfProposalStatus, OkfRecordFile, import_okf_records, okf_proposal_matches_identity,
+    parse_okf_proposal_file, parse_okf_proposal_markdown, parse_okf_record_file,
+    parse_okf_record_markdown, preflight_okf_proposal_file, preflight_okf_proposal_markdown,
+    read_okf_proposal_files, read_okf_record_files, redacted_okf_proposal_path,
 };
 pub use precheck::PrecheckInput;
 pub use proposals::{

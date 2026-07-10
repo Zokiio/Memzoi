@@ -183,8 +183,12 @@ To close a packet without a canonical write, run
 `memzoi proposal-files reject <proposal-id> --reason "..."`. Rejection moves
 a repo-safe packet to `.memzoi/proposals/resolved/rejected/` with the reviewer,
 timestamp, outcome, and reason embedded in its frontmatter. A non-repo-safe
-packet is replaced there by a create-shaped hash receipt so its original
-content, scope, authorship, target, and lineage do not enter Git history.
+packet is sensitivity-preflighted before full parsing and replaced there by a
+create-shaped hash receipt, even when its other fields are malformed. Its
+original content, scope, authorship, target, lineage, proposal ID, and file ID
+do not enter Git history or command output. The receipt frontmatter and filename
+use deterministic hash-only identities, while replay by either original alias
+hashes the lookup and finds the receipt without echoing that alias.
 Repeating an apply verifies the stored resolution against canonical bytes and
 lineage, repairing only missing or stale disposable SQLite rows. Repeating a
 rejection returns the stored resolution without writing again; attempting the
@@ -304,11 +308,11 @@ state. The destination outcomes are:
 
 Only `repo-safe` repo candidates receive `create_proposal`; omitted sensitivity
 normalizes to `unknown`, and other classifications receive a redacted `blocked`
-action. Import plans are explicitly per-candidate, so applying a reviewed plan may
-write its allowed candidates while the blocked candidate remains a no-write. If a
-manifest contains any blocked repo candidate, its document-wide source locators are
-omitted from the plan and from allowed proposal files because they cannot be safely
-attributed to only the allowed subset.
+action. If any repo candidate is non-repo-safe, every repo candidate in that manifest
+is blocked with guidance to split the manifest before retrying. No proposal file or
+canonical repo record is written from that repo subset. Local and session candidates
+may still write private runtime records. The document-wide source locators are omitted
+from the plan because they cannot be safely attributed to a partial destination subset.
 
 After reviewing an imported repo proposal, use the separate explicit proposal
 review/apply workflow described in [Approval, review, and promotion](#approval-review-and-promotion),

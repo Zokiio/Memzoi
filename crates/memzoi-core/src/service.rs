@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -527,7 +527,7 @@ impl MemoryService {
 
         let matches = resolved
             .iter()
-            .filter(|entry| proposal_matches_identity(&entry.proposal, proposal_identity))
+            .filter(|entry| okf::okf_proposal_matches_identity(&entry.proposal, proposal_identity))
             .collect::<Vec<_>>();
         let entry = match matches.as_slice() {
             [] => bail!("proposal file not found: {proposal_identity}"),
@@ -615,7 +615,7 @@ impl MemoryService {
         validate_no_cross_state_identity_collisions(&pending, &resolved)?;
         if resolved
             .iter()
-            .any(|entry| proposals_share_identity(proposal, &entry.proposal))
+            .any(|entry| okf::okf_proposals_share_identity(proposal, &entry.proposal))
         {
             bail!("pending proposal {} is already resolved", proposal.id);
         }
@@ -634,19 +634,32 @@ impl MemoryService {
             "pending proposal root",
         )?;
         let mut entries = Vec::new();
-        for proposal in okf::read_okf_proposal_files(&pending_root)? {
+        for inventory in okf::read_pending_okf_proposal_inventory_files(&pending_root)? {
+            let proposal = inventory.proposal;
             if proposal.status != crate::OkfProposalStatus::Proposed
                 || proposal.resolution.is_some()
             {
                 bail!("pending proposal {} must be unresolved", proposal.id);
             }
-            let path = pending_root.join(format!("{}.md", proposal.file_id));
+            let path = inventory.path;
             ensure_safe_existing_file(
                 &self.paths.project_root,
                 &pending_root,
                 &path,
                 "pending proposal",
-            )?;
+            )
+            .map_err(|error| {
+                if proposal.sensitivity == crate::OkfProposalSensitivity::RepoSafe {
+                    error
+                } else {
+                    anyhow!(
+                        "failed to inspect pending proposal {}",
+                        pending_root
+                            .join(format!("{}.md", proposal.file_id))
+                            .display()
+                    )
+                }
+            })?;
             entries.push(FileProposalInventoryEntry { proposal, path });
         }
         Ok(entries)
@@ -1103,7 +1116,29 @@ impl MemoryService {
         }
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let proposal_path = proposal_path.as_ref();
-        let proposal = self.load_pending_file_proposal(proposal_path)?;
+        let pending_root = self.paths.proposals_dir().join("pending");
+        let preflight_display_path = okf::redacted_okf_proposal_path(&pending_root, proposal_path)
+            .unwrap_or_else(|_| pending_root.join("redacted-proposal.md"));
+        ensure_safe_existing_file(
+            &self.paths.project_root,
+            &pending_root,
+            proposal_path,
+            "pending proposal",
+        )
+        .map_err(|_| {
+            anyhow!(
+                "failed to inspect pending proposal {} before safety preflight",
+                preflight_display_path.display()
+            )
+        })?;
+        let preflight = okf::preflight_okf_proposal_file(&pending_root, proposal_path)?
+            .context("pending proposal was ignored")?;
+        let is_non_repo_safe = preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe;
+        let proposal = if is_non_repo_safe {
+            preflight.receipt_proposal
+        } else {
+            self.load_pending_file_proposal(proposal_path)?
+        };
         self.validate_fresh_file_proposal_identity(&proposal)?;
         let mut resolution = OkfProposalResolution {
             outcome: OkfProposalOutcome::Rejected,
@@ -1127,17 +1162,22 @@ impl MemoryService {
             .join("rejected")
             .join(format!("{}.md", proposal.file_id));
         self.prepare_resolution_destination(&resolved_path)?;
-        let archived_proposal = okf::proposal_for_rejection_archive(&proposal);
+        let archived_proposal = proposal.clone();
         let resolved_markdown =
             okf::render_resolved_okf_proposal_markdown(&archived_proposal, &resolution)?;
         let nonce = Uuid::now_v7().to_string();
         let resolved_temp = stage_file(&resolved_path, &resolved_markdown, &nonce)?;
         let pending_backup = sibling_transaction_path(proposal_path, &nonce, "pending");
 
+        let display_pending_path = if is_non_repo_safe {
+            pending_root.join(format!("{}.md", archived_proposal.file_id))
+        } else {
+            proposal_path.to_path_buf()
+        };
         if let Err(error) = fs::rename(proposal_path, &pending_backup).with_context(|| {
             format!(
                 "failed to stage pending proposal {} for rejection",
-                proposal_path.display()
+                display_pending_path.display()
             )
         }) {
             remove_staged_file(&resolved_temp);
@@ -1163,14 +1203,28 @@ impl MemoryService {
 
     fn load_pending_file_proposal(&self, proposal_path: &Path) -> Result<OkfProposalFile> {
         let pending_root = self.paths.proposals_dir().join("pending");
+        let display_path = okf::redacted_okf_proposal_path(&pending_root, proposal_path)
+            .unwrap_or_else(|_| pending_root.join("redacted-proposal.md"));
         ensure_safe_existing_file(
             &self.paths.project_root,
             &pending_root,
             proposal_path,
             "pending proposal",
-        )?;
+        )
+        .map_err(|_| {
+            anyhow!(
+                "failed to inspect pending proposal {}",
+                display_path.display()
+            )
+        })?;
+        let preflight = okf::preflight_okf_proposal_file(&pending_root, proposal_path)?
+            .context("pending proposal was ignored")?;
+        if preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe {
+            okf::validate_repo_apply_proposal(&preflight.receipt_proposal)?;
+            unreachable!("non-repo-safe proposal validation always returns an error");
+        }
         let proposal = okf::parse_okf_proposal_file(&pending_root, proposal_path)?
-            .with_context(|| format!("pending proposal {} was ignored", proposal_path.display()))?;
+            .context("pending proposal was ignored")?;
         if proposal.status != crate::OkfProposalStatus::Proposed || proposal.resolution.is_some() {
             bail!("pending proposal {} must be unresolved", proposal.id);
         }
@@ -1637,7 +1691,10 @@ impl MemoryService {
                 hash: import::content_hash(&record.draft.body),
             });
         }
-        for proposal in okf::read_okf_proposal_files(self.paths.proposals_dir().join("pending"))? {
+        for inventory in okf::read_pending_okf_proposal_inventory_files(
+            self.paths.proposals_dir().join("pending"),
+        )? {
+            let proposal = inventory.proposal;
             entries.push(ExistingDuplicate {
                 kind: import::ImportDuplicateKind::PendingProposal,
                 id: proposal.id,
@@ -1830,35 +1887,22 @@ impl RepoLifecycleLock {
     }
 }
 
-fn proposal_matches_identity(proposal: &OkfProposalFile, identity: &str) -> bool {
-    proposal.id == identity || proposal.file_id == identity
-}
-
-fn proposal_identities(proposal: &OkfProposalFile) -> BTreeSet<&str> {
-    [proposal.id.as_str(), proposal.file_id.as_str()]
-        .into_iter()
-        .collect()
-}
-
-fn proposals_share_identity(left: &OkfProposalFile, right: &OkfProposalFile) -> bool {
-    !proposal_identities(left).is_disjoint(&proposal_identities(right))
-}
-
 fn validate_unique_proposal_identities(
     entries: &[FileProposalInventoryEntry],
     state: &str,
 ) -> Result<()> {
-    let mut identities = BTreeMap::<&str, &Path>::new();
-    for entry in entries {
-        for identity in proposal_identities(&entry.proposal) {
-            if let Some(previous) = identities.insert(identity, &entry.path)
-                && previous != entry.path
+    let mut identities = BTreeMap::<String, usize>::new();
+    for (index, entry) in entries.iter().enumerate() {
+        for identity in okf::proposal_identity_tokens(&entry.proposal) {
+            if let Some(previous) = identities.insert(identity.clone(), index)
+                && previous != index
             {
-                bail!(
-                    "duplicate {state} proposal identity {identity:?} in {} and {}",
-                    previous.display(),
-                    entry.path.display()
+                let label = proposal_collision_identity_label(
+                    &entries[previous].proposal,
+                    &entry.proposal,
+                    &identity,
                 );
+                bail!("duplicate {state} proposal {label}");
             }
         }
     }
@@ -1871,10 +1915,12 @@ fn validate_no_cross_state_identity_collisions(
 ) -> Result<()> {
     for pending_entry in pending {
         for resolved_entry in resolved {
-            let overlap = proposal_identities(&pending_entry.proposal)
-                .intersection(&proposal_identities(&resolved_entry.proposal))
+            let pending_identities = okf::proposal_identity_tokens(&pending_entry.proposal);
+            let resolved_identities = okf::proposal_identity_tokens(&resolved_entry.proposal);
+            let overlap = pending_identities
+                .intersection(&resolved_identities)
                 .next()
-                .copied();
+                .cloned();
             if let Some(identity) = overlap {
                 let outcome = resolved_entry
                     .proposal
@@ -1882,16 +1928,36 @@ fn validate_no_cross_state_identity_collisions(
                     .as_ref()
                     .context("resolved proposal is missing resolution metadata")?
                     .outcome;
+                let label = proposal_collision_identity_label(
+                    &pending_entry.proposal,
+                    &resolved_entry.proposal,
+                    &identity,
+                );
                 bail!(
-                    "pending proposal {} reintroduces resolved identity {identity:?} already {} at {}",
-                    pending_entry.path.display(),
-                    outcome.as_str(),
-                    resolved_entry.path.display()
+                    "pending proposal reintroduces resolved {label} already {}",
+                    outcome.as_str()
                 );
             }
         }
     }
     Ok(())
+}
+
+fn proposal_collision_identity_label(
+    left: &OkfProposalFile,
+    right: &OkfProposalFile,
+    token: &str,
+) -> String {
+    if left.sensitivity == crate::OkfProposalSensitivity::RepoSafe
+        && right.sensitivity == crate::OkfProposalSensitivity::RepoSafe
+    {
+        for identity in [&left.id, &left.file_id] {
+            if identity == &right.id || identity == &right.file_id {
+                return format!("identity {identity:?}");
+            }
+        }
+    }
+    format!("identity token {token}")
 }
 
 fn ensure_expected_canonical_bytes(

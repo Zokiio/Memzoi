@@ -54,6 +54,19 @@ pub struct OkfProposalFile {
     pub resolution: Option<OkfProposalResolution>,
 }
 
+/// Minimal, content-free classification used before parsing any reviewable proposal fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OkfProposalPreflight {
+    pub sensitivity: OkfProposalSensitivity,
+    pub receipt_proposal: OkfProposalFile,
+}
+
+#[derive(Debug)]
+pub(crate) struct OkfProposalInventoryFile {
+    pub(crate) path: PathBuf,
+    pub(crate) proposal: OkfProposalFile,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OkfProposalResolution {
     pub outcome: OkfProposalOutcome,
@@ -509,6 +522,40 @@ pub fn read_okf_proposal_files(proposals_root: impl AsRef<Path>) -> Result<Vec<O
     Ok(proposals)
 }
 
+pub(crate) fn read_pending_okf_proposal_inventory_files(
+    proposals_root: impl AsRef<Path>,
+) -> Result<Vec<OkfProposalInventoryFile>> {
+    let proposals_root = proposals_root.as_ref();
+    if !proposals_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    collect_markdown_files(proposals_root, &mut files)?;
+    let mut proposals = Vec::new();
+    for file in files {
+        let Some(preflight) = preflight_okf_proposal_file(proposals_root, &file)? else {
+            continue;
+        };
+        let proposal = if preflight.sensitivity == OkfProposalSensitivity::RepoSafe {
+            parse_okf_proposal_file(proposals_root, &file)?
+                .with_context(|| format!("pending proposal was ignored: {}", file.display()))?
+        } else {
+            preflight.receipt_proposal
+        };
+        proposals.push(OkfProposalInventoryFile {
+            path: file,
+            proposal,
+        });
+    }
+    proposals.sort_by(|left, right| {
+        left.proposal
+            .id
+            .cmp(&right.proposal.id)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(proposals)
+}
+
 pub fn parse_okf_record_file(
     bundle_root: impl AsRef<Path>,
     file_path: impl AsRef<Path>,
@@ -522,13 +569,120 @@ pub fn parse_okf_proposal_file(
     proposals_root: impl AsRef<Path>,
     file_path: impl AsRef<Path>,
 ) -> Result<Option<OkfProposalFile>> {
-    let markdown = fs::read_to_string(file_path.as_ref()).with_context(|| {
-        format!(
-            "failed to read OKF proposal {}",
-            file_path.as_ref().display()
-        )
-    })?;
+    let markdown = fs::read_to_string(file_path.as_ref())
+        .with_context(|| "failed to read proposal during safety preflight".to_owned())?;
     parse_okf_proposal_markdown(proposals_root, file_path, &markdown)
+}
+
+pub fn preflight_okf_proposal_file(
+    proposals_root: impl AsRef<Path>,
+    file_path: impl AsRef<Path>,
+) -> Result<Option<OkfProposalPreflight>> {
+    let markdown = fs::read_to_string(file_path.as_ref())
+        .context("failed to read proposal during safety preflight")?;
+    preflight_okf_proposal_markdown(proposals_root, file_path, &markdown)
+}
+
+pub fn redacted_okf_proposal_path(
+    proposals_root: impl AsRef<Path>,
+    file_path: impl AsRef<Path>,
+) -> Result<PathBuf> {
+    let proposals_root = proposals_root.as_ref();
+    let raw_file_id = raw_proposal_file_id(proposals_root, file_path.as_ref())?;
+    Ok(proposals_root.join(format!("{}.md", okf_proposal_identity_token(&raw_file_id))))
+}
+
+pub fn preflight_okf_proposal_markdown(
+    proposals_root: impl AsRef<Path>,
+    file_path: impl AsRef<Path>,
+    markdown: &str,
+) -> Result<Option<OkfProposalPreflight>> {
+    let proposals_root = proposals_root.as_ref();
+    let file_path = file_path.as_ref();
+    if is_reserved_record_file(file_path) {
+        return Ok(None);
+    }
+
+    let raw_file_id = raw_proposal_file_id(proposals_root, file_path)?;
+    let preflight_frontmatter = proposal_preflight_frontmatter(markdown);
+    let raw_id = unique_top_level_yaml_scalar(preflight_frontmatter, "id");
+    let sensitivity = unique_top_level_yaml_scalar(preflight_frontmatter, "sensitivity")
+        .as_deref()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_default();
+    let digest = rejected_proposal_content_hash(raw_id.as_deref(), &raw_file_id, markdown);
+    let receipt_id = raw_id
+        .as_deref()
+        .map(okf_proposal_identity_token)
+        .unwrap_or_else(|| okf_proposal_identity_token(&format!("missing-id:{digest}")));
+    let receipt_file_id = okf_proposal_identity_token(&raw_file_id);
+    let timestamp = "1970-01-01T00:00:00Z".to_owned();
+    let receipt_proposal = OkfProposalFile {
+        file_id: receipt_file_id,
+        id: receipt_id,
+        kind: None,
+        version: None,
+        profile: None,
+        memory_type: MemoryType::Fact,
+        lane: MemoryLane::Semantic,
+        title: "Redacted non-repo-safe proposal".to_owned(),
+        description: "Original proposal content and identity redacted before archival.".to_owned(),
+        body: format!(
+            "Original non-repo-safe proposal content and identity were redacted before archival.\n\nContent hash (BLAKE3): `{digest}`."
+        ),
+        status: OkfProposalStatus::Proposed,
+        proposal: OkfProposalMetadata {
+            action: OkfProposalAction::Create,
+            proposed_by: "redacted".to_owned(),
+            proposed_at: timestamp.clone(),
+            reason: None,
+            confidence: None,
+            target: None,
+        },
+        scope_kind: ScopeKind::Repo,
+        scope_id: None,
+        applies_to: Vec::new(),
+        tags: Vec::new(),
+        timestamp,
+        created_by: None,
+        sources: Vec::new(),
+        supersedes: Vec::new(),
+        sensitivity,
+        resolution: None,
+    };
+    Ok(Some(OkfProposalPreflight {
+        sensitivity,
+        receipt_proposal,
+    }))
+}
+
+fn proposal_preflight_frontmatter(markdown: &str) -> &str {
+    let Some(rest) = markdown
+        .strip_prefix("---\n")
+        .or_else(|| markdown.strip_prefix("---\r\n"))
+    else {
+        return "";
+    };
+    rest.split_once("\n---")
+        .map_or(rest, |(frontmatter, _)| frontmatter)
+}
+
+fn unique_top_level_yaml_scalar(frontmatter: &str, key: &str) -> Option<String> {
+    let mut values = frontmatter.lines().filter_map(|line| {
+        if line.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let (candidate_key, value) = line.trim_end_matches('\r').split_once(':')?;
+        if candidate_key != key {
+            return None;
+        }
+        serde_yaml::from_str::<serde_yaml::Value>(value.trim())
+            .ok()?
+            .as_str()
+            .map(str::to_owned)
+    });
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
 }
 
 pub fn parse_okf_record_markdown(
@@ -845,61 +999,50 @@ pub(crate) fn render_resolved_okf_proposal_markdown(
     ))
 }
 
-pub(crate) fn proposal_for_rejection_archive(proposal: &OkfProposalFile) -> OkfProposalFile {
-    if proposal.sensitivity == OkfProposalSensitivity::RepoSafe {
-        return proposal.clone();
-    }
-
-    let digest = rejected_proposal_content_hash(proposal);
-    let mut redacted = proposal.clone();
-    redacted.kind = None;
-    redacted.version = None;
-    redacted.profile = None;
-    redacted.title = "Redacted non-repo-safe proposal".to_owned();
-    redacted.description = "Original proposal content redacted before archival.".to_owned();
-    redacted.body = format!(
-        "Original non-repo-safe proposal content was redacted before archival.\n\nContent hash (BLAKE3): `{digest}`."
-    );
-    redacted.proposal.action = OkfProposalAction::Create;
-    redacted.proposal.proposed_by = "redacted".to_owned();
-    redacted.proposal.reason = None;
-    redacted.proposal.confidence = None;
-    redacted.proposal.target = None;
-    redacted.scope_id = None;
-    redacted.applies_to.clear();
-    redacted.tags.clear();
-    redacted.created_by = None;
-    redacted.sources.clear();
-    redacted.supersedes.clear();
-    redacted
+fn rejected_proposal_content_hash(
+    raw_id: Option<&str>,
+    raw_file_id: &str,
+    markdown: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"proposal-id\0");
+    hasher.update(raw_id.unwrap_or("<missing-or-non-string>").as_bytes());
+    hasher.update(b"\0proposal-file-id\0");
+    hasher.update(raw_file_id.as_bytes());
+    hasher.update(b"\0proposal-markdown\0");
+    hasher.update(markdown.as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
-fn rejected_proposal_content_hash(proposal: &OkfProposalFile) -> String {
-    let bytes = serde_json::to_vec(&(
-        (
-            &proposal.kind,
-            &proposal.version,
-            &proposal.profile,
-            &proposal.title,
-            &proposal.description,
-            &proposal.body,
-        ),
-        (
-            &proposal.proposal.action,
-            &proposal.proposal.proposed_by,
-            &proposal.proposal.reason,
-            &proposal.proposal.confidence,
-            &proposal.proposal.target,
-            &proposal.scope_id,
-            &proposal.applies_to,
-            &proposal.tags,
-            &proposal.created_by,
-            &proposal.sources,
-            &proposal.supersedes,
-        ),
-    ))
-    .expect("rejected proposal digest input is serializable");
-    blake3::hash(&bytes).to_hex().to_string()
+pub fn okf_proposal_matches_identity(proposal: &OkfProposalFile, identity: &str) -> bool {
+    proposal.id == identity
+        || proposal.file_id == identity
+        || proposal_identity_tokens(proposal).contains(&okf_proposal_identity_token(identity))
+}
+
+pub(crate) fn okf_proposals_share_identity(
+    left: &OkfProposalFile,
+    right: &OkfProposalFile,
+) -> bool {
+    !proposal_identity_tokens(left).is_disjoint(&proposal_identity_tokens(right))
+}
+
+pub(crate) fn proposal_identity_tokens(proposal: &OkfProposalFile) -> BTreeSet<String> {
+    [proposal.id.as_str(), proposal.file_id.as_str()]
+        .into_iter()
+        .map(okf_proposal_identity_token)
+        .collect()
+}
+
+fn okf_proposal_identity_token(identity: &str) -> String {
+    const PREFIX: &str = "redacted-identity-";
+    if identity
+        .strip_prefix(PREFIX)
+        .is_some_and(|digest| digest.len() == 64 && digest.chars().all(|ch| ch.is_ascii_hexdigit()))
+    {
+        return identity.to_owned();
+    }
+    format!("{PREFIX}{}", blake3::hash(identity.as_bytes()).to_hex())
 }
 
 pub(crate) fn render_memory_record_markdown(
@@ -1160,7 +1303,7 @@ enum ConfidenceValue {
 }
 
 fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+    for entry in fs::read_dir(dir).context("failed to scan OKF Markdown directory")? {
         let entry = entry?;
         let path = entry.path();
         if is_hidden(&path) {
@@ -1399,23 +1542,22 @@ pub(crate) fn validate_concept_id(concept: &str) -> Result<()> {
 }
 
 fn proposal_file_id(bundle_root: &Path, file_path: &Path) -> Result<String> {
+    let file_id = raw_proposal_file_id(bundle_root, file_path)?;
+    validate_proposal_identifier(&file_id)?;
+    Ok(file_id)
+}
+
+fn raw_proposal_file_id(bundle_root: &Path, file_path: &Path) -> Result<String> {
     if file_path
         .extension()
         .and_then(|extension| extension.to_str())
         != Some("md")
     {
-        bail!(
-            "OKF proposal files must use .md extension: {}",
-            file_path.display()
-        );
+        bail!("OKF proposal files must use .md extension");
     }
-    let relative = file_path.strip_prefix(bundle_root).with_context(|| {
-        format!(
-            "OKF proposal path {} is not under proposal root {}",
-            file_path.display(),
-            bundle_root.display()
-        )
-    })?;
+    let relative = file_path
+        .strip_prefix(bundle_root)
+        .context("OKF proposal path is not under proposal root")?;
     let without_extension = strip_md_extension(relative);
     for component in without_extension.components() {
         match component {
@@ -1426,7 +1568,6 @@ fn proposal_file_id(bundle_root: &Path, file_path: &Path) -> Result<String> {
     let file_id = without_extension
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/");
-    validate_proposal_identifier(&file_id)?;
     Ok(file_id)
 }
 
@@ -1793,7 +1934,7 @@ fn body_without_matching_h1(body: &str, title: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, io::ErrorKind, path::Path};
+    use std::{collections::BTreeSet, fs, io::ErrorKind, path::Path};
 
     use tempfile::TempDir;
 
@@ -1803,6 +1944,73 @@ mod tests {
     };
 
     const EXAMPLE_MEMORY: &str = include_str!("../../../examples/example-memory.md");
+
+    #[test]
+    fn rejection_digest_and_alias_tokens_cover_raw_proposal_and_file_identities()
+    -> anyhow::Result<()> {
+        let markdown = "---\nid: secret-proposal-id\ntype: [malformed\nsensitivity: secret\n---\nsecret body\n";
+        let base = super::rejected_proposal_content_hash(
+            Some("secret-proposal-id"),
+            "secret-file-id",
+            markdown,
+        );
+        assert_ne!(
+            base,
+            super::rejected_proposal_content_hash(
+                Some("different-proposal-id"),
+                "secret-file-id",
+                markdown,
+            )
+        );
+        assert_ne!(
+            base,
+            super::rejected_proposal_content_hash(
+                Some("secret-proposal-id"),
+                "different-file-id",
+                markdown,
+            )
+        );
+
+        let root = Path::new("/bundle/pending");
+        let preflight =
+            super::preflight_okf_proposal_markdown(root, root.join("secret-file-id.md"), markdown)?
+                .expect("malformed secret packet should still produce a safety receipt");
+        assert_eq!(preflight.sensitivity, super::OkfProposalSensitivity::Secret);
+        assert!(super::okf_proposal_matches_identity(
+            &preflight.receipt_proposal,
+            "secret-proposal-id"
+        ));
+        assert!(super::okf_proposal_matches_identity(
+            &preflight.receipt_proposal,
+            "secret-file-id"
+        ));
+        assert!(!preflight.receipt_proposal.id.contains("secret-proposal-id"));
+        assert!(
+            !preflight
+                .receipt_proposal
+                .file_id
+                .contains("secret-file-id")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_read_failure_does_not_echo_raw_file_identity() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let raw_file_id = "secret-invalid-utf8-file-identity";
+        let path = temp.path().join(format!("{raw_file_id}.md"));
+        fs::write(&path, [0xff, 0xfe])?;
+
+        let error = super::preflight_okf_proposal_file(temp.path(), &path)
+            .expect_err("invalid UTF-8 should fail before proposal parsing");
+        let rendered = format!("{error:#}");
+        assert!(!rendered.contains(raw_file_id), "{rendered}");
+        assert!(
+            rendered.contains("failed to read proposal during safety preflight"),
+            "{rendered}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn internal_record_renderer_preserves_canonical_fields() -> anyhow::Result<()> {

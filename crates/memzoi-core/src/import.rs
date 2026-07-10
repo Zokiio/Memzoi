@@ -429,9 +429,9 @@ pub(crate) fn build_plan(
         candidate.classification.destination == MemoryDestination::Repo
             && candidate.sensitivity != OkfProposalSensitivity::RepoSafe
     });
-    // Sources apply to the whole manifest, so they cannot be safely attributed to only the
-    // allowed candidates once any repo candidate is blocked. Omit them instead of leaking a
-    // prohibited locator or fabricating evidence provenance for the safe subset.
+    // Sources apply to the whole manifest, so they cannot be safely attributed to local/session
+    // writes once an unsafe repo candidate blocks the repo subset. Omit them from the safe plan;
+    // every repo candidate is blocked, while runtime-only routes may still proceed.
     let mut sources = if has_blocked_repo_candidate {
         Vec::new()
     } else {
@@ -473,8 +473,10 @@ pub(crate) fn build_plan(
     };
     let mut prior: BTreeMap<String, usize> = BTreeMap::new();
     for c in normalized {
-        let blocked_repo = c.classification.destination == MemoryDestination::Repo
+        let non_repo_safe = c.classification.destination == MemoryDestination::Repo
             && c.sensitivity != OkfProposalSensitivity::RepoSafe;
+        let blocked_repo =
+            c.classification.destination == MemoryDestination::Repo && has_blocked_repo_candidate;
         let mut duplicates = if blocked_repo {
             Vec::new()
         } else {
@@ -494,7 +496,12 @@ pub(crate) fn build_plan(
         let action = if blocked_repo {
             summary.needs_review += 1;
             ImportCandidateAction::Blocked {
-                reason: repo_sensitivity_block_reason(c.sensitivity),
+                reason: if non_repo_safe {
+                    repo_sensitivity_block_reason(c.sensitivity)
+                } else {
+                    "another repo candidate in this manifest is not repo-safe; split the manifest so repo-safe candidates retain their evidence sources"
+                        .to_owned()
+                },
             }
         } else if !duplicates.is_empty() {
             summary.duplicates += 1;
@@ -544,7 +551,7 @@ pub(crate) fn build_plan(
         if !blocked_repo {
             prior.entry(c.content_hash.clone()).or_insert(c.index);
         }
-        let (classification, title, body, scope, tags) = if blocked_repo {
+        let (classification, title, body, scope, tags) = if non_repo_safe {
             (
                 MemoryDestinationClassification {
                     destination: MemoryDestination::Repo,
