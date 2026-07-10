@@ -114,7 +114,12 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/memzoi-mcp.exe" "dist/package/memzoi-mcp.exe"
           Compress-Archive -Path "dist/package/memzoi.exe", "dist/package/memzoi-mcp.exe" -DestinationPath "dist/$archive" -Force
           $hash = Get-FileHash "dist/$archive" -Algorithm SHA256
-          "$($hash.Hash.ToLower())  $archive" | Set-Content "dist/$archive.sha256"
+          $manifest = "$($hash.Hash.ToLower())  $archive`n"
+          [System.IO.File]::WriteAllText(
+            "dist/$archive.sha256",
+            $manifest,
+            [System.Text.UTF8Encoding]::new($false)
+          )
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
