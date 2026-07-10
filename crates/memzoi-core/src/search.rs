@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, functions::FunctionFlags, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -64,6 +64,11 @@ pub(crate) fn search_memory_at(
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(ToOwned::to_owned);
+    let scope_id = match input.scope_id.as_deref() {
+        Some(scope_id) if scope_id.trim().is_empty() => bail!("scope_id cannot be empty"),
+        Some(scope_id) => Some(scope_id.trim().to_owned()),
+        None => None,
+    };
 
     let limit = normalized_limit(input.limit);
     let evaluated_at = expiry::format_timestamp(now)?;
@@ -77,7 +82,7 @@ pub(crate) fn search_memory_at(
     } else {
         "1 = 1"
     };
-    let scope_id_filter = if input.scope_id.is_some() {
+    let scope_id_filter = if scope_id.is_some() {
         "memory_record.scope_id = ?3"
     } else {
         "1 = 1"
@@ -132,7 +137,7 @@ pub(crate) fn search_memory_at(
             params![
                 fts_query,
                 scope_kind,
-                input.scope_id,
+                scope_id,
                 memory_type,
                 path_prefix.as_deref(),
                 destination,
@@ -580,6 +585,57 @@ mod tests {
                 .any(|path| path.path == "apps/web/**"),
             "search result should expose the stored glob path: {results:?}"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_memory_normalizes_non_empty_scope_id_filters() -> anyhow::Result<()> {
+        let (_temp, conn) = initialized_database()?;
+        insert_memory(
+            &conn,
+            MemoryFixture {
+                id: "rec-team-scope",
+                memory_type: MemoryType::Decision,
+                scope_kind: ScopeKind::Team,
+                status: MemoryStatus::Active,
+                title: "Team scope normalization",
+                body: "Scoped recall uses one normalized identifier contract.",
+                path: None,
+                source_ref: Some("issue://42"),
+            },
+        )?;
+        conn.execute(
+            "UPDATE memory_record SET scope_id = 'team-alpha' WHERE id = 'rec-team-scope'",
+            [],
+        )?;
+
+        let results = search_memory(
+            &conn,
+            SearchInput {
+                query: "normalized identifier".to_owned(),
+                scope_kind: Some(ScopeKind::Team),
+                scope_id: Some("  team-alpha  ".to_owned()),
+                limit: 10,
+                ..SearchInput::default()
+            },
+        )?;
+        assert_eq!(
+            result_ids(&results)?,
+            HashSet::from(["rec-team-scope".to_owned()])
+        );
+
+        let error = search_memory(
+            &conn,
+            SearchInput {
+                query: "normalized identifier".to_owned(),
+                scope_id: Some("   ".to_owned()),
+                limit: 10,
+                ..SearchInput::default()
+            },
+        )
+        .expect_err("empty scope identifiers must be rejected");
+        assert!(error.to_string().contains("scope_id cannot be empty"));
 
         Ok(())
     }
