@@ -2,7 +2,7 @@
 
 Status: active
 Updated: 2026-07-10
-Shipped baseline: v0.3.0
+Shipped baseline: v0.3.1
 
 ## Product outcome
 
