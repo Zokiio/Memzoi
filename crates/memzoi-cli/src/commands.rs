@@ -21,10 +21,11 @@ use serde_json::json;
 
 use crate::{
     cli::{
-        CheckpointCommands, Cli, Commands, DraftCommand, EventCommands, ImportCommands,
-        IntegrateCommands, LocalCommands, McpCommands, ProposalCommands, ProposalFileCommands,
+        CheckpointCommands, Cli, Commands, DraftCommand, EvalCommands, EventCommands,
+        ImportCommands, IntegrateCommands, LocalCommands, McpCommands, ProposalCommands,
+        ProposalFileCommands,
     },
-    integrate, mcp,
+    eval, integrate, mcp,
     output::{print_json, print_jsonl_row},
     update,
 };
@@ -241,6 +242,9 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
         } => export_command(&format, &scope_kind, json),
         Commands::Rebuild { json } => rebuild_command(json),
         Commands::Doctor { project_root, json } => doctor_command(project_root, json),
+        Commands::Eval { command } => match command {
+            EvalCommands::Recall { corpus, json } => eval::recall_eval_command(corpus, json),
+        },
         Commands::Quickstart { apply_sample, json } => quickstart_command(apply_sample, json),
         Commands::Update {
             check,
@@ -1425,6 +1429,7 @@ fn search_command(
         scope_kind: scope_kind.as_deref().map(parse_scope_kind).transpose()?,
         scope_id: None,
         memory_type: memory_type.as_deref().map(parse_memory_type).transpose()?,
+        lane: None,
         destination: Some(MemoryDestination::Repo),
         path_prefix: path,
         limit,
@@ -1957,6 +1962,7 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
         scope_kind: Some(ScopeKind::Repo),
         scope_id: None,
         memory_type: Some(MemoryType::Decision),
+        lane: None,
         destination: Some(MemoryDestination::Repo),
         path_prefix: None,
         limit: 10,
@@ -1994,6 +2000,7 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
             scope_kind: Some(ScopeKind::Repo),
             scope_id: None,
             memory_type: Some(MemoryType::Decision),
+            lane: None,
             destination: Some(MemoryDestination::Repo),
             path_prefix: None,
             limit: 10,

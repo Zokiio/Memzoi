@@ -4649,6 +4649,7 @@ mod tests {
             scope_kind: Some(ScopeKind::Repo),
             scope_id: None,
             memory_type: None,
+            lane: None,
             destination: Some(MemoryDestination::Repo),
             path_prefix: None,
             limit: 10,

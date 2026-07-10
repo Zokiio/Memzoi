@@ -75,6 +75,106 @@ fn update_help_advertises_update_options() {
 }
 
 #[test]
+fn eval_recall_help_requires_an_explicit_corpus() {
+    let mut cmd = memzoi();
+
+    cmd.args(["eval", "recall", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Evaluate recall quality")
+                .and(predicate::str::contains("--corpus <CORPUS>"))
+                .and(predicate::str::contains("--json")),
+        );
+}
+
+#[test]
+fn eval_recall_json_uses_isolated_state_and_reports_citations() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    let sentinel = repo.path().join(".memzoi/records/user-record.md");
+    fs::create_dir_all(sentinel.parent().expect("sentinel parent")).expect("create sentinel root");
+    fs::write(&sentinel, "user canonical bytes").expect("write sentinel");
+
+    let mut cmd = memzoi();
+    let assert = cmd
+        .args(["eval", "recall", "--corpus"])
+        .arg(checked_recall_corpus())
+        .arg("--json")
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let report = json_from_stdout(&assert.get_output().stdout);
+
+    assert_eq!(
+        report.get("version").and_then(Value::as_str),
+        Some("memzoi-recall-report/v1")
+    );
+    assert_eq!(
+        report.pointer("/aggregate/passed").and_then(Value::as_bool),
+        Some(true)
+    );
+    let citation = report
+        .get("cases")
+        .and_then(Value::as_array)
+        .and_then(|cases| {
+            cases
+                .iter()
+                .find(|case| case.get("id").and_then(Value::as_str) == Some("citation-round-trip"))
+        })
+        .and_then(|case| case.pointer("/retrieved/0/citations/0"))
+        .expect("citation-bearing retrieved result");
+    assert_eq!(
+        citation.get("source_ref").and_then(Value::as_str),
+        Some("issue://44")
+    );
+    assert_eq!(
+        citation.get("path").and_then(Value::as_str),
+        Some("docs/roadmap.md")
+    );
+    assert_eq!(
+        fs::read_to_string(&sentinel).expect("read sentinel"),
+        "user canonical bytes",
+        "evaluation must not mutate normal canonical state"
+    );
+}
+
+#[test]
+fn eval_recall_regression_keeps_json_report_on_stdout_and_exits_nonzero() {
+    let (_fixture, corpus) = failing_recall_corpus();
+    let repo = tempfile::tempdir().expect("temp repo");
+    let mut cmd = memzoi();
+    let assert = cmd
+        .args(["eval", "recall", "--corpus"])
+        .arg(&corpus)
+        .arg("--json")
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "recall evaluation thresholds failed",
+        ));
+    let report = json_from_stdout(&assert.get_output().stdout);
+
+    assert_eq!(
+        report.pointer("/aggregate/passed").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        report
+            .pointer("/aggregate/mean_recall_at_k")
+            .and_then(Value::as_f64),
+        Some(0.5)
+    );
+    assert_eq!(
+        report
+            .pointer("/cases/0/retrieved_ids")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+}
+
+#[test]
 fn update_check_json_reports_available_even_when_apply_is_unsupported() {
     let repo = tempfile::tempdir().expect("temp repo");
     let target_ref = next_patch_release_ref();
@@ -6402,6 +6502,69 @@ fn run_command_failure_stderr_with_home(repo: &Path, args: &[&str], memzoi_home:
     std::str::from_utf8(&assert.get_output().stderr)
         .expect("stderr is utf-8")
         .to_owned()
+}
+
+fn checked_recall_corpus() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v1/corpus.yaml")
+}
+
+fn failing_recall_corpus() -> (tempfile::TempDir, PathBuf) {
+    let fixture = tempfile::tempdir().expect("recall fixture root");
+    let records = fixture.path().join("records");
+    fs::create_dir(&records).expect("create recall records root");
+    for id in ["target", "second-relevant"] {
+        fs::write(
+            records.join(format!("{id}.md")),
+            format!(
+                r#"---
+type: fact
+lane: semantic
+title: Regression anchor {id}
+timestamp: "2026-07-01T00:00:00Z"
+updated: "2026-07-01T00:00:00Z"
+status: active
+scope: repo
+visibility: repo
+confidence: 1
+source: eval
+source_ref: fixture://{id}
+---
+
+# Regression anchor {id}
+
+The regression anchor appears in this fixture.
+"#
+            ),
+        )
+        .expect("write recall record fixture");
+    }
+    let corpus = fixture.path().join("corpus.yaml");
+    fs::write(
+        &corpus,
+        r#"version: memzoi-recall-corpus/v1
+name: intentional-regression
+evaluated_at: 2026-07-10T12:00:00Z
+records_root: records
+records:
+  - target.md
+  - second-relevant.md
+thresholds:
+  min_mean_recall_at_k: 1.0
+  min_mean_mrr: 0.0
+  max_forbidden_hits: 0
+cases:
+  - id: misses-one-relevant-record
+    query: regression anchor
+    relevant_ids: [target, second-relevant]
+    forbidden_ids: []
+    scope_kind: repo
+    type: fact
+    lane: semantic
+    k: 1
+"#,
+    )
+    .expect("write failing recall corpus");
+    (fixture, corpus)
 }
 
 fn write_pending_proposal_file(repo: &Path, name: &str, contents: String) {

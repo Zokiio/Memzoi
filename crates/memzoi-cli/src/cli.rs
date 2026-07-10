@@ -268,6 +268,12 @@ pub(crate) enum Commands {
         json: bool,
     },
 
+    /// Run file-native evaluation suites in isolated state.
+    Eval {
+        #[command(subcommand)]
+        command: EvalCommands,
+    },
+
     /// Print or run a tiny first-run workflow.
     Quickstart {
         #[arg(long)]
@@ -301,6 +307,19 @@ pub(crate) enum Commands {
     Integrate {
         #[command(subcommand)]
         command: IntegrateCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum EvalCommands {
+    /// Evaluate recall quality against a versioned YAML corpus.
+    Recall {
+        /// Explicit path to the recall corpus YAML file.
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Emit the stable machine-readable report.
+        #[arg(long)]
+        json: bool,
     },
 }
 

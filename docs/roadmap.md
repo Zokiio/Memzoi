@@ -93,7 +93,7 @@ Exit criteria:
 Issues:
 
 - [#44 Add a file-native `memzoi eval recall` golden suite](https://github.com/Zokiio/Memzoi/issues/44)
-- [#45 RFC: Define the evidence-backed capture and extractor boundary](https://github.com/Zokiio/Memzoi/issues/45)
+- [#45 RFC: Define the evidence-backed capture and extractor boundary](https://github.com/Zokiio/Memzoi/issues/45) — [RFC 0001 draft](rfcs/0001-evidence-backed-capture.md)
 - [#47 Add safety and quality metrics to eval output and CI](https://github.com/Zokiio/Memzoi/issues/47)
 - [#48 Plan evidence-backed capture from one explicit Markdown source](https://github.com/Zokiio/Memzoi/issues/48)
 - [#49 Route a reviewed capture plan through existing memory boundaries](https://github.com/Zokiio/Memzoi/issues/49)
