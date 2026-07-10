@@ -86,6 +86,36 @@ runtime continuity. `memzoi session-end` accepts explicit structured input
 and free-text checkpoint bodies are not an extraction source. See
 [OKF profile](./okf-profile.md) for the file-native proposal/record details.
 
+## Authoritative read-time expiry
+
+An active record with `expires`/`expires_at` stops participating in normal
+memory reads when the evaluation clock reaches its expiry. The boundary is
+inclusive: a record is expired when `now >= expires_at`. This rule is shared by
+repo, local, and session search; context and handoff packs (including path-only
+candidates); precheck; local lists; checkpoint list/show; and generated OKF,
+`AGENTS.memory.md`, and `CLAUDE.memory.md` exports.
+
+Expiry values use one of two exact forms:
+
+- `YYYY-MM-DD` means `00:00:00Z` at the start of that date; or
+- an RFC 3339 timestamp with `Z` or an explicit numeric UTC offset.
+
+Offsets describe an instant, so `2026-07-10T14:00:00+02:00` expires at the
+same moment as `2026-07-10T12:00:00Z`. Timestamps without a timezone and
+invalid calendar values are rejected rather than treated as unexpired.
+Production services evaluate against `SystemClock`; embedders and tests can
+inject one clock through `MemoryService::open_with_clock` or
+`MemoryService::open_paths_with_clock`, ensuring every surface in one service
+uses the same instant.
+
+Expiry is a read-time eligibility decision, not an implicit lifecycle write.
+Memzoi leaves the indexed status and canonical `.memzoi/records/*.md` file
+unchanged during search, rebuild, context, precheck, and export. Use
+`memzoi expiry <record-id>` (or MCP `inspect_memory_expiry`) to retrieve the
+record by ID, see the normalized effective instant, and explain why normal
+reads excluded it. Any renewal or status transition remains a separately
+reviewed canonical lifecycle action.
+
 ## Command boundary
 
 The following is the authoritative boundary for current CLI behavior. A

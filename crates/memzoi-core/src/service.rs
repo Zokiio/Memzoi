@@ -4,12 +4,14 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::import::{self, ExistingDuplicate};
@@ -25,7 +27,8 @@ use crate::{
         ProposalApprovalPolicy, discover_existing_paths, discover_paths, load_effective_config,
     },
     context, db,
-    events::{AppendEvent, append_event, for_each_event as stream_events, now_utc},
+    events::{AppendEvent, append_event, for_each_event as stream_events},
+    expiry::{self, Clock, ExpiryDiagnostic, SystemClock},
     exporters, handoff, okf, precheck, proposals, search,
     session_end::{
         SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument, SessionEndResult,
@@ -154,6 +157,7 @@ pub struct ProposeResult {
 pub struct MemoryService {
     paths: MemoryPaths,
     conn: Connection,
+    clock: Arc<dyn Clock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,11 +168,19 @@ enum FileWriteMode {
 
 impl MemoryService {
     pub fn open(start: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_clock(start, SystemClock)
+    }
+
+    pub fn open_with_clock(start: impl AsRef<Path>, clock: impl Clock + 'static) -> Result<Self> {
         let paths = discover_existing_paths(start)?;
-        Self::open_paths(paths)
+        Self::open_paths_with_clock(paths, clock)
     }
 
     pub fn open_paths(paths: MemoryPaths) -> Result<Self> {
+        Self::open_paths_with_clock(paths, SystemClock)
+    }
+
+    pub fn open_paths_with_clock(paths: MemoryPaths, clock: impl Clock + 'static) -> Result<Self> {
         if !paths.config_path.is_file() {
             bail!(
                 "Memzoi bundle is not initialized at {}; run `memzoi init` first",
@@ -178,7 +190,11 @@ impl MemoryService {
 
         let conn = db::open_database(&paths.db_path)?;
         db::init_database(&conn)?;
-        Ok(Self { paths, conn })
+        Ok(Self {
+            paths,
+            conn,
+            clock: Arc::new(clock),
+        })
     }
 
     pub fn initialize(start: impl AsRef<Path>, request: InitRequest) -> Result<InitResult> {
@@ -368,7 +384,13 @@ impl MemoryService {
     }
 
     pub fn search_memory(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
-        search::search_memory(&self.conn, input)
+        search::search_memory_at(&self.conn, input, self.now())
+    }
+
+    pub fn inspect_expiry(&self, record_id: &str) -> Result<ExpiryDiagnostic> {
+        let record = record_by_id(&self.conn, record_id)?
+            .with_context(|| format!("memory record not found: {record_id}"))?;
+        expiry::diagnose(record, self.now())
     }
 
     pub fn repo_index_drift(&self) -> Result<RepoIndexDrift> {
@@ -377,7 +399,7 @@ impl MemoryService {
             .filter(|record| record.status == MemoryStatus::Active)
             .map(|record| (record.concept_id.clone(), record))
             .collect::<BTreeMap<_, _>>();
-        let indexed = active_records_for_destination(&self.conn, MemoryDestination::Repo)?
+        let indexed = indexed_active_records_for_destination(&self.conn, MemoryDestination::Repo)?
             .into_iter()
             .map(|record| (record.id.clone(), record))
             .collect::<BTreeMap<_, _>>();
@@ -414,16 +436,16 @@ impl MemoryService {
         actor: &str,
         input: LocalMemoryInput,
     ) -> Result<MemoryRecord> {
-        let now = now_utc()?;
+        let now = self.now_timestamp()?;
         create_local_memory_with_conn(&self.conn, actor, &input, &now)
     }
 
     pub fn list_local_memory(&self) -> Result<Vec<MemoryRecord>> {
-        active_records_for_destination(&self.conn, MemoryDestination::Local)
+        active_records_for_destination(&self.conn, MemoryDestination::Local, self.now())
     }
 
     pub fn search_local_memory(&self, query: String, limit: usize) -> Result<Vec<SearchResult>> {
-        search::search_memory(
+        search::search_memory_at(
             &self.conn,
             SearchInput {
                 query,
@@ -432,20 +454,21 @@ impl MemoryService {
                 include_inactive: false,
                 ..SearchInput::default()
             },
+            self.now(),
         )
     }
 
     pub fn create_checkpoint(&self, actor: &str, input: CheckpointInput) -> Result<MemoryRecord> {
-        let now = now_utc()?;
+        let now = self.now_timestamp()?;
         create_checkpoint_with_conn(&self.conn, actor, &input, &now)
     }
 
     pub fn list_checkpoints(&self) -> Result<Vec<MemoryRecord>> {
-        active_checkpoint_records(&self.conn)
+        active_checkpoint_records(&self.conn, self.now())
     }
 
     pub fn show_checkpoint(&self, record_id: &str) -> Result<MemoryRecord> {
-        checkpoint_record(&self.conn, record_id)?
+        checkpoint_record(&self.conn, record_id, self.now())?
             .with_context(|| format!("checkpoint not found: {record_id}"))
     }
 
@@ -455,7 +478,7 @@ impl MemoryService {
         document: SessionEndDocument,
     ) -> Result<SessionEndResult> {
         validate_session_end_document(&document)?;
-        let timestamp = now_utc()?;
+        let timestamp = self.now_timestamp()?;
         let pending_root = self.paths.proposals_dir().join("pending");
         let mut reserved_proposal_ids = BTreeSet::new();
         let mut repo_plans = Vec::with_capacity(document.candidates.len());
@@ -614,7 +637,7 @@ impl MemoryService {
                 plan.plan_id
             );
         }
-        let timestamp = now_utc()?;
+        let timestamp = self.now_timestamp()?;
         let pending_root = self.paths.proposals_dir().join("pending");
         let mut planned = Vec::new();
         for candidate in &plan.candidates {
@@ -722,8 +745,16 @@ impl MemoryService {
                 hash: import::content_hash(&proposal.body),
             });
         }
-        let mut runtime = records_for_runtime_preservation(&self.conn)?;
-        runtime.retain(|record| record.status == MemoryStatus::Active);
+        let runtime_records = records_for_runtime_preservation(&self.conn)?;
+        let now = self.now();
+        let mut runtime = Vec::new();
+        for record in runtime_records {
+            if record.status == MemoryStatus::Active
+                && !expiry::is_expired(record.expires_at.as_deref(), now)?
+            {
+                runtime.push(record);
+            }
+        }
         runtime.sort_by(|a, b| a.id.cmp(&b.id));
         for record in runtime {
             entries.push(ExistingDuplicate {
@@ -738,33 +769,36 @@ impl MemoryService {
     }
 
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
-        context::build_context_pack(&self.conn, input)
+        context::build_context_pack_at(&self.conn, input, self.now())
     }
 
     pub fn build_handoff_pack(&self, input: HandoffInput) -> Result<HandoffPack> {
-        handoff::build_handoff_pack(&self.conn, input)
+        handoff::build_handoff_pack_at(&self.conn, input, self.now())
     }
 
     pub fn precheck(&self, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
-        precheck::precheck(&self.conn, input)
+        precheck::precheck_at(&self.conn, input, self.now())
     }
 
     pub fn export(&self, input: ExportInput) -> Result<ExportResult> {
         let written_paths = match input.format {
-            ExportFormat::Okf => exporters::export_okf(
+            ExportFormat::Okf => exporters::export_okf_at(
                 &self.conn,
                 &self.paths.exports_dir.join("okf"),
                 input.scope_kind,
+                self.now(),
             )?,
-            ExportFormat::AgentsMd => vec![exporters::export_agents_md(
+            ExportFormat::AgentsMd => vec![exporters::export_agents_md_at(
                 &self.conn,
                 &self.paths.exports_dir.join("AGENTS.memory.md"),
                 input.scope_kind,
+                self.now(),
             )?],
-            ExportFormat::ClaudeMd => vec![exporters::export_claude_md(
+            ExportFormat::ClaudeMd => vec![exporters::export_claude_md_at(
                 &self.conn,
                 &self.paths.exports_dir.join("CLAUDE.memory.md"),
                 input.scope_kind,
+                self.now(),
             )?],
         };
 
@@ -772,6 +806,14 @@ impl MemoryService {
             format: input.format,
             written_paths,
         })
+    }
+
+    fn now(&self) -> OffsetDateTime {
+        self.clock.now_utc()
+    }
+
+    fn now_timestamp(&self) -> Result<String> {
+        expiry::format_timestamp(self.now())
     }
 
     pub fn rebuild(self) -> Result<RebuildResult> {
@@ -1080,7 +1122,7 @@ fn insert_memory_record_row(
     Ok(())
 }
 
-fn active_records_for_destination(
+fn indexed_active_records_for_destination(
     conn: &Connection,
     destination: MemoryDestination,
 ) -> Result<Vec<MemoryRecord>> {
@@ -1097,7 +1139,29 @@ fn active_records_for_destination(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn active_checkpoint_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
+fn active_records_for_destination(
+    conn: &Connection,
+    destination: MemoryDestination,
+    now: OffsetDateTime,
+) -> Result<Vec<MemoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
+                supersedes_id, expires_at
+         FROM memory_record
+         WHERE status = 'active'
+           AND destination = ?1
+           AND memzoi_is_expired(expires_at, ?2) = 0
+         ORDER BY updated_at DESC, id ASC",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![destination.as_str(), expiry::format_timestamp(now)?],
+        search::record_from_row,
+    )?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn active_checkpoint_records(conn: &Connection, now: OffsetDateTime) -> Result<Vec<MemoryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
@@ -1106,13 +1170,18 @@ fn active_checkpoint_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
          WHERE status = 'active'
            AND destination = 'session'
            AND source_kind = 'memzoi-checkpoint'
+           AND memzoi_is_expired(expires_at, ?1) = 0
          ORDER BY created_at DESC, id ASC",
     )?;
-    let rows = stmt.query_map([], search::record_from_row)?;
+    let rows = stmt.query_map([expiry::format_timestamp(now)?], search::record_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn checkpoint_record(conn: &Connection, record_id: &str) -> Result<Option<MemoryRecord>> {
+fn checkpoint_record(
+    conn: &Connection,
+    record_id: &str,
+    now: OffsetDateTime,
+) -> Result<Option<MemoryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
@@ -1121,7 +1190,24 @@ fn checkpoint_record(conn: &Connection, record_id: &str) -> Result<Option<Memory
          WHERE id = ?1
            AND status = 'active'
            AND destination = 'session'
-           AND source_kind = 'memzoi-checkpoint'",
+           AND source_kind = 'memzoi-checkpoint'
+           AND memzoi_is_expired(expires_at, ?2) = 0",
+    )?;
+    stmt.query_row(
+        rusqlite::params![record_id, expiry::format_timestamp(now)?],
+        search::record_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn record_by_id(conn: &Connection, record_id: &str) -> Result<Option<MemoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
+                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
+                supersedes_id, expires_at
+         FROM memory_record
+         WHERE id = ?1",
     )?;
     stmt.query_row([record_id], search::record_from_row)
         .optional()

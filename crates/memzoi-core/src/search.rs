@@ -2,9 +2,11 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
 
 use crate::{
     events::{AppendEvent, append_event},
+    expiry,
     models::{
         MemoryCitation, MemoryDestination, MemoryPath, MemoryRecord, MemoryType, ScopeKind,
         SearchResult,
@@ -23,7 +25,16 @@ pub struct SearchInput {
     pub include_inactive: bool,
 }
 
+#[cfg(test)]
 pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<SearchResult>> {
+    search_memory_at(conn, input, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn search_memory_at(
+    conn: &Connection,
+    input: SearchInput,
+    now: OffsetDateTime,
+) -> Result<Vec<SearchResult>> {
     let fts_query = fts_query(&input.query);
     if fts_query.is_empty() {
         return Ok(Vec::new());
@@ -36,6 +47,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
         .map(ToOwned::to_owned);
 
     let limit = normalized_limit(input.limit);
+    let evaluated_at = expiry::format_timestamp(now)?;
     let status_filter = if input.include_inactive {
         "1 = 1"
     } else {
@@ -98,6 +110,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
          JOIN memory_record ON memory_record.rowid = memory_fts.rowid
          WHERE memory_fts MATCH ?1
            AND {status_filter}
+           AND memzoi_is_expired(memory_record.expires_at, ?9) = 0
            AND {destination_filter}
            AND {scope_filter}
            AND {scope_id_filter}
@@ -127,6 +140,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
                 path_like,
                 destination,
                 limit as i64,
+                evaluated_at,
             ],
             |row| {
                 let record = record_from_row(row)?;
@@ -164,6 +178,7 @@ pub fn search_memory(conn: &Connection, input: SearchInput) -> Result<Vec<Search
                 "destination": destination,
                 "path_prefix": input.path_prefix,
                 "limit": limit,
+                "evaluated_at": evaluated_at,
                 "result_ids": results.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
             }),
             record_id: None,

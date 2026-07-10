@@ -4,15 +4,18 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
 
 use crate::{
     events::{AppendEvent, append_event},
+    expiry,
     models::{
         MemoryCitation, MemoryDestination, MemoryPath, MemoryType, PrecheckWarning, ScopeKind,
         SearchResult,
     },
     search::{
-        SearchInput, citation_for, load_paths, path_matches_request, record_from_row, search_memory,
+        SearchInput, citation_for, load_paths, path_matches_request, record_from_row,
+        search_memory_at,
     },
 };
 
@@ -26,13 +29,23 @@ pub struct PrecheckInput {
     pub scope_kind: Option<ScopeKind>,
 }
 
+#[cfg(test)]
 pub fn precheck(conn: &Connection, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
+    precheck_at(conn, input, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn precheck_at(
+    conn: &Connection,
+    input: PrecheckInput,
+    now: OffsetDateTime,
+) -> Result<Vec<PrecheckWarning>> {
     let requested_path = normalized_path(input.path.as_deref());
     let mut candidates = BTreeMap::<String, PrecheckCandidate>::new();
+    let evaluated_at = expiry::format_timestamp(now)?;
 
     if let Some(requested_path) = requested_path {
         for (result, path_score) in
-            path_governance_candidates(conn, input.scope_kind, requested_path)?
+            path_governance_candidates(conn, input.scope_kind, requested_path, &evaluated_at)?
         {
             candidates.insert(
                 result.record.id.clone(),
@@ -46,7 +59,7 @@ pub fn precheck(conn: &Connection, input: PrecheckInput) -> Result<Vec<PrecheckW
     }
 
     if let Some(query) = lexical_query(&input) {
-        for result in search_memory(
+        for result in search_memory_at(
             conn,
             SearchInput {
                 query,
@@ -56,6 +69,7 @@ pub fn precheck(conn: &Connection, input: PrecheckInput) -> Result<Vec<PrecheckW
                 include_inactive: false,
                 ..SearchInput::default()
             },
+            now,
         )?
         .into_iter()
         .filter(is_governance_memory)
@@ -116,6 +130,7 @@ fn path_governance_candidates(
     conn: &Connection,
     scope_kind: Option<ScopeKind>,
     requested_path: &str,
+    evaluated_at: &str,
 ) -> Result<Vec<(SearchResult, i64)>> {
     let requested_path = requested_path.trim().trim_end_matches('/').to_owned();
     if requested_path.is_empty() {
@@ -133,10 +148,12 @@ fn path_governance_candidates(
                     memory_record.visibility, memory_record.title, memory_record.body,
                     memory_record.status, memory_record.confidence, memory_record.source_kind,
                     memory_record.source_ref, memory_record.content_hash, memory_record.created_at,
-                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at
+                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at,
+                    memory_record.proposal_id
              FROM memory_path
              JOIN memory_record ON memory_record.id = memory_path.record_id
              WHERE memory_record.status = 'active'
+               AND memzoi_is_expired(memory_record.expires_at, ?5) = 0
                AND memory_record.destination = ?1
                AND memory_record.type IN ('risk', 'warning', 'failed_attempt')
                AND (?2 IS NULL OR memory_record.scope_kind = ?2)
@@ -169,6 +186,7 @@ fn path_governance_candidates(
                 scope_kind,
                 requested_path,
                 path_like,
+                evaluated_at,
             ],
             record_from_row,
         )

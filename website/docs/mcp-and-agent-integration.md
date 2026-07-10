@@ -42,7 +42,8 @@ The server exposes:
 
 | Tool | Purpose |
 | --- | --- |
-| `search_memory` | Search active memory records by text with optional scope, type, path, and limit filters. |
+| `search_memory` | Search active, unexpired memory records by text with optional scope, type, path, and limit filters. |
+| `inspect_memory_expiry` | Retrieve a record by ID, including an expired record, and explain normal-read eligibility without mutation. |
 | `build_context_pack` | Build a prompt-ready context pack for a task, with optional local/session memory opt-in. |
 | `propose_memory` | Create a memory proposal using the effective approval policy or an `approval_mode` override. |
 | `precheck_path` | Check a path against warnings, risks, and failed attempts. |

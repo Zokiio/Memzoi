@@ -2610,6 +2610,40 @@ fn search_json_filters_scope_type_path_limit_and_excludes_inactive_records() {
 }
 
 #[test]
+fn expiry_command_shows_records_excluded_from_normal_search_and_explains_why() {
+    let repo = initialized_temp_repo();
+    let record_id = create_applied_memory(
+        repo.path(),
+        "warning",
+        "repo",
+        "Expired CLI diagnostic memory",
+        "The expirydiagnostic token should be hidden from normal search.",
+    );
+    let conn = Connection::open(memory_db_path(repo.path())).expect("open runtime database");
+    conn.execute(
+        "UPDATE memory_record SET expires_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
+        [record_id.as_str()],
+    )
+    .expect("set expired diagnostic fixture");
+    drop(conn);
+
+    let search = run_json_command(repo.path(), &["search", "expirydiagnostic", "--json"]);
+    assert!(record_ids_from_json(&search).is_empty());
+
+    let diagnostic = run_json_command(repo.path(), &["expiry", record_id.as_str(), "--json"]);
+    assert_eq!(diagnostic["record"]["id"], record_id);
+    assert_eq!(diagnostic["record"]["status"], "active");
+    assert_eq!(diagnostic["expired"], true);
+    assert_eq!(diagnostic["excluded_from_normal_reads"], true);
+    assert!(
+        diagnostic["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("at or after expiry")),
+        "diagnostic should explain exclusion: {diagnostic}"
+    );
+}
+
+#[test]
 fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
     let repo = initialized_temp_repo();
     let repo = repo.path();

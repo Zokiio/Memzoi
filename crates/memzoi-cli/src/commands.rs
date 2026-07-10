@@ -178,6 +178,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             limit,
             json,
         } => search_command(query, scope_kind, memory_type, path, limit, json),
+        Commands::Expiry { record_id, json } => expiry_command(&record_id, json),
         Commands::Context {
             task,
             path,
@@ -1357,6 +1358,33 @@ fn search_command(
                 result.record.title
             );
         }
+        Ok(())
+    }
+}
+
+fn expiry_command(record_id: &str, as_json: bool) -> Result<()> {
+    let service = open_service()?;
+    let diagnostic = service.inspect_expiry(record_id)?;
+
+    if as_json {
+        print_json(&serde_json::to_value(&diagnostic)?)
+    } else {
+        println!("record_id:\t{}", diagnostic.record.id);
+        println!("title:\t{}", diagnostic.record.title);
+        println!("status:\t{}", diagnostic.record.status.as_str());
+        println!(
+            "expires_at:\t{}",
+            diagnostic.record.expires_at.as_deref().unwrap_or("none")
+        );
+        println!("evaluated_at:\t{}", diagnostic.evaluated_at);
+        println!("expired:\t{}", diagnostic.expired);
+        println!(
+            "excluded_from_normal_reads:\t{}",
+            diagnostic.excluded_from_normal_reads
+        );
+        println!("reason:\t{}", diagnostic.reason);
+        println!();
+        println!("{}", diagnostic.record.body);
         Ok(())
     }
 }

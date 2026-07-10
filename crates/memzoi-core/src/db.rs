@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-use crate::schema;
+use crate::{expiry, schema};
 
 pub fn open_database(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -28,6 +28,8 @@ fn configure_connection(conn: &Connection) -> Result<()> {
         .context("failed to set SQLite busy timeout")?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("failed to enable SQLite WAL journal mode")?;
+    expiry::register_sqlite_functions(conn)
+        .context("failed to register SQLite expiry functions")?;
     Ok(())
 }
 

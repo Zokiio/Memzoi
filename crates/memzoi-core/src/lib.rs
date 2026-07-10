@@ -3,6 +3,7 @@ mod context;
 mod db;
 mod error;
 mod events;
+mod expiry;
 mod exporters;
 mod handoff;
 mod import;
@@ -25,6 +26,7 @@ pub use config::{
 };
 pub use context::ContextPackInput;
 pub use error::{CoreError, Result};
+pub use expiry::{Clock, ExpiryDiagnostic, FixedClock, SystemClock};
 pub use handoff::HandoffInput;
 pub use import::{
     ImportApplyResult, ImportCandidate, ImportCandidateAction, ImportCandidateInput,

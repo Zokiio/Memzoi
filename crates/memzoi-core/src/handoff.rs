@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
@@ -18,10 +19,19 @@ pub struct HandoffInput {
     pub include_session: bool,
 }
 
+#[cfg(test)]
 pub fn build_handoff_pack(conn: &Connection, input: HandoffInput) -> Result<HandoffPack> {
+    build_handoff_pack_at(conn, input, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn build_handoff_pack_at(
+    conn: &Connection,
+    input: HandoffInput,
+    now: OffsetDateTime,
+) -> Result<HandoffPack> {
     let path_prefix = normalize_optional(input.path_prefix);
     let task = effective_task(input.task, path_prefix.as_deref())?;
-    let context = context::build_context_pack(
+    let context = context::build_context_pack_at(
         conn,
         ContextPackInput {
             task: task.clone(),
@@ -30,6 +40,7 @@ pub fn build_handoff_pack(conn: &Connection, input: HandoffInput) -> Result<Hand
             include_local: input.include_local,
             include_session: input.include_session,
         },
+        now,
     )?;
     let proposal_inbox = proposal_inbox_summary(proposals::open_proposal_counts(conn)?);
 

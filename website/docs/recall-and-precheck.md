@@ -12,9 +12,10 @@ Memzoi has three read-side workflows: recall memory for context, build handoff p
 memzoi search pnpm --json
 memzoi search pnpm --type decision --scope-kind repo --limit 5
 memzoi search billing --path apps/api/src/billing --json
+memzoi expiry <record-id> --json
 ```
 
-Search is backed by SQLite FTS over active record titles and bodies. It supports optional filters for memory type, scope kind, path prefix, and limit. JSON search results return records with nullable `source_kind`/`source_ref` and citations carrying the four-part provenance metadata described below.
+Search is backed by SQLite FTS over active, unexpired record titles and bodies. It supports optional filters for memory type, scope kind, path prefix, and limit. JSON search results return records with nullable `source_kind`/`source_ref` and citations carrying the four-part provenance metadata described below. `memzoi expiry` is the explicit diagnostic path for retrieving a record that normal reads exclude and reporting the evaluation instant and reason; it does not mutate the record.
 
 Path filtering matches records bound to the exact path, descendants of the path, or ancestors of the path. That lets a record attached to `apps/web` apply when the user is working in `apps/web/src/App.tsx`.
 

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind,
-    Visibility, proposals::title_to_concept_slug,
+    Visibility, expiry, proposals::title_to_concept_slug,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -506,6 +506,10 @@ pub fn parse_okf_record_markdown(
     let supersedes_id = frontmatter.supersedes.or(frontmatter.supersedes_id);
     let expires_at = frontmatter.expires.or(frontmatter.expires_at);
     let proposal_id = optional_string(frontmatter.proposal_id, "proposal_id")?;
+    if let Some(expires_at) = expires_at.as_deref() {
+        expiry::parse_expires_at(expires_at)
+            .with_context(|| format!("invalid OKF expiry for {concept_id}"))?;
+    }
     let body = body_without_matching_h1(body, &title)?;
 
     Ok(Some(OkfRecordFile {

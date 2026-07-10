@@ -114,7 +114,7 @@ These fields extend OKF v0.1 for Memzoi:
 | `source` | Short provenance kind such as `human`, `agent`, `import`, `issue`, `pr`, or `doc`. |
 | `source_ref` | Optional durable reference for provenance, such as `issue://123`, `pr://45`, a commit SHA, or a URL. |
 | `supersedes` | Optional record ID replaced by this record. Prefer this over mutating old records in place. |
-| `expires` | Optional date or timestamp after which the record should stop participating in recall/precheck unless renewed. |
+| `expires` | Optional `YYYY-MM-DD` (start of that date in UTC) or RFC 3339 timestamp with an explicit timezone. At and after that instant, the active record is excluded from normal search, context, handoff, precheck, runtime lists/show, and generated exports without changing its canonical file or status. |
 
 Memory lanes:
 

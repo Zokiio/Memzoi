@@ -178,6 +178,14 @@ pub(crate) enum Commands {
         json: bool,
     },
 
+    /// Inspect a record's expiry and explain normal-read eligibility.
+    Expiry {
+        /// Record ID to inspect, including records excluded from normal reads.
+        record_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Build a prompt-ready context pack for a task.
     Context {
         #[arg(long)]

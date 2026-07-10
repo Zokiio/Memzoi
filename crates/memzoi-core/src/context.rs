@@ -7,17 +7,20 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    events::{AppendEvent, append_event, now_utc},
+    events::{AppendEvent, append_event},
+    expiry,
     models::{
         ContextPack, ContextPackBudget, ContextPackIncludedItem, ContextPackOmittedItem,
         ContextPackPolicy, ContextPackWarning, MemoryCitation, MemoryDestination, MemoryLane,
         MemoryPath, MemoryRecord, MemoryType, SearchRanking, SearchRankingSignals, SearchResult,
     },
     search::{
-        SearchInput, citation_for, load_paths, path_matches_request, record_from_row, search_memory,
+        SearchInput, citation_for, load_paths, path_matches_request, record_from_row,
+        search_memory_at,
     },
 };
 
@@ -32,7 +35,16 @@ pub struct ContextPackInput {
     pub include_session: bool,
 }
 
+#[cfg(test)]
 pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<ContextPack> {
+    build_context_pack_at(conn, input, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn build_context_pack_at(
+    conn: &Connection,
+    input: ContextPackInput,
+    now: OffsetDateTime,
+) -> Result<ContextPack> {
     let path_prefix = input
         .path_prefix
         .as_deref()
@@ -43,7 +55,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
     let mut candidates = HashMap::<String, ContextCandidate>::new();
 
     for destination in &requested_destinations {
-        for result in search_memory(
+        for result in search_memory_at(
             conn,
             SearchInput {
                 query: input.task.clone(),
@@ -52,6 +64,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
                 include_inactive: false,
                 ..SearchInput::default()
             },
+            now,
         )? {
             insert_candidate(&mut candidates, ContextCandidate::fts(result));
         }
@@ -59,7 +72,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
 
     if let Some(path_prefix) = path_prefix.as_deref() {
         for destination in &requested_destinations {
-            for result in path_candidates(conn, *destination, path_prefix, 50)? {
+            for result in path_candidates(conn, *destination, path_prefix, 50, now)? {
                 insert_candidate(&mut candidates, ContextCandidate::path(result));
             }
         }
@@ -125,7 +138,7 @@ pub fn build_context_pack(conn: &Connection, input: ContextPackInput) -> Result<
         omitted,
         warnings,
         next_queries: Vec::new(),
-        created_at: now_utc()?,
+        created_at: expiry::format_timestamp(now)?,
     };
     let mut pack = pack;
     pack.budget.selected_records = pack.records.len();
@@ -226,6 +239,7 @@ fn path_candidates(
     destination: MemoryDestination,
     path_prefix: &str,
     limit: usize,
+    now: OffsetDateTime,
 ) -> Result<Vec<SearchResult>> {
     let requested_path = path_prefix.trim().trim_end_matches('/').to_owned();
     if requested_path.is_empty() {
@@ -244,6 +258,7 @@ fn path_candidates(
              FROM memory_path
              JOIN memory_record ON memory_record.id = memory_path.record_id
              WHERE memory_record.status = 'active'
+               AND memzoi_is_expired(memory_record.expires_at, ?5) = 0
                AND memory_record.destination = ?1
                AND (
                  memory_path.path = ?2
@@ -274,7 +289,8 @@ fn path_candidates(
                 destination.as_str(),
                 requested_path,
                 path_like,
-                limit as i64
+                limit as i64,
+                expiry::format_timestamp(now)?,
             ],
             record_from_row,
         )

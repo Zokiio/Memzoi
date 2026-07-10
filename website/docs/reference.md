@@ -23,7 +23,8 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
 | `memzoi supersede` | Supersede an active memory record with new content. |
 | `memzoi tombstone` | Tombstone an active memory record. |
-| `memzoi search` | Search active memory records. |
+| `memzoi search` | Search active, unexpired memory records. |
+| `memzoi expiry` | Inspect a record by ID and explain its expiry eligibility without mutating it. |
 | `memzoi context` | Build a prompt-ready context pack for a task. |
 | `memzoi handoff` | Build a compact context pack for switching agents or harnesses. |
 | `memzoi precheck` | Check planned work against risky memories before acting. |
@@ -63,6 +64,7 @@ Run `memzoi <command> --help` for exact options.
 | `supersede` | `<record-id>`, `--type`, `--scope-kind`, `--visibility`, `--title`, `--body`, `--actor`, `--json` |
 | `tombstone` | `<record-id>`, `--reason`, `--actor`, `--json` |
 | `search` | `<query>`, `--scope-kind`, `--type`, `--path`, `--limit`, `--json` |
+| `expiry` | `<record-id>`, `--json` |
 | `context` | `--task`, `--path`, `--token-budget`, `--include-local`, `--include-session`, `--json` |
 | `handoff` | `--task` or `--path`, `--token-budget`, `--include-local`, `--include-session`, `--json` |
 | `precheck` | `--path`, `--action`, `--command`, `--scope-kind`, `--json` |
@@ -318,6 +320,7 @@ JSON status values:
 | Tool | Required arguments | Optional arguments |
 | --- | --- | --- |
 | `search_memory` | `query` | `scope_kind`, `scope`, `type`, `memory_type`, `path`, `path_prefix`, `limit` |
+| `inspect_memory_expiry` | `record_id` | none |
 | `build_context_pack` | `task` | `path`, `path_prefix`, `token_budget`, `include_local`, `include_session` |
 | `propose_memory` | `title`, `body` | `type`, `memory_type`, `scope_kind`, `scope`, `scope_id`, `visibility`, `tags`, `source_kind`, `source_ref`, `confidence`, `actor`, `approval_mode` |
 | `precheck_path` | `path` | `scope_kind`, `scope` |

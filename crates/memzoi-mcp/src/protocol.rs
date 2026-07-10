@@ -136,6 +136,17 @@ fn tools_list_result() -> Value {
                 })
             ),
             tool_schema(
+                "inspect_memory_expiry",
+                "Show a record even when expired and explain why normal reads include or exclude it.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "record_id": { "type": "string" }
+                    },
+                    "required": ["record_id"]
+                })
+            ),
+            tool_schema(
                 "build_context_pack",
                 "Build a prompt-ready context pack for a task.",
                 json!({
@@ -247,6 +258,9 @@ fn tools_call(service: &MemoryService, params: Value) -> Result<Value> {
         "search_memory" => json!({
             "records": service.search_memory(search_input(&arguments)?)?,
         }),
+        "inspect_memory_expiry" => {
+            serde_json::to_value(service.inspect_expiry(required_str(&arguments, "record_id")?)?)?
+        }
         "build_context_pack" => {
             serde_json::to_value(service.build_context_pack(context_input(&arguments)?)?)?
         }
@@ -598,6 +612,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let expected = BTreeSet::from([
             "search_memory",
+            "inspect_memory_expiry",
             "build_context_pack",
             "propose_memory",
             "precheck_path",
@@ -881,6 +896,58 @@ mod tests {
                 .unwrap()
                 .to_ascii_lowercase()
                 .contains("narwhal")
+        );
+    }
+
+    #[test]
+    fn inspect_memory_expiry_tool_explains_an_expired_record() {
+        let temp = TempDir::new().unwrap();
+        MemoryService::initialize(temp.path(), InitRequest { force: false }).unwrap();
+        fs::write(
+            temp.path()
+                .join(".memzoi/records/expired-mcp-diagnostic.md"),
+            r#"---
+type: fact
+title: Expired MCP diagnostic
+timestamp: 2026-01-01T00:00:00Z
+status: active
+visibility: repo
+confidence: confirmed
+scope: repo
+source: test
+expires: 2000-01-01T00:00:00Z
+---
+
+# Expired MCP diagnostic
+
+The mcpexpirydiagnostic token should be hidden from normal search.
+"#,
+        )
+        .unwrap();
+        MemoryService::rebuild_at(temp.path()).unwrap();
+        let service = MemoryService::open(temp.path()).unwrap();
+
+        let response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "expiry-inspect",
+                "method": "tools/call",
+                "params": {
+                    "name": "inspect_memory_expiry",
+                    "arguments": { "record_id": "expired-mcp-diagnostic" }
+                }
+            }),
+        );
+
+        let diagnostic = &response["result"]["structuredContent"];
+        assert_eq!(diagnostic["record"]["status"], "active");
+        assert_eq!(diagnostic["expired"], true);
+        assert_eq!(diagnostic["excluded_from_normal_reads"], true);
+        assert!(
+            diagnostic["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("at or after expiry"))
         );
     }
 
