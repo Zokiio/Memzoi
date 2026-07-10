@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::{Date, OffsetDateTime, Time, format_description::well_known::Rfc3339};
@@ -349,8 +349,9 @@ impl MemoryService {
     pub fn apply_proposal(&self, proposal_id: &str, actor: &str) -> Result<MemoryRecord> {
         let tx = self.conn.unchecked_transaction()?;
         let record = proposals::apply_proposal(&tx, proposal_id, actor)?;
-        self.write_record_file_with_conn(&tx, &record, FileWriteMode::CreateNew)?;
-        tx.commit()?;
+        let write =
+            self.prepare_record_file_write_with_conn(&tx, &record, FileWriteMode::CreateNew)?;
+        commit_db_and_canonical_writes(tx, &[write])?;
         Ok(record)
     }
 
@@ -382,24 +383,7 @@ impl MemoryService {
 
         let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
         let nonce = Uuid::now_v7().to_string();
-        let mut staged_writes = Vec::with_capacity(plan.writes.len());
-        for write in &plan.writes {
-            let temp_path = match stage_file(&write.path, &write.markdown, &nonce) {
-                Ok(path) => path,
-                Err(error) => {
-                    cleanup_staged_canonical_writes(&staged_writes);
-                    return Err(error);
-                }
-            };
-            let backup_path = (write.mode == FileWriteMode::Overwrite)
-                .then(|| sibling_transaction_path(&write.path, &nonce, "canonical"));
-            staged_writes.push(StagedCanonicalFileWrite {
-                path: write.path.clone(),
-                temp_path,
-                backup_path,
-                installed: false,
-            });
-        }
+        let mut staged_writes = stage_canonical_writes(&plan.writes, &nonce)?;
         let resolved_temp = match stage_file(&resolved_path, &resolved_markdown, &nonce) {
             Ok(path) => path,
             Err(error) => {
@@ -457,20 +441,7 @@ impl MemoryService {
                 )
             })?;
             pending_moved = true;
-            for write in &mut staged_writes {
-                if let Some(backup_path) = &write.backup_path {
-                    fs::rename(&write.path, backup_path).with_context(|| {
-                        format!(
-                            "failed to stage canonical memory record {}",
-                            write.path.display()
-                        )
-                    })?;
-                }
-                fs::rename(&write.temp_path, &write.path).with_context(|| {
-                    format!("failed to install memory record {}", write.path.display())
-                })?;
-                write.installed = true;
-            }
+            install_staged_canonical_writes(&mut staged_writes, |_| Ok(()))?;
             fs::rename(&resolved_temp, &resolved_path).with_context(|| {
                 format!(
                     "failed to install resolved proposal {}",
@@ -508,11 +479,7 @@ impl MemoryService {
         }
 
         remove_staged_file(&pending_backup);
-        for write in &staged_writes {
-            if let Some(backup_path) = &write.backup_path {
-                remove_staged_file(backup_path);
-            }
-        }
+        finalize_staged_canonical_writes(&staged_writes);
         Ok(FileProposalResolutionResult {
             proposal,
             resolution,
@@ -795,12 +762,51 @@ impl MemoryService {
         actor: &str,
         draft: MemoryDraft,
     ) -> Result<SupersedeResult> {
+        self.supersede_record_with_hooks(record_id, actor, draft, |_| Ok(()), |_| Ok(()))
+    }
+
+    fn supersede_record_with_hooks<BeforeInstall, BeforeCommit>(
+        &self,
+        record_id: &str,
+        actor: &str,
+        draft: MemoryDraft,
+        before_install: BeforeInstall,
+        before_commit: BeforeCommit,
+    ) -> Result<SupersedeResult>
+    where
+        BeforeInstall: FnMut(usize) -> Result<()>,
+        BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
+    {
         let tx = self.conn.unchecked_transaction()?;
+        let target = record_by_id(&tx, record_id)?
+            .with_context(|| format!("memory record not found: {record_id}"))?;
+        validate_legacy_canonical_target(&target)?;
+        if target.scope_kind != draft.scope_kind || target.scope_id != draft.scope_id {
+            bail!(
+                "cannot supersede record {record_id} cross-scope: target={}:{}, replacement={}:{}",
+                target.scope_kind.as_str(),
+                target.scope_id.as_deref().unwrap_or("-"),
+                draft.scope_kind.as_str(),
+                draft.scope_id.as_deref().unwrap_or("-")
+            );
+        }
         let result = proposals::supersede_record(&tx, record_id, actor, draft)?;
-        self.ensure_record_file_absent(&result.replacement.id)?;
-        self.write_record_file_with_conn(&tx, &result.previous, FileWriteMode::Overwrite)?;
-        self.write_record_file_with_conn(&tx, &result.replacement, FileWriteMode::CreateNew)?;
-        tx.commit()?;
+        let previous_write = self.prepare_record_file_write_with_conn(
+            &tx,
+            &result.previous,
+            FileWriteMode::Overwrite,
+        )?;
+        let replacement_write = self.prepare_record_file_write_with_conn(
+            &tx,
+            &result.replacement,
+            FileWriteMode::CreateNew,
+        )?;
+        commit_db_and_canonical_writes_with_hooks(
+            tx,
+            &[previous_write, replacement_write],
+            before_install,
+            before_commit,
+        )?;
         Ok(result)
     }
 
@@ -811,49 +817,28 @@ impl MemoryService {
         reason: &str,
     ) -> Result<MemoryRecord> {
         let tx = self.conn.unchecked_transaction()?;
+        let target = record_by_id(&tx, record_id)?
+            .with_context(|| format!("memory record not found: {record_id}"))?;
+        validate_legacy_canonical_target(&target)?;
         let record = proposals::tombstone_record(&tx, record_id, actor, reason)?;
-        self.write_record_file_with_conn(&tx, &record, FileWriteMode::Overwrite)?;
-        tx.commit()?;
+        let write =
+            self.prepare_record_file_write_with_conn(&tx, &record, FileWriteMode::Overwrite)?;
+        commit_db_and_canonical_writes(tx, &[write])?;
         Ok(record)
     }
 
-    fn write_record_file_with_conn(
+    fn prepare_record_file_write_with_conn(
         &self,
         conn: &Connection,
         record: &MemoryRecord,
         mode: FileWriteMode,
-    ) -> Result<()> {
+    ) -> Result<CanonicalFileWrite> {
         let tags = record_tags(conn, &record.id)?;
         let applies_to = search::load_paths(conn, &record.id)?
             .into_iter()
             .map(|path| path.path)
             .collect::<Vec<_>>();
-        match mode {
-            FileWriteMode::CreateNew => okf::create_memory_record_file_with_metadata(
-                &self.paths.records_dir(),
-                record,
-                &tags,
-                &applies_to,
-            )?,
-            FileWriteMode::Overwrite => okf::write_memory_record_file_with_metadata(
-                &self.paths.records_dir(),
-                record,
-                &tags,
-                &applies_to,
-            )?,
-        };
-        Ok(())
-    }
-
-    fn ensure_record_file_absent(&self, record_id: &str) -> Result<()> {
-        let path = self.paths.records_dir().join(format!("{record_id}.md"));
-        if path
-            .try_exists()
-            .with_context(|| format!("failed to inspect memory record {}", path.display()))?
-        {
-            bail!("canonical memory record already exists: {}", path.display());
-        }
-        Ok(())
+        self.prepare_canonical_file_write(record.clone(), tags, applies_to, mode)
     }
 
     pub fn search_memory(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
@@ -1376,6 +1361,30 @@ fn parse_orderable_timestamp(value: &str, label: &str) -> Result<OffsetDateTime>
     bail!("{label} must be an RFC 3339 timestamp or YYYY-MM-DD date: {value:?}")
 }
 
+fn validate_legacy_canonical_target(target: &MemoryRecord) -> Result<()> {
+    if target.destination != MemoryDestination::Repo {
+        bail!(
+            "record {} cannot be changed canonically because destination {} is not repo",
+            target.id,
+            target.destination.as_str()
+        );
+    }
+    if target.visibility == Visibility::Private {
+        bail!(
+            "record {} cannot be changed canonically because visibility private is not repo-shareable",
+            target.id
+        );
+    }
+    if target.status != MemoryStatus::Active {
+        bail!(
+            "record {} cannot be changed canonically because status {} is not active",
+            target.id,
+            target.status.as_str()
+        );
+    }
+    Ok(())
+}
+
 fn ensure_path_absent(path: &Path, label: &str) -> Result<()> {
     if path
         .try_exists()
@@ -1425,6 +1434,114 @@ fn stage_file(final_path: &Path, contents: &str, nonce: &str) -> Result<PathBuf>
     Ok(temp_path)
 }
 
+fn stage_canonical_writes(
+    writes: &[CanonicalFileWrite],
+    nonce: &str,
+) -> Result<Vec<StagedCanonicalFileWrite>> {
+    let mut staged = Vec::with_capacity(writes.len());
+    for write in writes {
+        let temp_path = match stage_file(&write.path, &write.markdown, nonce) {
+            Ok(path) => path,
+            Err(error) => {
+                cleanup_staged_canonical_writes(&staged);
+                return Err(error);
+            }
+        };
+        let backup_path = (write.mode == FileWriteMode::Overwrite)
+            .then(|| sibling_transaction_path(&write.path, nonce, "canonical"));
+        staged.push(StagedCanonicalFileWrite {
+            path: write.path.clone(),
+            temp_path,
+            backup_path,
+            installed: false,
+        });
+    }
+    Ok(staged)
+}
+
+fn install_staged_canonical_writes<BeforeInstall>(
+    writes: &mut [StagedCanonicalFileWrite],
+    mut before_install: BeforeInstall,
+) -> Result<()>
+where
+    BeforeInstall: FnMut(usize) -> Result<()>,
+{
+    for (index, write) in writes.iter_mut().enumerate() {
+        before_install(index)?;
+        if let Some(backup_path) = &write.backup_path {
+            fs::rename(&write.path, backup_path).with_context(|| {
+                format!(
+                    "failed to stage canonical memory record {}",
+                    write.path.display()
+                )
+            })?;
+        }
+        fs::rename(&write.temp_path, &write.path)
+            .with_context(|| format!("failed to install memory record {}", write.path.display()))?;
+        write.installed = true;
+    }
+    Ok(())
+}
+
+fn rollback_staged_canonical_writes(writes: &mut [StagedCanonicalFileWrite]) {
+    for write in writes.iter_mut().rev() {
+        if write.installed {
+            remove_staged_file(&write.path);
+            write.installed = false;
+        }
+        if let Some(backup_path) = &write.backup_path
+            && backup_path.exists()
+        {
+            let _ = fs::rename(backup_path, &write.path);
+        }
+        remove_staged_file(&write.temp_path);
+    }
+}
+
+fn finalize_staged_canonical_writes(writes: &[StagedCanonicalFileWrite]) {
+    for write in writes {
+        if let Some(backup_path) = &write.backup_path {
+            remove_staged_file(backup_path);
+        }
+        remove_staged_file(&write.temp_path);
+    }
+}
+
+fn commit_db_and_canonical_writes(
+    tx: Transaction<'_>,
+    writes: &[CanonicalFileWrite],
+) -> Result<()> {
+    commit_db_and_canonical_writes_with_hooks(tx, writes, |_| Ok(()), |_| Ok(()))
+}
+
+fn commit_db_and_canonical_writes_with_hooks<BeforeInstall, BeforeCommit>(
+    tx: Transaction<'_>,
+    writes: &[CanonicalFileWrite],
+    before_install: BeforeInstall,
+    before_commit: BeforeCommit,
+) -> Result<()>
+where
+    BeforeInstall: FnMut(usize) -> Result<()>,
+    BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
+{
+    let nonce = Uuid::now_v7().to_string();
+    let mut staged = stage_canonical_writes(writes, &nonce)?;
+    if let Err(error) = install_staged_canonical_writes(&mut staged, before_install) {
+        rollback_staged_canonical_writes(&mut staged);
+        return Err(error);
+    }
+    if let Err(error) = before_commit(&tx) {
+        rollback_staged_canonical_writes(&mut staged);
+        return Err(error);
+    }
+    if let Err(error) = tx.commit() {
+        rollback_staged_canonical_writes(&mut staged);
+        return Err(error).context("failed to commit memory lifecycle transaction");
+    }
+    finalize_staged_canonical_writes(&staged);
+    Ok(())
+}
+
 fn remove_staged_file(path: &Path) {
     match fs::remove_file(path) {
         Ok(()) => {}
@@ -1451,18 +1568,7 @@ fn rollback_file_resolution(
     if resolved_installed {
         remove_staged_file(resolved_path);
     }
-    for write in writes.iter_mut().rev() {
-        if write.installed {
-            remove_staged_file(&write.path);
-            write.installed = false;
-        }
-        if let Some(backup_path) = &write.backup_path
-            && backup_path.exists()
-        {
-            let _ = fs::rename(backup_path, &write.path);
-        }
-        remove_staged_file(&write.temp_path);
-    }
+    rollback_staged_canonical_writes(writes);
     if pending_moved {
         let _ = fs::rename(pending_backup, pending_path);
     }
@@ -2280,6 +2386,254 @@ mod tests {
     }
 
     #[test]
+    fn legacy_lifecycle_rejects_runtime_targets_without_canonical_leaks() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let local = service.create_local_memory(
+            "agent:red-tests",
+            LocalMemoryInput {
+                memory_type: MemoryType::Preference,
+                lane: MemoryLane::Semantic,
+                title: "Private runtime preference".to_owned(),
+                body: "This local-only body must never become canonical.".to_owned(),
+            },
+        )?;
+        let checkpoint = service.create_checkpoint(
+            "agent:red-tests",
+            CheckpointInput {
+                task: "Private runtime checkpoint".to_owned(),
+                note: "This session-only body must never become canonical.".to_owned(),
+            },
+        )?;
+
+        let local_error = service
+            .tombstone_record(&local.id, "agent:red-tests", "must stay local")
+            .expect_err("local targets must not be written as canonical tombstones");
+        assert!(local_error.to_string().contains("destination local"));
+
+        let session_error = service
+            .supersede_record(
+                &checkpoint.id,
+                "agent:red-tests",
+                sample_memory_draft(
+                    "Replacement for session checkpoint",
+                    "A repo replacement must not promote the private target.",
+                ),
+            )
+            .expect_err("session targets must not be written as canonical supersedes");
+        assert!(session_error.to_string().contains("destination session"));
+
+        for record in [&local, &checkpoint] {
+            assert!(
+                !service
+                    .paths
+                    .records_dir()
+                    .join(format!("{}.md", record.id))
+                    .exists(),
+                "runtime target {} leaked into canonical records",
+                record.id
+            );
+            let stored = service.inspect_expiry(&record.id)?.record;
+            assert_eq!(stored.status, MemoryStatus::Active);
+            assert_eq!(stored.destination, record.destination);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let mut private_draft = sample_memory_draft(
+            "Private repo target",
+            "Private visibility must not be rewritten through a legacy lifecycle route.",
+        );
+        private_draft.visibility = Visibility::Private;
+        let private = apply_test_record(&service, private_draft)?;
+        let private_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", private.id));
+        let private_before = fs::read(&private_path)?;
+
+        let private_error = service
+            .tombstone_record(&private.id, "agent:red-tests", "must stay private")
+            .expect_err("private targets must not be rewritten canonically");
+        assert!(private_error.to_string().contains("visibility private"));
+        assert_eq!(fs::read(&private_path)?, private_before);
+        assert_eq!(
+            service.inspect_expiry(&private.id)?.record.status,
+            MemoryStatus::Active
+        );
+
+        let active = apply_test_record(
+            &service,
+            sample_memory_draft(
+                "Inactive lifecycle target",
+                "Inactive targets must be rejected before file mutation.",
+            ),
+        )?;
+        let active_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", active.id));
+        let active_before = fs::read(&active_path)?;
+        service.conn.execute(
+            "UPDATE memory_record SET status = 'superseded' WHERE id = ?1",
+            [active.id.as_str()],
+        )?;
+
+        let inactive_error = service
+            .tombstone_record(&active.id, "agent:red-tests", "already inactive")
+            .expect_err("inactive targets must be rejected");
+        assert!(inactive_error.to_string().contains("status superseded"));
+        assert_eq!(fs::read(&active_path)?, active_before);
+        assert_eq!(
+            service.inspect_expiry(&active.id)?.record.status,
+            MemoryStatus::Superseded
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_supersede_rejects_cross_scope_replacements_before_mutation() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let target = apply_test_record(
+            &service,
+            sample_memory_draft(
+                "Same-scope lifecycle target",
+                "The target must remain active when replacement scope differs.",
+            ),
+        )?;
+        let target_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", target.id));
+        let target_before = fs::read(&target_path)?;
+        let mut replacement = sample_memory_draft(
+            "Cross-scope lifecycle replacement",
+            "A team-scoped replacement cannot supersede a repo-scoped target.",
+        );
+        replacement.scope_kind = ScopeKind::Team;
+        replacement.scope_id = Some("platform".to_owned());
+
+        let error = service
+            .supersede_record(&target.id, "agent:red-tests", replacement)
+            .expect_err("cross-scope replacements must be rejected");
+        assert!(error.to_string().contains("cross-scope"));
+        assert_eq!(fs::read(&target_path)?, target_before);
+        assert_eq!(
+            service.inspect_expiry(&target.id)?.record.status,
+            MemoryStatus::Active
+        );
+        assert!(
+            !service
+                .paths
+                .records_dir()
+                .join("cross-scope-lifecycle-replacement.md")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_supersede_rolls_back_db_and_files_when_second_install_fails() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let target = apply_test_record(
+            &service,
+            sample_memory_draft(
+                "Second-write rollback target",
+                "The original canonical body must survive a second-write failure.",
+            ),
+        )?;
+        let target_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", target.id));
+        let target_before = fs::read(&target_path)?;
+        let replacement = sample_memory_draft(
+            "Second-write rollback replacement",
+            "This replacement must disappear when its install is interrupted.",
+        );
+
+        let error = service
+            .supersede_record_with_hooks(
+                &target.id,
+                "agent:red-tests",
+                replacement,
+                |index| {
+                    if index == 1 {
+                        return Err(anyhow::anyhow!("injected second-write install failure"));
+                    }
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .expect_err("second-write failure must abort the lifecycle transaction");
+        assert!(error.to_string().contains("second-write install failure"));
+
+        assert_legacy_supersede_unchanged(
+            &service,
+            &target,
+            &target_path,
+            &target_before,
+            "second-write-rollback-replacement",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_supersede_rolls_back_installed_files_when_db_commit_fails() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let target = apply_test_record(
+            &service,
+            sample_memory_draft(
+                "Commit rollback target",
+                "The original canonical body must survive a database commit failure.",
+            ),
+        )?;
+        let target_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", target.id));
+        let target_before = fs::read(&target_path)?;
+        let replacement = sample_memory_draft(
+            "Commit rollback replacement",
+            "This replacement must disappear when SQLite refuses commit.",
+        );
+
+        let error = service
+            .supersede_record_with_hooks(
+                &target.id,
+                "agent:red-tests",
+                replacement,
+                |_| Ok(()),
+                |tx| {
+                    tx.pragma_update(None, "defer_foreign_keys", "ON")?;
+                    tx.execute(
+                        "INSERT INTO memory_tag(record_id, tag) VALUES ('missing-record', 'deferred-commit-failure')",
+                        [],
+                    )?;
+                    Ok(())
+                },
+            )
+            .expect_err("deferred foreign-key violation must fail commit");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to commit memory lifecycle transaction"),
+            "expected actual commit failure, got: {error:#}"
+        );
+
+        assert_legacy_supersede_unchanged(
+            &service,
+            &target,
+            &target_path,
+            &target_before,
+            "commit-rollback-replacement",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn rebuild_refuses_to_discard_open_proposals_with_actionable_details() -> anyhow::Result<()> {
         let (_temp, service) = initialized_service()?;
         let pending = service.propose_memory_with_options(
@@ -2380,6 +2734,52 @@ mod tests {
         MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
         let service = MemoryService::open_paths(paths)?;
         Ok((temp, service))
+    }
+
+    fn apply_test_record(
+        service: &MemoryService,
+        draft: MemoryDraft,
+    ) -> anyhow::Result<MemoryRecord> {
+        let proposal = service.propose_memory("agent:red-tests", draft)?;
+        service.validate_proposal(&proposal.id)?;
+        service.approve_proposal(&proposal.id, "reviewer:human")?;
+        service.apply_proposal(&proposal.id, "agent:applier")
+    }
+
+    fn assert_legacy_supersede_unchanged(
+        service: &MemoryService,
+        target: &MemoryRecord,
+        target_path: &Path,
+        target_before: &[u8],
+        replacement_id: &str,
+    ) -> anyhow::Result<()> {
+        assert_eq!(fs::read(target_path)?, target_before);
+        assert_eq!(
+            service.inspect_expiry(&target.id)?.record.status,
+            MemoryStatus::Active
+        );
+        assert!(
+            service.inspect_expiry(replacement_id).is_err(),
+            "replacement row {replacement_id} survived rollback"
+        );
+        assert!(
+            !service
+                .paths
+                .records_dir()
+                .join(format!("{replacement_id}.md"))
+                .exists(),
+            "replacement file {replacement_id} survived rollback"
+        );
+        let transaction_files = fs::read_dir(service.paths.records_dir())?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with('.') && name.ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(
+            transaction_files.is_empty(),
+            "staged transaction files survived rollback: {transaction_files:?}"
+        );
+        Ok(())
     }
 
     fn sample_memory_draft(title: &str, body: &str) -> MemoryDraft {

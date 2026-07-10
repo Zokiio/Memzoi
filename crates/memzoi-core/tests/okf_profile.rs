@@ -480,7 +480,7 @@ fn apply_refuses_to_overwrite_existing_canonical_file_outside_db() -> anyhow::Re
         .expect_err("apply should not overwrite an existing canonical file")
         .to_string();
     assert!(
-        error.contains("failed to create memory record"),
+        error.contains("canonical memory record already exists"),
         "got {error}"
     );
     assert_eq!(
@@ -640,7 +640,7 @@ fn apply_rolls_back_db_state_when_canonical_file_write_fails() -> anyhow::Result
         .expect_err("apply should fail when canonical record path cannot be written")
         .to_string();
     assert!(
-        error.contains("failed to create records directory"),
+        error.contains("failed to inspect canonical memory record"),
         "got {error}"
     );
 

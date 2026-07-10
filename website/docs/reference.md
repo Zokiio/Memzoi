@@ -21,8 +21,8 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
-| `memzoi supersede` | Supersede an active memory record with new content. |
-| `memzoi tombstone` | Tombstone an active memory record. |
+| `memzoi supersede` | Atomically supersede an active, non-private repo record with a same-scope repo-safe replacement. |
+| `memzoi tombstone` | Atomically tombstone an active, non-private repo record. |
 | `memzoi search` | Search active, unexpired memory records. |
 | `memzoi expiry` | Inspect a record by ID and explain its expiry eligibility without mutating it. |
 | `memzoi context` | Build a prompt-ready context pack for a task. |
