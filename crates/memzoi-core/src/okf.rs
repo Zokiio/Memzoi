@@ -1308,8 +1308,7 @@ fn quote_yaml_string(value: &str) -> String {
     if is_plain_yaml_scalar(value) {
         return value.to_owned();
     }
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    serde_json::to_string(value).expect("serializing a YAML string scalar cannot fail")
 }
 
 fn is_plain_yaml_scalar(value: &str) -> bool {

@@ -3,8 +3,8 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
     ContextPackInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryService, MemoryType,
-    OkfProposalSensitivity, PrecheckInput, ProposalApprovalOverride, ProposeOptions, ScopeKind,
-    SearchInput, Visibility,
+    OkfProposalSensitivity, PrecheckInput, Proposal, ProposalApprovalOverride, ProposeOptions,
+    ScopeKind, SearchInput, Visibility,
 };
 use serde_json::{Value, json};
 
@@ -348,14 +348,31 @@ fn propose_memory_output(service: &MemoryService, arguments: &Value) -> Result<V
     let validation = result
         .validation
         .or_else(|| result.proposal.validation.clone());
+    let proposal = proposal_for_mcp_response(result.proposal);
 
     Ok(json!({
-        "proposal": result.proposal,
+        "proposal": proposal,
         "proposal_id": proposal_id,
         "status": status,
         "validation": validation,
         "applied": false,
     }))
+}
+
+fn proposal_for_mcp_response(mut proposal: Proposal) -> Proposal {
+    if proposal.payload.sensitivity == OkfProposalSensitivity::RepoSafe {
+        return proposal;
+    }
+
+    proposal.payload.title = "Redacted non-repo-safe proposal".to_owned();
+    proposal.payload.body =
+        "Original non-repo-safe proposal content was redacted from this response.".to_owned();
+    proposal.payload.scope_id = None;
+    proposal.payload.tags.clear();
+    proposal.payload.source_kind = None;
+    proposal.payload.source_ref = None;
+    proposal.actor = "redacted".to_owned();
+    proposal
 }
 
 fn memory_draft(arguments: &Value) -> Result<MemoryDraft> {
@@ -755,6 +772,15 @@ mod tests {
     #[test]
     fn propose_memory_tool_treats_omitted_sensitivity_as_unknown() {
         let (_temp, service) = test_service();
+        let sentinels = [
+            "MCP-UNKNOWN-TITLE-SENTINEL",
+            "MCP-UNKNOWN-BODY-SENTINEL",
+            "MCP-UNKNOWN-SCOPE-SENTINEL",
+            "MCP-UNKNOWN-TAG-SENTINEL",
+            "MCP-UNKNOWN-SOURCE-KIND-SENTINEL",
+            "MCP-UNKNOWN-SOURCE-REF-SENTINEL",
+            "MCP-UNKNOWN-ACTOR-SENTINEL",
+        ];
 
         let response = response(
             &service,
@@ -765,8 +791,13 @@ mod tests {
                 "params": {
                     "name": "propose_memory",
                     "arguments": {
-                        "title": "Unclassified MCP proposal",
-                        "body": "Classification is required before canonical apply.",
+                        "actor": sentinels[6],
+                        "title": sentinels[0],
+                        "body": sentinels[1],
+                        "scope_id": sentinels[2],
+                        "tags": [sentinels[3]],
+                        "source_kind": sentinels[4],
+                        "source_ref": sentinels[5],
                         "approval_mode": "auto"
                     }
                 }
@@ -776,6 +807,16 @@ mod tests {
         let structured = &response["result"]["structuredContent"];
         assert_eq!(structured["status"], "pending");
         assert_eq!(structured["proposal"]["payload"]["sensitivity"], "unknown");
+        assert_eq!(
+            structured["proposal"]["payload"]["title"],
+            "Redacted non-repo-safe proposal"
+        );
+        assert_eq!(structured["proposal"]["payload"]["scope_id"], Value::Null);
+        assert_eq!(
+            structured["proposal"]["payload"]["source_kind"],
+            Value::Null
+        );
+        assert_eq!(structured["proposal"]["payload"]["source_ref"], Value::Null);
         assert_eq!(structured["validation"]["is_valid"], false);
         assert!(
             structured["validation"]["issues"]
@@ -785,6 +826,13 @@ mod tests {
                     .any(|issue| { issue["code"] == "repo_sensitivity_required" }))
         );
         assert_eq!(structured["applied"], false);
+        let rendered = serde_json::to_string(&response).expect("serialize MCP response");
+        for sentinel in sentinels {
+            assert!(
+                !rendered.contains(sentinel),
+                "non-repo-safe MCP response leaked {sentinel}: {rendered}"
+            );
+        }
     }
 
     #[test]

@@ -1375,6 +1375,81 @@ fn cli_proposal_evidence_survives_apply_rebuild_and_recall_separately_from_linea
 }
 
 #[test]
+fn cli_source_reference_does_not_fabricate_an_evidence_kind() {
+    let repo = initialized_temp_repo();
+    let applied = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--sensitivity",
+            "repo-safe",
+            "--source-ref",
+            "issue://42#reference-only",
+            "--title",
+            "Reference-only CLI evidence",
+            "--body",
+            "Topaz reference-only provenance remains independently nullable.",
+            "--json",
+        ],
+    );
+    let proposal_id = json_string(&applied, "proposal_id").to_owned();
+
+    run_json_command(repo.path(), &["rebuild", "--json"]);
+    let recalled = run_json_command(repo.path(), &["search", "topaz reference-only", "--json"]);
+    let result = &recalled["records"][0];
+    assert_eq!(result["record"]["source_kind"], Value::Null);
+    assert_json_string_field(
+        &result["record"],
+        &["source_ref"],
+        "issue://42#reference-only",
+    );
+    assert_json_string_field(&result["record"], &["proposal_id"], &proposal_id);
+    assert_eq!(result["citations"][0]["source_kind"], Value::Null);
+    assert_json_string_field(
+        &result["citations"][0],
+        &["source_ref"],
+        "issue://42#reference-only",
+    );
+}
+
+#[test]
+fn cli_multiline_evidence_round_trips_without_index_drift() {
+    let repo = initialized_temp_repo();
+    let source_ref = "issue://42\nfragment";
+    run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--sensitivity",
+            "repo-safe",
+            "--source-ref",
+            source_ref,
+            "--title",
+            "Multiline evidence encoding",
+            "--body",
+            "Jasper multiline evidence must not create canonical/index drift.",
+            "--json",
+        ],
+    );
+
+    let doctor = run_json_command(repo.path(), &["doctor", "--json"]);
+    assert_check_status(&doctor, "repo_index", "ok");
+    run_json_command(repo.path(), &["rebuild", "--json"]);
+    let recalled = run_json_command(repo.path(), &["search", "jasper multiline", "--json"]);
+    assert_eq!(recalled["records"][0]["record"]["source_ref"], source_ref);
+    assert_eq!(
+        recalled["records"][0]["citations"][0]["source_ref"],
+        source_ref
+    );
+}
+
+#[test]
 fn propose_apply_implies_auto_approval_when_repo_policy_is_manual() {
     let repo = initialized_temp_repo();
     fs::write(
@@ -4817,7 +4892,7 @@ fn context_json_returns_prompt_ready_pack_records_and_citations() {
     assert_json_string_field(citation, &["scope", "scope_kind"], "repo");
     assert_json_string_field(citation, &["destination"], "repo");
     assert_json_string_field(citation, &["visibility"], "repo");
-    assert_json_string_field(citation, &["source_kind"], "cli");
+    assert_eq!(citation["source_kind"], Value::Null);
     assert_json_string_field(citation, &["source_ref"], "issue://cli-context#procedure");
     let first_record = pack["records"]
         .as_array()

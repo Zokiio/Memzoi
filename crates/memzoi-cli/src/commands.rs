@@ -2162,8 +2162,7 @@ fn draft_from_args(args: DraftCommand) -> Result<MemoryDraft> {
         title,
         body,
         tags: Vec::new(),
-        source_kind: normalize_optional_metadata(source_kind, "source-kind")?
-            .or_else(|| Some("cli".to_owned())),
+        source_kind: normalize_optional_metadata(source_kind, "source-kind")?,
         source_ref: normalize_optional_metadata(source_ref, "source-ref")?,
         sensitivity: sensitivity.parse().map_err(anyhow::Error::msg)?,
         confidence: 1.0,

@@ -251,7 +251,7 @@ fn push_frontmatter(output: &mut String, key: &str, value: &str) {
 }
 
 fn quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    serde_json::to_string(value).expect("serializing a YAML string scalar cannot fail")
 }
 
 fn ensure_no_parent_traversal(destination: &Path) -> Result<()> {
