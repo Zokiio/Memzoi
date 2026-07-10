@@ -117,6 +117,10 @@ These fields extend OKF v0.1 for Memzoi:
 | `supersedes` | Optional record ID replaced by this record. Prefer this over mutating old records in place. |
 | `expires` | Optional `YYYY-MM-DD` (start of that date in UTC) or RFC 3339 timestamp with an explicit timezone. At and after that instant, the active record is excluded from normal search, context, handoff, precheck, runtime lists/show, and generated exports without changing its canonical file or status. |
 
+`source` and `source_ref` are independently optional. Memzoi preserves missing
+evidence as `null` across canonical render, rebuild, recall, and export; it does
+not fabricate a concept ID or route name as evidence.
+
 Memory lanes:
 
 - `session`: active task context, handoff notes, checkpoints, or current working assumptions. Raw transcripts should remain local by default.

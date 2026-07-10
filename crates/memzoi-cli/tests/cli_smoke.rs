@@ -1329,6 +1329,52 @@ fn propose_omitted_sensitivity_is_explicit_unknown_and_cannot_apply() {
 }
 
 #[test]
+fn cli_proposal_evidence_survives_apply_rebuild_and_recall_separately_from_lineage() {
+    let repo = initialized_temp_repo();
+    let applied = run_json_command(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "decision",
+            "--sensitivity",
+            "repo-safe",
+            "--source-kind",
+            "issue",
+            "--source-ref",
+            "issue://42#trust-contract",
+            "--title",
+            "CLI evidence survives rebuild",
+            "--body",
+            "Zircon provenance remains attached to original evidence.",
+            "--json",
+        ],
+    );
+    let proposal_id = json_string(&applied, "proposal_id").to_owned();
+    let record_id = json_string(&applied, "record_id").to_owned();
+
+    run_json_command(repo.path(), &["rebuild", "--json"]);
+    let recalled = run_json_command(repo.path(), &["search", "zircon provenance", "--json"]);
+    let result = &recalled["records"][0];
+    assert_json_string_field(&result["record"], &["id"], &record_id);
+    assert_json_string_field(&result["record"], &["source_kind"], "issue");
+    assert_json_string_field(
+        &result["record"],
+        &["source_ref"],
+        "issue://42#trust-contract",
+    );
+    assert_json_string_field(&result["record"], &["proposal_id"], &proposal_id);
+    assert_json_string_field(&result["citations"][0], &["source_kind"], "issue");
+    assert_json_string_field(
+        &result["citations"][0],
+        &["source_ref"],
+        "issue://42#trust-contract",
+    );
+    assert!(result["citations"][0].get("proposal_id").is_none());
+}
+
+#[test]
 fn propose_apply_implies_auto_approval_when_repo_policy_is_manual() {
     let repo = initialized_temp_repo();
     fs::write(

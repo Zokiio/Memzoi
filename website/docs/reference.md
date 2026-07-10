@@ -43,7 +43,7 @@ Run `memzoi <command> --help` for exact options.
 | Command | Important options |
 | --- | --- |
 | `init` | `--force`, `--json` |
-| `propose` | `--type`, `--scope-kind`, `--visibility`, `--sensitivity`, `--title`, `--body`, `--actor`, `--manual`, `--auto-approve`, `--apply`, `--json` |
+| `propose` | `--type`, `--scope-kind`, `--visibility`, `--sensitivity`, `--source-kind`, `--source-ref`, `--title`, `--body`, `--actor`, `--manual`, `--auto-approve`, `--apply`, `--json` |
 | `proposals list` | `--status open\|pending\|validated\|approved\|rejected\|applied\|all`, `--json` |
 | `proposals show` | `<proposal-id>`, `--json` |
 | `proposals apply` | `--all-approved`, `--actor`, `--json` |
@@ -62,7 +62,7 @@ Run `memzoi <command> --help` for exact options.
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
-| `supersede` | `<record-id>`, `--type`, `--scope-kind`, `--visibility`, `--sensitivity`, `--title`, `--body`, `--actor`, `--json` |
+| `supersede` | `<record-id>`, `--type`, `--scope-kind`, `--visibility`, `--sensitivity`, `--source-kind`, `--source-ref`, `--title`, `--body`, `--actor`, `--json` |
 | `tombstone` | `<record-id>`, `--reason`, `--actor`, `--json` |
 | `search` | `<query>`, `--scope-kind`, `--type`, `--path`, `--limit`, `--json` |
 | `expiry` | `<record-id>`, `--json` |

@@ -35,6 +35,8 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             memory_type,
             scope_kind,
             visibility,
+            source_kind,
+            source_ref,
             sensitivity,
             title,
             body,
@@ -48,6 +50,8 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 memory_type,
                 scope_kind,
                 visibility,
+                source_kind,
+                source_ref,
                 sensitivity,
                 title,
                 body,
@@ -155,6 +159,8 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             memory_type,
             scope_kind,
             visibility,
+            source_kind,
+            source_ref,
             sensitivity,
             title,
             body,
@@ -166,6 +172,8 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 memory_type,
                 scope_kind,
                 visibility,
+                source_kind,
+                source_ref,
                 sensitivity,
                 title,
                 body,
@@ -430,6 +438,8 @@ fn propose_command(
         &draft_args.memory_type,
         &draft_args.scope_kind,
         &draft_args.visibility,
+        draft_args.source_kind,
+        draft_args.source_ref,
         &draft_args.sensitivity,
         draft_args.title,
         draft_args.body,
@@ -1516,6 +1526,8 @@ fn supersede_command(
         &draft_args.memory_type,
         &draft_args.scope_kind,
         &draft_args.visibility,
+        draft_args.source_kind,
+        draft_args.source_ref,
         &draft_args.sensitivity,
         draft_args.title,
         draft_args.body,
@@ -2197,6 +2209,8 @@ fn draft_from_args(
     memory_type: &str,
     scope_kind: &str,
     visibility: &str,
+    source_kind: Option<String>,
+    source_ref: Option<String>,
     sensitivity: &str,
     title: String,
     body: String,
@@ -2210,11 +2224,23 @@ fn draft_from_args(
         title,
         body,
         tags: Vec::new(),
-        source_kind: Some("cli".to_string()),
-        source_ref: None,
+        source_kind: normalize_optional_metadata(source_kind, "source-kind")?
+            .or_else(|| Some("cli".to_owned())),
+        source_ref: normalize_optional_metadata(source_ref, "source-ref")?,
         sensitivity: sensitivity.parse().map_err(anyhow::Error::msg)?,
         confidence: 1.0,
     })
+}
+
+fn normalize_optional_metadata(value: Option<String>, label: &str) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("--{label} cannot be empty");
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn parse_memory_type(value: &str) -> Result<MemoryType> {

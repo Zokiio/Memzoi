@@ -560,7 +560,8 @@ pub fn parse_okf_record_markdown(
     let visibility = parse_required_enum::<Visibility>(frontmatter.visibility, "visibility")?;
     let status = parse_status(required_string(frontmatter.status, "status")?)?;
     let confidence = parse_confidence(frontmatter.confidence)?;
-    let source_kind = required_string(frontmatter.source.or(frontmatter.source_kind), "source")?;
+    let source_kind = optional_string(frontmatter.source.or(frontmatter.source_kind), "source")?;
+    let source_ref = optional_string(frontmatter.source_ref, "source_ref")?;
     let created = required_string(
         frontmatter
             .created
@@ -594,8 +595,8 @@ pub fn parse_okf_record_markdown(
             title,
             body,
             tags: frontmatter.tags.unwrap_or_default(),
-            source_kind: Some(source_kind),
-            source_ref: frontmatter.source_ref.or(Some(concept_id)),
+            source_kind,
+            source_ref,
             sensitivity: OkfProposalSensitivity::RepoSafe,
             confidence,
         },
@@ -1279,11 +1280,9 @@ fn render_memory_record(record: &MemoryRecord, tags: &[String], applies_to: &[St
     }
     push_yaml_string(&mut output, "visibility", record.visibility.as_str());
     output.push_str(&format!("confidence: {}\n", record.confidence));
-    push_yaml_string(
-        &mut output,
-        "source",
-        record.source_kind.as_deref().unwrap_or("memzoi-apply"),
-    );
+    if let Some(source_kind) = &record.source_kind {
+        push_yaml_string(&mut output, "source", source_kind);
+    }
     if let Some(source_ref) = &record.source_ref {
         push_yaml_string(&mut output, "source_ref", source_ref);
     }
@@ -1876,6 +1875,42 @@ mod tests {
             .expect("original writer IO error should remain in anyhow chain");
         assert_eq!(cause.kind(), ErrorKind::Other);
         assert_eq!(cause.to_string(), "forced writer failure");
+
+        Ok(())
+    }
+
+    #[test]
+    fn nullable_evidence_round_trips_without_fabricated_defaults() -> anyhow::Result<()> {
+        let root = Path::new("/bundle/records");
+        let path = root.join("no-evidence.md");
+        let markdown = r#"---
+type: fact
+lane: semantic
+title: No evidence metadata
+scope: repo
+visibility: repo
+status: active
+confidence: confirmed
+created: 2026-07-04T00:00:00Z
+---
+
+# No evidence metadata
+
+Nullable provenance remains nullable.
+"#;
+        let parsed = super::parse_okf_record_markdown(root, &path, markdown)?
+            .expect("record should parse without evidence metadata");
+        assert_eq!(parsed.draft.source_kind, None);
+        assert_eq!(parsed.draft.source_ref, None);
+
+        let record = super::project_okf_record(&parsed);
+        let rendered = super::render_memory_record_markdown(&record, &[], &[]);
+        assert!(!rendered.contains("source:"), "{rendered}");
+        assert!(!rendered.contains("source_ref:"), "{rendered}");
+        let reparsed = super::parse_okf_record_markdown(root, &path, &rendered)?
+            .expect("rendered record should parse");
+        assert_eq!(reparsed.draft.source_kind, None);
+        assert_eq!(reparsed.draft.source_ref, None);
 
         Ok(())
     }

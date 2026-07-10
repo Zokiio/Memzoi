@@ -34,6 +34,12 @@ pub(crate) enum Commands {
         scope_kind: String,
         #[arg(long, default_value = "repo")]
         visibility: String,
+        /// Optional evidence source kind, such as issue, PR, commit, or document.
+        #[arg(long = "source-kind")]
+        source_kind: Option<String>,
+        /// Optional durable evidence locator kept separate from proposal lineage.
+        #[arg(long = "source-ref")]
+        source_ref: Option<String>,
         /// Repo sharing classification. Canonical apply requires repo-safe.
         #[arg(long, default_value = "unknown")]
         sensitivity: String,
@@ -138,6 +144,12 @@ pub(crate) enum Commands {
         scope_kind: String,
         #[arg(long, default_value = "repo")]
         visibility: String,
+        /// Optional evidence source kind for the replacement record.
+        #[arg(long = "source-kind")]
+        source_kind: Option<String>,
+        /// Optional durable evidence locator for the replacement record.
+        #[arg(long = "source-ref")]
+        source_ref: Option<String>,
         /// Repo sharing classification. Canonical replacement requires repo-safe.
         #[arg(long, default_value = "unknown")]
         sensitivity: String,
@@ -509,6 +521,8 @@ pub(crate) struct DraftCommand {
     pub(crate) memory_type: String,
     pub(crate) scope_kind: String,
     pub(crate) visibility: String,
+    pub(crate) source_kind: Option<String>,
+    pub(crate) source_ref: Option<String>,
     pub(crate) sensitivity: String,
     pub(crate) title: String,
     pub(crate) body: String,
