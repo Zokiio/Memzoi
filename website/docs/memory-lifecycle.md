@@ -73,6 +73,11 @@ The following categories are excluded from canonical repo records:
 - `temporary_task_state`; and
 - `local_only_state`.
 
+Proposal sensitivity expresses these boundaries as `repo-safe`, `local-only`,
+`sensitive`, `secret`, `raw-transcript`, `private-personal-data`,
+`temporary-state`, or `unknown`. Omitted legacy DB/file values resolve to
+`unknown`; only `repo-safe` can pass canonical apply.
+
 Do not put these categories in `.memzoi/records/*.md` or a repo-shared pending proposal.
 A blocked sensitivity is not made safe by auto-approval. Classify or sanitize
 the candidate, or use `needs_review`; do not add an override that bypasses the
@@ -123,10 +128,10 @@ command's JSON output, event, or database row does not change what it writes.
 
 | Boundary | Commands | What is written (or not written) |
 | --- | --- | --- |
-| **Canonical Git record writers** | `memzoi apply <proposal-id>`; `memzoi proposals apply --all-approved` | Apply approved DB proposals and write canonical `.memzoi/records/*.md`. |
-|  | `memzoi propose --apply` | Create, validate, approve, and then explicitly apply one proposal. The flag supplies an `auto` per-call approval override and writes a canonical record only because `--apply` was requested; `--manual --apply` is invalid. |
+| **Canonical Git record writers** | `memzoi apply <proposal-id>`; `memzoi proposals apply --all-approved` | Apply approved, explicitly `repo-safe` DB proposals and write canonical `.memzoi/records/*.md`. |
+|  | `memzoi propose --apply --sensitivity repo-safe` | Create, validate, approve, and then explicitly apply one proposal. The flag supplies an `auto` per-call approval override and writes a canonical record only because `--apply` was requested; `--manual --apply` is invalid. Auto-approval cannot bypass sensitivity. |
 |  | `memzoi proposal-files apply <proposal-id>` | Explicitly apply one valid repo-safe OKF proposal, update the runtime search index in the same operation, and move the packet from `pending/` to `resolved/applied/`. |
-|  | `memzoi supersede <record-id>`; `memzoi tombstone <record-id>` | Explicitly update canonical record files and their lifecycle status. |
+|  | `memzoi supersede <record-id> --sensitivity repo-safe`; `memzoi tombstone <record-id>` | Explicitly update canonical record files and their lifecycle status. Replacement content requires an explicit repo-safe classification. |
 |  | `memzoi quickstart --apply-sample` | Explicitly creates the quickstart sample as a canonical repo record (and also generates an export). |
 | **Pending file proposal writers** | `memzoi session-end --from-file <path>`; `memzoi session-end --from-checkpoint <id>` with a `repo` candidate | Write `.memzoi/proposals/pending/*.md` review packets. They do **not** write `.memzoi/records/*.md`; review and an explicit proposal-file apply are separate steps. |
 | **DB proposal-state writers (not file/canonical writers)** | `memzoi propose`; `memzoi approve <proposal-id>`; `memzoi reject <proposal-id>` | Create or change proposal state in the runtime database. `propose` without `--apply` never writes a canonical record; approval alone never writes one. |
@@ -152,7 +157,8 @@ override. Configure it as:
 proposal_approval = "manual" # or "auto"
 ```
 
-**Auto-approval is not application.** `auto` validates and approves a valid
+**Auto-approval is not application.** `auto` validates and approves a valid,
+repo-safe
 proposal; it does not write `.memzoi/records/*.md` by itself. Application is a
 separate explicit operation (`apply`, `proposals apply --all-approved`,
 `proposal-files apply`, or the explicit `propose --apply` shortcut). With
@@ -168,6 +174,10 @@ The Git review rule is:
 4. Explicitly apply it to create/update `.memzoi/records/*.md`; successful
    apply also updates derived search state and archives the packet under
    `.memzoi/proposals/resolved/applied/`.
+
+Apply keeps evidence provenance (`source`/`source_ref`) separate from review
+lineage (`proposal_id`). Recall cites the original evidence; event and resolved
+packet output identifies the proposal that authorized the canonical change.
 
 To close a packet without a canonical write, run
 `memzoi proposal-files reject <proposal-id> --reason "..."`. Rejection moves

@@ -113,6 +113,7 @@ These fields extend OKF v0.1 for Memzoi:
 | `applies_to` | Repository paths, path prefixes, or trailing `/**` scopes where the record is relevant. This is separate from the path concept ID. General glob syntax is not part of the current matcher. |
 | `source` | Short provenance kind such as `human`, `agent`, `import`, `issue`, `pr`, or `doc`. |
 | `source_ref` | Optional durable reference for provenance, such as `issue://123`, `pr://45`, a commit SHA, or a URL. |
+| `proposal_id` | Optional ID of the review packet that approved the record. This is proposal lineage, not evidence provenance, and is kept separate from `source`/`source_ref`. |
 | `supersedes` | Optional record ID replaced by this record. Prefer this over mutating old records in place. |
 | `expires` | Optional `YYYY-MM-DD` (start of that date in UTC) or RFC 3339 timestamp with an explicit timezone. At and after that instant, the active record is excluded from normal search, context, handoff, precheck, runtime lists/show, and generated exports without changing its canonical file or status. |
 
@@ -224,7 +225,14 @@ Proposal sensitivity values:
 | `local-only` | Useful locally but should not become repo-shared memory. |
 | `sensitive` | Requires explicit human review before any sharing. |
 | `secret` | Must not be committed or applied into repo records. |
+| `raw-transcript` | Raw conversation content that must not become repo-shared memory. |
+| `private-personal-data` | Private personal information that must not become repo-shared memory. |
+| `temporary-state` | Short-lived task state that belongs in local/session memory rather than canonical repo memory. |
 | `unknown` | Conservative default requiring review. |
+
+New packets should always declare sensitivity. Legacy packets that omit it
+remain readable as `unknown`, and every non-`repo-safe` value is blocked at
+canonical apply even if the packet or DB proposal was auto-approved.
 
 Validation checks:
 
@@ -256,6 +264,12 @@ Proposal-to-record mapping:
 Rejected packets move to `resolved/rejected/` instead and create no canonical
 record. The resolved packet retains the reviewed proposal evidence and adds a
 Git-readable outcome, reviewer, timestamp, reason, and affected record IDs.
+
+For an applied packet, canonical `source`/`source_ref` point to its original
+evidence locator (for example `path` plus `src/auth/session.ts`), while
+`proposal_id` points to the packet that approved the change. Rebuild and OKF
+exports preserve both. Recall citations deliberately cite the evidence fields;
+audit events and resolved packets carry the proposal lineage.
 
 The resulting canonical record may be a compact projection of the proposal. Review-only fields such as `proposal.reason`, proposal confidence, and review notes do not need to be copied into canonical record frontmatter unless they remain durable project knowledge.
 

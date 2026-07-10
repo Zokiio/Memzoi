@@ -43,7 +43,7 @@ Run `memzoi <command> --help` for exact options.
 | Command | Important options |
 | --- | --- |
 | `init` | `--force`, `--json` |
-| `propose` | `--type`, `--scope-kind`, `--visibility`, `--title`, `--body`, `--actor`, `--manual`, `--auto-approve`, `--apply`, `--json` |
+| `propose` | `--type`, `--scope-kind`, `--visibility`, `--sensitivity`, `--title`, `--body`, `--actor`, `--manual`, `--auto-approve`, `--apply`, `--json` |
 | `proposals list` | `--status open\|pending\|validated\|approved\|rejected\|applied\|all`, `--json` |
 | `proposals show` | `<proposal-id>`, `--json` |
 | `proposals apply` | `--all-approved`, `--actor`, `--json` |
@@ -62,7 +62,7 @@ Run `memzoi <command> --help` for exact options.
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
-| `supersede` | `<record-id>`, `--type`, `--scope-kind`, `--visibility`, `--title`, `--body`, `--actor`, `--json` |
+| `supersede` | `<record-id>`, `--type`, `--scope-kind`, `--visibility`, `--sensitivity`, `--title`, `--body`, `--actor`, `--json` |
 | `tombstone` | `<record-id>`, `--reason`, `--actor`, `--json` |
 | `search` | `<query>`, `--scope-kind`, `--type`, `--path`, `--limit`, `--json` |
 | `expiry` | `<record-id>`, `--json` |
@@ -220,9 +220,9 @@ canonical record directly.
 
 ## Context JSON
 
-`memzoi context --json` and MCP `build_context_pack` return the prompt-ready pack plus metadata. Existing fields such as `prompt`, `records`, `citations`, and `token_budget` remain available. Recalled citation JSON uses four separate fields: `provenance` (plane), `destination`, optional `source_kind`, and optional `source_ref`.
+`memzoi context --json` and MCP `build_context_pack` return the prompt-ready pack plus metadata. Existing fields such as `prompt`, `records`, `citations`, and `token_budget` remain available. Recalled record JSON may include `proposal_id` as review lineage. Citation JSON intentionally uses the original evidence fields instead: `provenance` (plane), `destination`, optional `source_kind`, and optional `source_ref`.
 
-The serialized `provenance` values are `git` and `runtime`. `git` identifies ownership by canonical `.memzoi/records/*.md` files; it does not mean the record bypassed SQLite, because SQLite is a derived runtime index/cache. For recalled records, serialized `destination` remains `repo`, `local`, or `session`; destination is routing, not provenance. `source_kind` and `source_ref` are nullable source metadata and remain independent of one another.
+The serialized `provenance` values are `git` and `runtime`. `git` identifies ownership by canonical `.memzoi/records/*.md` files; it does not mean the record bypassed SQLite, because SQLite is a derived runtime index/cache. For recalled records, serialized `destination` remains `repo`, `local`, or `session`; destination is routing, not provenance. `source_kind` and `source_ref` are nullable evidence metadata and remain independent of both one another and `proposal_id`. Apply/rebuild/export round-trip all three; audit events also identify the approving proposal.
 
 The additive metadata fields are:
 
@@ -324,7 +324,7 @@ JSON status values:
 | `search_memory` | `query` | `scope_kind`, `scope`, `type`, `memory_type`, `path`, `path_prefix`, `limit` |
 | `inspect_memory_expiry` | `record_id` | none |
 | `build_context_pack` | `task` | `path`, `path_prefix`, `token_budget`, `include_local`, `include_session` |
-| `propose_memory` | `title`, `body` | `type`, `memory_type`, `scope_kind`, `scope`, `scope_id`, `visibility`, `tags`, `source_kind`, `source_ref`, `confidence`, `actor`, `approval_mode` |
+| `propose_memory` | `title`, `body` | `type`, `memory_type`, `scope_kind`, `scope`, `scope_id`, `visibility`, `sensitivity`, `tags`, `source_kind`, `source_ref`, `confidence`, `actor`, `approval_mode` |
 | `precheck_path` | `path` | `scope_kind`, `scope` |
 | `precheck_action` | `action` | `path`, `scope_kind`, `scope` |
 | `precheck_command` | `command` | `path`, `scope_kind`, `scope` |
@@ -383,6 +383,9 @@ Valid proposal sensitivity values:
 - `local-only`
 - `sensitive`
 - `secret`
+- `raw-transcript`
+- `private-personal-data`
+- `temporary-state`
 - `unknown`
 
 The current CLI/MCP proposal inbox remains DB-local workflow state and uses the operational proposal statuses below.
@@ -399,7 +402,7 @@ memzoi proposal-files reject <proposal-id> --reason "..."
 
 `list`, `show`, and `validate` are read-only. `list` and `validate` describe the pending inbox; `show` can also inspect a resolved packet. `validate` includes target existence, active-state, scope, and freshness checks for supersede/tombstone packets. `apply` accepts a `status: proposed`, `sensitivity: repo-safe` packet, writes its canonical changes and derived SQLite rows atomically, then moves the packet to `.memzoi/proposals/resolved/applied/`. Create writes one active record; supersede preserves the target as `superseded` and creates one lineage-linked active replacement; tombstone preserves the target evidence with `status: tombstoned`. `reject` creates no canonical record and moves the packet to `.memzoi/proposals/resolved/rejected/` with an explicit reason. Resolution metadata records the outcome, actor, timestamp, reason, and affected record IDs. Repeating the same outcome is an auditable no-op; requesting the opposite outcome is refused.
 
-Git-plane apply blocks `secret`, `sensitive`, `local-only`, and `unknown` proposals, and there is no override flag. Classify or sanitize blocked proposals before repo apply, or route `local-only` memory to the local/runtime plane.
+Git-plane apply blocks every value except `repo-safe`, including `secret`, `sensitive`, `local-only`, `raw-transcript`, `private-personal-data`, `temporary-state`, and `unknown`; there is no override flag. Missing legacy sensitivity is treated as `unknown`. Classify or sanitize blocked proposals before repo apply, or route local/session content to the runtime plane.
 
 ## Local runtime memory
 
@@ -529,7 +532,8 @@ CLI overrides:
 
 - `memzoi propose --manual` creates a `pending` proposal.
 - `memzoi propose --auto-approve` forces auto-approval for one proposal.
-- `memzoi propose --apply` creates, approves, and applies through the CLI. It is incompatible with `--manual`.
+- `memzoi propose --apply --sensitivity repo-safe` creates, approves, and applies through the CLI. It is incompatible with `--manual`.
+- Omitted sensitivity is serialized as `unknown`; validation and apply both refuse canonical promotion until it is explicitly `repo-safe`.
 
 MCP override:
 

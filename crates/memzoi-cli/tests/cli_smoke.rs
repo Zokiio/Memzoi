@@ -1871,6 +1871,17 @@ fn proposal_files_apply_repo_safe_create_resolves_packet_and_updates_runtime_ind
         Some(1),
         "runtime index should immediately recall the applied proposal: {search}"
     );
+    let recalled = &search["records"][0]["record"];
+    assert_json_string_field(recalled, &["source_kind"], "path");
+    assert_json_string_field(recalled, &["source_ref"], "src/lib.rs");
+    assert_json_string_field(recalled, &["proposal_id"], "mem_test_valid");
+
+    run_json_command(repo.path(), &["rebuild", "--json"]);
+    let rebuilt_search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
+    let rebuilt = &rebuilt_search["records"][0]["record"];
+    assert_json_string_field(rebuilt, &["source_kind"], "path");
+    assert_json_string_field(rebuilt, &["source_ref"], "src/lib.rs");
+    assert_json_string_field(rebuilt, &["proposal_id"], "mem_test_valid");
 
     let pending = run_json_command(repo.path(), &["proposal-files", "list", "--json"]);
     assert!(proposals_from_json(&pending).is_empty(), "{pending}");

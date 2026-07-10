@@ -67,6 +67,7 @@ Optional arguments:
 - `scope_kind` or `scope`
 - `scope_id`
 - `visibility`
+- `sensitivity`: `repo-safe`, `local-only`, `sensitive`, `secret`, `raw-transcript`, `private-personal-data`, `temporary-state`, or `unknown`
 - `tags`
 - `source_kind`
 - `source_ref`
@@ -81,11 +82,12 @@ Example manual proposal:
   "title": "Keep MCP writes reviewable",
   "body": "MCP clients may propose memory, but durable record writes must use the CLI apply workflow.",
   "type": "decision",
+  "sensitivity": "repo-safe",
   "approval_mode": "manual"
 }
 ```
 
-Structured output includes the proposal ID, status, validation details when available, and `applied: false`. Under the built-in default policy, a valid proposal returns `status: "approved"` and `applied: false`. With `approval_mode: "manual"`, it returns `status: "pending"` and `applied: false`.
+Structured output includes the proposal ID, status, sensitivity inside the proposal payload, validation details when available, and `applied: false`. Omitted sensitivity is represented as `unknown`, never as repo-safe. Under the built-in default policy, a valid `repo-safe` proposal returns `status: "approved"` and `applied: false`; unknown or otherwise blocked sensitivity remains pending with an actionable validation issue. With `approval_mode: "manual"`, the proposal remains `pending` and `applied: false` until CLI-side review.
 
 ## Generated agent instructions
 

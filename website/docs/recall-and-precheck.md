@@ -40,6 +40,12 @@ Recall and precheck expose four independent pieces of provenance metadata:
 - `source_kind` is optional short source metadata (for example, `human`, `issue`, or `memzoi-local`). It is `null` when the record has no source kind.
 - `source_ref` is an optional durable locator for that source (for example, an issue, PR, commit, or URL). It is independent of `source_kind` and is `null` when no reference was recorded.
 
+An applied record may also expose `proposal_id` in its record JSON. That field
+is review lineage: it identifies the DB or file-backed packet that authorized
+the write. It is intentionally not substituted into `source_ref`, so recall
+and precheck citations continue to point at original evidence while audit
+events and resolved packets point at the approving proposal.
+
 In JSON, `records[].citations`, top-level `citations`, and `included[].citation` carry this metadata; `included[].provenance` and `included[].destination` repeat the plane and destination for the selected item. `precheck --json` exposes the same citation metadata under each warning. Text prompt lines use the same `provenance=<plane>` and `destination=<destination>` labels, while source metadata remains optional.
 
 The JSON output includes:
