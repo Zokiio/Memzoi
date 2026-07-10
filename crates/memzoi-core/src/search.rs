@@ -93,7 +93,11 @@ pub(crate) fn search_memory_at(
     } else {
         "1 = 1"
     };
-    let lane_filter = "(?9 IS NULL OR memory_record.lane = ?9)";
+    let lane_filter = if input.lane.is_some() {
+        "memory_record.lane = ?9"
+    } else {
+        "1 = 1"
+    };
     let destination = input.destination.unwrap_or(MemoryDestination::Repo);
     let destination_filter = "memory_record.destination = ?6";
     let path_filter = if path_prefix.is_some() {
@@ -136,30 +140,50 @@ pub(crate) fn search_memory_at(
     let mut stmt = conn
         .prepare(&sql)
         .context("failed to prepare memory search")?;
-    let rows = stmt
-        .query_map(
-            params![
-                fts_query,
-                scope_kind,
-                scope_id,
-                memory_type,
-                path_prefix.as_deref(),
-                destination,
-                limit as i64,
-                evaluated_at,
-                lane,
-            ],
-            |row| {
-                let record = record_from_row(row)?;
-                let rank: f64 = row.get(19)?;
-                Ok((record, rank))
-            },
-        )
-        .context("failed to execute memory search")?;
+    let mut ranked_rows = Vec::new();
+    if let Some(lane_value) = lane.as_deref() {
+        let rows = stmt
+            .query_map(
+                params![
+                    fts_query,
+                    scope_kind,
+                    scope_id,
+                    memory_type,
+                    path_prefix.as_deref(),
+                    destination,
+                    limit as i64,
+                    evaluated_at,
+                    lane_value,
+                ],
+                ranked_record_from_row,
+            )
+            .context("failed to execute lane-filtered memory search")?;
+        for row in rows {
+            ranked_rows.push(row.context("failed to read memory search row")?);
+        }
+    } else {
+        let rows = stmt
+            .query_map(
+                params![
+                    fts_query,
+                    scope_kind,
+                    scope_id,
+                    memory_type,
+                    path_prefix.as_deref(),
+                    destination,
+                    limit as i64,
+                    evaluated_at,
+                ],
+                ranked_record_from_row,
+            )
+            .context("failed to execute memory search")?;
+        for row in rows {
+            ranked_rows.push(row.context("failed to read memory search row")?);
+        }
+    }
 
     let mut results = Vec::new();
-    for row in rows {
-        let (record, rank) = row.context("failed to read memory search row")?;
+    for (record, rank) in ranked_rows {
         let paths = load_paths(conn, &record.id)?;
         let citation_path = path_prefix
             .as_deref()
@@ -203,6 +227,12 @@ pub(crate) fn search_memory_at(
     )?;
 
     Ok(results)
+}
+
+fn ranked_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(MemoryRecord, f64)> {
+    let record = record_from_row(row)?;
+    let rank = row.get(19)?;
+    Ok((record, rank))
 }
 
 pub(crate) fn load_paths(conn: &Connection, record_id: &str) -> Result<Vec<MemoryPath>> {
