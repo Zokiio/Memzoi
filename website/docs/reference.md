@@ -129,7 +129,7 @@ thresholds:
   min_citation_integrity: 1.0
   min_provenance_integrity: 1.0
   min_case_pass_rate: 1.0
-  max_estimated_usage: 500
+  max_estimated_usage: 500 # Per-case maximum; corpus total is reported separately.
   # max_p95_latency_ms: 50
 cases:
   - surface: search

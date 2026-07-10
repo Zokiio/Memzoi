@@ -31,7 +31,7 @@ of truth. In plain language:
 | Stale, expired, and scope leakage | Declared ineligible records that surfaced in the corresponding safety cases. Expired records are classified before other non-active lifecycle states so the categories stay disjoint. |
 | Citation integrity | Returned results with structurally consistent citations that identify the same record and expected evidence. |
 | Provenance integrity | Returned results whose storage plane matches their destination, whose source metadata survives intact, and whose proposal lineage remains separate from evidence. |
-| Token usage | The deterministic `approx_words` estimate, with its unit and estimator version emitted in the report. |
+| Token usage | The deterministic `approx_words` estimate, with its unit and estimator version emitted in the report. `max_estimated_usage` limits the maximum per-case estimate, not the corpus total. |
 | p50 and p95 latency | Nearest-rank median and 95th-percentile observed case latency from a monotonic timer. |
 
 Quality and integrity metrics are higher-is-better; leakage and forbidden-hit
