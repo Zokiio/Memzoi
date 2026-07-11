@@ -21,9 +21,9 @@ Use this checklist for GitHub binary releases.
 - [ ] Run `make onboarding-smoke`.
 - [ ] Run `make capture-smoke` and confirm direct CLI and MCP capture planning leave managed memory state absent.
 - [ ] Run `pnpm docs:build` under `website/`.
-- [ ] Run the release workflow manually with `ref: main` and `upload: false`; inspect every platform artifact.
+- [ ] Run the release workflow manually with `ref: main` and `upload: false`; inspect every platform artifact and confirm each matrix job executes both packaged binaries with the validated workspace version. Use that workflow run as the native packaged-version evidence for all supported targets.
 - [ ] Extract one Unix archive, run `scripts/capture-smoke.sh <extracted-directory>` against its two packaged binaries, and verify its downloaded sidecar with `shasum -a 256 -c <archive>.sha256`.
-- [ ] Extract the Windows archive, run both binaries with `--version`, and verify its downloaded sidecar with `Get-FileHash`.
+- [ ] Inspect the Windows archive and verify its downloaded sidecar with `Get-FileHash`; confirm the workflow's Windows packaged-version step reported both expected versions.
 - [ ] Open a repository created by the previous release and smoke-test `doctor`, `search`, `context`, and `rebuild` with the candidate binaries.
 
 ## Publish

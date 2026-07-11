@@ -25,6 +25,7 @@ jobs:
     outputs:
       build_ref: ${{ steps.metadata.outputs.build_ref }}
       release_tag: ${{ steps.metadata.outputs.release_tag }}
+      version: ${{ steps.metadata.outputs.version }}
     steps:
       - name: Checkout requested ref
         uses: actions/checkout@v7
@@ -57,6 +58,7 @@ jobs:
           scripts/check-release-metadata.sh "$release_tag"
           echo "build_ref=$BUILD_REF" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
     needs: preflight
@@ -120,6 +122,87 @@ jobs:
             $manifest,
             [System.Text.UTF8Encoding]::new($false)
           )
+      - name: Verify Unix packaged binary versions
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          ARCHIVE: dist/memzoi-${{ needs.preflight.outputs.release_tag }}-${{ matrix.target }}.tar.gz
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          verify_dir="$RUNNER_TEMP/memzoi-release-package"
+          mkdir -p "$verify_dir"
+
+          entries=$(tar -tzf "$ARCHIVE" | LC_ALL=C sort)
+          expected_entries=$(printf '%s\n' memzoi memzoi-mcp)
+          if [ "$entries" != "$expected_entries" ]; then
+            printf 'Unexpected archive contents:\n%s\n' "$entries" >&2
+            exit 1
+          fi
+
+          tar -xzf "$ARCHIVE" -C "$verify_dir"
+          test -x "$verify_dir/memzoi"
+          test -x "$verify_dir/memzoi-mcp"
+
+          cli_version=$("$verify_dir/memzoi" --version)
+          mcp_version=$("$verify_dir/memzoi-mcp" --version)
+          if [ "$cli_version" != "memzoi $EXPECTED_VERSION" ]; then
+            printf 'Unexpected CLI version: %s\n' "$cli_version" >&2
+            exit 1
+          fi
+          if [ "$mcp_version" != "memzoi-mcp $EXPECTED_VERSION" ]; then
+            printf 'Unexpected MCP version: %s\n' "$mcp_version" >&2
+            exit 1
+          fi
+
+          printf 'CLI: %s\n' "$cli_version"
+          printf 'MCP: %s\n' "$mcp_version"
+      - name: Verify Windows packaged binary versions
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          ARCHIVE: dist/memzoi-${{ needs.preflight.outputs.release_tag }}-${{ matrix.target }}.zip
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = "Stop"
+          $archive = (Resolve-Path $env:ARCHIVE).Path
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
+          try {
+            $entries = @($zip.Entries | ForEach-Object FullName | Sort-Object)
+          } finally {
+            $zip.Dispose()
+          }
+          $expectedEntries = @('memzoi-mcp.exe', 'memzoi.exe')
+          $difference = Compare-Object -ReferenceObject $expectedEntries -DifferenceObject $entries
+          if ($null -ne $difference) {
+            throw "Unexpected archive contents: $($entries -join ', ')"
+          }
+
+          $verifyDir = Join-Path $env:RUNNER_TEMP 'memzoi-release-package'
+          Expand-Archive -Path $archive -DestinationPath $verifyDir -Force
+          $cli = Join-Path $verifyDir 'memzoi.exe'
+          $mcp = Join-Path $verifyDir 'memzoi-mcp.exe'
+          if (-not (Test-Path $cli -PathType Leaf)) { throw "Packaged CLI is missing" }
+          if (-not (Test-Path $mcp -PathType Leaf)) { throw "Packaged MCP server is missing" }
+
+          $cliVersion = (& $cli --version | Out-String).Trim()
+          $cliExit = $LASTEXITCODE
+          if ($cliExit -ne 0) { throw "Packaged CLI exited with $cliExit" }
+          $mcpVersion = (& $mcp --version | Out-String).Trim()
+          $mcpExit = $LASTEXITCODE
+          if ($mcpExit -ne 0) { throw "Packaged MCP server exited with $mcpExit" }
+          if ($cliVersion -ne "memzoi $env:EXPECTED_VERSION") {
+            throw "Unexpected CLI version: $cliVersion"
+          }
+          if ($mcpVersion -ne "memzoi-mcp $env:EXPECTED_VERSION") {
+            throw "Unexpected MCP version: $mcpVersion"
+          }
+
+          Write-Host "CLI: $cliVersion"
+          Write-Host "MCP: $mcpVersion"
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
