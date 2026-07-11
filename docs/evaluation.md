@@ -51,6 +51,72 @@ resource counters. They must not install or download models or mutate project
 memory; model-backed and fusion adapters are added by the separately gated
 candidate implementation issue.
 
+The committed three-dimensional exact-vector candidate verifies the adapter
+contract; it is not a measured model candidate or ship evidence. Run every
+v0.5 contract fixture with:
+
+```bash
+make eval-v0.5-foundation
+```
+
+### Candidate manifests and exact retrieval
+
+Pass one or more strict candidate manifests after the lexical baseline:
+
+```bash
+cargo run --locked -q -p memzoi-cli -- eval recall-v3 \
+  --corpus evals/recall/v3/corpus.yaml \
+  --candidate evals/recall/v3/candidates/exact-union.json \
+  --json
+```
+
+`memzoi-recall-candidate/v1` binds the model/artifact revision, license,
+dimensions, pooling, normalization, query/document prefixes, embedding document,
+retrieval architecture, candidate counts, cutoff, fusion, structural weights,
+tie policy, profile/generation, content fingerprint, vector artifact, and
+environment. The v0.5 validator rejects non-repo destinations, approximate
+search, implicit installation, online-only models, unsafe paths, unknown fields,
+and non-finite parameters.
+
+Missing, stale, incomplete, incompatible, corrupt, query-embedding-failed, or
+unsupported state returns the production lexical projection with a typed reason
+and must achieve normalized parity of 1.0. Exact cosine search runs before any
+approximate index. Semantic-only, lexical reranking, and lexical/semantic union
+share eligibility, lexical ranking, citations, top-k, and context budget.
+
+### Operational and task-utility evidence
+
+```bash
+cargo run --locked -q -p memzoi-cli -- eval recall-operational \
+  --evidence evals/recall/v3/operational/evidence.json --json
+```
+
+The strict schema requires answer and coding utility; every lifecycle, failure,
+promotion, rollback, and replacement scenario; all fallback reasons; an exact
+10,000-record workload; warm/cold, build/update, memory, and disk observations;
+environment metadata; and a cross-platform tolerance contract. Traces can hold
+only reason codes and counters, so raw queries, excerpts, private identifiers,
+and provider metadata are not representable. The committed evidence is
+synthetic contract data and must be replaced with candidate/release-bound
+measurements before it becomes release evidence.
+
+### Two-track competitor evidence
+
+```bash
+cargo run --locked -q -p memzoi-cli -- eval recall-competitors \
+  --evidence evals/recall/v3/competitors/fixture-evidence.json --json
+```
+
+Retrieval results require NDCG, recall, MRR, eligibility/forbidden behavior,
+supported citation behavior, latency, resources, and cost. End-to-end results
+require task completion, correctness, memory use, supported citation quality,
+forbidden-memory use, context tokens, latency, and cost. Every product names its
+version/configuration, raw-result digest, reproduction steps, and limitations.
+Locked-test access and product-specific tuning fail the report. The committed
+products are synthetic contract fixtures, not claims about real competitors.
+Competitor ranking remains informative only: D56-4 depends on safely beating
+Memzoi's lexical baseline.
+
 Memzoi has two checked-in, file-native evaluation suites. Recall v2 gates
 retrieval, precheck, lifecycle suppression, privacy boundaries, citations, and
 provenance. Capture v1 gates candidate quality, evidence, classification,

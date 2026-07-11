@@ -2,21 +2,89 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use memzoi_core::{
-    CaptureEvalBaselineStatus, CaptureEvalReport, RecallEvalBaselineStatus, RecallEvalForbiddenIds,
+    CaptureEvalBaselineStatus, CaptureEvalReport, ManifestDrivenRecallCandidate,
+    RecallCompetitorReport, RecallEvalBaselineStatus, RecallEvalForbiddenIds,
     RecallEvalIntegrityMetric, RecallEvalLeakageMetric, RecallEvalRatioMetric, RecallEvalReport,
-    RecallEvalSurface, RecallV3Report, attach_capture_eval_baseline, attach_recall_eval_baseline,
-    run_capture_eval, run_recall_eval, run_recall_v3_eval, write_capture_eval_baseline,
-    write_recall_eval_baseline, write_recall_v3_commitment,
+    RecallEvalSurface, RecallOperationalReport, RecallV3Candidate, RecallV3Report,
+    attach_capture_eval_baseline, attach_recall_eval_baseline, run_capture_eval,
+    run_recall_competitor_eval, run_recall_eval, run_recall_operational_eval, run_recall_v3_eval,
+    run_recall_v3_eval_with_candidates, write_capture_eval_baseline, write_recall_eval_baseline,
+    write_recall_v3_commitment,
 };
 
 use crate::output::print_json;
 
+pub(crate) fn recall_operational_eval_command(evidence: PathBuf, as_json: bool) -> Result<()> {
+    let report = run_recall_operational_eval(evidence)?;
+    if as_json {
+        print_json(&serde_json::to_value(&report)?)?;
+    } else {
+        print_operational_human_report(&report);
+    }
+    if !report.passed {
+        bail!("recall operational evaluation gates failed");
+    }
+    Ok(())
+}
+
+pub(crate) fn recall_competitor_eval_command(evidence: PathBuf, as_json: bool) -> Result<()> {
+    let report = run_recall_competitor_eval(evidence)?;
+    if as_json {
+        print_json(&serde_json::to_value(&report)?)?;
+    } else {
+        print_competitor_human_report(&report);
+    }
+    if !report.passed {
+        bail!("recall competitor evaluation gates failed");
+    }
+    Ok(())
+}
+
+fn print_operational_human_report(report: &RecallOperationalReport) {
+    println!("Memzoi recall operational evaluation ({})", report.version);
+    println!("candidate_digest:\t{}", report.candidate_digest);
+    println!(
+        "task_utility_pass_rate:\t{:.6}",
+        report.task_utility_pass_rate
+    );
+    println!(
+        "operational_pass_rate:\t{:.6}",
+        report.operational_pass_rate
+    );
+    println!("fallback_parity:\t{:.6}", report.fallback_parity);
+    println!("warm_p95_ms:\t{:.3}", report.performance.warm_query_p95_ms);
+    println!("result:\t{}", pass_label(report.passed));
+}
+
+fn print_competitor_human_report(report: &RecallCompetitorReport) {
+    println!("Memzoi recall competitor evaluation ({})", report.version);
+    println!("protocol_digest:\t{}", report.protocol_digest);
+    println!("products:\t{}", report.products.len());
+    println!("retrieval_tracks:\t{}", report.retrieval_results.len());
+    println!("end_to_end_tracks:\t{}", report.end_to_end_results.len());
+    println!("release_gate:\t{}", report.internal_release_gate);
+    println!("result:\t{}", pass_label(report.passed));
+}
+
 pub(crate) fn recall_v3_eval_command(
     corpus: PathBuf,
+    candidate_paths: Vec<PathBuf>,
     commitment: Option<PathBuf>,
     as_json: bool,
 ) -> Result<()> {
-    let report = run_recall_v3_eval(corpus)?;
+    let report = if candidate_paths.is_empty() {
+        run_recall_v3_eval(corpus)?
+    } else {
+        let mut candidates = candidate_paths
+            .into_iter()
+            .map(ManifestDrivenRecallCandidate::load)
+            .collect::<Result<Vec<_>>>()?;
+        let mut candidate_refs = candidates
+            .iter_mut()
+            .map(|candidate| candidate as &mut dyn RecallV3Candidate)
+            .collect::<Vec<_>>();
+        run_recall_v3_eval_with_candidates(corpus, &mut candidate_refs)?
+    };
     if let Some(path) = commitment {
         write_recall_v3_commitment(&report, path)?;
     }

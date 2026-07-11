@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 use crate::{
-    FixedClock, InitRequest, MemoryCitation, MemoryPaths, MemoryRecord, MemoryService, ScopeKind,
-    SearchInput,
+    FixedClock, InitRequest, MemoryCitation, MemoryPaths, MemoryPlane, MemoryRecord, MemoryService,
+    ScopeKind, SearchInput,
 };
 
 pub const RECALL_V3_CORPUS_VERSION: &str = "memzoi-recall-corpus/v3";
@@ -131,6 +131,7 @@ pub struct RecallV3CandidateInput {
     pub top_k: usize,
     pub context_budget: usize,
     pub eligible_records: Vec<RecallV3CandidateRecord>,
+    pub lexical_hits: Vec<RecallV3CandidateHit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,6 +139,7 @@ pub struct RecallV3CandidateRecord {
     pub id: String,
     pub title: String,
     pub body: String,
+    pub citation: MemoryCitation,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -553,11 +555,12 @@ fn run_loaded(
     };
     let mut all_cases = Vec::new();
     let mut all_resources = Vec::new();
-    let (reports, resources) = evaluate_candidate(&loaded.corpus, records, lexical)?;
+    let (reports, resources) = evaluate_candidate(&loaded.corpus, records, lexical, None)?;
     all_cases.push(reports);
     all_resources.push(resources);
     for candidate in candidates.iter_mut() {
-        let (reports, resources) = evaluate_candidate(&loaded.corpus, records, &mut **candidate)?;
+        let (reports, resources) =
+            evaluate_candidate(&loaded.corpus, records, &mut **candidate, Some(lexical))?;
         all_cases.push(reports);
         all_resources.push(resources);
     }
@@ -637,6 +640,7 @@ fn evaluate_candidate(
     corpus: &RecallV3Corpus,
     records: &[MemoryRecord],
     candidate: &mut dyn RecallV3Candidate,
+    mut lexical: Option<&mut dyn RecallV3Candidate>,
 ) -> Result<(Vec<RecallV3CaseReport>, BTreeMap<String, f64>)> {
     let mut reports = Vec::new();
     let mut resources = BTreeMap::new();
@@ -647,7 +651,7 @@ fn evaluate_candidate(
             .filter(|j| j.eligible)
             .map(|j| j.record_id.as_str())
             .collect::<BTreeSet<_>>();
-        let input = RecallV3CandidateInput {
+        let mut input = RecallV3CandidateInput {
             case_id: case.id.clone(),
             query: case.query.clone(),
             path: case.path.clone(),
@@ -662,11 +666,47 @@ fn evaluate_candidate(
                     id: r.id.clone(),
                     title: r.title.clone(),
                     body: r.body.clone(),
+                    citation: MemoryCitation {
+                        record_id: r.id.clone(),
+                        memory_type: r.memory_type,
+                        scope_kind: r.scope_kind,
+                        provenance: MemoryPlane::Git,
+                        destination: r.destination,
+                        visibility: r.visibility,
+                        source_kind: r.source_kind.clone(),
+                        source_ref: r.source_ref.clone(),
+                        path: None,
+                        capture: r.capture.clone(),
+                    },
                 })
                 .collect(),
+            lexical_hits: Vec::new(),
         };
+        if let Some(baseline) = lexical.as_deref_mut() {
+            let lexical_output = baseline.retrieve(&input)?;
+            let eligible_ids = input
+                .eligible_records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<BTreeSet<_>>();
+            input.lexical_hits = lexical_output
+                .hits
+                .into_iter()
+                .filter(|hit| eligible_ids.contains(hit.record_id.as_str()))
+                .take(case.top_k)
+                .collect();
+        }
         let started = Instant::now();
         let output = candidate.retrieve(&input)?;
+        if output.fallback_reason.as_deref().is_some_and(|reason| {
+            reason.is_empty()
+                || reason.len() > 64
+                || !reason
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        }) {
+            bail!("candidate emitted an invalid fallback reason code");
+        }
         if output.hits.iter().any(|hit| {
             !hit.score.is_finite() || hit.signals.values().any(|value| !value.is_finite())
         }) || output

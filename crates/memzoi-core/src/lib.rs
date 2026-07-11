@@ -14,8 +14,11 @@ mod models;
 mod okf;
 mod precheck;
 mod proposals;
+mod recall_candidate_eval;
+mod recall_competitor_eval;
 mod recall_eval;
 mod recall_eval_v3;
+mod recall_operational_eval;
 mod schema;
 mod search;
 mod service;
@@ -89,6 +92,8 @@ pub use proposals::{
     MemoryDraft, Proposal, ProposalStatus, ProposalStatusFilter, SupersedeResult, ValidationIssue,
     ValidationResult,
 };
+pub use recall_candidate_eval::*;
+pub use recall_competitor_eval::*;
 pub use recall_eval::{
     RECALL_EVAL_BASELINE_VERSION, RECALL_EVAL_CORPUS_VERSION,
     RECALL_EVAL_METRIC_DEFINITIONS_VERSION, RECALL_EVAL_REPORT_VERSION, RecallEvalBaseline,
@@ -104,6 +109,7 @@ pub use recall_eval::{
     attach_recall_eval_baseline, run_recall_eval, write_recall_eval_baseline,
 };
 pub use recall_eval_v3::*;
+pub use recall_operational_eval::*;
 pub use search::SearchInput;
 pub use service::{
     CheckpointInput, ExportFormat, ExportInput, ExportResult, FileProposalInventory,
