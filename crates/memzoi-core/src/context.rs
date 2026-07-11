@@ -1428,6 +1428,7 @@ mod tests {
                 source_kind: Some("test".to_owned()),
                 source_ref: None,
                 proposal_id: None,
+                capture: None,
                 content_hash: format!("hash-{id}"),
                 created_at: "2026-07-09T00:00:00Z".to_owned(),
                 updated_at: "2026-07-09T00:00:00Z".to_owned(),

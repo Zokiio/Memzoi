@@ -1,6 +1,7 @@
 # RFC 0001: Evidence-backed capture and extractor boundary
 
-- Status: Proposed — high-level direction endorsed; normative contract pending maintainer review
+- Status: Accepted with profile-scoped implementation
+- Accepted: 2026-07-10
 - Direction endorsed: 2026-07-10
 - Target: v0.4 — Evidence-backed Capture
 - Tracking issue: [#45](https://github.com/Zokiio/Memzoi/issues/45)
@@ -14,8 +15,13 @@ candidate-scoped evidence, classifies their destination and sensitivity, and
 returns a reviewable plan without writing canonical, proposal, local, session,
 index, event, or configuration state.
 
+Every plan is classified as `repo_safe`, `private`, or `blocked` from its
+sources, evidence, and candidates. Private plans cannot be persisted anywhere
+under the repository root or returned through an unauthorised or logging MCP
+path. Blocked plans contain redacted diagnostics only.
+
 Routing reviewed selections is a separate, explicit CLI operation. A
-versioned review artifact records accept, reject, and edit decisions against
+versioned review artifact records accept, reject, edit, and defer decisions against
 one immutable plan. Apply revalidates that review, the saved plan, and its
 source snapshots without rerunning the extractor, then uses the existing
 destination policy and guarded routing primitives. A repo candidate
@@ -57,11 +63,13 @@ fills that gap without weakening the review boundary.
    and their reasons reviewable per candidate.
 4. Detect changed plan bytes, stale sources, and changed routing inputs before
    any write, without claiming that an unkeyed digest authenticates a reviewer.
-5. Support deterministic and model-backed extractors without coupling core to
+5. Prevent capture plans themselves from becoming a repo-sharing or logging
+   bypass for private or prohibited source material.
+6. Support deterministic and model-backed extractors without coupling core to
    a model provider or storing credentials.
-6. Reuse the existing import, destination-policy, proposal-review, and
+7. Reuse the existing import, destination-policy, proposal-review, and
    canonical-apply boundaries.
-7. Make safety, quality, latency, and review burden measurable.
+8. Make safety, quality, latency, and review burden measurable.
 
 ## Non-goals
 
@@ -86,12 +94,14 @@ fills that gap without weakening the review boundary.
 - **Source snapshot**: the exact bytes resolved from a descriptor plus their
   media type, length, and content hash.
 - **Evidence**: a validated, non-empty byte and line span inside one snapshot.
+- **Claim**: the normalized proposed memory, exact evidence, and extractor
+  identity before routing policy is applied.
 - **Candidate**: proposed typed memory content, evidence, extraction metadata,
   confidence, and effective classification.
 - **Capture plan**: an immutable review artifact containing snapshots,
   candidates, blockers, and a content-derived identity. It is not memory.
 - **Capture review**: a versioned artifact that binds per-candidate accept,
-  reject, or edit decisions to one capture plan.
+  reject, edit, or defer decisions to one capture plan.
 - **Route apply**: the explicit operation that validates a reviewed capture
   plan and review artifact and hands selected candidates to guarded routing
   primitives.
@@ -269,7 +279,8 @@ Each candidate contains the following required semantic fields:
 
 | Field | Decision |
 | --- | --- |
-| `candidate_id` | Content-derived ID assigned by core after normalization. |
+| `claim_id` | Content-derived identity of the normalized memory draft, exact evidence, and extractor identity. |
+| `candidate_id` | Content-derived identity of the claim plus confidence, effective destination, sensitivity, and action. |
 | `memory.type` | Existing `MemoryType` value. |
 | `memory.lane` | Existing `MemoryLane` value. |
 | `memory.title`, `memory.body` | Non-empty normalized proposed memory. |
@@ -288,9 +299,14 @@ Core trims outer whitespace from titles, bodies, reasons, tags, IDs, and paths
 using the same typed-draft rules as existing import, preserves internal Unicode
 and line endings, sorts only fields whose schema declares set semantics, and
 rejects duplicates after normalization. `candidate_id` is a domain-separated
-BLAKE3 digest of canonical memory, evidence, extraction, confidence, and
-effective classification fields. Routing-state-dependent action details are
-covered by `plan_id` rather than `candidate_id`.
+BLAKE3 digest of `claim_id`, confidence, effective destination, sensitivity,
+and action. `claim_id` is a separately domain-separated digest of canonical
+memory, evidence, and extraction identity. A policy change can therefore route
+the same claim differently without pretending extraction produced a different
+claim. Reviewer edits that change the memory draft produce a new reviewed
+claim identity; destination-only edits retain the claim identity and produce a
+new reviewed candidate identity. `plan_id` covers both identities and all
+decision-affecting routing state.
 
 Plan `status` is `ready` or `blocked`. Candidate actions are a closed tagged
 union: `create_proposal` (reserved proposal ID and relative packet path),
@@ -321,6 +337,37 @@ The host may only preserve a proposed route or make it safer. A classification
 mismatch becomes `needs_review` with a stable diagnostic code; it is never
 silently upgraded to `repo-safe`.
 
+### Plan data classification and storage
+
+The plan is a review artifact that may contain exact source text. It is not
+safe merely because planning performs no writes. Core assigns one
+`data_class` after preflight and again after post-extraction safeguards:
+
+| Plan contents | `data_class` |
+| --- | --- |
+| Only repo-safe sources, locators, evidence, and candidates | `repo_safe` |
+| Any local/session source or candidate, `sensitive`/`unknown` classification, private locator, or private evidence | `private` |
+| Secret, raw transcript, private personal data, unsafe source, or global safeguard violation | `blocked` |
+
+Classification is enforced, not advisory:
+
+- `repo_safe` plans may be printed or explicitly saved to an allowed review
+  path, never under `.memzoi`, the private runtime directory, or generated
+  exports.
+- `private` plans default to stdout or the private runtime directory and cannot
+  be saved under the repository root, `.memzoi/`, a generated export, or an
+  integration file. Path checks use resolved containment, not string prefixes.
+- MCP may return a private plan only to an explicitly authorised local client.
+  The server must not persist the request, response, evidence, or candidate
+  content in logs, traces, caches, or metrics labels.
+- `blocked` plans contain only the redacted blocked-plan envelope and safe
+  diagnostics defined under safeguards. They never contain candidate or
+  evidence text.
+
+Changing a source, edit, or classification so that the effective data class
+changes produces a different plan or review identity. Route apply repeats this
+classification and fails closed before writing.
+
 ### Example `capture-plan-v1`
 
 This example is abbreviated only by replacing hashes with illustrative values;
@@ -330,6 +377,7 @@ an implementation returns full hashes.
 schema: memzoi/capture-plan-v1
 plan_id: capture_4a26...
 status: ready
+data_class: repo_safe
 sources:
   - source_id: auth-adr
     locator:
@@ -341,16 +389,22 @@ sources:
 safeguards:
   policy_version: memzoi/capture-safeguards-v1
   configuration_hash: blake3:6d73...
-routing_snapshot:
+preconditions:
   policy_version: memzoi/destination-policy-v1
-  state_hash: blake3:ee20...
+  candidates:
+    candidate_7098...:
+      duplicate_match_set_hash: blake3:ee20...
+      conflict_match_set_hash: blake3:7f31...
+      reserved_proposal_id: capture-authentication-uses-signed-sessions
+      relevant_record_hashes: []
 extractor:
   kind: deterministic
   id: memzoi-markdown
   version: 1.0.0
   configuration_hash: blake3:2718...
 candidates:
-  - candidate_id: candidate_7098...
+  - claim_id: claim_61c2...
+    candidate_id: candidate_7098...
     memory:
       type: decision
       lane: semantic
@@ -420,6 +474,9 @@ decisions:
   - candidate_id: candidate_9912...
     outcome: reject
     reason_code: not-durable
+  - candidate_id: candidate_1184...
+    outcome: defer
+    reason_code: insufficient-context
   - candidate_id: candidate_3011...
     outcome: edit
     memory:
@@ -436,13 +493,32 @@ decisions:
 
 Every plan candidate appears exactly once. An empty review or duplicate,
 unknown, or omitted candidate ID is invalid. `accept` preserves the candidate;
-`reject` writes nothing; `edit` may replace only the typed memory draft and an
-explicit requested destination. Evidence, source snapshots, and extraction
-identity cannot be edited. Core reruns shape, prohibited-data, destination,
-sensitivity, duplicate, and conflict validation over edits and computes a new
-reviewed-candidate identity and effective action. Review cannot override a
-global blocker, route `needs_review`, silently accept a possible conflict, or
-upgrade content to `repo-safe` without passing the same deterministic policy.
+`reject` writes nothing; `defer` writes nothing and records that the reviewer
+has not made a terminal decision; `edit` may replace only the typed memory
+draft and an explicit requested destination. Evidence, source snapshots, and
+extraction identity cannot be edited. A later review may replace a deferred
+decision by repeating the complete decision set, naming the prior review ID,
+and changing only deferred entries. It receives a new review ID and must pass
+the same stale checks when applied. The required v0.4 profile supports one
+such predecessor hop. Deeper review chains fail closed because the v0.4 CLI
+and apply boundary carry only the immediate predecessor; a future extension
+must carry and validate the complete ancestor chain before enabling more hops.
+
+Core reruns shape, prohibited-data, destination, sensitivity, duplicate, and
+conflict validation over edits and computes new reviewed claim and candidate
+identities as applicable. Human authority depends on why the original
+candidate required review:
+
+| Condition | Human authority |
+| --- | --- |
+| Ambiguous destination, sensitivity, or low confidence | May edit or sanitize the draft and explicitly request `repo`, `local`, `session`, or `discard`; core reclassifies and reroutes it. A `repo` request succeeds only when the retained evidence and locator are also repo-safe. |
+| Possible duplicate or conflict | Cannot silently force creation; the reviewer must choose an explicit lifecycle resolution or regenerate after resolving the conflict. |
+| Secret, raw transcript, private personal data, unsafe path, malformed source, or global safeguard violation | Hard blocker; cannot be overridden by a review. |
+
+Thus `needs_review` is a resolvable no-write state when the ambiguity is within
+human authority, not a permanent route. Review cannot override a global
+blocker, silently accept a possible conflict, or upgrade content to
+`repo-safe` without passing the same deterministic policy.
 
 `review_id` is a domain-separated BLAKE3 digest over the plan ID, ordered
 decisions, reviewed candidate identities, reviewer, and review time. Like
@@ -450,8 +526,9 @@ decisions, reviewed candidate identities, reviewer, and review time. Like
 must be pinned by the explicit apply request or review channel. The proposal
 audit block retains the review ID, actor, time, decision, and any safe edit
 reason. Mixed selections are transactional: all selected writes commit or none
-do. A review containing only rejects succeeds with zero writes and a resolved
-review result.
+do. A review containing only rejects and deferrals succeeds with zero writes
+and a resolved review result; deferrals remain eligible for a later review and
+are not reported as rejections.
 
 ### Plan identity and stale checks
 
@@ -470,11 +547,11 @@ review result.
 human-visible semantic field and decision-affecting input or result: schema
 version, summary counts, ordered
 source descriptors and hashes, effective limits and safeguard versions,
-extractor/model identity and configuration hashes, routing-policy/state
-fingerprints, normalized candidates and evidence, effective classifications,
-actions, and stable blocker codes with safe locations. Human diagnostic prose
-is derived from identity-covered codes at render time and is never accepted as
-unvalidated plan input.
+extractor/model identity and configuration hashes, routing policy and
+candidate-specific preconditions, normalized claims, candidates and evidence,
+effective classifications, actions, and stable blocker codes with safe
+locations. Human diagnostic prose is derived from identity-covered codes at
+render time and is never accepted as unvalidated plan input.
 
 Actor identity, timestamps, transport IDs, diagnostic prose, credential names
 and values, and provider request IDs are excluded. Actor and time do not change
@@ -505,8 +582,9 @@ checks:
    the extractor and recompute its configuration/template hash. A missing or
    changed profile makes the plan stale; provider credentials and executor
    availability are not required.
-6. Recompute safeguard configuration and all routing inputs that could affect
-   duplicate results, reserved proposal IDs, destination policy, or actions.
+6. Recompute safeguard configuration, destination policy, and each candidate's
+   targeted routing preconditions: duplicate and conflict match sets, matched
+   record hashes/statuses, and reserved proposal identity.
 7. Validate every review decision and edited candidate, rebuild selected
    routing actions, and require semantic equality with the reviewed actions.
 8. Only then invoke the guarded destination-specific write primitives.
@@ -516,6 +594,31 @@ zero writes. Source changes, policy changes, newly conflicting memory, or plan
 edits therefore require a new plan and review. Review edits retain
 the plan ID but produce new reviewed-candidate and review IDs. A changed plan
 actor or wall clock does not change the plan.
+
+The planner must not use one hash of the complete memory, proposal, or runtime
+inventory. Each candidate records only state capable of changing its action:
+
+```yaml
+preconditions:
+  policy_version: memzoi/destination-policy-v1
+  candidates:
+    candidate_7098...:
+      duplicate_match_set_hash: blake3:...
+      conflict_match_set_hash: blake3:...
+      reserved_proposal_id: capture-authentication-uses-signed-sessions
+      relevant_record_hashes:
+        - record_id: mem_...
+          content_hash: blake3:...
+          status: active
+          updated_at: 2026-07-09T12:00:00Z
+```
+
+A plan becomes stale when a relevant match appears or disappears, a matched
+record changes, the reserved proposal identity is taken, or an applicable
+policy/safeguard changes. An unrelated record elsewhere in the project does
+not invalidate it. The read-only snapshot loader may use broader indexes to
+find relevant records, but only the deterministic match sets and target state
+become apply preconditions.
 
 The extractor or provider is **not rerun during apply**. This avoids model
 nondeterminism and a second provider disclosure and ensures the human reviewed
@@ -539,6 +642,21 @@ boundary.
 Instruction-file, ADR, and Git-change extractors are adapters over the same
 source, evidence, candidate, and plan contracts. They may specialize
 deterministic parsing, but cannot relax safeguards.
+
+### Profile-scoped implementation
+
+Acceptance fixes the core contract without requiring every described source or
+extractor profile in the first tracer:
+
+| Scope | Required capability |
+| --- | --- |
+| Core v1 contract | `capture-plan-v1`, `capture-review-v1`, exact evidence, plan/review identity, data classification, targeted stale checks, safeguards, and governed routing. |
+| Required v0.4 profile | One explicit `project_path`, UTF-8 Markdown, and the deterministic Markdown extractor. |
+| Extension profiles | `project_directory`, instruction and ADR directories, supplied Git diff/bytes, `git_blob`, `git_range`, and model-backed extraction. |
+
+The extension profiles remain specified so they cannot weaken the boundary
+when implemented. They require their own implementation support, corpus cases,
+and release gates. #48 and #49 are not blocked on implementing them.
 
 ### Provider-neutral model boundary
 
@@ -778,27 +896,43 @@ recall; session routing must not silently rewrite a reviewed capture draft.
 
 For `repo` candidates, #49 adds optional capture provenance to the pending OKF
 proposal packet. That block contains `capture-plan-v1`, `capture-review-v1`,
-candidate/reviewed-candidate IDs, exact evidence items, extraction identity,
-confidence, classifications, and the review decision.
-The existing `sources` projection remains populated for older readers. A
-resolved proposal retains this capture block. Proposal identity remains review
+claim/candidate/reviewed-candidate IDs, exact repo-safe review evidence,
+extraction identity, confidence, classifications, and the review decision. The
+existing `sources` projection remains populated for older readers. A resolved
+proposal retains this complete capture block. Proposal identity remains review
 lineage and is not substituted for evidence identity.
 
 Canonical apply remains unchanged in authority: only the existing explicit
 proposal-file apply may create the repo record, and it rechecks `repo-safe`.
-To satisfy #49, the additive OKF record schema gains an optional versioned
-evidence list; proposal parsing/rendering, resolved packets, rebuild, and the
-derived runtime index preserve it. Existing `source`/`source_ref` remains a
-legacy primary-evidence projection, while `proposal_id` remains separate review
-lineage. Derived storage gains typed evidence rows (or an equivalently queried
-versioned structure), and recall citations expose source/span/hash plus
-extractor, plan, and review identities. Older records without the block remain
-valid. This extension does not bypass the proposal packet or canonical apply.
+Evidence is intentionally stored at three different levels:
+
+| Surface | Evidence representation |
+| --- | --- |
+| Capture plan and review | Exact excerpt text, typed locator, source hash, byte/line span, excerpt hash, and semantic location. |
+| Pending and resolved proposal | Exact repo-safe review evidence plus claim, candidate, plan, review, and extractor identities. |
+| Canonical record | Compact references: locator, source revision/hash, span, evidence hash, and an optional bounded short excerpt. |
+
+For a Git-tracked path, capture records the resolved blob or commit object ID
+when available as well as the path and content hash. This makes historical
+evidence reproducible after the working tree changes.
+
+To satisfy #49, the additive OKF record schema gains the compact optional
+versioned evidence list; proposal parsing/rendering, resolved packets, rebuild,
+and the derived runtime index preserve the appropriate tier. Existing
+`source`/`source_ref` remains a legacy primary-evidence projection, while
+`proposal_id` remains separate review lineage. Derived storage gains typed
+evidence rows (or an equivalently queried versioned structure), and recall
+citations expose source/span/hash plus extractor, plan, and review identities.
+Older records without the block remain valid. This extension does not bypass
+the proposal packet or canonical apply.
 
 MCP may accept a capture request and return `capture-plan-v1`. It must not
 accept route/apply flags, write a plan file, create proposals or runtime rows,
-approve proposals, or apply canonical records. CLI route apply is introduced
-by #49 as the explicit mutation boundary.
+approve proposals, or apply canonical records. It may return a `private` plan
+only through an explicitly authorised local-client profile whose request and
+response bodies are excluded from persistence and logging. It returns a
+redacted envelope for `blocked` plans. CLI route apply is introduced by #49 as
+the explicit mutation boundary.
 
 ## Threat model
 
@@ -815,7 +949,8 @@ by #49 as the explicit mutation boundary.
 | Model nondeterminism | Apply the reviewed plan without rerunning the model. |
 | Plan/review edits | Mismatched pinned IDs fail; a recomputed unkeyed ID creates different content requiring fresh review but does not authenticate its author. |
 | Actor/time replay differences | Excluded from identity because they do not change plan meaning. |
-| Changed duplicate or proposal state | Routing fingerprint/action recomputation rejects stale plans before writes. |
+| Changed duplicate or proposal state | Candidate-specific match sets, target hashes, and proposal reservations reject stale affected plans before writes without coupling them to unrelated inventory changes. |
+| Private plan persistence or logging | Enforce `data_class` at every CLI/MCP save, return, log, trace, export, and integration boundary. |
 | Partial-batch confusion | Source/global blockers make the batch non-routable; candidate-local no-write outcomes remain explicit; selected writes are transactional. |
 | Canonical-write bypass | Capture can create at most a pending repo proposal; canonical apply remains separate. |
 | Credential disclosure | No credential fields; trusted profile controls environment/secret injection; bounded stderr and detected values never enter output or logs. |
@@ -837,6 +972,8 @@ The following are hard invariants for v0.4:
 - zero prohibited-data or credential leakage across the versioned corpus and
   documented detector classes in human/JSON/MCP output, logs, provider
   requests, proposals, runtime rows, and canonical records;
+- zero persistence of `private` plans beneath the repository root, in
+  generated exports or integration files, or in MCP server logs;
 - zero canonical repo writes from capture routing;
 - deterministic plans are byte-equivalent for identical inputs; and
 - every repo candidate remains behind repo-safe proposal review and explicit
@@ -845,11 +982,11 @@ The following are hard invariants for v0.4:
 The eval report must also measure candidate precision/recall, evidence validity,
 destination and sensitivity accuracy, duplicate/conflict handling, extractor
 failures, latency, payload size, candidate counts, and human proposed,
-accepted, rejected, edited, duplicate, and needs-review outcomes.
+accepted, rejected, edited, deferred, duplicate, and needs-review outcomes.
 
 Numeric quality, latency, and review-burden thresholds are deliberately not
 invented in this RFC. #44 establishes the file-native corpus/reporting
-foundation, #47 implements safety and quality metrics in CI, and #55 records
+foundation, #47 provides safety and quality metrics in CI, and #55 records
 the observed baseline and v0.4 go/no-go thresholds. Mutation-free planning,
 detected-value non-echo, provenance, stale-input rejection, corpus leakage, and
 canonical-boundary invariants above are not deferrable numeric targets.
@@ -873,12 +1010,14 @@ review burden over deterministic extraction.
   locator requires a new schema version.
 - CLI and MCP share core parsing, normalization, safeguard, and fingerprint
   code. Transport envelopes do not redefine the plan.
-- A plan created under a different safeguard, extractor, destination-policy,
-  or relevant routing-state fingerprint is stale and must be regenerated.
+- A plan created under a different safeguard, extractor, destination policy,
+  or relevant candidate precondition is stale and must be regenerated.
 - Capture plans are review artifacts, not canonical memory or disposable
   indexes. Planning prints them; it does not silently save them. A caller may
-  explicitly save one for review and pass that exact artifact to CLI route
-  apply.
+  explicitly save a `repo_safe` plan to an allowed path for review and pass
+  that exact artifact to CLI route apply. A `private` plan may be saved only
+  under the private runtime directory; a `blocked` plan contains no reviewable
+  content.
 - Exact Markdown candidate rules, CLI command spelling, and concrete encoding
   of the required capture/review/evidence blocks are implementation details for
   #48/#49.
@@ -949,7 +1088,7 @@ an allow-listed local profile; the host owns execution and secrets.
 
 ## Deferred implementation choices
 
-The following do not change the endorsed high-level direction:
+The following do not change the accepted core contract:
 
 - #48 selects and versions the initial deterministic Markdown candidate rules
   and may tighten the proposed safeguard defaults through tests.
@@ -960,27 +1099,31 @@ The following do not change the endorsed high-level direction:
   numeric quality, latency, and review-burden release thresholds.
 - Shipping any particular model adapter is optional and requires a separate
   provider/privacy review plus the same eval gates.
+- Directory, supplied-bytes, Git blob/range, and specialised instruction/ADR
+  profiles are extension profiles. Each may ship independently after its own
+  implementation and evaluation gate.
 
 ## Maintainer decision
 
-**High-level direction endorsed — 2026-07-10. Normative RFC remains
-Proposed.**
+**Accepted with profile-scoped implementation — 2026-07-10.**
 
-The maintainer endorsed these starting choices on 2026-07-10:
+The capture-plan, review, evidence, no-write, stale-validation,
+classification, and routing boundaries in this RFC are normative. The v0.4
+required profile is deterministic capture from one explicit UTF-8 Markdown
+`project_path`. Directory, supplied-bytes, Git blob/range, specialised
+instruction/ADR, and model-backed profiles remain specified extensions and
+require their own implementation and evaluation gates.
 
-- a separate `capture-plan-v1` before import;
-- candidate-scoped exact evidence and versioned extractor/model provenance;
-- identity over all decision-affecting inputs, excluding actor and timestamps;
-- stale validation before routing;
-- deterministic Markdown first and provider-neutral model execution outside
-  core with host-supplied credentials;
-- explicit named sources, no-write planning, untrusted-input safeguards, and
-  no prohibited-data echo; and
-- reuse of the existing proposal review and explicit canonical apply boundary.
+Acceptance specifically includes:
 
-This endorsement does not yet accept added normative choices such as the exact
-review schema, source forms, canonicalization algorithm, evidence text/span
-encoding, model no-rerun behavior, safeguard ceilings, batch semantics,
-subprocess policy, or OKF/runtime provenance representation. Those require
-maintainer review in #45 before the RFC can become Accepted and before #48/#49
-may treat them as stable contracts.
+- enforced plan data classification;
+- separate claim and routing identities;
+- human-resolvable `needs_review` cases with non-overridable hard blockers;
+- candidate-specific stale preconditions;
+- tiered evidence storage;
+- the `defer` review outcome; and
+- the existing boundary in which route apply can create a pending repo
+  proposal but never canonical memory.
+
+#48 and #49 may treat the core contract and required v0.4 profile as stable.
+Extension profiles do not block their implementation.

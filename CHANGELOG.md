@@ -5,7 +5,9 @@
 ### Added
 
 - File-native `memzoi eval recall` v2 trust suites with isolated disposable state, search/precheck/context/write-gate cases, lifecycle and scope leakage metrics, citation/provenance checks, token and latency reporting, and an explicit typed baseline for local and CI regression gates.
-- A proposed evidence-backed capture and extractor boundary RFC whose high-level v0.4 plan/review/apply direction is maintainer-endorsed.
+- Evidence-backed capture with a bounded deterministic one-Markdown profile, redacted secret/PII/transcript blocking, immutable plan and review artifacts, deferred-review lineage, targeted stale-state checks, crash-recoverable proposal/private routing, and provenance that survives canonical apply and rebuild.
+- A planning-only MCP 2025-06-18 `plan_capture_v1` tool with bounded stdio, timeout/cancellation, structured output, no memory writes, and private-result denial by default.
+- An accepted evidence-backed capture and extractor boundary RFC defining the v0.4 plan/review/apply direction.
 
 ## [0.3.1] - 2026-07-10
 

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use memzoi_core::MemoryService;
+use memzoi_core::discover_paths;
 
 mod protocol;
 
@@ -16,11 +16,11 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let service = MemoryService::open(&cli.project_root).with_context(|| {
+    let paths = discover_paths(&cli.project_root).with_context(|| {
         format!(
-            "failed to open memory service at {}",
+            "failed to discover Memzoi project at {}",
             cli.project_root.display()
         )
     })?;
-    protocol::serve_stdio(service)
+    protocol::serve_stdio(protocol::ProtocolState::new(paths))
 }

@@ -23,9 +23,11 @@ clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 predicates = "3"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+rustix = { version = "1", features = ["fs"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_json_canonicalizer = "0.3.2"
 sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"

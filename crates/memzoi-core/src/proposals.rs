@@ -526,7 +526,8 @@ fn insert_record(
 }
 
 fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
-    conn.query_row(
+    let mut record = conn
+        .query_row(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
                 supersedes_id, expires_at, proposal_id
@@ -554,6 +555,7 @@ fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
                 source_kind: row.get(11)?,
                 source_ref: row.get(12)?,
                 proposal_id: row.get(18)?,
+                capture: None,
                 content_hash: row.get(13)?,
                 created_at: row.get(14)?,
                 updated_at: row.get(15)?,
@@ -562,8 +564,10 @@ fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
             })
         },
     )
-    .optional()?
-    .with_context(|| format!("memory record not found: {id}"))
+        .optional()?
+        .with_context(|| format!("memory record not found: {id}"))?;
+    record.capture = crate::capture::load_capture_provenance(conn, &record.id)?;
+    Ok(record)
 }
 
 fn duplicate_record_ids(conn: &Connection, content_hash: &str) -> Result<Vec<String>> {

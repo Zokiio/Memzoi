@@ -11,8 +11,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind,
-    Visibility, expiry, proposals::title_to_concept_slug,
+    CaptureProvenance, MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus,
+    MemoryType, ScopeKind, Visibility, capture, expiry, proposals::title_to_concept_slug,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +26,7 @@ pub struct OkfRecordFile {
     pub supersedes_id: Option<String>,
     pub expires_at: Option<String>,
     pub proposal_id: Option<String>,
+    pub capture: Option<CaptureProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub struct OkfProposalFile {
     pub supersedes: Vec<String>,
     pub sensitivity: OkfProposalSensitivity,
     pub resolution: Option<OkfProposalResolution>,
+    pub capture: Option<CaptureProvenance>,
 }
 
 /// Minimal, content-free classification used before parsing any reviewable proposal fields.
@@ -110,6 +112,7 @@ pub(crate) struct OkfCreateProposalDraft {
     pub(crate) tags: Vec<String>,
     pub(crate) sources: Vec<OkfProposalSource>,
     pub(crate) sensitivity: OkfProposalSensitivity,
+    pub(crate) capture: Option<CaptureProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +191,7 @@ pub(crate) fn render_okf_create_proposal_markdown(
             .collect(),
         supersedes: Vec::new(),
         sensitivity: draft.sensitivity,
+        capture: draft.capture.clone(),
     };
     let yaml =
         serde_yaml::to_string(&frontmatter).context("failed to render OKF proposal frontmatter")?;
@@ -611,6 +615,7 @@ pub fn preflight_okf_proposal_markdown(
         supersedes: Vec::new(),
         sensitivity,
         resolution: None,
+        capture: None,
     };
     Ok(Some(OkfProposalPreflight {
         sensitivity,
@@ -744,6 +749,7 @@ pub fn parse_okf_record_markdown(
         supersedes_id,
         expires_at,
         proposal_id,
+        capture: frontmatter.capture,
     }))
 }
 
@@ -815,6 +821,7 @@ pub fn parse_okf_proposal_markdown(
         supersedes,
         sensitivity,
         resolution,
+        capture: frontmatter.capture,
     }))
 }
 
@@ -873,6 +880,10 @@ fn project_okf_new_record(
         source_kind,
         source_ref,
         proposal_id: Some(proposal.id.clone()),
+        capture: proposal
+            .capture
+            .as_ref()
+            .map(CaptureProvenance::compact_for_record),
         content_hash: blake3::hash(proposal.body.trim().as_bytes())
             .to_hex()
             .to_string(),
@@ -899,6 +910,7 @@ pub(crate) fn project_okf_record(record: &OkfRecordFile) -> MemoryRecord {
         source_kind: record.draft.source_kind.clone(),
         source_ref: record.draft.source_ref.clone(),
         proposal_id: record.proposal_id.clone(),
+        capture: record.capture.clone(),
         content_hash: crate::import::content_hash(&record.draft.body),
         created_at: record.created.clone(),
         updated_at: record
@@ -975,6 +987,7 @@ pub(crate) fn render_resolved_okf_proposal_markdown(
         supersedes: proposal.supersedes.clone(),
         sensitivity: proposal.sensitivity,
         resolution: resolution.clone(),
+        capture: proposal.capture.clone(),
     };
     let yaml = serde_yaml::to_string(&frontmatter)
         .context("failed to render resolved OKF proposal frontmatter")?;
@@ -1102,6 +1115,8 @@ struct OkfCreateProposalFrontmatter {
     sources: Vec<OkfProposalSource>,
     supersedes: Vec<String>,
     sensitivity: OkfProposalSensitivity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture: Option<CaptureProvenance>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1149,6 +1164,7 @@ struct OkfFrontmatter {
     updated_at: Option<String>,
     applies_to: Option<Vec<String>>,
     tags: Option<Vec<String>>,
+    capture: Option<CaptureProvenance>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1175,6 +1191,7 @@ struct OkfProposalFrontmatter {
     supersedes: Option<StringList>,
     sensitivity: Option<String>,
     resolution: Option<OkfProposalResolutionFrontmatter>,
+    capture: Option<CaptureProvenance>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1214,6 +1231,8 @@ struct OkfResolvedProposalFrontmatter {
     supersedes: Vec<String>,
     sensitivity: OkfProposalSensitivity,
     resolution: OkfProposalResolution,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture: Option<CaptureProvenance>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1382,6 +1401,7 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
             params![record.concept_id, tag],
         )?;
     }
+    capture::store_capture_provenance(conn, &record.concept_id, record.capture.as_ref())?;
     Ok(())
 }
 
@@ -1413,6 +1433,16 @@ fn render_memory_record(record: &MemoryRecord, tags: &[String], applies_to: &[St
     }
     if let Some(proposal_id) = &record.proposal_id {
         push_yaml_string(&mut output, "proposal_id", proposal_id);
+    }
+    if let Some(capture) = &record.capture {
+        output.push_str("capture:\n");
+        let yaml = serde_yaml::to_string(capture)
+            .expect("capture provenance must serialize as canonical record frontmatter");
+        for line in yaml.lines() {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
     }
     if !tags.is_empty() {
         output.push_str("tags:\n");
@@ -2067,6 +2097,7 @@ mod tests {
             source_kind: Some("human-authored".to_owned()),
             source_ref: Some("issue://42".to_owned()),
             proposal_id: Some("prop_review_42".to_owned()),
+            capture: None,
             content_hash: "hash".to_owned(),
             created_at: "2026-07-05T00:00:00Z".to_owned(),
             updated_at: "2026-07-06T00:00:00Z".to_owned(),

@@ -10,9 +10,10 @@ pub fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);",
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);",
     )
-    .context("failed to record schema migrations 2, 3, and 4")?;
+    .context("failed to record schema migrations 2 through 5")?;
     Ok(())
 }
 
@@ -162,6 +163,11 @@ CREATE TABLE IF NOT EXISTS memory_tag (
   PRIMARY KEY (record_id, tag)
 );
 
+CREATE TABLE IF NOT EXISTS memory_capture (
+  record_id TEXT PRIMARY KEY REFERENCES memory_record(id) ON DELETE CASCADE,
+  provenance_json TEXT NOT NULL CHECK (json_valid(provenance_json))
+);
+
 CREATE TABLE IF NOT EXISTS read_audit (
   id TEXT PRIMARY KEY,
   operation TEXT NOT NULL,
@@ -197,6 +203,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_path_record_id ON memory_path(record_id);
 CREATE INDEX IF NOT EXISTS idx_memory_path_path ON memory_path(path);
 CREATE INDEX IF NOT EXISTS idx_proposal_id_status ON proposal(id, status);
 CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_capture_record_id ON memory_capture(record_id);
 
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
 "#;

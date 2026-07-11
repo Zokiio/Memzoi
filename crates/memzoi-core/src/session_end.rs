@@ -127,6 +127,7 @@ pub(crate) fn session_end_proposal_draft(
         tags: candidate.tags.clone(),
         sources: Vec::new(),
         sensitivity: candidate.sensitivity,
+        capture: None,
     })
 }
 

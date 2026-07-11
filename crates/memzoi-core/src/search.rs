@@ -183,7 +183,8 @@ pub(crate) fn search_memory_at(
     }
 
     let mut results = Vec::new();
-    for (record, rank) in ranked_rows {
+    for (mut record, rank) in ranked_rows {
+        record.capture = crate::capture::load_capture_provenance(conn, &record.id)?;
         let paths = load_paths(conn, &record.id)?;
         let citation_path = path_prefix
             .as_deref()
@@ -273,6 +274,7 @@ pub(crate) fn citation_for(
         source_kind: record.source_kind.clone(),
         source_ref: record.source_ref.clone(),
         path: path.map(|path| path.path.clone()),
+        capture: record.capture.clone(),
     })
 }
 
@@ -292,6 +294,7 @@ pub(crate) fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memor
         source_kind: row.get(11)?,
         source_ref: row.get(12)?,
         proposal_id: row.get(18)?,
+        capture: None,
         content_hash: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
