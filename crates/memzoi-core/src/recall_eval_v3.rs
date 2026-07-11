@@ -282,16 +282,18 @@ pub fn run_recall_v3_eval(path: impl AsRef<Path>) -> Result<RecallV3Report> {
     MemoryService::rebuild_paths(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
-    let records = crate::read_okf_record_files(paths.records_dir())?
-        .into_iter()
-        .map(|record| crate::okf::project_okf_record(&record))
+    let record_files = crate::read_okf_record_files(paths.records_dir())?;
+    let record_paths = recall_record_paths(&record_files);
+    let records = record_files
+        .iter()
+        .map(crate::okf::project_okf_record)
         .collect::<Vec<_>>();
     validate_record_ids(&loaded.corpus, &records)?;
     let mut lexical = LexicalCandidate {
         service: &service,
         record_count: records.len(),
     };
-    run_loaded(loaded, &records, &mut lexical, &mut [])
+    run_loaded(loaded, &records, &record_paths, &mut lexical, &mut [])
 }
 
 pub fn run_recall_v3_eval_with_candidates(
@@ -307,16 +309,40 @@ pub fn run_recall_v3_eval_with_candidates(
     MemoryService::rebuild_paths(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
-    let records = crate::read_okf_record_files(paths.records_dir())?
-        .into_iter()
-        .map(|record| crate::okf::project_okf_record(&record))
+    let record_files = crate::read_okf_record_files(paths.records_dir())?;
+    let record_paths = recall_record_paths(&record_files);
+    let records = record_files
+        .iter()
+        .map(crate::okf::project_okf_record)
         .collect::<Vec<_>>();
     validate_record_ids(&loaded.corpus, &records)?;
     let mut lexical = LexicalCandidate {
         service: &service,
         record_count: records.len(),
     };
-    run_loaded(loaded, &records, &mut lexical, candidates)
+    run_loaded(loaded, &records, &record_paths, &mut lexical, candidates)
+}
+
+fn recall_record_paths(records: &[crate::okf::OkfRecordFile]) -> BTreeMap<String, Vec<String>> {
+    records
+        .iter()
+        .map(|record| {
+            let mut paths = record.applies_to.clone();
+            paths.sort();
+            (record.concept_id.clone(), paths)
+        })
+        .collect()
+}
+
+fn recall_citation_path(paths: &[String], requested: Option<&str>) -> Option<String> {
+    requested
+        .and_then(|requested| {
+            paths
+                .iter()
+                .find(|stored| crate::search::path_matches_request(stored, requested))
+        })
+        .or_else(|| paths.first())
+        .cloned()
 }
 
 pub fn write_recall_v3_commitment(report: &RecallV3Report, path: impl AsRef<Path>) -> Result<()> {
@@ -577,6 +603,7 @@ fn lexical_fetch_limit(record_count: usize, ineligible_count: usize, top_k: usiz
 fn run_loaded(
     loaded: LoadedV3Corpus,
     records: &[MemoryRecord],
+    record_paths: &BTreeMap<String, Vec<String>>,
     lexical: &mut dyn RecallV3Candidate,
     candidates: &mut [&mut dyn RecallV3Candidate],
 ) -> Result<RecallV3Report> {
@@ -611,12 +638,18 @@ fn run_loaded(
     };
     let mut all_cases = Vec::new();
     let mut all_resources = Vec::new();
-    let (reports, resources) = evaluate_candidate(&loaded.corpus, records, lexical, None)?;
+    let (reports, resources) =
+        evaluate_candidate(&loaded.corpus, records, record_paths, lexical, None)?;
     all_cases.push(reports);
     all_resources.push(resources);
     for candidate in candidates.iter_mut() {
-        let (reports, resources) =
-            evaluate_candidate(&loaded.corpus, records, &mut **candidate, Some(lexical))?;
+        let (reports, resources) = evaluate_candidate(
+            &loaded.corpus,
+            records,
+            record_paths,
+            &mut **candidate,
+            Some(lexical),
+        )?;
         all_cases.push(reports);
         all_resources.push(resources);
     }
@@ -695,6 +728,7 @@ fn run_loaded(
 fn evaluate_candidate(
     corpus: &RecallV3Corpus,
     records: &[MemoryRecord],
+    record_paths: &BTreeMap<String, Vec<String>>,
     candidate: &mut dyn RecallV3Candidate,
     mut lexical: Option<&mut dyn RecallV3Candidate>,
 ) -> Result<(Vec<RecallV3CaseReport>, BTreeMap<String, f64>)> {
@@ -731,7 +765,9 @@ fn evaluate_candidate(
                         visibility: r.visibility,
                         source_kind: r.source_kind.clone(),
                         source_ref: r.source_ref.clone(),
-                        path: None,
+                        path: record_paths
+                            .get(&r.id)
+                            .and_then(|paths| recall_citation_path(paths, case.path.as_deref())),
                         capture: r.capture.clone(),
                     },
                 })
@@ -906,9 +942,17 @@ fn score_case(
         .iter()
         .filter(|hit| {
             let expected = &judgments[hit.record_id.as_str()].expected_citations;
-            hit.citations
-                .iter()
-                .any(|c| c.source_ref.as_ref().is_some_and(|r| expected.contains(r)))
+            hit.citations.iter().any(|citation| {
+                citation
+                    .source_ref
+                    .as_ref()
+                    .is_some_and(|reference| expected.contains(reference))
+                    && case.path.as_deref().is_none_or(|requested| {
+                        citation.path.as_deref().is_some_and(|stored| {
+                            crate::search::path_matches_request(stored, requested)
+                        })
+                    })
+            })
         })
         .count();
     let hard_negative_hits = accepted
@@ -1079,5 +1123,18 @@ mod tests {
         let error = validate_corpus(&corpus).unwrap_err();
         assert!(error.to_string().contains("top_k must be between"));
         Ok(())
+    }
+
+    #[test]
+    fn citation_path_prefers_the_case_match_then_the_first_staged_path() {
+        let paths = vec!["docs/default.md".to_owned(), "src/**".to_owned()];
+        assert_eq!(
+            recall_citation_path(&paths, Some("src/lib.rs")).as_deref(),
+            Some("src/**")
+        );
+        assert_eq!(
+            recall_citation_path(&paths, Some("other/file.md")).as_deref(),
+            Some("docs/default.md")
+        );
     }
 }

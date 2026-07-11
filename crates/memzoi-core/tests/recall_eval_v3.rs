@@ -109,6 +109,17 @@ impl RecallV3Candidate for BrokenFallback {
                 .iter()
                 .all(|record| record.id != "scope-distractor")
         );
+        if input.case_id == "citation-and-path" {
+            let citation_target = input
+                .eligible_records
+                .iter()
+                .find(|record| record.id == "citation-target")
+                .expect("citation target must be eligible");
+            assert_eq!(
+                citation_target.citation.path.as_deref(),
+                Some("docs/roadmap.md")
+            );
+        }
         Ok(RecallV3CandidateOutput {
             hits: Vec::new(),
             fallback_reason: Some("missing_index".into()),
@@ -141,6 +152,50 @@ impl RecallV3Candidate for FullLexicalPoolCandidate {
             resource_observations: Default::default(),
         })
     }
+}
+
+struct PathlessCitationCandidate;
+
+impl RecallV3Candidate for PathlessCitationCandidate {
+    fn manifest(&self) -> RecallV3CandidateManifest {
+        RecallV3CandidateManifest {
+            id: "pathless-citation".into(),
+            version: "1".into(),
+            adapter: "test".into(),
+            configuration_digest: "pathless-citation".into(),
+            offline: true,
+        }
+    }
+
+    fn retrieve(
+        &mut self,
+        input: &RecallV3CandidateInput,
+    ) -> anyhow::Result<RecallV3CandidateOutput> {
+        let mut hits = input.lexical_hits.clone();
+        for hit in &mut hits {
+            for citation in &mut hit.citations {
+                citation.path = None;
+            }
+        }
+        Ok(RecallV3CandidateOutput {
+            hits,
+            fallback_reason: None,
+            resource_observations: Default::default(),
+        })
+    }
+}
+
+#[test]
+fn recall_v3_rejects_pathless_citations_for_path_scoped_cases() -> anyhow::Result<()> {
+    let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/corpus.yaml");
+    let mut candidate = PathlessCitationCandidate;
+    let report = run_recall_v3_eval_with_candidates(corpus, &mut [&mut candidate])?;
+    let candidate = &report.candidates[1];
+
+    assert!(candidate.aggregate.citation_integrity < 1.0);
+    assert!(!candidate.passed);
+    Ok(())
 }
 
 #[test]
