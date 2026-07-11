@@ -319,6 +319,39 @@ pub(crate) enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EvalCommands {
+    /// Validate task-utility, fallback, lifecycle, and performance evidence.
+    RecallOperational {
+        /// Strict operational evidence JSON file.
+        #[arg(long)]
+        evidence: PathBuf,
+        /// Emit the stable machine-readable report.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate a frozen two-track competitor bakeoff evidence package.
+    RecallCompetitors {
+        /// Strict competitor evidence JSON file.
+        #[arg(long)]
+        evidence: PathBuf,
+        /// Emit the stable machine-readable report.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Evaluate candidate-neutral recall v3 quality and emit release evidence.
+    RecallV3 {
+        /// Explicit path to the strict recall-v3 corpus YAML file.
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Strict candidate manifest JSON files to evaluate after the lexical baseline.
+        #[arg(long = "candidate")]
+        candidates: Vec<PathBuf>,
+        /// Write the digest commitment artifact to this path.
+        #[arg(long)]
+        commitment: Option<PathBuf>,
+        /// Emit the stable machine-readable report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Evaluate recall quality against a versioned YAML corpus.
     Recall {
         /// Explicit path to the recall corpus YAML file.

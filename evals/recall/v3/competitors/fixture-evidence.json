@@ -1,0 +1,99 @@
+{
+  "version": "memzoi-recall-competitor-evidence/v1",
+  "protocol": {
+    "frozen_at": "2026-07-11T00:00:00Z",
+    "corpus_digest": "blake3:fixture-development-corpus",
+    "judgment_digest": "blake3:fixture-development-judgments",
+    "query_or_task_set_digest": "blake3:fixture-two-track-set",
+    "top_k": 10,
+    "context_budget": 500,
+    "hardware": "portable synthetic fixture",
+    "network_measurement": "count requests and transferred bytes",
+    "latency_measurement": "monotonic end-to-end p50 and p95",
+    "cost_measurement": "provider invoice or zero for local execution"
+  },
+  "products": [
+    {
+      "id": "fixture-ranked-memory",
+      "product": "Synthetic ranked-memory fixture",
+      "version": "1",
+      "hosting": "local",
+      "model": "deterministic fixture",
+      "configuration_digest": "blake3:fixture-ranked-config",
+      "import_procedure": "load the committed synthetic records",
+      "api_invocation": "fixture retrieval adapter",
+      "track": "retrieval",
+      "network_used": false
+    },
+    {
+      "id": "fixture-agent-memory",
+      "product": "Synthetic agent-memory fixture",
+      "version": "1",
+      "hosting": "hosted",
+      "model": "deterministic fixture",
+      "configuration_digest": "blake3:fixture-agent-config",
+      "import_procedure": "load the committed synthetic task memories",
+      "api_invocation": "fixture task harness",
+      "track": "end_to_end_agent",
+      "network_used": true
+    }
+  ],
+  "retrieval_results": [
+    {
+      "product_id": "fixture-ranked-memory",
+      "ndcg_at_10": 1.0,
+      "recall_at_k": 1.0,
+      "mrr": 1.0,
+      "eligible_cases": 2,
+      "forbidden_hits": 0,
+      "citations_supported": false,
+      "citation_integrity": null,
+      "latency_p50_ms": 1.0,
+      "latency_p95_ms": 2.0,
+      "peak_memory_bytes": 1048576,
+      "disk_bytes": 4096,
+      "cost_usd": 0.0
+    }
+  ],
+  "end_to_end_results": [
+    {
+      "product_id": "fixture-agent-memory",
+      "task_count": 2,
+      "task_completion_rate": 1.0,
+      "answer_correctness": 1.0,
+      "required_memory_use": 1.0,
+      "citation_quality": null,
+      "forbidden_memory_uses": 0,
+      "context_tokens": 256,
+      "latency_p50_ms": 10.0,
+      "latency_p95_ms": 20.0,
+      "cost_usd": 0.01
+    }
+  ],
+  "limitations": [
+    {
+      "product_id": "fixture-ranked-memory",
+      "capability": "citations",
+      "explanation": "The synthetic retrieval fixture intentionally exposes no citation API."
+    },
+    {
+      "product_id": "fixture-agent-memory",
+      "capability": "ranked_results",
+      "explanation": "The synthetic agent fixture exposes only end-to-end task behavior."
+    }
+  ],
+  "artifacts": [
+    {
+      "product_id": "fixture-ranked-memory",
+      "raw_results_digest": "blake3:fixture-ranked-results",
+      "reproduction_instructions": "Run the retrieval fixture through the committed protocol."
+    },
+    {
+      "product_id": "fixture-agent-memory",
+      "raw_results_digest": "blake3:fixture-agent-results",
+      "reproduction_instructions": "Run the task fixture through the committed protocol."
+    }
+  ],
+  "locked_test_accessed": false,
+  "product_specific_tuning": false
+}

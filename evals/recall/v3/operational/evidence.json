@@ -1,0 +1,91 @@
+{
+  "version": "memzoi-recall-operational-evidence/v1",
+  "candidate_digest": "blake3:fixture-exact-union",
+  "release_build_digest": "blake3:fixture-release",
+  "lexical_projection_digest": "blake3:fixture-lexical-projection",
+  "environment": {
+    "os": "fixture-os",
+    "architecture": "fixture-arch",
+    "cpu": "fixture-cpu",
+    "memory_bytes": 17179869184,
+    "release_build": true,
+    "timer": "monotonic"
+  },
+  "task_utility": [
+    {
+      "id": "answer-required-memory",
+      "kind": "answer",
+      "completed": true,
+      "answer_correct": true,
+      "required_memory_used": true,
+      "distractor_avoided": true,
+      "citation_used": true,
+      "false_confidence_avoided": true,
+      "context_tokens": 96
+    },
+    {
+      "id": "coding-required-memory",
+      "kind": "coding",
+      "completed": true,
+      "answer_correct": true,
+      "required_memory_used": true,
+      "distractor_avoided": true,
+      "citation_used": true,
+      "false_confidence_avoided": true,
+      "context_tokens": 128
+    }
+  ],
+  "operational": [
+    {"id":"create","scenario":"create","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":false,"passed":true,"reason_code":"generation_created"},
+    {"id":"update","scenario":"update","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":false,"passed":true,"reason_code":"generation_updated"},
+    {"id":"supersede","scenario":"supersede","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":false,"passed":true,"reason_code":"source_superseded"},
+    {"id":"tombstone","scenario":"tombstone","canonical_unchanged":true,"expected_generation_active":false,"stale_generation_queryable":false,"deletion_verified":true,"rollback_verified":false,"passed":true,"reason_code":"source_tombstoned"},
+    {"id":"expiry","scenario":"expiry","canonical_unchanged":true,"expected_generation_active":false,"stale_generation_queryable":false,"deletion_verified":true,"rollback_verified":false,"passed":true,"reason_code":"source_expired"},
+    {"id":"deletion","scenario":"deletion","canonical_unchanged":true,"expected_generation_active":false,"stale_generation_queryable":false,"deletion_verified":true,"rollback_verified":false,"passed":true,"reason_code":"source_deleted"},
+    {"id":"stale","scenario":"stale_state","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":false,"passed":true,"reason_code":"lexical_fallback_stale"},
+    {"id":"partial","scenario":"partial_state","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":false,"passed":true,"reason_code":"prior_generation_retained"},
+    {"id":"corruption","scenario":"corruption","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":false,"passed":true,"reason_code":"corruption_detected"},
+    {"id":"interrupted-build","scenario":"interrupted_build","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":false,"passed":true,"reason_code":"incomplete_generation_unpublished"},
+    {"id":"atomic-promotion","scenario":"atomic_promotion","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":false,"passed":true,"reason_code":"generation_promoted"},
+    {"id":"rollback","scenario":"rollback","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":true,"passed":true,"reason_code":"generation_rolled_back"},
+    {"id":"model-replacement","scenario":"model_replacement","canonical_unchanged":true,"expected_generation_active":true,"stale_generation_queryable":false,"deletion_verified":false,"rollback_verified":false,"passed":true,"reason_code":"profile_replaced"}
+  ],
+  "fallback": [
+    {"id":"missing-model","scenario":"missing_model","reason_code":"missing_model","normalized_lexical_parity":1.0,"partial_mixed_output":false,"passed":true},
+    {"id":"missing-index","scenario":"missing_index","reason_code":"missing_index","normalized_lexical_parity":1.0,"partial_mixed_output":false,"passed":true},
+    {"id":"stale-index","scenario":"stale_index","reason_code":"stale_index","normalized_lexical_parity":1.0,"partial_mixed_output":false,"passed":true},
+    {"id":"incomplete-index","scenario":"incomplete_index","reason_code":"incomplete_index","normalized_lexical_parity":1.0,"partial_mixed_output":false,"passed":true},
+    {"id":"incompatible-index","scenario":"incompatible_index","reason_code":"incompatible_index","normalized_lexical_parity":1.0,"partial_mixed_output":false,"passed":true},
+    {"id":"corrupt-index","scenario":"corrupt_index","reason_code":"corrupt_index","normalized_lexical_parity":1.0,"partial_mixed_output":false,"passed":true},
+    {"id":"query-embedding","scenario":"query_embedding_failure","reason_code":"query_embedding_failure","normalized_lexical_parity":1.0,"partial_mixed_output":false,"passed":true},
+    {"id":"unsupported-platform","scenario":"unsupported_platform","reason_code":"unsupported_platform","normalized_lexical_parity":1.0,"partial_mixed_output":false,"passed":true}
+  ],
+  "performance": {
+    "record_count": 10000,
+    "workload_seed": 1592594996,
+    "warm_query_p50_ms": 18.0,
+    "warm_query_p95_ms": 42.0,
+    "cold_start_ms": 110.0,
+    "first_query_ms": 64.0,
+    "full_build_ms": 950.0,
+    "incremental_update_ms": 12.0,
+    "idle_memory_bytes": 10485760,
+    "build_memory_bytes": 67108864,
+    "search_memory_bytes": 33554432,
+    "model_disk_bytes": 1048576,
+    "index_disk_bytes": 2097152
+  },
+  "cross_platform": {
+    "mode": "ranking_tolerance",
+    "min_top_k_overlap": 1.0,
+    "max_rank_displacement": 0
+  },
+  "deterministic_ties": true,
+  "policy_gates_preserved": true,
+  "trace_counters": [
+    {"reason_code":"semantic_success","count":2},
+    {"reason_code":"lexical_fallback","count":8},
+    {"reason_code":"safe_suppression","count":1}
+  ],
+  "warm_p95_limit_ms": 200.0
+}
