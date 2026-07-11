@@ -55,3 +55,31 @@ fn operational_evidence_rejects_unregistered_trace_reason_codes() {
     let error = run_recall_operational_eval(path).unwrap_err();
     assert!(format!("{error:#}").contains("unknown variant `private_identifier_123`"));
 }
+
+#[test]
+fn operational_evidence_requires_complete_environment_identity() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/operational/evidence.json");
+    let bytes = std::fs::read(fixture).unwrap();
+    let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let invalid = [
+        ("os", serde_json::json!(" ")),
+        ("architecture", serde_json::json!("")),
+        ("cpu", serde_json::json!(" ")),
+        ("timer", serde_json::json!("")),
+        ("memory_bytes", serde_json::json!(0)),
+    ];
+    for (field, value) in invalid {
+        let mut evidence = original.clone();
+        evidence["environment"][field] = value;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evidence.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+        let error = run_recall_operational_eval(path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid operational evidence identity")
+        );
+    }
+}

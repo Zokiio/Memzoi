@@ -359,6 +359,7 @@ fn validate_manifest(manifest: &RecallRetrievalCandidateManifest) -> Result<()> 
     }
     if !manifest.storage.exact_search
         || manifest.storage.destination != MemoryDestination::Repo
+        || manifest.storage.vector_artifact.as_os_str().is_empty()
         || manifest.storage.vector_artifact.is_absolute()
         || manifest
             .storage

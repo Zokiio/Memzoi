@@ -158,3 +158,22 @@ fn development_log_rejects_blank_attempt_metadata() {
         assert!(validate_development_log(&log).is_err());
     }
 }
+
+#[test]
+fn empty_vector_artifact_path_is_rejected() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/candidates");
+    let bytes = std::fs::read(root.join("exact-union.json"))?;
+    let mut manifest: RecallRetrievalCandidateManifest = serde_json::from_slice(&bytes)?;
+    manifest.storage.vector_artifact = "".into();
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("candidate.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
+
+    let error = match ManifestDrivenRecallCandidate::load(path) {
+        Ok(_) => panic!("empty vector artifact unexpectedly loaded"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("relative artifact"));
+    Ok(())
+}

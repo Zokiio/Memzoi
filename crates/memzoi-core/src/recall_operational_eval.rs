@@ -355,6 +355,11 @@ fn validate_evidence(evidence: &RecallOperationalEvidence) -> Result<()> {
         || evidence.candidate_digest.trim().is_empty()
         || evidence.release_build_digest.trim().is_empty()
         || evidence.lexical_projection_digest.trim().is_empty()
+        || evidence.environment.os.trim().is_empty()
+        || evidence.environment.architecture.trim().is_empty()
+        || evidence.environment.cpu.trim().is_empty()
+        || evidence.environment.timer.trim().is_empty()
+        || evidence.environment.memory_bytes == 0
         || evidence.task_utility.is_empty()
         || evidence.operational.is_empty()
         || evidence.fallback.is_empty()
