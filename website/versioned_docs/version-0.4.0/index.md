@@ -34,7 +34,9 @@ Memzoi v0 is local-first and intended for dogfooding and early experimentation. 
 - Deterministic generated exports: OKF Markdown projections, `AGENTS.memory.md`, and `CLAUDE.memory.md`.
 - Minimal stdio MCP server with safe tools:
   - `search_memory`
+  - `inspect_memory_expiry`
   - `build_context_pack`
+  - `plan_capture_v1`
   - `propose_memory`
   - `precheck_path`
   - `precheck_action`

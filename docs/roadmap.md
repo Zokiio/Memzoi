@@ -30,7 +30,7 @@ The v0.4 release combines the governed memory kernel with explicit evidence-back
 | Retrieval | FTS5/BM25 plus scope, type, lane, confidence, and path reranking | Establish evals, then add semantic recall only if it wins measurably |
 | Consolidation | Exact duplicate suppression and manual supersede/tombstone exist | Add review-first near-duplicate, contradiction, staleness, and retention planning |
 | Evaluation | File-native recall v2 and capture v1 suites enforce deterministic baselines, provenance, safety, quality, latency, and review-burden gates in CI | Use measured regressions to govern future retrieval and capture work |
-| Provider surface | CLI, six safe MCP tools, integrations, and deterministic exports exist | Stabilize contracts and harden operations after capture, recall, and lifecycle are proven |
+| Provider surface | CLI, eight safe MCP tools, integrations, and deterministic exports exist | Stabilize contracts and harden operations after capture, recall, and lifecycle are proven |
 
 Historical research under `.research/docs/` remains useful background, but current product documentation under `website/docs/`, shipped behavior, and this roadmap take precedence when they disagree. In particular, v0.3's two-plane file-native model supersedes the earlier SQLite-canonical direction.
 
