@@ -14,6 +14,7 @@ use crate::{
 };
 
 pub(crate) const SQL_PATH_MATCHES_REQUEST: &str = "memzoi_path_matches";
+pub(crate) const SEARCH_RESULT_LIMIT_MAX: usize = 100;
 
 pub(crate) fn register_sqlite_functions(conn: &Connection) -> Result<()> {
     conn.create_scalar_function(
@@ -353,7 +354,11 @@ fn fts_query(query: &str) -> String {
 }
 
 fn normalized_limit(limit: usize) -> usize {
-    if limit == 0 { 10 } else { limit.min(100) }
+    if limit == 0 {
+        10
+    } else {
+        limit.min(SEARCH_RESULT_LIMIT_MAX)
+    }
 }
 
 fn snippet(record: &MemoryRecord, query: &str) -> String {

@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use crate::{
     FixedClock, InitRequest, MemoryCitation, MemoryPaths, MemoryPlane, MemoryRecord, MemoryService,
-    ScopeKind, SearchInput,
+    ScopeKind, SearchInput, search::SEARCH_RESULT_LIMIT_MAX,
 };
 
 pub const RECALL_V3_CORPUS_VERSION: &str = "memzoi-recall-corpus/v3";
@@ -387,11 +387,16 @@ fn validate_corpus(corpus: &RecallV3Corpus) -> Result<()> {
             || case.id.trim().is_empty()
             || case.query.trim().is_empty()
             || case.slices.is_empty()
-            || case.top_k == 0
             || case.context_budget == 0
             || case.judgments.is_empty()
         {
             bail!("invalid or duplicate recall-v3 case {:?}", case.id);
+        }
+        if !(1..=SEARCH_RESULT_LIMIT_MAX).contains(&case.top_k) {
+            bail!(
+                "case {:?} top_k must be between 1 and {SEARCH_RESULT_LIMIT_MAX}",
+                case.id
+            );
         }
         if case.provenance.reference.trim().is_empty() {
             bail!("case {:?} provenance reference is empty", case.id);
@@ -536,10 +541,7 @@ impl RecallV3Candidate for LexicalCandidate<'_> {
         let ineligible_count = self
             .record_count
             .saturating_sub(input.eligible_records.len());
-        let fetch_limit = input
-            .top_k
-            .saturating_add(ineligible_count)
-            .min(self.record_count.max(input.top_k));
+        let fetch_limit = lexical_fetch_limit(self.record_count, ineligible_count, input.top_k);
         let results = self.service.search_memory(SearchInput {
             query: input.query.clone(),
             scope_kind: input.scope_kind,
@@ -562,6 +564,10 @@ impl RecallV3Candidate for LexicalCandidate<'_> {
             resource_observations: BTreeMap::new(),
         })
     }
+}
+
+fn lexical_fetch_limit(record_count: usize, ineligible_count: usize, top_k: usize) -> usize {
+    top_k.saturating_add(ineligible_count).min(record_count)
 }
 
 fn run_loaded(
@@ -1045,4 +1051,28 @@ fn digest_bytes(bytes: &[u8]) -> String {
 }
 fn digest_json(value: &impl Serialize) -> Result<String> {
     Ok(digest_bytes(&serde_json_canonicalizer::to_vec(value)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexical_fetch_limit_never_exceeds_staged_record_count() {
+        assert_eq!(lexical_fetch_limit(4, 1, 2), 3);
+        assert_eq!(lexical_fetch_limit(4, 4, 2), 4);
+        assert_eq!(lexical_fetch_limit(4, 0, 100), 4);
+    }
+
+    #[test]
+    fn corpus_top_k_matches_production_search_boundary() -> anyhow::Result<()> {
+        let mut corpus: RecallV3Corpus =
+            serde_yaml::from_str(include_str!("../../../evals/recall/v3/corpus.yaml"))?;
+        corpus.cases[0].top_k = SEARCH_RESULT_LIMIT_MAX;
+        validate_corpus(&corpus)?;
+        corpus.cases[0].top_k = SEARCH_RESULT_LIMIT_MAX + 1;
+        let error = validate_corpus(&corpus).unwrap_err();
+        assert!(error.to_string().contains("top_k must be between"));
+        Ok(())
+    }
 }
