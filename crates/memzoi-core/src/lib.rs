@@ -1,4 +1,5 @@
 mod capture;
+mod capture_eval;
 mod config;
 mod context;
 mod db;
@@ -23,25 +24,33 @@ mod session_end;
 pub(crate) use db::{init_database, open_database};
 
 pub use capture::{
-    CAPTURE_APPLY_RESULT_SCHEMA, CAPTURE_MAX_CANDIDATES, CAPTURE_MAX_EVIDENCE_BYTES,
-    CAPTURE_MAX_EVIDENCE_ITEM_BYTES, CAPTURE_MAX_INVENTORY_BYTES, CAPTURE_MAX_INVENTORY_DEPTH,
-    CAPTURE_MAX_INVENTORY_ENTRIES, CAPTURE_MAX_INVENTORY_FILE_BYTES, CAPTURE_MAX_INVENTORY_FILES,
-    CAPTURE_MAX_MARKDOWN_HEADINGS, CAPTURE_MAX_PATH_BYTES, CAPTURE_MAX_RUNTIME_INVENTORY_BYTES,
+    ADR_EXTRACTOR_PROFILE, ADR_EXTRACTOR_VERSION, CAPTURE_APPLY_RESULT_SCHEMA,
+    CAPTURE_MAX_AGGREGATE_SOURCE_BYTES, CAPTURE_MAX_CANDIDATES, CAPTURE_MAX_DIRECTORY_DEPTH,
+    CAPTURE_MAX_DIRECTORY_FILES, CAPTURE_MAX_EVIDENCE_BYTES, CAPTURE_MAX_EVIDENCE_ITEM_BYTES,
+    CAPTURE_MAX_INVENTORY_BYTES, CAPTURE_MAX_INVENTORY_DEPTH, CAPTURE_MAX_INVENTORY_ENTRIES,
+    CAPTURE_MAX_INVENTORY_FILE_BYTES, CAPTURE_MAX_INVENTORY_FILES, CAPTURE_MAX_MARKDOWN_HEADINGS,
+    CAPTURE_MAX_PATH_BYTES, CAPTURE_MAX_RUNTIME_INVENTORY_BYTES,
     CAPTURE_MAX_RUNTIME_INVENTORY_RECORDS, CAPTURE_MAX_RUNTIME_PATHS_PER_RECORD,
     CAPTURE_MAX_SERIALIZED_PLAN_BYTES, CAPTURE_MAX_SERIALIZED_REVIEW_BYTES,
     CAPTURE_MAX_SOURCE_BYTES, CAPTURE_PLAN_SCHEMA, CAPTURE_PROVENANCE_SCHEMA,
     CAPTURE_REQUEST_SCHEMA, CAPTURE_REVIEW_INPUT_SCHEMA, CAPTURE_REVIEW_SCHEMA, CaptureAction,
     CaptureApplyResult, CaptureCandidate, CaptureCandidatePreconditions, CaptureClassification,
     CaptureDataClass, CaptureDiagnostic, CaptureEvidence, CaptureEvidenceSpan,
-    CaptureExtractorIdentity, CaptureExtractorRequest, CaptureMatch, CaptureMatchKind,
-    CaptureMemoryDraft, CaptureMemoryScope, CapturePlan, CapturePlanStatus, CapturePlanSummary,
-    CapturePlanningControl, CaptureProvenance, CaptureRequest, CaptureReview,
-    CaptureReviewDecision, CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome,
-    CaptureSafeguards, CaptureSourceLocator, CaptureSourceRequest, CaptureSourceSnapshot,
-    CaptureWrite, MARKDOWN_EXTRACTOR_PROFILE, build_capture_review,
-    build_capture_review_with_prior, parse_capture_plan, parse_capture_request,
+    CaptureExtractorIdentity, CaptureExtractorRequest, CaptureGitSourceContext, CaptureMatch,
+    CaptureMatchKind, CaptureMemoryDraft, CaptureMemoryScope, CapturePlan, CapturePlanStatus,
+    CapturePlanSummary, CapturePlanningControl, CapturePolicyInputSnapshot, CaptureProvenance,
+    CaptureRequest, CaptureReview, CaptureReviewDecision, CaptureReviewDecisionInput,
+    CaptureReviewInput, CaptureReviewOutcome, CaptureSafeguards, CaptureSemanticLocation,
+    CaptureSourceInputs, CaptureSourceLocator, CaptureSourceMemberSnapshot, CaptureSourceRequest,
+    CaptureSourceSnapshot, CaptureWrite, GIT_CHANGE_EXTRACTOR_PROFILE,
+    GIT_CHANGE_EXTRACTOR_VERSION, INSTRUCTION_EXTRACTOR_PROFILE, INSTRUCTION_EXTRACTOR_VERSION,
+    MARKDOWN_EXTRACTOR_PROFILE, MAX_DIFF_SOURCE_BYTES, build_capture_review,
+    build_capture_review_with_inputs, build_capture_review_with_prior,
+    build_capture_review_with_prior_and_inputs, parse_capture_plan, parse_capture_request,
     parse_capture_review, parse_capture_review_input, plan_capture, plan_capture_with_control,
+    plan_capture_with_inputs, plan_capture_with_inputs_and_control,
 };
+pub use capture_eval::*;
 pub use config::{
     ConfigSource, ConfigSources, EffectiveConfig, MemoryPaths, ProposalApprovalPolicy,
     WorkflowConfig, discover_paths, load_effective_config, runtime_home, user_config_path,

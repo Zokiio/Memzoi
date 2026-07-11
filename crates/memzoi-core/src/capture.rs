@@ -20,6 +20,9 @@ use crate::{
     ScopeKind, parse_okf_proposal_markdown, parse_okf_record_markdown,
 };
 
+mod adapters;
+mod sources;
+
 pub const CAPTURE_REQUEST_SCHEMA: &str = "memzoi/capture-request-v1";
 pub const CAPTURE_PLAN_SCHEMA: &str = "memzoi/capture-plan-v1";
 pub const CAPTURE_REVIEW_INPUT_SCHEMA: &str = "memzoi/capture-review-input-v1";
@@ -28,7 +31,22 @@ pub const CAPTURE_APPLY_RESULT_SCHEMA: &str = "memzoi/capture-apply-result-v1";
 pub const CAPTURE_PROVENANCE_SCHEMA: &str = "memzoi/capture-provenance-v1";
 pub const MARKDOWN_EXTRACTOR_PROFILE: &str = "markdown-deterministic";
 pub const MARKDOWN_EXTRACTOR_VERSION: &str = "1.0.0";
+pub const INSTRUCTION_EXTRACTOR_PROFILE: &str = "instruction-deterministic";
+pub const INSTRUCTION_EXTRACTOR_VERSION: &str = "1.0.0";
+pub const ADR_EXTRACTOR_PROFILE: &str = "adr-deterministic";
+pub const ADR_EXTRACTOR_VERSION: &str = "1.0.0";
+pub const GIT_CHANGE_EXTRACTOR_PROFILE: &str = "git-change-deterministic";
+pub const GIT_CHANGE_EXTRACTOR_VERSION: &str = "1.0.0";
 pub const MAX_MARKDOWN_SOURCE_BYTES: u64 = 1024 * 1024;
+pub const MAX_DIFF_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
+pub const CAPTURE_MAX_AGGREGATE_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+pub const CAPTURE_MAX_DIRECTORY_FILES: usize = 128;
+pub const CAPTURE_MAX_DIRECTORY_DEPTH: usize = 8;
+pub const CAPTURE_MAX_GIT_CHANGED_FILES: usize = 512;
+pub const CAPTURE_MAX_GIT_DIFF_HUNKS: usize = 4096;
+pub const CAPTURE_MAX_GIT_POLICY_FILE_BYTES: u64 = 64 * 1024;
+pub const CAPTURE_MAX_GIT_POLICY_BYTES: u64 = 256 * 1024;
+pub const CAPTURE_GIT_PROCESS_TIMEOUT_MILLIS: u64 = 60_000;
 pub const CAPTURE_MAX_SOURCE_BYTES: usize = MAX_MARKDOWN_SOURCE_BYTES as usize;
 pub const CAPTURE_MAX_PATH_BYTES: usize = 4096;
 pub const CAPTURE_MAX_CANDIDATES: usize = 100;
@@ -45,6 +63,17 @@ pub const CAPTURE_MAX_RUNTIME_INVENTORY_BYTES: u64 = 32 * 1024 * 1024;
 pub const CAPTURE_MAX_RUNTIME_PATHS_PER_RECORD: usize = 256;
 pub const CAPTURE_MAX_SERIALIZED_PLAN_BYTES: usize = 2 * 1024 * 1024 - 4096;
 pub const CAPTURE_MAX_SERIALIZED_REVIEW_BYTES: usize = 2 * 1024 * 1024 - 4096;
+const INSTRUCTION_REVIEW_MARKERS: &[&[&str]] = &[
+    &["temporary"],
+    &["current", "task"],
+    &["this", "task"],
+    &["session"],
+    &["wip"],
+    &["scratch"],
+    &["personal"],
+    &["private"],
+    &["local", "only"],
+];
 
 #[derive(Debug, Clone)]
 pub struct CapturePlanningControl {
@@ -104,20 +133,118 @@ pub struct CaptureSourceRequest {
     pub source_id: String,
     pub locator: CaptureSourceLocator,
     pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<CaptureGitSourceContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CaptureSourceLocator {
-    ProjectPath { path: String },
+    ProjectPath {
+        path: String,
+    },
+    ProjectDirectory {
+        path: String,
+        recursive: bool,
+        ignore_policy: String,
+        include: Vec<String>,
+    },
+    SuppliedBytes {
+        display_name: String,
+        media_type: String,
+        byte_length: u64,
+        source_content_hash: String,
+    },
+    GitRange {
+        repository: String,
+        base: String,
+        head: String,
+        merge_parent: String,
+        rename_detection: bool,
+        diff_format: String,
+    },
 }
 
 impl CaptureSourceLocator {
-    pub fn path(&self) -> &str {
+    pub fn project_path(&self) -> Option<&str> {
         match self {
-            Self::ProjectPath { path } => path,
+            Self::ProjectPath { path } | Self::ProjectDirectory { path, .. } => Some(path),
+            Self::SuppliedBytes { .. } | Self::GitRange { .. } => None,
         }
     }
+
+    pub fn durable_reference(&self) -> String {
+        match self {
+            Self::ProjectPath { path } | Self::ProjectDirectory { path, .. } => path.clone(),
+            Self::SuppliedBytes {
+                display_name,
+                source_content_hash,
+                ..
+            } => format!("supplied:{display_name}@{source_content_hash}"),
+            Self::GitRange {
+                repository,
+                base,
+                head,
+                ..
+            } => format!("git:{repository}@{base}..{head}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureGitSourceContext {
+    pub repository: String,
+    pub base: String,
+    pub head: String,
+}
+
+#[derive(Default)]
+pub struct CaptureSourceInputs {
+    supplied_bytes: BTreeMap<String, Vec<u8>>,
+}
+
+impl CaptureSourceInputs {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert_supplied_bytes(
+        &mut self,
+        source_id: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        let source_id = source_id.into();
+        if !valid_source_id(&source_id) {
+            bail!("capture supplied source_id is invalid");
+        }
+        if self.supplied_bytes.contains_key(&source_id) {
+            bail!("capture supplied source_id is duplicated");
+        }
+        self.supplied_bytes.insert(source_id, bytes);
+        Ok(())
+    }
+
+    fn supplied_bytes(&self, source_id: &str) -> Option<&[u8]> {
+        self.supplied_bytes.get(source_id).map(Vec::as_slice)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.supplied_bytes.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CaptureSourceDocument {
+    pub(super) request: CaptureSourceRequest,
+    pub(super) snapshot: CaptureSourceSnapshot,
+    pub(super) bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CaptureLoadedSource {
+    pub(super) snapshot: CaptureSourceSnapshot,
+    pub(super) documents: Vec<CaptureSourceDocument>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +276,26 @@ pub struct CaptureSourceSnapshot {
     pub media_type: String,
     pub byte_length: u64,
     pub source_content_hash: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<CaptureSourceMemberSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_inputs: Vec<CapturePolicyInputSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureSourceMemberSnapshot {
+    pub path: String,
+    pub byte_length: u64,
+    pub source_content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapturePolicyInputSnapshot {
+    pub path: String,
+    pub source_content_hash: String,
+    pub engine_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +319,68 @@ pub struct CaptureEvidence {
     pub text: Option<String>,
     pub heading_path: Vec<String>,
     pub section_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_location: Option<CaptureSemanticLocation>,
+}
+
+impl CaptureEvidence {
+    pub fn durable_reference(&self) -> String {
+        if let Some(CaptureSemanticLocation::GitChange {
+            repository,
+            base,
+            head,
+            hunk,
+            old_path,
+            new_path,
+            ..
+        }) = &self.semantic_location
+        {
+            let path = new_path
+                .as_deref()
+                .or(old_path.as_deref())
+                .unwrap_or("unknown");
+            return format!("git:{repository}@{base}..{head}:{path}#{hunk}");
+        }
+        self.locator.durable_reference()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+// Keep the public v1 semantic-location shape direct and human-readable in Rust and JSON.
+#[allow(clippy::large_enum_variant)]
+pub enum CaptureSemanticLocation {
+    Instruction,
+    Adr {
+        field: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+    GitChange {
+        repository: String,
+        base: String,
+        head: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_blob: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_blob: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_path: Option<String>,
+        change_kind: String,
+        hunk: String,
+        side: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_line_start: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_line_end: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_line_start: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_line_end: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +502,22 @@ pub struct CaptureSafeguards {
     pub policy_version: String,
     pub configuration_hash: String,
     pub max_source_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_aggregate_source_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_directory_files: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_directory_depth: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_changed_files: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_diff_hunks: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_source_policy_file_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_source_policy_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_timeout_millis: Option<u64>,
     pub max_path_bytes: usize,
     pub max_candidates: usize,
     pub max_markdown_headings: usize,
@@ -521,7 +746,34 @@ pub fn build_capture_review(
     reviewed_by: &str,
     reviewed_at: &str,
 ) -> Result<CaptureReview> {
-    build_capture_review_inner(paths, None, plan, input, None, reviewed_by, reviewed_at)
+    build_capture_review_with_inputs(
+        paths,
+        plan,
+        input,
+        &CaptureSourceInputs::default(),
+        reviewed_by,
+        reviewed_at,
+    )
+}
+
+pub fn build_capture_review_with_inputs(
+    paths: &MemoryPaths,
+    plan: &CapturePlan,
+    input: CaptureReviewInput,
+    source_inputs: &CaptureSourceInputs,
+    reviewed_by: &str,
+    reviewed_at: &str,
+) -> Result<CaptureReview> {
+    build_capture_review_inner(
+        paths,
+        None,
+        plan,
+        input,
+        None,
+        source_inputs,
+        reviewed_by,
+        reviewed_at,
+    )
 }
 
 pub fn build_capture_review_with_prior(
@@ -532,23 +784,47 @@ pub fn build_capture_review_with_prior(
     reviewed_by: &str,
     reviewed_at: &str,
 ) -> Result<CaptureReview> {
+    build_capture_review_with_prior_and_inputs(
+        paths,
+        plan,
+        input,
+        prior_review,
+        &CaptureSourceInputs::default(),
+        reviewed_by,
+        reviewed_at,
+    )
+}
+
+pub fn build_capture_review_with_prior_and_inputs(
+    paths: &MemoryPaths,
+    plan: &CapturePlan,
+    input: CaptureReviewInput,
+    prior_review: &CaptureReview,
+    source_inputs: &CaptureSourceInputs,
+    reviewed_by: &str,
+    reviewed_at: &str,
+) -> Result<CaptureReview> {
     build_capture_review_inner(
         paths,
         None,
         plan,
         input,
         Some(prior_review),
+        source_inputs,
         reviewed_by,
         reviewed_at,
     )
 }
 
-pub(crate) fn build_capture_review_with_connection(
+// Every argument is an independently revalidated review-boundary input.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_capture_review_with_connection_and_inputs(
     paths: &MemoryPaths,
     conn: &Connection,
     plan: &CapturePlan,
     input: CaptureReviewInput,
     prior_review: Option<&CaptureReview>,
+    source_inputs: &CaptureSourceInputs,
     reviewed_by: &str,
     reviewed_at: &str,
 ) -> Result<CaptureReview> {
@@ -558,17 +834,21 @@ pub(crate) fn build_capture_review_with_connection(
         plan,
         input,
         prior_review,
+        source_inputs,
         reviewed_by,
         reviewed_at,
     )
 }
 
+// The private implementation mirrors the complete public review boundary.
+#[allow(clippy::too_many_arguments)]
 fn build_capture_review_inner(
     paths: &MemoryPaths,
     runtime_conn: Option<&Connection>,
     plan: &CapturePlan,
     input: CaptureReviewInput,
     prior_review: Option<&CaptureReview>,
+    source_inputs: &CaptureSourceInputs,
     reviewed_by: &str,
     reviewed_at: &str,
 ) -> Result<CaptureReview> {
@@ -582,17 +862,22 @@ fn build_capture_review_inner(
     if input.plan_id != plan.plan_id {
         bail!("capture review input does not match the plan");
     }
-    validate_prior_review_lineage(paths, runtime_conn, plan, &input, prior_review)?;
+    validate_prior_review_lineage(
+        paths,
+        runtime_conn,
+        plan,
+        &input,
+        prior_review,
+        source_inputs,
+    )?;
     let reviewed_by = reviewed_by.trim();
     let reviewed_at = reviewed_at.trim();
     validate_capture_actor(reviewed_by)?;
     time::OffsetDateTime::parse(reviewed_at, &time::format_description::well_known::Rfc3339)
         .context("capture reviewed_at must be RFC 3339")?;
 
-    let current = plan_capture_inner(paths, plan.request.clone(), runtime_conn, None)?;
-    if current.plan_id != plan.plan_id || current != *plan {
-        bail!("stale capture plan");
-    }
+    validate_capture_plan_live_state(paths, runtime_conn, plan, source_inputs, None)
+        .context("stale capture plan")?;
 
     let mut inputs = BTreeMap::new();
     for decision in input.decisions {
@@ -709,6 +994,7 @@ fn validate_prior_review_lineage(
     plan: &CapturePlan,
     input: &CaptureReviewInput,
     prior_review: Option<&CaptureReview>,
+    source_inputs: &CaptureSourceInputs,
 ) -> Result<()> {
     let prior_id = input.prior_review_id.as_deref();
     if let Some(prior_id) = prior_id
@@ -752,6 +1038,7 @@ fn validate_prior_review_lineage(
         plan,
         replay_input,
         None,
+        source_inputs,
         &prior_review.reviewed_by,
         &prior_review.reviewed_at,
     )
@@ -921,7 +1208,15 @@ fn validate_selected_review_matches(decisions: &[CaptureReviewDecision]) -> Resu
 }
 
 pub fn plan_capture(paths: &MemoryPaths, request: CaptureRequest) -> Result<CapturePlan> {
-    plan_capture_inner(paths, request, None, None)
+    plan_capture_with_inputs(paths, request, &CaptureSourceInputs::default())
+}
+
+pub fn plan_capture_with_inputs(
+    paths: &MemoryPaths,
+    request: CaptureRequest,
+    source_inputs: &CaptureSourceInputs,
+) -> Result<CapturePlan> {
+    plan_capture_inner(paths, request, source_inputs, None, None)
 }
 
 pub fn plan_capture_with_control(
@@ -929,30 +1224,32 @@ pub fn plan_capture_with_control(
     request: CaptureRequest,
     control: &CapturePlanningControl,
 ) -> Result<CapturePlan> {
-    plan_capture_inner(paths, request, None, Some(control))
+    plan_capture_with_inputs_and_control(paths, request, &CaptureSourceInputs::default(), control)
 }
 
-pub(crate) fn plan_capture_with_connection(
+pub fn plan_capture_with_inputs_and_control(
     paths: &MemoryPaths,
     request: CaptureRequest,
-    conn: &Connection,
+    source_inputs: &CaptureSourceInputs,
+    control: &CapturePlanningControl,
 ) -> Result<CapturePlan> {
-    plan_capture_inner(paths, request, Some(conn), None)
+    plan_capture_inner(paths, request, source_inputs, None, Some(control))
 }
 
 fn plan_capture_inner(
     paths: &MemoryPaths,
     request: CaptureRequest,
+    source_inputs: &CaptureSourceInputs,
     runtime_conn: Option<&Connection>,
     control: Option<&CapturePlanningControl>,
 ) -> Result<CapturePlan> {
     check_planning_control(control)?;
-    let extractor = extractor_identity();
-    let safeguards = safeguards();
+    let extractor = extractor_identity(&request.extractor.profile)?;
+    let safeguards = safeguards(&request.extractor.profile)?;
     if let Err(error) = validate_request(&request) {
         if request.schema == CAPTURE_REQUEST_SCHEMA
             && request.sources.len() == 1
-            && request.extractor.profile == MARKDOWN_EXTRACTOR_PROFILE
+            && supported_extractor_profile(&request.extractor.profile)
         {
             let _ = error;
             return blocked_after_planning_failure(
@@ -966,8 +1263,7 @@ fn plan_capture_inner(
         return Err(error);
     }
     let source = &request.sources[0];
-    let CaptureSourceLocator::ProjectPath { path } = &source.locator;
-    let (snapshot, bytes) = match read_source(paths, source, path, control) {
+    let loaded = match sources::load_capture_source(paths, source, source_inputs, control) {
         Ok(source) => source,
         Err(error) => {
             let _ = error;
@@ -981,19 +1277,19 @@ fn plan_capture_inner(
         }
     };
 
-    if let Some((_finding, line)) = prohibited_finding(&bytes) {
-        return blocked_plan(
-            &request,
-            safeguards,
-            extractor,
-            "prohibited_content_detected",
-            line,
-        );
-    }
-
-    let text = match std::str::from_utf8(&bytes) {
-        Ok(text) => text,
-        Err(_) => {
+    for document in &loaded.documents {
+        if let Some((_finding, line)) =
+            adapters::prohibited_finding_for_profile(&request.extractor.profile, &document.bytes)
+        {
+            return blocked_plan(
+                &request,
+                safeguards,
+                extractor,
+                "prohibited_content_detected",
+                line,
+            );
+        }
+        if std::str::from_utf8(&document.bytes).is_err() {
             return blocked_plan(
                 &request,
                 safeguards,
@@ -1002,15 +1298,15 @@ fn plan_capture_inner(
                 None,
             );
         }
-    };
-    if text.as_bytes().contains(&0) {
-        return blocked_plan(
-            &request,
-            safeguards,
-            extractor,
-            "unsupported_binary_content",
-            None,
-        );
+        if document.bytes.contains(&0) {
+            return blocked_plan(
+                &request,
+                safeguards,
+                extractor,
+                "unsupported_binary_content",
+                None,
+            );
+        }
     }
     check_planning_control(control)?;
     let inventory_result = match runtime_conn {
@@ -1030,7 +1326,13 @@ fn plan_capture_inner(
             );
         }
     };
-    let extraction = match extract_candidates(source, &snapshot, text, &extractor, control) {
+    let extraction = match adapters::extract_profile(
+        source,
+        &loaded,
+        &extractor,
+        &request.extractor.profile,
+        control,
+    ) {
         Ok(extraction) => extraction,
         Err(error) => {
             let _ = error;
@@ -1082,7 +1384,7 @@ fn plan_capture_inner(
         status: CapturePlanStatus::Ready,
         data_class,
         request,
-        sources: vec![snapshot],
+        sources: vec![loaded.snapshot],
         safeguards,
         preconditions,
         extractor,
@@ -1103,6 +1405,773 @@ fn plan_capture_inner(
     }
     check_planning_control(control)?;
     Ok(plan)
+}
+
+pub(crate) fn validate_capture_plan_live_state(
+    paths: &MemoryPaths,
+    runtime_conn: Option<&Connection>,
+    plan: &CapturePlan,
+    source_inputs: &CaptureSourceInputs,
+    control: Option<&CapturePlanningControl>,
+) -> Result<()> {
+    validate_plan_identity(plan)?;
+    if plan.status != CapturePlanStatus::Ready {
+        bail!("blocked capture plans have no live review state");
+    }
+    check_planning_control(control)?;
+    if plan.extractor != extractor_identity(&plan.request.extractor.profile)? {
+        bail!("capture extractor profile changed");
+    }
+    if plan.safeguards != safeguards(&plan.request.extractor.profile)? {
+        bail!("capture safeguards changed");
+    }
+    let source = plan
+        .request
+        .sources
+        .first()
+        .context("capture plan source is missing")?;
+    let loaded = sources::load_capture_source(paths, source, source_inputs, control)?;
+    if plan.sources.as_slice() != [loaded.snapshot.clone()] {
+        bail!("capture source snapshot changed");
+    }
+    validate_loaded_source_preflight(&plan.request.extractor.profile, &loaded)?;
+    validate_plan_evidence(plan, &loaded)?;
+
+    let inventory = match runtime_conn {
+        Some(conn) => load_inventory_with_connection(paths, conn, control)?,
+        None => load_inventory(paths, control)?,
+    };
+    if plan.extractor.kind != "deterministic" {
+        bail!("capture profile requires a trusted issuance attestation before replay");
+    }
+    let replay = adapters::extract_profile(
+        source,
+        &loaded,
+        &plan.extractor,
+        &plan.request.extractor.profile,
+        control,
+    )?;
+    let mut replay_candidates = replay.candidates;
+    let mut replay_diagnostics = replay.diagnostics;
+    classify_actions(&inventory, &mut replay_candidates, control)?;
+    if replay_candidates.iter().any(|candidate| {
+        matches!(
+            &candidate.action,
+            CaptureAction::NoWrite { reason_code }
+                if reason_code == "runtime_inventory_unavailable"
+        )
+    }) {
+        replay_diagnostics.push(CaptureDiagnostic {
+            code: "runtime_inventory_unavailable".to_owned(),
+            source_id: None,
+            line: None,
+        });
+    }
+    if replay_candidates != plan.candidates || replay_diagnostics != plan.diagnostics {
+        bail!("capture plan no longer matches deterministic extraction output");
+    }
+    let mut expected_candidates = Vec::with_capacity(plan.candidates.len());
+    for planned in &plan.candidates {
+        check_planning_control(control)?;
+        let (memory_type, lane, destination, sensitivity, destination_reason, sensitivity_reason) =
+            core_candidate_policy(&plan.request, planned)?;
+        if planned.memory.memory_type != memory_type || planned.memory.lane != lane {
+            bail!("capture candidate memory shape is inconsistent with its evidence profile");
+        }
+        let normalized = normalize_reviewed_memory(&planned.memory)?;
+        if normalized.title != planned.memory.title
+            || normalized.body != planned.memory.body
+            || normalized.scope != planned.memory.scope
+            || normalized.tags.len() != planned.memory.tags.len()
+            || normalized.tags.iter().collect::<BTreeSet<_>>()
+                != planned.memory.tags.iter().collect::<BTreeSet<_>>()
+        {
+            bail!("capture candidate memory is not in canonical form");
+        }
+        expected_candidates.push(candidate(
+            planned.memory.clone(),
+            planned.evidence.clone(),
+            &plan.extractor,
+            destination,
+            sensitivity,
+            destination_reason,
+            sensitivity_reason,
+        )?);
+    }
+    classify_actions(&inventory, &mut expected_candidates, control)?;
+    if expected_candidates != plan.candidates {
+        bail!("capture candidate identity, classification, or action changed");
+    }
+    if candidate_preconditions(&expected_candidates) != plan.preconditions {
+        bail!("capture routing preconditions changed");
+    }
+    let expected_data_class = if expected_candidates
+        .iter()
+        .all(candidate_is_repo_safe_for_plan)
+    {
+        CaptureDataClass::RepoSafe
+    } else {
+        CaptureDataClass::Private
+    };
+    if plan.data_class != expected_data_class || plan.summary != summarize(&expected_candidates) {
+        bail!("capture plan classification or summary changed");
+    }
+    Ok(())
+}
+
+fn validate_loaded_source_preflight(profile: &str, loaded: &CaptureLoadedSource) -> Result<()> {
+    for document in &loaded.documents {
+        if adapters::prohibited_finding_for_profile(profile, &document.bytes).is_some() {
+            bail!("capture source now contains prohibited content");
+        }
+        if document.bytes.contains(&0) || std::str::from_utf8(&document.bytes).is_err() {
+            bail!("capture source is no longer supported text");
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan_evidence(plan: &CapturePlan, loaded: &CaptureLoadedSource) -> Result<()> {
+    for candidate in &plan.candidates {
+        if candidate.extraction != plan.extractor || candidate.evidence.is_empty() {
+            bail!("capture candidate extractor or evidence changed");
+        }
+        let mut candidate_text =
+            Vec::with_capacity(candidate.memory.title.len() + candidate.memory.body.len() + 1);
+        candidate_text.extend_from_slice(candidate.memory.title.as_bytes());
+        candidate_text.push(b'\n');
+        candidate_text.extend_from_slice(candidate.memory.body.as_bytes());
+        if prohibited_finding(&candidate_text).is_some() {
+            bail!("capture candidate contains prohibited content");
+        }
+        for evidence in &candidate.evidence {
+            let document = loaded
+                .documents
+                .iter()
+                .find(|document| {
+                    document.request.source_id == evidence.source_id
+                        && document.request.locator == evidence.locator
+                        && document.snapshot.source_content_hash == evidence.source_content_hash
+                })
+                .context("capture evidence source changed")?;
+            let start = usize::try_from(evidence.span.byte_start)
+                .context("capture evidence start is out of range")?;
+            let end = usize::try_from(evidence.span.byte_end)
+                .context("capture evidence end is out of range")?;
+            let document_text = std::str::from_utf8(&document.bytes)
+                .context("capture evidence source is no longer UTF-8")?;
+            if start >= end
+                || end > document.bytes.len()
+                || !document_text.is_char_boundary(start)
+                || !document_text.is_char_boundary(end)
+            {
+                bail!("capture evidence span changed");
+            }
+            let excerpt = &document.bytes[start..end];
+            if content_hash(excerpt) != evidence.evidence_content_hash
+                || evidence.text.as_deref().map(str::as_bytes) != Some(excerpt)
+            {
+                bail!("capture evidence content changed");
+            }
+            let line_start = 1 + document.bytes[..start]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count() as u64;
+            let line_end = line_start
+                + excerpt[..excerpt.len() - 1]
+                    .iter()
+                    .filter(|byte| **byte == b'\n')
+                    .count() as u64;
+            if evidence.span.line_start != line_start || evidence.span.line_end != line_end {
+                bail!("capture evidence line location changed");
+            }
+            let semantic_matches = matches!(
+                (
+                    &plan.request.extractor.profile[..],
+                    &evidence.semantic_location
+                ),
+                (MARKDOWN_EXTRACTOR_PROFILE, None)
+                    | (
+                        INSTRUCTION_EXTRACTOR_PROFILE,
+                        Some(CaptureSemanticLocation::Instruction)
+                    )
+                    | (
+                        ADR_EXTRACTOR_PROFILE,
+                        Some(CaptureSemanticLocation::Adr { .. })
+                    )
+                    | (
+                        GIT_CHANGE_EXTRACTOR_PROFILE,
+                        Some(CaptureSemanticLocation::GitChange { .. })
+                    )
+            );
+            if !semantic_matches {
+                bail!("capture evidence semantic location is inconsistent with its profile");
+            }
+        }
+    }
+    Ok(())
+}
+
+type CoreCandidatePolicy = (
+    MemoryType,
+    MemoryLane,
+    MemoryDestination,
+    OkfProposalSensitivity,
+    &'static str,
+    &'static str,
+);
+
+fn core_candidate_policy(
+    request: &CaptureRequest,
+    candidate: &CaptureCandidate,
+) -> Result<CoreCandidatePolicy> {
+    match request.extractor.profile.as_str() {
+        MARKDOWN_EXTRACTOR_PROFILE => markdown_candidate_policy(candidate),
+        INSTRUCTION_EXTRACTOR_PROFILE => instruction_candidate_policy(candidate),
+        ADR_EXTRACTOR_PROFILE => adr_candidate_policy(candidate),
+        GIT_CHANGE_EXTRACTOR_PROFILE => git_candidate_policy(request, candidate),
+        _ => bail!("unsupported capture extractor profile"),
+    }
+}
+
+fn markdown_candidate_policy(candidate: &CaptureCandidate) -> Result<CoreCandidatePolicy> {
+    validate_project_evidence_scope(candidate)?;
+    let section_kind = one_section_kind(candidate)?;
+    if section_kind == "unclassified" {
+        return Ok((
+            MemoryType::Fact,
+            MemoryLane::Semantic,
+            MemoryDestination::NeedsReview,
+            OkfProposalSensitivity::Unknown,
+            "unrecognized_markdown_requires_review",
+            "unrecognized_markdown_sensitivity_unknown",
+        ));
+    }
+    let (memory_type, lane, destination, sensitivity) =
+        typed_section_policy(section_kind).context("capture Markdown section kind is invalid")?;
+    validate_typed_evidence_heading(candidate, section_kind, None)?;
+    Ok((
+        memory_type,
+        lane,
+        destination,
+        sensitivity,
+        "deterministic_typed_markdown_section",
+        "deterministic_typed_markdown_profile",
+    ))
+}
+
+fn instruction_candidate_policy(candidate: &CaptureCandidate) -> Result<CoreCandidatePolicy> {
+    validate_instruction_evidence_scope(candidate)?;
+    if candidate.evidence.iter().any(|evidence| {
+        !matches!(
+            evidence.semantic_location,
+            Some(CaptureSemanticLocation::Instruction)
+        )
+    }) {
+        bail!("instruction candidate evidence is missing its semantic location");
+    }
+    let section_kind = one_section_kind(candidate)?;
+    let has_heading = candidate
+        .evidence
+        .first()
+        .and_then(|evidence| evidence.text.as_deref())
+        .and_then(|text| text.lines().next())
+        .and_then(parse_atx_heading)
+        .is_some();
+    if section_kind == "instruction" && !has_heading {
+        return Ok(if instruction_evidence_requires_review(candidate) {
+            (
+                MemoryType::Procedure,
+                MemoryLane::Procedural,
+                MemoryDestination::NeedsReview,
+                OkfProposalSensitivity::Unknown,
+                "temporary_or_ambiguous_instruction_requires_review",
+                "instruction_sharing_or_lifetime_is_ambiguous",
+            )
+        } else {
+            (
+                MemoryType::Procedure,
+                MemoryLane::Procedural,
+                MemoryDestination::Repo,
+                OkfProposalSensitivity::RepoSafe,
+                "explicit_instruction_file_preamble",
+                "explicit_repo_instruction_file_passed_safeguards",
+            )
+        });
+    }
+    let typed_kind = section_kind.strip_prefix("instruction_");
+    let (memory_type, lane, destination, sensitivity) = match typed_kind {
+        Some(kind) => {
+            let policy = typed_section_policy(kind)
+                .context("capture instruction section kind is invalid")?;
+            validate_typed_evidence_heading(candidate, kind, None)?;
+            policy
+        }
+        None if section_kind == "instruction" => {
+            validate_untyped_instruction_heading(candidate)?;
+            (
+                MemoryType::Procedure,
+                MemoryLane::Procedural,
+                MemoryDestination::Repo,
+                OkfProposalSensitivity::RepoSafe,
+            )
+        }
+        None => bail!("capture instruction section kind is invalid"),
+    };
+    if instruction_evidence_requires_review(candidate) {
+        Ok((
+            memory_type,
+            lane,
+            MemoryDestination::NeedsReview,
+            OkfProposalSensitivity::Unknown,
+            "temporary_or_ambiguous_instruction_requires_review",
+            "instruction_sharing_or_lifetime_is_ambiguous",
+        ))
+    } else {
+        Ok((
+            memory_type,
+            lane,
+            destination,
+            sensitivity,
+            "deterministic_instruction_section",
+            "explicit_repo_instruction_file_passed_safeguards",
+        ))
+    }
+}
+
+fn adr_candidate_policy(candidate: &CaptureCandidate) -> Result<CoreCandidatePolicy> {
+    validate_project_evidence_scope(candidate)?;
+    let statuses = candidate
+        .evidence
+        .iter()
+        .filter_map(|evidence| match &evidence.semantic_location {
+            Some(CaptureSemanticLocation::Adr { status, .. }) => Some(status.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if statuses.len() != 1 {
+        bail!("ADR candidate evidence has inconsistent status metadata");
+    }
+    let status = statuses
+        .first()
+        .copied()
+        .context("ADR candidate status evidence is missing")?;
+    let field_tag = one_prefixed_tag(&candidate.memory.tags, "adr-field:")?;
+    let status_tag = one_prefixed_tag(&candidate.memory.tags, "adr-status:")?;
+    if status_tag != status || !candidate.memory.tags.iter().any(|tag| tag == "adr") {
+        bail!("ADR candidate tags do not match evidence status");
+    }
+    for required_field in ["title", "status", field_tag] {
+        if !candidate.evidence.iter().any(|evidence| {
+            matches!(
+                &evidence.semantic_location,
+                Some(CaptureSemanticLocation::Adr {
+                    field,
+                    status: evidence_status,
+                    ..
+                })
+                    if field == required_field && evidence_status == status
+            )
+        }) {
+            bail!("ADR candidate is missing title, status, or field evidence");
+        }
+    }
+    let lifecycle_targets = candidate
+        .evidence
+        .iter()
+        .filter_map(|evidence| match &evidence.semantic_location {
+            Some(CaptureSemanticLocation::Adr {
+                field,
+                target: Some(target),
+                ..
+            }) if field == "supersession" => Some(target.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if field_tag == "supersession" {
+        if lifecycle_targets.len() != 1
+            || lifecycle_targets.first().copied() != Some(candidate.memory.body.as_str())
+        {
+            bail!("ADR supersession target does not match exact lifecycle evidence");
+        }
+    } else if !lifecycle_targets.is_empty() {
+        bail!("ADR lifecycle target appears on a non-supersession candidate");
+    }
+    let (memory_type, lane) = match field_tag {
+        "context" | "consequences" => (MemoryType::Fact, MemoryLane::Semantic),
+        "decision" | "supersession" => (MemoryType::Decision, MemoryLane::Semantic),
+        "risk" => (MemoryType::Risk, MemoryLane::Semantic),
+        _ => bail!("ADR candidate field is invalid"),
+    };
+    let status_allows_repo = status == "accepted" && field_tag != "supersession";
+    Ok(if status_allows_repo {
+        (
+            memory_type,
+            lane,
+            MemoryDestination::Repo,
+            OkfProposalSensitivity::RepoSafe,
+            "accepted_adr_field",
+            "explicit_repo_adr_passed_safeguards",
+        )
+    } else {
+        (
+            memory_type,
+            lane,
+            MemoryDestination::NeedsReview,
+            OkfProposalSensitivity::Unknown,
+            if field_tag == "supersession" {
+                "adr_supersession_requires_lifecycle_review"
+            } else {
+                "adr_status_requires_review"
+            },
+            "adr_status_or_lifecycle_authority_is_not_repo_safe",
+        )
+    })
+}
+
+fn git_candidate_policy(
+    request: &CaptureRequest,
+    candidate: &CaptureCandidate,
+) -> Result<CoreCandidatePolicy> {
+    let section_kind = one_section_kind(candidate)?;
+    let (memory_type, lane, _, _) =
+        typed_section_policy(section_kind).context("Git candidate section kind is invalid")?;
+    if !matches!(
+        memory_type,
+        MemoryType::Decision
+            | MemoryType::Procedure
+            | MemoryType::Warning
+            | MemoryType::Risk
+            | MemoryType::FailedAttempt
+    ) {
+        bail!("Git candidate memory type is not durable guidance");
+    }
+    let source = request
+        .sources
+        .first()
+        .context("Git capture source is missing")?;
+    let mut paths = BTreeSet::new();
+    let mut sides = BTreeSet::new();
+    for evidence in &candidate.evidence {
+        let CaptureSemanticLocation::GitChange {
+            repository,
+            base,
+            head,
+            old_path,
+            new_path,
+            side,
+            ..
+        } = evidence
+            .semantic_location
+            .as_ref()
+            .context("Git candidate semantic location is missing")?
+        else {
+            bail!("Git candidate semantic location is invalid");
+        };
+        match (&source.locator, &source.git) {
+            (
+                CaptureSourceLocator::GitRange {
+                    repository: expected_repository,
+                    base: expected_base,
+                    head: expected_head,
+                    ..
+                },
+                None,
+            ) if repository == expected_repository
+                && base == expected_base
+                && head == expected_head => {}
+            (_, Some(git))
+                if repository == &git.repository && base == &git.base && head == &git.head => {}
+            _ => bail!("Git candidate revision identity does not match its source request"),
+        }
+        let path = if side == "old" {
+            old_path.as_deref().or(new_path.as_deref())
+        } else {
+            new_path.as_deref().or(old_path.as_deref())
+        }
+        .context("Git candidate has no evidence path")?;
+        validate_git_candidate_path(path)?;
+        paths.insert(path.to_owned());
+        sides.insert(side.as_str());
+    }
+    if sides.len() != 1 {
+        bail!("Git candidate evidence has inconsistent diff sides");
+    }
+    let side = sides
+        .first()
+        .copied()
+        .context("Git candidate evidence side is missing")?;
+    validate_typed_evidence_heading(
+        candidate,
+        section_kind,
+        Some(match side {
+            "new" => '+',
+            "old" => '-',
+            _ => bail!("Git candidate evidence side is invalid"),
+        }),
+    )?;
+    if candidate.memory.scope.kind != ScopeKind::Repo
+        || candidate.memory.scope.id.is_some()
+        || candidate
+            .memory
+            .scope
+            .paths
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != paths
+    {
+        bail!("Git candidate scope does not match its evidence path");
+    }
+    Ok(if side == "old" {
+        (
+            memory_type,
+            lane,
+            MemoryDestination::NeedsReview,
+            OkfProposalSensitivity::Unknown,
+            "deleted_git_guidance_requires_review",
+            "deleted_git_guidance_has_no_direct_lifecycle_authority",
+        )
+    } else {
+        (
+            memory_type,
+            lane,
+            MemoryDestination::Repo,
+            OkfProposalSensitivity::RepoSafe,
+            "deterministic_typed_added_git_guidance",
+            "explicit_repo_diff_passed_safeguards",
+        )
+    })
+}
+
+fn typed_section_policy(
+    section_kind: &str,
+) -> Option<(
+    MemoryType,
+    MemoryLane,
+    MemoryDestination,
+    OkfProposalSensitivity,
+)> {
+    Some(match section_kind {
+        "fact" => (
+            MemoryType::Fact,
+            MemoryLane::Semantic,
+            MemoryDestination::Repo,
+            OkfProposalSensitivity::RepoSafe,
+        ),
+        "preference" => (
+            MemoryType::Preference,
+            MemoryLane::Semantic,
+            MemoryDestination::Local,
+            OkfProposalSensitivity::LocalOnly,
+        ),
+        "decision" => (
+            MemoryType::Decision,
+            MemoryLane::Semantic,
+            MemoryDestination::Repo,
+            OkfProposalSensitivity::RepoSafe,
+        ),
+        "procedure" => (
+            MemoryType::Procedure,
+            MemoryLane::Procedural,
+            MemoryDestination::Repo,
+            OkfProposalSensitivity::RepoSafe,
+        ),
+        "episode" => (
+            MemoryType::Episode,
+            MemoryLane::Session,
+            MemoryDestination::Session,
+            OkfProposalSensitivity::TemporaryState,
+        ),
+        "warning" => (
+            MemoryType::Warning,
+            MemoryLane::Semantic,
+            MemoryDestination::Repo,
+            OkfProposalSensitivity::RepoSafe,
+        ),
+        "failed_attempt" => (
+            MemoryType::FailedAttempt,
+            MemoryLane::Episodic,
+            MemoryDestination::Repo,
+            OkfProposalSensitivity::RepoSafe,
+        ),
+        "risk" => (
+            MemoryType::Risk,
+            MemoryLane::Semantic,
+            MemoryDestination::Repo,
+            OkfProposalSensitivity::RepoSafe,
+        ),
+        _ => return None,
+    })
+}
+
+fn one_section_kind(candidate: &CaptureCandidate) -> Result<&str> {
+    let kinds = candidate
+        .evidence
+        .iter()
+        .map(|evidence| evidence.section_kind.as_str())
+        .collect::<BTreeSet<_>>();
+    if kinds.len() != 1 {
+        bail!("capture candidate evidence has inconsistent section kinds");
+    }
+    kinds
+        .first()
+        .copied()
+        .context("capture candidate evidence section kind is missing")
+}
+
+fn validate_project_evidence_scope(candidate: &CaptureCandidate) -> Result<()> {
+    let paths = candidate
+        .evidence
+        .iter()
+        .map(|evidence| {
+            evidence
+                .locator
+                .project_path()
+                .context("capture project evidence path is missing")
+                .map(str::to_owned)
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    if candidate.memory.scope.kind != ScopeKind::Repo
+        || candidate.memory.scope.id.is_some()
+        || candidate
+            .memory
+            .scope
+            .paths
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != paths
+    {
+        bail!("capture candidate scope does not match project evidence");
+    }
+    Ok(())
+}
+
+fn validate_instruction_evidence_scope(candidate: &CaptureCandidate) -> Result<()> {
+    let paths = candidate
+        .evidence
+        .iter()
+        .map(|evidence| {
+            let path = evidence
+                .locator
+                .project_path()
+                .context("instruction evidence path is missing")?;
+            Ok(path.rsplit_once('/').map(|(parent, _)| parent.to_owned()))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    if paths.len() != 1 {
+        bail!("instruction candidate evidence paths are inconsistent");
+    }
+    let expected = paths
+        .first()
+        .cloned()
+        .flatten()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if candidate.memory.scope.kind != ScopeKind::Repo
+        || candidate.memory.scope.id.is_some()
+        || candidate
+            .memory
+            .scope
+            .paths
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != expected
+    {
+        bail!("instruction candidate scope does not match its source directory");
+    }
+    Ok(())
+}
+
+fn validate_typed_evidence_heading(
+    candidate: &CaptureCandidate,
+    section_kind: &str,
+    diff_side: Option<char>,
+) -> Result<()> {
+    let evidence = candidate
+        .evidence
+        .first()
+        .context("capture typed evidence is missing")?;
+    let first = evidence
+        .text
+        .as_deref()
+        .and_then(|text| text.lines().next())
+        .context("capture typed evidence heading is missing")?;
+    let first = match diff_side {
+        Some(side) => first
+            .strip_prefix(side)
+            .context("Git capture evidence must match its declared diff side")?,
+        None => first,
+    };
+    let (_, heading) = parse_atx_heading(first).context("capture evidence heading is invalid")?;
+    let (typed, title) = typed_heading(&heading);
+    let Some((_, _, _, _, actual_kind)) = typed else {
+        bail!("capture evidence heading is not typed");
+    };
+    if actual_kind != section_kind || title != candidate.memory.title {
+        bail!("capture evidence heading does not match candidate memory");
+    }
+    Ok(())
+}
+
+fn validate_untyped_instruction_heading(candidate: &CaptureCandidate) -> Result<()> {
+    let first = candidate
+        .evidence
+        .first()
+        .and_then(|evidence| evidence.text.as_deref())
+        .and_then(|text| text.lines().next())
+        .context("instruction evidence heading is missing")?;
+    let (_, heading) =
+        parse_atx_heading(first).context("instruction evidence heading is invalid")?;
+    if typed_heading(&heading).0.is_some() || heading != candidate.memory.title {
+        bail!("instruction evidence heading does not match candidate memory");
+    }
+    Ok(())
+}
+
+fn instruction_evidence_requires_review(candidate: &CaptureCandidate) -> bool {
+    candidate.evidence.iter().any(|evidence| {
+        evidence
+            .heading_path
+            .iter()
+            .any(|heading| contains_instruction_review_marker(heading))
+            || evidence
+                .text
+                .as_deref()
+                .is_some_and(|text| text.lines().any(contains_instruction_review_marker))
+    })
+}
+
+fn contains_instruction_review_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let words = lower
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    INSTRUCTION_REVIEW_MARKERS
+        .iter()
+        .any(|marker| words.windows(marker.len()).any(|window| window == *marker))
+}
+
+fn one_prefixed_tag<'a>(tags: &'a [String], prefix: &str) -> Result<&'a str> {
+    let matches = tags
+        .iter()
+        .filter_map(|tag| tag.strip_prefix(prefix))
+        .collect::<Vec<_>>();
+    if matches.len() != 1 || matches[0].is_empty() {
+        bail!("capture candidate typed tag is missing or duplicated");
+    }
+    Ok(matches[0])
+}
+
+fn validate_git_candidate_path(path: &str) -> Result<()> {
+    validate_project_relative(path, "Git evidence")?;
+    if adapters::git_path_exclusion_code(path).is_some() {
+        bail!("Git candidate path is generated, managed, or dependency content");
+    }
+    Ok(())
 }
 
 fn blocked_after_planning_failure(
@@ -1172,6 +2241,7 @@ fn redacted_request(request: &CaptureRequest) -> CaptureRequest {
             path: "redacted.md".to_owned(),
         };
         source.media_type = "text/markdown".to_owned();
+        source.git = None;
     }
     value.extractor.profile = MARKDOWN_EXTRACTOR_PROFILE.to_owned();
     value
@@ -1269,16 +2339,132 @@ fn validate_request(request: &CaptureRequest) -> Result<()> {
     if prohibited_finding(source.source_id.as_bytes()).is_some() {
         bail!("capture source_id contains prohibited content");
     }
+    match request.extractor.profile.as_str() {
+        MARKDOWN_EXTRACTOR_PROFILE => {
+            require_markdown_media(source)?;
+            let CaptureSourceLocator::ProjectPath { path } = &source.locator else {
+                bail!("Markdown capture requires one project_path source");
+            };
+            if source.git.is_some() {
+                bail!("Markdown capture cannot include Git revision context");
+            }
+            validate_markdown_path(path)?;
+        }
+        INSTRUCTION_EXTRACTOR_PROFILE => {
+            require_markdown_media(source)?;
+            let CaptureSourceLocator::ProjectPath { path } = &source.locator else {
+                bail!("instruction capture requires one project_path source");
+            };
+            if source.git.is_some() {
+                bail!("instruction capture cannot include Git revision context");
+            }
+            validate_markdown_path(path)?;
+            let name = Path::new(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if !matches!(name, "AGENTS.md" | "CLAUDE.md") {
+                bail!("instruction capture source must be AGENTS.md or CLAUDE.md");
+            }
+        }
+        ADR_EXTRACTOR_PROFILE => {
+            require_markdown_media(source)?;
+            if source.git.is_some() {
+                bail!("ADR capture cannot include Git revision context");
+            }
+            match &source.locator {
+                CaptureSourceLocator::ProjectPath { path } => validate_markdown_path(path)?,
+                CaptureSourceLocator::ProjectDirectory {
+                    path,
+                    ignore_policy,
+                    include,
+                    ..
+                } => {
+                    validate_project_relative(path, "ADR directory")?;
+                    if ignore_policy != "git-v1" {
+                        bail!("ADR directory capture requires ignore_policy git-v1");
+                    }
+                    if include.as_slice() != ["*.md"] {
+                        bail!("ADR directory capture supports only the deterministic *.md include");
+                    }
+                }
+                _ => bail!("ADR capture requires one project_path or project_directory source"),
+            }
+        }
+        GIT_CHANGE_EXTRACTOR_PROFILE => {
+            if source.media_type != "text/x-diff" {
+                bail!("Git-change capture source media_type must be text/x-diff");
+            }
+            match &source.locator {
+                CaptureSourceLocator::ProjectPath { path } => {
+                    validate_project_relative(path, "Git diff source")?;
+                    if !matches!(
+                        Path::new(path).extension().and_then(|value| value.to_str()),
+                        Some("diff" | "patch")
+                    ) {
+                        bail!("Git diff source must use a .diff or .patch extension");
+                    }
+                    validate_git_source_context(
+                        source
+                            .git
+                            .as_ref()
+                            .context("Git diff capture requires explicit revision context")?,
+                    )?;
+                }
+                CaptureSourceLocator::SuppliedBytes {
+                    display_name,
+                    media_type,
+                    byte_length,
+                    source_content_hash,
+                } => {
+                    if media_type != &source.media_type {
+                        bail!("supplied-bytes media_type does not match the source descriptor");
+                    }
+                    validate_safe_display_name(display_name)?;
+                    if *byte_length > MAX_DIFF_SOURCE_BYTES {
+                        bail!("supplied Git diff exceeds the configured size limit");
+                    }
+                    validate_content_hash(source_content_hash)?;
+                    validate_git_source_context(
+                        source
+                            .git
+                            .as_ref()
+                            .context("supplied Git diff requires explicit revision context")?,
+                    )?;
+                }
+                CaptureSourceLocator::GitRange {
+                    repository,
+                    base,
+                    head,
+                    merge_parent,
+                    diff_format,
+                    ..
+                } => {
+                    if source.git.is_some() {
+                        bail!("git_range stores revision context in its locator");
+                    }
+                    validate_repository_identity(repository)?;
+                    validate_git_object_pair(base, head, "git_range")?;
+                    if !matches!(merge_parent.as_str(), "base_to_head" | "first_parent") {
+                        bail!("git_range merge_parent is unsupported");
+                    }
+                    if diff_format != "git-unified-v1" {
+                        bail!("git_range diff_format is unsupported");
+                    }
+                }
+                CaptureSourceLocator::ProjectDirectory { .. } => {
+                    bail!("Git-change capture does not accept a project directory")
+                }
+            }
+        }
+        _ => bail!("unsupported capture extractor profile"),
+    }
+    Ok(())
+}
+
+fn require_markdown_media(source: &CaptureSourceRequest) -> Result<()> {
     if source.media_type != "text/markdown" {
         bail!("capture source media_type must be text/markdown");
-    }
-    if request.extractor.profile != MARKDOWN_EXTRACTOR_PROFILE {
-        bail!("unsupported capture extractor profile");
-    }
-    let CaptureSourceLocator::ProjectPath { path } = &source.locator;
-    validate_project_path(path)?;
-    if prohibited_finding(path.as_bytes()).is_some() {
-        bail!("capture source locator contains prohibited content");
     }
     Ok(())
 }
@@ -1293,7 +2479,19 @@ fn valid_source_id(value: &str) -> bool {
         })
 }
 
-fn validate_project_path(value: &str) -> Result<()> {
+fn validate_markdown_path(value: &str) -> Result<()> {
+    validate_project_relative(value, "Markdown source")?;
+    if Path::new(value)
+        .extension()
+        .and_then(|value| value.to_str())
+        != Some("md")
+    {
+        bail!("capture source must be one Markdown file");
+    }
+    Ok(())
+}
+
+fn validate_project_relative(value: &str, label: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > CAPTURE_MAX_PATH_BYTES
         || value.contains('\\')
@@ -1304,96 +2502,90 @@ fn validate_project_path(value: &str) -> Result<()> {
             .split('/')
             .any(|component| component.is_empty() || matches!(component, "." | ".."))
     {
-        bail!("capture source path must be POSIX project-relative");
+        bail!("capture {label} path must be POSIX project-relative");
     }
-    let path = Path::new(value);
-    if path.extension().and_then(|value| value.to_str()) != Some("md") {
-        bail!("capture source must be one Markdown file");
-    }
-    for component in path.components() {
+    for component in Path::new(value).components() {
         let Component::Normal(component) = component else {
             bail!("capture source path contains an unsafe component");
         };
-        if component == ".memzoi" {
-            bail!("capture source cannot read Memzoi-managed state");
+        let component = component.to_string_lossy();
+        if component.eq_ignore_ascii_case(".memzoi") || component.eq_ignore_ascii_case(".git") {
+            bail!("capture source cannot read managed repository state");
         }
+    }
+    if prohibited_finding(value.as_bytes()).is_some() {
+        bail!("capture source locator contains prohibited content");
     }
     Ok(())
 }
 
-fn read_source(
-    paths: &MemoryPaths,
-    source: &CaptureSourceRequest,
-    relative: &str,
-    control: Option<&CapturePlanningControl>,
-) -> Result<(CaptureSourceSnapshot, Vec<u8>)> {
-    check_planning_control(control)?;
-    let candidate_path = paths.project_root.join(relative);
-    let current_dir = std::env::current_dir().context("failed to resolve capture runtime paths")?;
-    let candidate_resolved = candidate_path
-        .canonicalize()
-        .context("failed to resolve capture source containment")?;
-    for protected in [&paths.memory_dir, &paths.runtime_dir, &paths.exports_dir] {
-        let absolute = if protected.is_absolute() {
-            protected.clone()
-        } else {
-            current_dir.join(protected)
-        };
-        let normalized = normalize_absolute_path(&absolute);
-        let resolved = normalized.canonicalize().unwrap_or(normalized);
-        if candidate_resolved.starts_with(resolved) {
-            bail!("capture source cannot read Memzoi runtime or generated export state");
-        }
-    }
-    let mut file = open_capture_source(&paths.project_root, relative)?;
-    let before = file
-        .metadata()
-        .context("failed to inspect capture source")?;
-    if !before.is_file() {
-        bail!("capture source must be a regular file");
-    }
-    #[cfg(unix)]
+fn validate_safe_display_name(value: &str) -> Result<()> {
+    if value.trim().is_empty()
+        || value.len() > 256
+        || value.contains(['/', '\\', '\0'])
+        || value.chars().any(char::is_control)
+        || prohibited_finding(value.as_bytes()).is_some()
     {
-        use std::os::unix::fs::MetadataExt;
+        bail!("capture supplied source display_name is invalid");
+    }
+    Ok(())
+}
 
-        if before.nlink() != 1 {
-            bail!("capture source must not be hard-linked");
-        }
+fn validate_repository_identity(value: &str) -> Result<()> {
+    if value != "." {
+        bail!("capture Git repository identity must be the current project root");
     }
-    if before.len() > MAX_MARKDOWN_SOURCE_BYTES {
-        bail!("capture source exceeds the configured size limit");
+    Ok(())
+}
+
+fn validate_git_source_context(context: &CaptureGitSourceContext) -> Result<()> {
+    validate_repository_identity(&context.repository)?;
+    validate_git_object_pair(&context.base, &context.head, "Git diff")
+}
+
+fn validate_git_object_pair(base: &str, head: &str, label: &str) -> Result<()> {
+    validate_git_object_id(base)?;
+    validate_git_object_id(head)?;
+    let (base_algorithm, base_digest) = base
+        .split_once(':')
+        .context("capture Git base object ID is malformed")?;
+    let (head_algorithm, head_digest) = head
+        .split_once(':')
+        .context("capture Git head object ID is malformed")?;
+    if base_algorithm != head_algorithm {
+        bail!("{label} base and head must use the same object algorithm");
     }
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    file.by_ref()
-        .take(MAX_MARKDOWN_SOURCE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .context("failed to read capture source")?;
-    check_planning_control(control)?;
-    if bytes.len() as u64 > MAX_MARKDOWN_SOURCE_BYTES {
-        bail!("capture source exceeds the configured size limit");
-    }
-    let after = file
-        .metadata()
-        .context("failed to inspect capture source")?;
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        bail!("capture source changed while it was read");
-    }
-    #[cfg(unix)]
+    if base_digest.bytes().all(|byte| byte == b'0') || head_digest.bytes().all(|byte| byte == b'0')
     {
-        use std::os::unix::fs::MetadataExt;
-
-        if after.nlink() != 1 {
-            bail!("capture source link count changed while it was read");
-        }
+        bail!("{label} commit identities cannot be null object IDs");
     }
-    let snapshot = CaptureSourceSnapshot {
-        source_id: source.source_id.clone(),
-        locator: source.locator.clone(),
-        media_type: source.media_type.clone(),
-        byte_length: bytes.len() as u64,
-        source_content_hash: content_hash(&bytes),
-    };
-    Ok((snapshot, bytes))
+    if base == head {
+        bail!("{label} base and head must differ");
+    }
+    Ok(())
+}
+
+fn validate_git_object_id(value: &str) -> Result<()> {
+    let valid = value.strip_prefix("sha1:").is_some_and(|digest| {
+        digest.len() == 40 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) || value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if !valid || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        bail!("capture Git object ID must be a full lowercase algorithm-prefixed digest");
+    }
+    Ok(())
+}
+
+fn validate_content_hash(value: &str) -> Result<()> {
+    if !value.strip_prefix("blake3:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && !digest.bytes().any(|byte| byte.is_ascii_uppercase())
+    }) {
+        bail!("capture source content hash is invalid");
+    }
+    Ok(())
 }
 
 fn normalize_absolute_path(path: &Path) -> PathBuf {
@@ -2419,15 +3611,20 @@ fn evidence_for(
         text: Some(excerpt.to_owned()),
         heading_path: heading_path.to_vec(),
         section_kind: section_kind.to_owned(),
+        semantic_location: None,
     }])
 }
 
 fn default_scope(source: &CaptureSourceRequest) -> CaptureScope {
-    let CaptureSourceLocator::ProjectPath { path } = &source.locator;
     CaptureScope {
         kind: ScopeKind::Repo,
         id: None,
-        paths: vec![path.clone()],
+        paths: source
+            .locator
+            .project_path()
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -2486,6 +3683,17 @@ fn rebuild_edited_candidate(
 
     let (sensitivity, destination_reason, sensitivity_reason) = match destination {
         MemoryDestination::Repo => {
+            if original.evidence.iter().any(|evidence| {
+                matches!(
+                    &evidence.semantic_location,
+                    Some(CaptureSemanticLocation::Adr { field, .. })
+                        if field == "supersession"
+                )
+            }) {
+                bail!(
+                    "ADR supersession candidates require an explicit lifecycle proposal and cannot be converted to a create proposal"
+                );
+            }
             if !matches!(
                 original.classification.sensitivity,
                 OkfProposalSensitivity::RepoSafe | OkfProposalSensitivity::Unknown
@@ -2829,24 +4037,86 @@ fn summarize(candidates: &[CaptureCandidate]) -> CapturePlanSummary {
     summary
 }
 
-fn extractor_identity() -> CaptureExtractorIdentity {
-    CaptureExtractorIdentity {
-        kind: "deterministic".to_owned(),
-        id: "memzoi-markdown".to_owned(),
-        version: MARKDOWN_EXTRACTOR_VERSION.to_owned(),
-        configuration_hash: content_hash(
-            b"memzoi/markdown-deterministic-v1\0typed-atx-sections\0unsupported-regions=diagnostic-v1",
-        ),
-    }
+fn supported_extractor_profile(profile: &str) -> bool {
+    matches!(
+        profile,
+        MARKDOWN_EXTRACTOR_PROFILE
+            | INSTRUCTION_EXTRACTOR_PROFILE
+            | ADR_EXTRACTOR_PROFILE
+            | GIT_CHANGE_EXTRACTOR_PROFILE
+    )
 }
 
-fn safeguards() -> CaptureSafeguards {
-    CaptureSafeguards {
-        policy_version: "memzoi/capture-safeguards-v1".to_owned(),
-        configuration_hash: content_hash(
-            b"memzoi/capture-safeguards-v1\0prohibited-detectors=5\0source-hard-links=reject\0max-source=1048576\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
+fn extractor_identity(profile: &str) -> Result<CaptureExtractorIdentity> {
+    let (id, version, configuration) = match profile {
+        MARKDOWN_EXTRACTOR_PROFILE => (
+            "memzoi-markdown",
+            MARKDOWN_EXTRACTOR_VERSION,
+            b"memzoi/markdown-deterministic-v1\0typed-atx-sections\0unsupported-regions=diagnostic-v1"
+                .as_slice(),
         ),
-        max_source_bytes: MAX_MARKDOWN_SOURCE_BYTES,
+        INSTRUCTION_EXTRACTOR_PROFILE => (
+            "memzoi-instructions",
+            INSTRUCTION_EXTRACTOR_VERSION,
+            b"memzoi/instruction-deterministic-v1\0structured-sections\0generated-blocks=exclude-v1\0temporary-heading-preamble-body=needs-review-v3"
+                .as_slice(),
+        ),
+        ADR_EXTRACTOR_PROFILE => (
+            "memzoi-adr",
+            ADR_EXTRACTOR_VERSION,
+            b"memzoi/adr-deterministic-v1\0status-context-decision-consequences-supersession\0title-status-field-target-evidence=v2\0conflicting-metadata=fail-safe-v1\0directory-order=path-v1"
+                .as_slice(),
+        ),
+        GIT_CHANGE_EXTRACTOR_PROFILE => (
+            "memzoi-git-change",
+            GIT_CHANGE_EXTRACTOR_VERSION,
+            b"memzoi/git-change-deterministic-v1\0unified-diff-v1\0strict-headers-and-blobs=v2\0typed-durable-guidance-v1\0heading-boundary=all-v1\0path-policy=git-durable-v1\0files=512\0hunks=4096\0rename=exact-blob-v1\0mode-authority=regular-blob-evidence-v1"
+                .as_slice(),
+        ),
+        _ => bail!("unsupported capture extractor profile"),
+    };
+    Ok(CaptureExtractorIdentity {
+        kind: "deterministic".to_owned(),
+        id: id.to_owned(),
+        version: version.to_owned(),
+        configuration_hash: content_hash(configuration),
+    })
+}
+
+fn safeguards(profile: &str) -> Result<CaptureSafeguards> {
+    if !supported_extractor_profile(profile) {
+        bail!("unsupported capture extractor profile");
+    }
+    let git_change = profile == GIT_CHANGE_EXTRACTOR_PROFILE;
+    let adr_directory = profile == ADR_EXTRACTOR_PROFILE;
+    Ok(CaptureSafeguards {
+        policy_version: "memzoi/capture-safeguards-v1".to_owned(),
+        configuration_hash: if adr_directory {
+            content_hash(
+                b"memzoi/capture-safeguards-v1\0prohibited-detectors=6\0source-hard-links=reject\0max-source=1048576\0max-aggregate-source=4194304\0max-directory-files=128\0max-directory-depth=8\0directory-ignore=git-v1+ignore-0.4.28\0policy-prohibited-scan=raw-v1\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
+            )
+        } else if git_change {
+            content_hash(
+                b"memzoi/capture-safeguards-v1\0prohibited-detectors=6\0source-hard-links=reject\0max-source=2097152\0max-changed-files=512\0max-diff-hunks=4096\0max-policy-file=65536\0max-policy-bytes=262144\0policy-prohibited-scan=raw-v1\0adapter-timeout-ms=60000\0gitignore-engine=ignore-0.4.28\0git-no-lazy-fetch=1\0git-repository-identity=filesystem-v1\0git-local-config=memzoi/git-local-config-v1+no-includes+no-worktree-config\0git-hermetic-env=env-clear+explicit-path+nonexistent-home-xdg-tmp+trace-disabled-v1\0git-renderer-min=2.43\0git-renderer-options=order-null+inter-hunk-0+prefix-a-b+indicators-v1\0git-attributes=head-tree-only-v1\0git-control-files=stable-nlink1+per-child-revalidation-v1\0git-quote-path=true\0git-regular-blob-evidence=100644+100755-v1\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
+            )
+        } else {
+            content_hash(
+                b"memzoi/capture-safeguards-v1\0prohibited-detectors=6\0source-hard-links=reject\0max-source=1048576\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
+            )
+        },
+        max_source_bytes: if git_change {
+            MAX_DIFF_SOURCE_BYTES
+        } else {
+            MAX_MARKDOWN_SOURCE_BYTES
+        },
+        max_aggregate_source_bytes: adr_directory.then_some(CAPTURE_MAX_AGGREGATE_SOURCE_BYTES),
+        max_directory_files: adr_directory.then_some(CAPTURE_MAX_DIRECTORY_FILES),
+        max_directory_depth: adr_directory.then_some(CAPTURE_MAX_DIRECTORY_DEPTH),
+        max_changed_files: git_change.then_some(CAPTURE_MAX_GIT_CHANGED_FILES),
+        max_diff_hunks: git_change.then_some(CAPTURE_MAX_GIT_DIFF_HUNKS),
+        max_source_policy_file_bytes: git_change.then_some(CAPTURE_MAX_GIT_POLICY_FILE_BYTES),
+        max_source_policy_bytes: git_change.then_some(CAPTURE_MAX_GIT_POLICY_BYTES),
+        adapter_timeout_millis: git_change.then_some(CAPTURE_GIT_PROCESS_TIMEOUT_MILLIS),
         max_path_bytes: CAPTURE_MAX_PATH_BYTES,
         max_candidates: CAPTURE_MAX_CANDIDATES,
         max_markdown_headings: CAPTURE_MAX_MARKDOWN_HEADINGS,
@@ -2862,7 +4132,7 @@ fn safeguards() -> CaptureSafeguards {
         max_runtime_paths_per_record: CAPTURE_MAX_RUNTIME_PATHS_PER_RECORD,
         max_serialized_plan_bytes: CAPTURE_MAX_SERIALIZED_PLAN_BYTES,
         max_serialized_review_bytes: CAPTURE_MAX_SERIALIZED_REVIEW_BYTES,
-    }
+    })
 }
 
 fn prohibited_finding(bytes: &[u8]) -> Option<(String, Option<u64>)> {
@@ -2898,6 +4168,12 @@ fn prohibited_finding(bytes: &[u8]) -> Option<(String, Option<u64>)> {
                 Some(index as u64 + 1),
             ));
         }
+        if contains_prompt_injection(&lower) {
+            return Some((
+                "prohibited_prompt_injection".to_owned(),
+                Some(index as u64 + 1),
+            ));
+        }
         let role_events = transcript_role_event_count(&lower);
         if role_events > 0 {
             transcript_roles = transcript_roles.saturating_add(role_events);
@@ -2916,6 +4192,21 @@ fn prohibited_finding(bytes: &[u8]) -> Option<(String, Option<u64>)> {
         }
     }
     None
+}
+
+fn contains_prompt_injection(lower: &str) -> bool {
+    [
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "ignore prior instructions",
+        "disregard previous instructions",
+        "disregard prior instructions",
+        "override previous instructions",
+        "reveal the system prompt",
+        "exfiltrate the system prompt",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
 }
 
 fn contains_credential_assignment(lower: &str) -> bool {

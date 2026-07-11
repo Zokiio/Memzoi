@@ -18,7 +18,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi checkpoint` | Add and list runtime session checkpoints. |
 | `memzoi events` | Export runtime event-log rows. |
 | `memzoi session-end` | Promote explicit structured session-end candidates into proposal files or runtime memory. |
-| `memzoi capture` | Plan evidence-backed capture from one explicit Markdown file, record a complete review, and route reviewed candidates. |
+| `memzoi capture` | Plan evidence-backed capture from one explicit Markdown, instruction, ADR, or Git-change source; record a complete review; and route reviewed candidates. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
@@ -33,6 +33,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi rebuild` | Rebuild the derived SQLite database from canonical `.memzoi/records/` files. |
 | `memzoi doctor` | Check installation and repo memory readiness. |
 | `memzoi eval recall` | Evaluate a versioned file-native trust corpus in disposable isolated state. |
+| `memzoi eval capture` | Evaluate capture quality, safety, and review burden in disposable isolated state. |
 | `memzoi quickstart` | Print or run a tiny first-run workflow. |
 | `memzoi update` | Check for or apply a Memzoi release update. |
 | `memzoi mcp` | Print MCP integration configuration. |
@@ -61,9 +62,9 @@ Run `memzoi <command> --help` for exact options.
 | `checkpoint list` | `--json` |
 | `events export` | `--jsonl` |
 | `session-end` | `--from-file <path>` or `--from-checkpoint <checkpoint-id>`, `--actor`, `--json` |
-| `capture plan` | `--source <project-relative.md>`, `--source-id`, `--output`, `--json` |
-| `capture review` | `--plan-file`, `--decisions-file`, `--prior-review-file`, `--reviewed-by`, `--reviewed-at`, `--output`, `--json` |
-| `capture apply` | `--plan-file`, `--review-file`, `--prior-review-file`, `--plan-id`, `--review-id`, `--actor`, `--json` |
+| `capture plan` | `--source <project-relative.md>` or `--request-file <capture-request.{json,yaml}>`, `--source-bytes <path\|->` for `supplied_bytes`, `--source-id`, `--output`, `--json` |
+| `capture review` | `--plan-file`, `--decisions-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--reviewed-by`, `--reviewed-at`, `--output`, `--json` |
+| `capture apply` | `--plan-file`, `--review-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--plan-id`, `--review-id`, `--actor`, `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
@@ -78,6 +79,7 @@ Run `memzoi <command> --help` for exact options.
 | `rebuild` | `--json` |
 | `doctor` | `--project-root`, `--json` |
 | `eval recall` | `--corpus <path>`, `--baseline <path>`, `--update-baseline`, `--json` |
+| `eval capture` | `--corpus <path>`, `--baseline <path>`, `--update-baseline`, `--json` |
 | `quickstart` | `--apply-sample`, `--json` |
 | `update` | `--check`, `--ref`, `--json` |
 | `mcp config` | `--project-root` |
@@ -191,11 +193,59 @@ Corpus thresholds remain the regression gate. A valid corpus prints its full
 report before a threshold or baseline failure returns non-zero; corpus or
 fixture validation errors return non-zero without a report.
 
+## Capture evaluation
+
+Run the checked-in capture quality gate from isolated temporary projects:
+
+```bash
+memzoi eval capture \
+  --corpus evals/capture/v1/corpus.yaml \
+  --baseline evals/capture/v1/baseline.json
+
+memzoi eval capture \
+  --corpus evals/capture/v1/corpus.yaml \
+  --baseline evals/capture/v1/baseline.json \
+  --json
+```
+
+The strict `memzoi-capture-corpus/v1` YAML names every required extractor
+profile, explicit source fixture, expected candidate and exact evidence span,
+classification, routing action, forbidden candidate, review outcome, and
+optional stale-source check. Unknown fields, escaping fixture paths, duplicate
+IDs, invalid expectations, and unaccounted profiles are rejected.
+
+The `memzoi-capture-report/v1` report contains aggregate and per-profile
+candidate precision/recall, evidence validity, destination/sensitivity/action
+accuracy, forbidden-hit rate, unsupported-outcome accuracy, review-burden
+counts, payload observations, and p50/p95 latency. Its non-waivable hard gates
+require deterministic no-write planning, valid evidence from named sources, no
+unnamed evidence or undeclared policy reads, no prohibited-content echo,
+stale-source identity rejection, and execution of every required profile.
+
+`--baseline` is optional. When present, capture requires an exact match with the
+typed `memzoi-capture-baseline/v1` deterministic projection; unlike observed
+latency and payload metadata, any changed deterministic metric, profile
+fingerprint, hard gate, or case outcome fails. Update an accepted change only
+after every gate passes:
+
+```bash
+memzoi eval capture \
+  --corpus evals/capture/v1/corpus.yaml \
+  --baseline evals/capture/v1/baseline.json \
+  --update-baseline
+```
+
+See the [evaluation contributor guide](https://github.com/Zokiio/Memzoi/blob/main/docs/evaluation.md)
+for metric definitions and fixture guidance.
+
 ## Evidence-backed capture
 
-Capture turns one explicit Markdown document into evidence-linked memory candidates without
-scanning the repository or inferring from chat, shell history, hidden agent state, or generated
-Memzoi files. Its three CLI stages keep extraction, human judgment, and writes separate:
+Capture turns one explicitly named project source into evidence-linked memory
+candidates without ambient repository scanning or inference from chat, shell
+history, or hidden agent state. The legacy `--source` shorthand selects the
+`markdown-deterministic` profile; `--request-file` accepts the complete strict
+JSON or YAML request needed by instruction, ADR, and Git-change profiles. Its
+three CLI stages keep extraction, human judgment, and writes separate:
 
 ```bash
 memzoi capture plan \
@@ -221,15 +271,16 @@ memzoi capture apply \
   --json
 ```
 
-`plan` and `review` do not write memory state. `--output` optionally writes the complete JSON
-artifact, while `--json` prints it; without `--json`, the command prints a human-readable view.
-Input artifacts must be regular, nonsymlink UTF-8 files no larger than 2 MiB. Artifact output is
-installed without replacing an existing path. The artifact's data class also constrains where it
-may be saved, as described below.
+`plan` and `review` do not write memory state. `--output` optionally writes the
+complete JSON artifact, while `--json` prints it; without `--json`, the command
+prints a human-readable view. Request, plan, decision, and review artifacts
+must be regular, nonsymlink UTF-8 files no larger than 2 MiB. Artifact output
+is installed without replacing an existing path. The artifact's data class
+also constrains where it may be saved, as described below.
 
 ### Deterministic Markdown profile
 
-The v0.4 profile accepts exactly one regular UTF-8 `.md` file named by a POSIX
+The `markdown-deterministic` profile accepts exactly one regular UTF-8 `.md` file named by a POSIX
 project-relative path. Absolute paths, traversal components, backslashes, `.memzoi`, symbolic
 links, non-Markdown files, and files larger than 1 MiB are rejected. The source is read only from
 the current project; capture never searches for additional inputs. The profile also caps a plan at
@@ -281,6 +332,102 @@ read-only and does not create or change `.memzoi/`, SQLite, proposal, export, or
 If runtime inventory is missing or cannot be read safely, affected local/session candidates become
 `needs_review` no-write actions with a stable warning. Unaffected repo-only candidates retain the
 same identity they would have against an empty runtime inventory.
+
+### Instruction, ADR, and Git-change profiles
+
+Extension profiles use a complete `memzoi/capture-request-v1` artifact. For
+example, this request captures one explicitly named agent instruction file:
+
+```yaml
+schema: memzoi/capture-request-v1
+sources:
+  - source_id: agent-rules
+    locator:
+      kind: project_path
+      path: AGENTS.md
+    media_type: text/markdown
+extractor:
+  profile: instruction-deterministic
+```
+
+```bash
+memzoi capture plan --request-file capture-request.yaml --output capture-plan.json --json
+```
+
+The profiles and accepted source shapes are closed sets:
+
+| Profile | Accepted explicit source | Extraction and routing boundary |
+| --- | --- | --- |
+| `instruction-deterministic` | One `project_path` whose basename is `AGENTS.md` or `CLAUDE.md` | Preamble and nonempty sections become scoped procedures by default; typed headings retain their typed memory mapping. A nested instruction file scopes candidates to its parent directory. Memzoi-generated marker blocks and whole generated projections are excluded. Temporary, session, WIP, scratch, personal, private, or local-only markers in headings, preambles, or section bodies become `needs_review` with unknown sensitivity. |
+| `adr-deterministic` | One Markdown `project_path`, or one `project_directory` with `ignore_policy: git-v1` and `include: ["*.md"]` | Recognizes ADR context, decision, consequences, risk, and supersession fields. Accepted/adopted/approved ADR fields may route repo-safe, except supersession always requires lifecycle review. Draft, rejected, superseded, deprecated, or unknown status remains `needs_review`. |
+| `git-change-deterministic` | One `.diff`/`.patch` `project_path` plus explicit Git context, one `supplied_bytes` descriptor plus explicit Git context and transport bytes, or one immutable `git_range` | Parses strict unified Git diffs and extracts typed added `Decision`, `Procedure`, `Warning`, `Risk`, and `Failed attempt` sections. Typed deleted guidance is preserved as an old-side `needs_review` candidate and cannot route directly to repo memory. Evidence records revisions, blobs, old/new paths, change kind, hunk identity, side, and line coordinates. Unsupported additions and rename-only changes produce diagnostics instead of speculative memory. |
+
+ADR directory capture sorts a bounded set of Markdown members, follows the
+repository's `.gitignore` policy, never enters `.git` or `.memzoi`, and snapshots
+both member content and ignore-policy inputs. Its locator shape is:
+
+```yaml
+locator:
+  kind: project_directory
+  path: docs/adr
+  recursive: true
+  ignore_policy: git-v1
+  include: ["*.md"]
+```
+
+Git-change sources never infer revision identity from ambient `HEAD`. Git range
+rendering requires Git 2.43 or newer and is capped at 512 changed files and
+4,096 diff hunks. A
+project diff names `git.repository`, `git.base`, and `git.head`; a `git_range`
+instead carries `repository`, full base/head object IDs, `merge_parent`
+(`base_to_head` or `first_parent`), `rename_detection`, and
+`diff_format: git-unified-v1` inside the locator. The range loader resolves and
+pins commit objects, runs a bounded deterministic local Git diff with quoted
+paths and attributes pinned, and does not change the worktree, index, refs, or
+configuration. The bounded local repository configuration is prohibited-scanned,
+rejects external includes, and is identity-covered; inherited Git tracing and
+configuration environments are cleared. Applicable `.gitignore` files are read
+only from the explicitly named head tree and are likewise prohibited-scanned and
+identity-covered; project and supplied diff sources do not consult ambient
+worktree ignore files. Combined and binary diffs, non-regular evidence modes,
+unsafe paths, and unsupported diff forms fail closed.
+
+A `supplied_bytes` request additionally pins a safe display name,
+`media_type: text/x-diff`, exact byte length, and
+`blake3:<64-lowercase-hex>` source content hash. The bytes are transported
+separately and are never read from ambient stdin. Pass the same exact bytes at
+all three trust boundaries:
+
+```bash
+memzoi capture plan \
+  --request-file supplied-diff-request.yaml \
+  --source-bytes reviewed.diff \
+  --output capture-plan.json \
+  --json
+
+memzoi capture review \
+  --plan-file capture-plan.json \
+  --decisions-file capture-decisions.json \
+  --source-bytes reviewed.diff \
+  --reviewed-by zoki \
+  --reviewed-at 2026-07-11T12:00:00Z \
+  --output capture-review.json \
+  --json
+
+memzoi capture apply \
+  --plan-file capture-plan.json \
+  --review-file capture-review.json \
+  --source-bytes reviewed.diff \
+  --plan-id capture_... \
+  --review-id review_... \
+  --actor zoki \
+  --json
+```
+
+Use `--source-bytes -` only to select stdin explicitly. Missing, extra,
+changed, oversized, symlinked, or non-regular transport bytes fail before a
+review or write. Project-path, directory, and Git-range requests reject
+`--source-bytes`.
 
 ### Data classes and review
 
@@ -361,8 +508,10 @@ compact form without copied evidence text; its evidence identity and lineage rem
 rebuild, recall citations, and later audits. Private runtime records retain the same provenance
 through runtime preservation and rebuild.
 
-MCP exposes the same planner as the read-only `plan_capture_v1` tool, but deliberately exposes no
-capture review or apply tool and denies `private` results by default. See
+MCP exposes only the original read-only Markdown/project-path planner as
+`plan_capture_v1`; instruction, ADR, directory, supplied-byte, and Git-range
+requests remain CLI-only and are rejected at the MCP boundary. MCP deliberately
+exposes no capture review or apply tool and denies `private` results by default. See
 [MCP and agent integration](./mcp-and-agent-integration.md#plan_capture_v1-contract).
 
 ## Classified import

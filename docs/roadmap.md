@@ -1,7 +1,7 @@
 # Memzoi roadmap
 
 Status: active
-Updated: 2026-07-10
+Updated: 2026-07-11
 Shipped baseline: v0.3.1
 
 ## Product outcome
@@ -81,6 +81,10 @@ Delivery order:
 4. Add instruction-file, ADR, and Git-change sources independently.
 5. Gate the release on capture quality, prohibited-data leakage, and review burden.
 
+Implementation note: the v0.4 code and evaluation scope is tracked by #52-#55
+and the narrower #64-#67 slices below. Release metadata, candidate artifacts,
+and publication remain a separate post-merge decision under #68.
+
 Exit criteria:
 
 - A versioned, file-native corpus produces stable human and JSON reports.
@@ -102,6 +106,11 @@ Issues:
 - [#53 Capture explicit ADR sources with evidence](https://github.com/Zokiio/Memzoi/issues/53)
 - [#54 Capture durable findings from an explicit Git change](https://github.com/Zokiio/Memzoi/issues/54)
 - [#55 Measure capture quality and human review burden](https://github.com/Zokiio/Memzoi/issues/55)
+- [#64 Add a file-native capture evaluation runner and versioned corpus](https://github.com/Zokiio/Memzoi/issues/64)
+- [#65 Capture durable findings from an explicit Git diff payload](https://github.com/Zokiio/Memzoi/issues/65)
+- [#66 Capture durable findings from an explicit Git commit range](https://github.com/Zokiio/Memzoi/issues/66)
+- [#67 Gate v0.4 on capture quality, safety, and review burden](https://github.com/Zokiio/Memzoi/issues/67)
+- [#68 Prepare and release v0.4.0](https://github.com/Zokiio/Memzoi/issues/68)
 
 ### v0.5 - Trustworthy Hybrid Recall
 
@@ -160,10 +169,11 @@ flowchart LR
     eval --> plan
     trust --> plan
     plan --> apply["Reviewed routing #49"]
-    apply --> sources["Source adapters #52-#54"]
+    apply --> sources["Source adapters #52, #53, #65, #66"]
     plan --> mcp["Safe MCP planning #51"]
-    trusteval --> captureeval["Capture quality gate #55"]
+    trusteval --> captureeval["Capture runner and quality gate #55, #64, #67"]
     sources --> captureeval
+    captureeval --> release["v0.4 release readiness #68"]
     captureeval --> hybrid["Hybrid recall RFC #56"]
     trust --> lifecycle["Lifecycle RFC #50"]
     trusteval --> lifecycle

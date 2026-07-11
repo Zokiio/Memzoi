@@ -83,6 +83,14 @@ safe POSIX project-relative path, rejects `.memzoi` and symbolic-link traversal,
 1 MiB. Unknown fields and mutation-like arguments such as `apply`, `approve`, `review`, or an
 output path are rejected.
 
+This boundary intentionally does not expand with the CLI capture adapters.
+`instruction-deterministic`, `adr-deterministic`, and
+`git-change-deterministic` profiles, plus `project_directory`,
+`supplied_bytes`, and `git_range` locators, are rejected by MCP schema and
+runtime validation. Use `memzoi capture plan --request-file ...` for those
+explicit-source workflows, then keep review and apply on the human-controlled
+CLI path.
+
 The tool uses the same deterministic extractor, duplicate/conflict inventory, identities, evidence
 spans, and preconditions as `memzoi capture plan`. It is planning-only: it does not create the
 runtime database, proposal directories, artifacts, events, exports, records, or any other managed

@@ -30,10 +30,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run tests
         run: cargo test --workspace
-      - name: Run trust evaluation
+      - name: Run recall and capture evaluations
         run: make eval
       - name: Run onboarding smoke test
         run: make onboarding-smoke
+      - name: Run direct-binary capture smoke test
+        run: make capture-smoke
       - name: Check old-name drift
         run: |
           ! grep -rIE 'agent[.]memory[.]lab|[.]ai-memory|ai[.]memory' \

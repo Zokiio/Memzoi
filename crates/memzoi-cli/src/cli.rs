@@ -334,6 +334,21 @@ pub(crate) enum EvalCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Evaluate capture quality and review burden against a versioned corpus.
+    Capture {
+        /// Explicit path to the capture corpus YAML file.
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Compare deterministic results with this local baseline artifact.
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        /// Replace the selected baseline after every safety and quality gate passes.
+        #[arg(long, requires = "baseline")]
+        update_baseline: bool,
+        /// Emit the stable machine-readable report.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -390,11 +405,21 @@ pub(crate) enum ImportCommands {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CaptureCommands {
-    /// Extract a deterministic, mutation-free plan from one Markdown source.
+    /// Extract a deterministic, mutation-free plan from one explicit source.
     Plan {
         /// Explicit POSIX project-relative Markdown source path.
-        #[arg(long)]
-        source: String,
+        #[arg(
+            long,
+            conflicts_with = "request_file",
+            required_unless_present = "request_file"
+        )]
+        source: Option<String>,
+        /// Complete capture-request-v1 JSON or YAML artifact for an extension profile.
+        #[arg(long = "request-file", conflicts_with = "source")]
+        request_file: Option<PathBuf>,
+        /// Explicit supplied-bytes transport path, or '-' for explicitly selected stdin.
+        #[arg(long = "source-bytes", requires = "request_file")]
+        source_bytes: Option<PathBuf>,
         /// Stable source identifier included in evidence references.
         #[arg(long = "source-id", default_value = "source")]
         source_id: String,
@@ -417,6 +442,9 @@ pub(crate) enum CaptureCommands {
         /// Prior capture-review-v1 artifact when replacing deferred decisions.
         #[arg(long = "prior-review-file")]
         prior_review_file: Option<PathBuf>,
+        /// Exact supplied bytes used by the plan, or '-' for explicitly selected stdin.
+        #[arg(long = "source-bytes")]
+        source_bytes: Option<PathBuf>,
         /// Reviewer identity recorded in the review artifact.
         #[arg(long = "reviewed-by")]
         reviewed_by: String,
@@ -442,6 +470,9 @@ pub(crate) enum CaptureCommands {
         /// Immediate predecessor review when applying a later deferred-decision review.
         #[arg(long = "prior-review-file")]
         prior_review_file: Option<PathBuf>,
+        /// Exact supplied bytes used by the plan, or '-' for explicitly selected stdin.
+        #[arg(long = "source-bytes")]
+        source_bytes: Option<PathBuf>,
         /// Expected plan identity pinned by the reviewer.
         #[arg(long = "plan-id")]
         plan_id: String,

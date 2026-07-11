@@ -16,12 +16,14 @@ Use this checklist for GitHub binary releases.
 - [ ] Run `cargo fmt --all -- --check`.
 - [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`.
 - [ ] Run `cargo test --workspace`.
-- [ ] Run `make eval` and confirm the checked-in trust baseline passes.
+- [ ] Run `make eval` and confirm both the recall and capture baselines pass without drift.
 - [ ] Run `cargo +1.96.1 check --workspace --all-targets --locked`.
 - [ ] Run `make onboarding-smoke`.
+- [ ] Run `make capture-smoke` and confirm direct CLI and MCP capture planning leave managed memory state absent.
 - [ ] Run `pnpm docs:build` under `website/`.
 - [ ] Run the release workflow manually with `ref: main` and `upload: false`; inspect every platform artifact.
-- [ ] Extract one archive, run both binaries with `--version`, and verify its downloaded sidecar with `shasum -a 256 -c <archive>.sha256` (or `Get-FileHash` on Windows).
+- [ ] Extract one Unix archive, run `scripts/capture-smoke.sh <extracted-directory>` against its two packaged binaries, and verify its downloaded sidecar with `shasum -a 256 -c <archive>.sha256`.
+- [ ] Extract the Windows archive, run both binaries with `--version`, and verify its downloaded sidecar with `Get-FileHash`.
 - [ ] Open a repository created by the previous release and smoke-test `doctor`, `search`, `context`, and `rebuild` with the candidate binaries.
 
 ## Publish

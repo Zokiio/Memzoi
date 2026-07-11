@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use memzoi_core::{
-    RecallEvalBaselineStatus, RecallEvalForbiddenIds, RecallEvalIntegrityMetric,
-    RecallEvalLeakageMetric, RecallEvalRatioMetric, RecallEvalReport, RecallEvalSurface,
-    attach_recall_eval_baseline, run_recall_eval, write_recall_eval_baseline,
+    CaptureEvalBaselineStatus, CaptureEvalReport, RecallEvalBaselineStatus, RecallEvalForbiddenIds,
+    RecallEvalIntegrityMetric, RecallEvalLeakageMetric, RecallEvalRatioMetric, RecallEvalReport,
+    RecallEvalSurface, attach_capture_eval_baseline, attach_recall_eval_baseline, run_capture_eval,
+    run_recall_eval, write_capture_eval_baseline, write_recall_eval_baseline,
 };
 
 use crate::output::print_json;
@@ -43,6 +44,100 @@ pub(crate) fn recall_eval_command(
         bail!("recall evaluation thresholds or baseline compatibility failed");
     }
     Ok(())
+}
+
+pub(crate) fn capture_eval_command(
+    corpus: PathBuf,
+    baseline: Option<PathBuf>,
+    update_baseline: bool,
+    as_json: bool,
+) -> Result<()> {
+    let mut report = run_capture_eval(&corpus)?;
+    let gates_passed = report.gates_passed;
+
+    if update_baseline && gates_passed {
+        let Some(baseline_path) = baseline.as_ref() else {
+            bail!("--update-baseline requires --baseline <PATH>");
+        };
+        write_capture_eval_baseline(&report, baseline_path)?;
+    }
+    if let Some(baseline_path) = baseline.as_ref()
+        && (!update_baseline || gates_passed)
+    {
+        attach_capture_eval_baseline(&mut report, baseline_path)?;
+    }
+
+    if as_json {
+        print_json(&serde_json::to_value(&report)?)?;
+    } else {
+        print_capture_human_report(&report);
+    }
+
+    if update_baseline && !gates_passed {
+        bail!("capture evaluation gates failed; baseline was not modified");
+    }
+    if !report.passed {
+        bail!("capture evaluation gates or baseline equality failed");
+    }
+    Ok(())
+}
+
+fn print_capture_human_report(report: &CaptureEvalReport) {
+    println!("Memzoi capture evaluation ({})", report.version);
+    println!("corpus:\t{}", report.corpus.name);
+    println!("corpus_version:\t{}", report.corpus.version);
+    println!("corpus_digest:\t{}", report.corpus.digest);
+    println!("profiles:\t{}", report.corpus.profile_count);
+    println!("cases:\t{}", report.corpus.case_count);
+    println!();
+    println!("case results");
+    for case in &report.cases {
+        println!("{}\t{}\t{}", pass_label(case.passed), case.profile, case.id);
+        println!(
+            "  candidates:\ttp={} fp={} fn={} forbidden={}",
+            case.true_positives,
+            case.false_positives,
+            case.false_negatives,
+            case.forbidden_hits.len()
+        );
+        println!(
+            "  evidence/classification:\t{:.6}/{:.6}/{:.6}",
+            case.evidence_validity.rate,
+            case.destination_accuracy.rate,
+            case.sensitivity_accuracy.rate
+        );
+    }
+    println!();
+    println!("aggregate");
+    println!(
+        "candidate_precision:\t{:.6}",
+        report.metrics.candidate_precision.value
+    );
+    println!(
+        "candidate_recall:\t{:.6}",
+        report.metrics.candidate_recall.value
+    );
+    println!(
+        "evidence_validity:\t{:.6}",
+        report.metrics.evidence_validity.rate
+    );
+    println!(
+        "case_pass_rate:\t{:.6}",
+        report.metrics.case_pass_rate.value
+    );
+    println!("hard_gates:\t{}", pass_label(report.hard_gates.passed()));
+    if let Some(results) = &report.threshold_results {
+        println!("thresholds:\t{}", pass_label(results.passed));
+    }
+    if let Some(baseline) = &report.baseline {
+        let status = match baseline.status {
+            CaptureEvalBaselineStatus::Match => "match",
+            CaptureEvalBaselineStatus::Changed => "changed",
+            CaptureEvalBaselineStatus::Incompatible => "incompatible",
+        };
+        println!("baseline:\t{status}");
+    }
+    println!("result:\t{}", pass_label(report.passed));
 }
 
 fn print_human_report(report: &RecallEvalReport) {

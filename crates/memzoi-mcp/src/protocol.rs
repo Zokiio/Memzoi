@@ -8,10 +8,11 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
-    CaptureDataClass, CapturePlanningControl, CaptureRequest, ContextPackInput, MemoryDestination,
-    MemoryDraft, MemoryLane, MemoryPaths, MemoryService, MemoryType, OkfProposalSensitivity,
-    PrecheckInput, Proposal, ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput,
-    Visibility, plan_capture, plan_capture_with_control,
+    CaptureDataClass, CapturePlanningControl, CaptureRequest, CaptureSourceLocator,
+    ContextPackInput, MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryDraft, MemoryLane,
+    MemoryPaths, MemoryService, MemoryType, OkfProposalSensitivity, PrecheckInput, Proposal,
+    ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, Visibility, plan_capture,
+    plan_capture_with_control,
 };
 use serde_json::{Value, json};
 
@@ -963,6 +964,7 @@ fn plan_capture_output(
 ) -> Result<Value> {
     let request = serde_json::from_value::<CaptureRequest>(arguments.clone())
         .map_err(|_| anyhow!(INVALID_CAPTURE_REQUEST))?;
+    validate_mcp_capture_authority(&request)?;
     let plan = match control {
         Some(control) => plan_capture_with_control(&state.paths, request, control),
         None => plan_capture(&state.paths, request),
@@ -979,6 +981,20 @@ fn plan_capture_output(
     })?;
     ensure_capture_data_class(&plan.data_class)?;
     serde_json::to_value(plan).map_err(|_| anyhow!(CAPTURE_PLANNING_FAILED))
+}
+
+fn validate_mcp_capture_authority(request: &CaptureRequest) -> Result<()> {
+    let allowed = request.sources.first().is_some_and(|source| {
+        request.sources.len() == 1
+            && request.extractor.profile == MARKDOWN_EXTRACTOR_PROFILE
+            && source.media_type == "text/markdown"
+            && source.git.is_none()
+            && matches!(&source.locator, CaptureSourceLocator::ProjectPath { .. })
+    });
+    if !allowed {
+        bail!(INVALID_CAPTURE_REQUEST);
+    }
+    Ok(())
 }
 
 fn ensure_capture_data_class(data_class: &CaptureDataClass) -> Result<()> {
@@ -1811,6 +1827,50 @@ mod tests {
                 .contains("example.invalid")
         );
         assert!(state.service.get().is_none());
+    }
+
+    #[test]
+    fn capture_runtime_authority_rejects_new_profiles_locators_and_git_context() {
+        let (_temp, state) = capture_test_state();
+        let mut instruction_profile = capture_arguments("AGENTS.md");
+        instruction_profile["extractor"]["profile"] = json!("instruction-deterministic");
+
+        let mut directory_locator = capture_arguments("docs/adr");
+        directory_locator["sources"][0]["locator"] = json!({
+            "kind": "project_directory",
+            "path": "docs/adr",
+            "recursive": true,
+            "ignore_policy": "git",
+            "include": ["**/*.md"]
+        });
+
+        let mut supplied_locator = capture_arguments("change.diff");
+        supplied_locator["sources"][0]["locator"] = json!({
+            "kind": "supplied_bytes",
+            "display_name": "change.diff",
+            "media_type": "text/x-diff",
+            "byte_length": 0,
+            "source_content_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+        });
+
+        let mut git_context = capture_arguments("notes.md");
+        git_context["sources"][0]["git"] = json!({
+            "repository": ".",
+            "base": "0000000000000000000000000000000000000000",
+            "head": "1111111111111111111111111111111111111111"
+        });
+
+        for request in [
+            instruction_profile,
+            directory_locator,
+            supplied_locator,
+            git_context,
+        ] {
+            let error = plan_capture_output(&state, &request, None)
+                .expect_err("expanded capture authority must remain unavailable over MCP");
+            assert_eq!(error.to_string(), INVALID_CAPTURE_REQUEST);
+            assert!(state.service.get().is_none());
+        }
     }
 
     #[test]

@@ -19,6 +19,23 @@ Common checks:
 ```bash
 make smoke
 make onboarding-smoke
+make eval
+make capture-smoke
+```
+
+`make eval` runs both checked-in suites; use `make eval-recall` or
+`make eval-capture` while iterating. Baseline writes are always explicit through
+`make eval-update-recall-baseline` or
+`make eval-update-capture-baseline`.
+
+`make capture-smoke` builds the CLI and MCP server, then invokes those binary
+files directly against an uninitialized temporary repository. It requires both
+planning surfaces to return an evidence-backed plan without creating managed
+memory state. To test extracted release artifacts instead, pass their directory
+to the script:
+
+```bash
+scripts/capture-smoke.sh /path/to/extracted-archive
 ```
 
 Underlying commands:
@@ -75,6 +92,8 @@ memzoi search --help
 memzoi context --help
 memzoi precheck --help
 make onboarding-smoke
+make eval
+make capture-smoke
 ```
 
 Use the existing `target/debug/memzoi` binary for local help comparisons if Cargo is unavailable but a debug binary has already been built.

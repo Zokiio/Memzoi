@@ -7,16 +7,17 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    CaptureRequest, CheckpointInput, ContextPackInput, ExportFormat, ExportInput,
-    FileProposalInventoryEntry, FileProposalInventoryError, FileProposalResolutionResult,
-    HandoffInput, ImportApplyResult, ImportPlan, InitRequest, LocalMemoryInput, MemoryDestination,
-    MemoryDraft, MemoryLane, MemoryRecord, MemoryService, MemoryType, OkfProposalOutcome,
-    OkfProposalSensitivity, OkfProposalStatus, PrecheckInput, Proposal, ProposalApprovalOverride,
-    ProposalInboxSummary, ProposalStatus, ProposalStatusFilter, ProposeOptions, ScopeKind,
-    SearchInput, SearchResult, SessionEndResult, SessionEndWrite, Visibility, build_capture_review,
-    build_capture_review_with_prior, discover_paths, lifecycle_transaction_artifact_count,
-    okf_proposal_matches_identity, parse_capture_plan, parse_capture_review,
-    parse_capture_review_input, parse_import_document, parse_session_end_document, plan_capture,
+    CaptureRequest, CaptureSourceInputs, CaptureSourceLocator, CheckpointInput, ContextPackInput,
+    ExportFormat, ExportInput, FileProposalInventoryEntry, FileProposalInventoryError,
+    FileProposalResolutionResult, HandoffInput, ImportApplyResult, ImportPlan, InitRequest,
+    LocalMemoryInput, MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryService,
+    MemoryType, OkfProposalOutcome, OkfProposalSensitivity, OkfProposalStatus, PrecheckInput,
+    Proposal, ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus, ProposalStatusFilter,
+    ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult, SessionEndWrite,
+    Visibility, build_capture_review_with_inputs, build_capture_review_with_prior_and_inputs,
+    discover_paths, lifecycle_transaction_artifact_count, okf_proposal_matches_identity,
+    parse_capture_plan, parse_capture_request, parse_capture_review, parse_capture_review_input,
+    parse_import_document, parse_session_end_document, plan_capture_with_inputs,
     scan_file_proposal_inventory,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -112,44 +113,50 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
         Commands::Capture { command } => match command {
             CaptureCommands::Plan {
                 source,
+                request_file,
+                source_bytes,
                 source_id,
                 output,
                 json,
-            } => capture_plan_command(source, source_id, output, json),
+            } => capture_plan_command(source, request_file, source_bytes, source_id, output, json),
             CaptureCommands::Review {
                 plan_file,
                 decisions_file,
                 prior_review_file,
+                source_bytes,
                 reviewed_by,
                 reviewed_at,
                 output,
                 json,
-            } => capture_review_command(
+            } => capture_review_command(CaptureReviewCommand {
                 plan_file,
                 decisions_file,
                 prior_review_file,
+                source_bytes,
                 reviewed_by,
                 reviewed_at,
                 output,
-                json,
-            ),
+                as_json: json,
+            }),
             CaptureCommands::Apply {
                 plan_file,
                 review_file,
                 prior_review_file,
+                source_bytes,
                 plan_id,
                 review_id,
                 actor,
                 json,
-            } => capture_apply_command(
+            } => capture_apply_command(CaptureApplyCommand {
                 plan_file,
                 review_file,
                 prior_review_file,
-                &plan_id,
-                &review_id,
-                &actor,
-                json,
-            ),
+                source_bytes,
+                plan_id,
+                review_id,
+                actor,
+                as_json: json,
+            }),
         },
         Commands::ProposalFiles { command } => match command {
             ProposalFileCommands::List { json } => proposal_files_list_command(json),
@@ -294,6 +301,12 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 update_baseline,
                 json,
             } => eval::recall_eval_command(corpus, baseline, update_baseline, json),
+            EvalCommands::Capture {
+                corpus,
+                baseline,
+                update_baseline,
+                json,
+            } => eval::capture_eval_command(corpus, baseline, update_baseline, json),
         },
         Commands::Quickstart { apply_sample, json } => quickstart_command(apply_sample, json),
         Commands::Update {
@@ -469,29 +482,38 @@ fn print_import_plan_human(plan: &ImportPlan) {
 }
 
 fn capture_plan_command(
-    source: String,
+    source: Option<String>,
+    request_file: Option<PathBuf>,
+    source_bytes: Option<PathBuf>,
     source_id: String,
     output: Option<PathBuf>,
     as_json: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let paths = discover_paths(&cwd)?;
-    let request = serde_json::from_value::<CaptureRequest>(json!({
-        "schema": "memzoi/capture-request-v1",
-        "sources": [{
-            "source_id": source_id,
-            "locator": {
-                "kind": "project_path",
-                "path": source,
+    let request = match (source, request_file) {
+        (Some(source), None) => serde_json::from_value::<CaptureRequest>(json!({
+            "schema": "memzoi/capture-request-v1",
+            "sources": [{
+                "source_id": source_id,
+                "locator": {
+                    "kind": "project_path",
+                    "path": source,
+                },
+                "media_type": "text/markdown",
+            }],
+            "extractor": {
+                "profile": "markdown-deterministic",
             },
-            "media_type": "text/markdown",
-        }],
-        "extractor": {
-            "profile": "markdown-deterministic",
-        },
-    }))
-    .context("failed to construct capture request")?;
-    let plan = plan_capture(&paths, request)?;
+        }))
+        .context("failed to construct capture request")?,
+        (None, Some(request_file)) => {
+            parse_capture_request(&read_capture_artifact(&request_file, "capture request")?)?
+        }
+        _ => bail!("capture plan requires exactly one --source or --request-file"),
+    };
+    let source_inputs = capture_source_inputs(&request, source_bytes.as_deref())?;
+    let plan = plan_capture_with_inputs(&paths, request, &source_inputs)?;
     let write_result = output
         .as_deref()
         .map(|destination| write_classified_capture_artifact(&plan, destination, &paths))
@@ -505,15 +527,28 @@ fn capture_plan_command(
     write_result.map(|_| ())
 }
 
-fn capture_review_command(
+struct CaptureReviewCommand {
     plan_file: PathBuf,
     decisions_file: PathBuf,
     prior_review_file: Option<PathBuf>,
+    source_bytes: Option<PathBuf>,
     reviewed_by: String,
     reviewed_at: String,
     output: Option<PathBuf>,
     as_json: bool,
-) -> Result<()> {
+}
+
+fn capture_review_command(command: CaptureReviewCommand) -> Result<()> {
+    let CaptureReviewCommand {
+        plan_file,
+        decisions_file,
+        prior_review_file,
+        source_bytes,
+        reviewed_by,
+        reviewed_at,
+        output,
+        as_json,
+    } = command;
     let plan = parse_capture_plan(&read_capture_artifact(&plan_file, "capture plan")?)?;
     let input = parse_capture_review_input(&read_capture_artifact(
         &decisions_file,
@@ -521,22 +556,31 @@ fn capture_review_command(
     )?)?;
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let paths = discover_paths(&cwd)?;
+    let source_inputs = capture_source_inputs(&plan.request, source_bytes.as_deref())?;
     let review = match prior_review_file {
         Some(prior_review_file) => {
             let prior = parse_capture_review(&read_capture_artifact(
                 &prior_review_file,
                 "prior capture review",
             )?)?;
-            build_capture_review_with_prior(
+            build_capture_review_with_prior_and_inputs(
                 &paths,
                 &plan,
                 input,
                 &prior,
+                &source_inputs,
                 &reviewed_by,
                 &reviewed_at,
             )?
         }
-        None => build_capture_review(&paths, &plan, input, &reviewed_by, &reviewed_at)?,
+        None => build_capture_review_with_inputs(
+            &paths,
+            &plan,
+            input,
+            &source_inputs,
+            &reviewed_by,
+            &reviewed_at,
+        )?,
     };
     let write_result = output
         .as_deref()
@@ -551,17 +595,31 @@ fn capture_review_command(
     write_result.map(|_| ())
 }
 
-fn capture_apply_command(
+struct CaptureApplyCommand {
     plan_file: PathBuf,
     review_file: PathBuf,
     prior_review_file: Option<PathBuf>,
-    plan_id: &str,
-    review_id: &str,
-    actor: &str,
+    source_bytes: Option<PathBuf>,
+    plan_id: String,
+    review_id: String,
+    actor: String,
     as_json: bool,
-) -> Result<()> {
+}
+
+fn capture_apply_command(command: CaptureApplyCommand) -> Result<()> {
+    let CaptureApplyCommand {
+        plan_file,
+        review_file,
+        prior_review_file,
+        source_bytes,
+        plan_id,
+        review_id,
+        actor,
+        as_json,
+    } = command;
     let plan = parse_capture_plan(&read_capture_artifact(&plan_file, "capture plan")?)?;
     let review = parse_capture_review(&read_capture_artifact(&review_file, "capture review")?)?;
+    let source_inputs = capture_source_inputs(&plan.request, source_bytes.as_deref())?;
     let service = open_service()?;
     let result = match prior_review_file {
         Some(prior_review_file) => {
@@ -569,9 +627,24 @@ fn capture_apply_command(
                 &prior_review_file,
                 "prior capture review",
             )?)?;
-            service.apply_capture_with_prior(actor, plan, review, &prior, plan_id, review_id)?
+            service.apply_capture_with_prior_and_inputs(
+                &actor,
+                plan,
+                review,
+                &prior,
+                &source_inputs,
+                &plan_id,
+                &review_id,
+            )?
         }
-        None => service.apply_capture(actor, plan, review, plan_id, review_id)?,
+        None => service.apply_capture_with_inputs(
+            &actor,
+            plan,
+            review,
+            &source_inputs,
+            &plan_id,
+            &review_id,
+        )?,
     };
     if as_json {
         print_json(
@@ -580,6 +653,59 @@ fn capture_apply_command(
     } else {
         print_capture_human("capture-apply", &result)
     }
+}
+
+fn capture_source_inputs(
+    request: &CaptureRequest,
+    source_bytes: Option<&Path>,
+) -> Result<CaptureSourceInputs> {
+    let supplied = request.sources.first().is_some_and(|source| {
+        matches!(&source.locator, CaptureSourceLocator::SuppliedBytes { .. })
+    });
+    match (supplied, source_bytes) {
+        (false, None) => Ok(CaptureSourceInputs::new()),
+        (false, Some(_)) => bail!("--source-bytes is valid only for a supplied_bytes source"),
+        (true, None) => bail!("supplied_bytes capture requires --source-bytes <PATH|->"),
+        (true, Some(path)) => {
+            let source_id = request
+                .sources
+                .first()
+                .context("capture request source is missing")?
+                .source_id
+                .clone();
+            let bytes = read_capture_source_bytes(path)?;
+            let mut inputs = CaptureSourceInputs::new();
+            inputs.insert_supplied_bytes(source_id, bytes)?;
+            Ok(inputs)
+        }
+    }
+}
+
+fn read_capture_source_bytes(path: &Path) -> Result<Vec<u8>> {
+    fn read_bounded(reader: &mut impl Read) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        reader
+            .take(memzoi_core::MAX_DIFF_SOURCE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .context("failed to read supplied capture bytes")?;
+        if bytes.len() as u64 > memzoi_core::MAX_DIFF_SOURCE_BYTES {
+            bail!("supplied capture bytes exceed the configured size limit");
+        }
+        Ok(bytes)
+    }
+
+    if path == Path::new("-") {
+        let stdin = std::io::stdin();
+        return read_bounded(&mut stdin.lock());
+    }
+    let metadata =
+        fs::symlink_metadata(path).context("failed to inspect supplied capture byte transport")?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("supplied capture byte transport must be a regular file");
+    }
+    let mut file =
+        fs::File::open(path).context("failed to open supplied capture byte transport")?;
+    read_bounded(&mut file)
 }
 
 const CAPTURE_ARTIFACT_MAX_BYTES: usize = 2 * 1024 * 1024;
