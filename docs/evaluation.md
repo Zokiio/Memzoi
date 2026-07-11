@@ -95,8 +95,9 @@ The strict schema requires answer and coding utility; every lifecycle, failure,
 promotion, rollback, and replacement scenario; all fallback reasons; an exact
 10,000-record workload; warm/cold, build/update, memory, and disk observations;
 environment metadata; and a cross-platform tolerance contract. Traces can hold
-only reason codes and counters, so raw queries, excerpts, private identifiers,
-and provider metadata are not representable. The committed evidence is
+only versioned, allowlisted reason-code enums and counters, so raw queries,
+excerpts, private identifiers, and provider metadata are not representable. The
+committed evidence is
 synthetic contract data and must be replaced with candidate/release-bound
 measurements before it becomes release evidence.
 

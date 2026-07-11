@@ -129,8 +129,52 @@ pub struct RecallEnvironmentEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecallTraceCounter {
-    pub reason_code: String,
+    pub reason_code: RecallTraceReasonCode,
     pub count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallTraceReasonCode {
+    SemanticSuccess,
+    LexicalFallback,
+    SafeSuppression,
+    MissingModel,
+    MissingIndex,
+    StaleIndex,
+    IncompleteIndex,
+    IncompatibleIndex,
+    CorruptIndex,
+    QueryEmbeddingFailure,
+    UnsupportedPlatform,
+    BuildStarted,
+    BuildCompleted,
+    BuildFailed,
+    Promotion,
+    Rollback,
+}
+
+impl RecallTraceReasonCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SemanticSuccess => "semantic_success",
+            Self::LexicalFallback => "lexical_fallback",
+            Self::SafeSuppression => "safe_suppression",
+            Self::MissingModel => "missing_model",
+            Self::MissingIndex => "missing_index",
+            Self::StaleIndex => "stale_index",
+            Self::IncompleteIndex => "incomplete_index",
+            Self::IncompatibleIndex => "incompatible_index",
+            Self::CorruptIndex => "corrupt_index",
+            Self::QueryEmbeddingFailure => "query_embedding_failure",
+            Self::UnsupportedPlatform => "unsupported_platform",
+            Self::BuildStarted => "build_started",
+            Self::BuildCompleted => "build_completed",
+            Self::BuildFailed => "build_failed",
+            Self::Promotion => "promotion",
+            Self::Rollback => "rollback",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,7 +282,7 @@ pub fn run_recall_operational_eval(path: impl AsRef<Path>) -> Result<RecallOpera
     let trace_counters = evidence
         .trace_counters
         .iter()
-        .map(|counter| (counter.reason_code.clone(), counter.count))
+        .map(|counter| (counter.reason_code.as_str().to_owned(), counter.count))
         .collect::<BTreeMap<_, _>>();
     let cross_platform = match evidence.cross_platform {
         RecallCrossPlatformContract::ExactVectors => {
@@ -359,10 +403,6 @@ fn validate_evidence(evidence: &RecallOperationalEvidence) -> Result<()> {
         .operational
         .iter()
         .any(|case| !is_reason_code(&case.reason_code))
-        || evidence
-            .trace_counters
-            .iter()
-            .any(|counter| !is_reason_code(&counter.reason_code))
     {
         bail!("invalid operational or fallback case");
     }

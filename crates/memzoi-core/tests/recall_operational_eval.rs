@@ -40,3 +40,18 @@ fn operational_evidence_rejects_raw_unknown_trace_fields() {
     let error = run_recall_operational_eval(path).unwrap_err();
     assert!(format!("{error:#}").contains("unknown field `raw_query`"));
 }
+
+#[test]
+fn operational_evidence_rejects_unregistered_trace_reason_codes() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/operational/evidence.json");
+    let bytes = std::fs::read(fixture).unwrap();
+    let mut evidence: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    evidence["trace_counters"][0]["reason_code"] = serde_json::json!("private_identifier_123");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("evidence.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+
+    let error = run_recall_operational_eval(path).unwrap_err();
+    assert!(format!("{error:#}").contains("unknown variant `private_identifier_123`"));
+}

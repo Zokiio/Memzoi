@@ -377,6 +377,18 @@ fn validate_manifest(manifest: &RecallRetrievalCandidateManifest) -> Result<()> 
     {
         bail!("invalid candidate retrieval parameters");
     }
+    if [
+        retrieval.path_weight,
+        retrieval.type_weight,
+        retrieval.lane_weight,
+        retrieval.destination_weight,
+        retrieval.confidence_weight,
+    ]
+    .iter()
+    .any(|weight| *weight != 0.0)
+    {
+        bail!("structural ranking weights must remain zero until structural scoring is supported");
+    }
     Ok(())
 }
 

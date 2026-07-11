@@ -103,3 +103,22 @@ fn approximate_search_manifest_is_rejected() -> anyhow::Result<()> {
     assert!(error.to_string().contains("exact search"));
     Ok(())
 }
+
+#[test]
+fn unsupported_structural_weights_are_rejected() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/candidates");
+    let bytes = std::fs::read(root.join("exact-union.json"))?;
+    let mut manifest: RecallRetrievalCandidateManifest = serde_json::from_slice(&bytes)?;
+    manifest.retrieval.path_weight = 0.25;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("candidate.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
+
+    let error = match ManifestDrivenRecallCandidate::load(path) {
+        Ok(_) => panic!("unsupported structural weights unexpectedly loaded"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("must remain zero"));
+    Ok(())
+}
