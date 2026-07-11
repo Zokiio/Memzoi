@@ -51,7 +51,7 @@ resource counters. They must not install or download models or mutate project
 memory; model-backed and fusion adapters are added by the separately gated
 candidate implementation issue.
 
-The committed three-dimensional exact-vector candidate verifies the adapter
+The committed four-dimensional exact-vector candidate verifies the adapter
 contract; it is not a measured model candidate or ship evidence. Run every
 v0.5 contract fixture with:
 

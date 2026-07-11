@@ -2,7 +2,7 @@ use memzoi_core::{
     ManifestDrivenRecallCandidate, RECALL_V3_CORPUS_VERSION, RECALL_V3_METRICS_VERSION,
     RECALL_V3_REPORT_VERSION, RECALL_V3_RUNNER_VERSION, RecallRetrievalCandidateManifest,
     RecallV3Candidate, RecallV3CandidateInput, RecallV3CandidateManifest, RecallV3CandidateOutput,
-    run_recall_v3_eval, run_recall_v3_eval_with_candidates,
+    RecallV3Corpus, run_recall_v3_eval, run_recall_v3_eval_with_candidates,
 };
 
 #[test]
@@ -138,4 +138,27 @@ fn recall_v3_rejects_unknown_schema_fields() {
     std::fs::write(dir.path().join("corpus.yaml"), invalid).unwrap();
     let error = run_recall_v3_eval(dir.path().join("corpus.yaml")).unwrap_err();
     assert!(error.to_string().contains("failed to parse"));
+}
+
+#[test]
+fn recall_v3_rejects_cases_without_eligible_relevance() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let bytes = std::fs::read(root.join("corpus.yaml"))?;
+    let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
+    for judgment in &mut corpus.cases[0].judgments {
+        if judgment.eligible {
+            judgment.relevance = 0;
+        }
+    }
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("corpus.yaml");
+    std::fs::write(&path, serde_yaml::to_string(&corpus)?)?;
+
+    let error = run_recall_v3_eval(path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("must have at least one eligible relevant judgment")
+    );
+    Ok(())
 }

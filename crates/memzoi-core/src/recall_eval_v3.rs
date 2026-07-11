@@ -419,6 +419,16 @@ fn validate_corpus(corpus: &RecallV3Corpus) -> Result<()> {
                 );
             }
         }
+        if !case
+            .judgments
+            .iter()
+            .any(|judgment| judgment.eligible && judgment.relevance > 0)
+        {
+            bail!(
+                "case {:?} must have at least one eligible relevant judgment",
+                case.id
+            );
+        }
     }
     validate_relative_path(&corpus.records_root)?;
     for path in &corpus.records {
