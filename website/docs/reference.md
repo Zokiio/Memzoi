@@ -235,7 +235,8 @@ links, non-Markdown files, and files larger than 1 MiB are rejected. The source 
 the current project; capture never searches for additional inputs. The profile also caps a plan at
 100 candidates, 4,096 Markdown headings, 16 KiB per evidence item, 256 KiB of total evidence, a
 bounded 10,000-file/32 MiB duplicate inventory, and a serialized plan just under 2 MiB.
-The extractor identity is `markdown-deterministic` with a versioned configuration hash.
+The extractor profile is `markdown-deterministic`. Plans identify the concrete extractor as
+`id: memzoi-markdown`, together with its version and configuration hash.
 
 Capture file access and private artifact saving currently require Unix handle-relative,
 no-symlink primitives. Windows builds fail these capture operations closed; the rest of the CLI

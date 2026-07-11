@@ -302,6 +302,7 @@ fn parse_jsonrpc_line(line: &str) -> std::result::Result<Value, Value> {
 }
 
 fn valid_jsonrpc_id(id: &Value) -> bool {
+    // MCP 2025-06-18 narrows base JSON-RPC request IDs to strings or numbers; null is forbidden.
     id.is_number()
         || id
             .as_str()
@@ -1612,6 +1613,26 @@ mod tests {
         assert_eq!(response["error"]["code"], -32600);
         assert_eq!(response["error"]["message"], INVALID_JSONRPC_ID);
         assert!(serde_json::to_vec(&response).unwrap().len() < 1024);
+        assert!(state.service.get().is_none());
+    }
+
+    #[test]
+    fn null_request_id_is_rejected_by_the_mcp_protocol_profile() {
+        let (_temp, state) = capture_test_state();
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "method": "tools/list"
+        })
+        .to_string();
+
+        let response = handle_line(&state, &line)
+            .unwrap()
+            .expect("MCP null request ID should produce an error response");
+
+        assert_eq!(response["id"], Value::Null);
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response["error"]["message"], INVALID_JSONRPC_ID);
         assert!(state.service.get().is_none());
     }
 
