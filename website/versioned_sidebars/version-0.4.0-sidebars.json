@@ -1,0 +1,48 @@
+{
+  "docs": [
+    {
+      "type": "category",
+      "label": "Start Here",
+      "collapsed": false,
+      "items": [
+        "index",
+        "quickstart",
+        "install"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Workflows",
+      "collapsed": false,
+      "items": [
+        "memory-lifecycle",
+        "recall-and-precheck",
+        "exports-and-files"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Integrations",
+      "collapsed": false,
+      "items": [
+        "mcp-and-agent-integration"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Reference",
+      "collapsed": false,
+      "items": [
+        "reference"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Development",
+      "collapsed": false,
+      "items": [
+        "development"
+      ]
+    }
+  ]
+}
