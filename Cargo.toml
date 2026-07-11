@@ -21,6 +21,7 @@ assert_cmd = "2"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
+ignore = "=0.4.28"
 predicates = "3"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 rustix = { version = "1", features = ["fs"] }

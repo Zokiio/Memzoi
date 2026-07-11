@@ -91,7 +91,6 @@ memzoi search quickstart
 memzoi context --task "remember quickstart setup"
 memzoi handoff --task "switch agents after quickstart"
 memzoi precheck --command "rm -rf .memzoi"
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json
 memzoi export agents-md
 memzoi mcp config --project-root .
 ```
@@ -136,11 +135,11 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
 - File-native canonical memory records under `.memzoi/records/`.
 - Local runtime state under `~/.memzoi/projects/<project-key>/` for derived SQLite indexes, generated exports, and DB-local open proposal state.
 - Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
-- Evidence-backed capture from one explicit project-relative Markdown file: deterministic planning, complete human review, and stale-guarded apply. Repo-safe candidates become pending proposal files, private local/session candidates stay in runtime storage, and capture provenance survives later apply and rebuild. See the [capture reference](website/docs/reference.md#evidence-backed-capture).
+- Evidence-backed capture from explicit Markdown, agent-instruction, ADR, and Git-change sources: deterministic planning, complete human review, exact source replay, and stale-guarded apply. Repo-safe candidates become pending proposal files, private local/session candidates stay in runtime storage, and capture provenance survives later apply and rebuild. See the [capture reference](website/docs/reference.md#evidence-backed-capture).
 - Deterministic planning for explicitly classified `memzoi/import-v1` candidates creates reviewable repo proposal files and private local/session runtime records on guarded apply. See the [import reference](website/docs/reference.md#classified-import).
 - Rebuild from canonical records with `memzoi rebuild` when the derived runtime index needs to be regenerated.
 - Text search, prompt-ready context packs, and CLI handoff packs.
-- File-native v2 trust evaluation across search, precheck, context, and write gates, with isolated fixtures, stable reports, and a typed local baseline.
+- File-native recall v2 and capture v1 evaluation gates with isolated fixtures, stable reports, typed local baselines, capture quality and evidence metrics, prohibited-data hard gates, and measured review burden.
 - Pre-action governance checks with citations and suggested next steps.
 - Deterministic generated exports: OKF Markdown projections, `AGENTS.memory.md`, and `CLAUDE.memory.md`.
 - Minimal stdio MCP server with safe tools:
@@ -171,6 +170,8 @@ Run the primary smoke checks:
 ```bash
 make smoke
 make onboarding-smoke
+make eval
+make capture-smoke
 ```
 
 Run the underlying Rust checks directly:

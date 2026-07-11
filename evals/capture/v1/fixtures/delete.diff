@@ -1,0 +1,8 @@
+diff --git a/docs/delete.md b/docs/delete.md
+deleted file mode 100644
+index 1111111111111111111111111111111111111111..0000000000000000000000000000000000000000
+--- a/docs/delete.md
++++ /dev/null
+@@ -1,2 +0,0 @@
+-# Warning: Removed guidance
+-Do not remove this without review.

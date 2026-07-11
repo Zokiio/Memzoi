@@ -92,6 +92,22 @@ fn eval_recall_help_requires_an_explicit_corpus() {
 }
 
 #[test]
+fn eval_capture_help_requires_an_explicit_corpus() {
+    let mut cmd = memzoi();
+
+    cmd.args(["eval", "capture", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Evaluate capture quality")
+                .and(predicate::str::contains("--corpus <CORPUS>"))
+                .and(predicate::str::contains("--baseline <BASELINE>"))
+                .and(predicate::str::contains("--update-baseline"))
+                .and(predicate::str::contains("--json")),
+        );
+}
+
+#[test]
 fn capture_help_exposes_explicit_plan_review_and_apply_boundaries() {
     let mut root = memzoi();
     root.args(["capture", "--help"]).assert().success().stdout(
@@ -583,6 +599,160 @@ fn capture_apply_routes_repo_candidates_to_pending_proposals_only() {
 }
 
 #[test]
+fn capture_request_file_requires_and_replays_explicit_supplied_bytes() {
+    let repo = initialized_temp_repo();
+    let diff = concat!(
+        "diff --git a/docs/cli.md b/docs/cli.md\n",
+        "new file mode 100644\n",
+        "index 0000000000000000000000000000000000000000..2222222222222222222222222222222222222222\n",
+        "--- /dev/null\n",
+        "+++ b/docs/cli.md\n",
+        "@@ -0,0 +1,2 @@\n",
+        "+# Decision: Replay supplied capture bytes\n",
+        "+Use suppliedclicapturetoken only with exact replay.\n",
+    );
+    let bytes_path = repo.path().join("reviewed.diff");
+    fs::write(&bytes_path, diff).expect("write supplied diff");
+    let request_path = repo.path().join("capture-request.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "memzoi/capture-request-v1",
+            "sources": [{
+                "source_id": "reviewed-diff",
+                "locator": {
+                    "kind": "supplied_bytes",
+                    "display_name": "reviewed.diff",
+                    "media_type": "text/x-diff",
+                    "byte_length": diff.len(),
+                    "source_content_hash": format!("blake3:{}", blake3::hash(diff.as_bytes()).to_hex()),
+                },
+                "media_type": "text/x-diff",
+                "git": {
+                    "repository": ".",
+                    "base": "sha1:1111111111111111111111111111111111111111",
+                    "head": "sha1:2222222222222222222222222222222222222222",
+                },
+            }],
+            "extractor": { "profile": "git-change-deterministic" },
+        }))
+        .expect("serialize capture request"),
+    )
+    .expect("write capture request");
+
+    let missing = run_command_failure_stderr(
+        repo.path(),
+        &[
+            "capture",
+            "plan",
+            "--request-file",
+            request_path.to_str().expect("request path utf-8"),
+            "--json",
+        ],
+    );
+    assert!(missing.contains("requires --source-bytes"), "{missing}");
+
+    let mut implicit_stdin = memzoi();
+    implicit_stdin
+        .args(["capture", "plan", "--request-file"])
+        .arg(&request_path)
+        .arg("--json")
+        .write_stdin(diff)
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "supplied_bytes capture requires --source-bytes",
+        ));
+
+    let mut explicit_stdin = memzoi();
+    let stdin_assert = explicit_stdin
+        .args(["capture", "plan", "--request-file"])
+        .arg(&request_path)
+        .args(["--source-bytes", "-", "--json"])
+        .write_stdin(diff)
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let stdin_plan = json_from_stdout(&stdin_assert.get_output().stdout);
+    assert_json_string_field(&stdin_plan, &["status"], "ready");
+    assert_eq!(stdin_plan["candidates"].as_array().map(Vec::len), Some(1));
+
+    let plan_path = repo.path().join("supplied-plan.json");
+    let plan = run_json_command(
+        repo.path(),
+        &[
+            "capture",
+            "plan",
+            "--request-file",
+            request_path.to_str().expect("request path utf-8"),
+            "--source-bytes",
+            bytes_path.to_str().expect("source bytes path utf-8"),
+            "--output",
+            plan_path.to_str().expect("plan path utf-8"),
+            "--json",
+        ],
+    );
+    assert_json_string_field(&plan, &["status"], "ready");
+    assert_eq!(plan["candidates"].as_array().map(Vec::len), Some(1));
+
+    let decisions_path = repo.path().join("supplied-decisions.json");
+    fs::write(
+        &decisions_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "memzoi/capture-review-input-v1",
+            "plan_id": json_string(&plan, "plan_id"),
+            "decisions": [{
+                "candidate_id": json_string(&plan["candidates"][0], "candidate_id"),
+                "outcome": "accept",
+            }],
+        }))
+        .expect("serialize supplied capture decisions"),
+    )
+    .expect("write supplied capture decisions");
+    let review = run_json_command(
+        repo.path(),
+        &[
+            "capture",
+            "review",
+            "--plan-file",
+            plan_path.to_str().expect("plan path utf-8"),
+            "--decisions-file",
+            decisions_path.to_str().expect("decisions path utf-8"),
+            "--source-bytes",
+            bytes_path.to_str().expect("source bytes path utf-8"),
+            "--reviewed-by",
+            "maintainer:test",
+            "--reviewed-at",
+            "2026-07-11T12:00:00Z",
+            "--json",
+        ],
+    );
+    assert_json_string_field(&review, &["plan_id"], json_string(&plan, "plan_id"));
+
+    fs::write(&bytes_path, "changed").expect("change supplied bytes");
+    let stale = run_command_failure_stderr(
+        repo.path(),
+        &[
+            "capture",
+            "review",
+            "--plan-file",
+            plan_path.to_str().expect("plan path utf-8"),
+            "--decisions-file",
+            decisions_path.to_str().expect("decisions path utf-8"),
+            "--source-bytes",
+            bytes_path.to_str().expect("source bytes path utf-8"),
+            "--reviewed-by",
+            "maintainer:test",
+            "--reviewed-at",
+            "2026-07-11T12:00:00Z",
+            "--json",
+        ],
+    );
+    assert!(stale.contains("stale capture plan"), "{stale}");
+}
+
+#[test]
 fn eval_recall_json_uses_isolated_state_and_reports_citations() {
     let repo = tempfile::tempdir().expect("temp repo");
     let sentinel = repo.path().join(".memzoi/records/user-record.md");
@@ -679,6 +849,101 @@ fn eval_recall_json_uses_isolated_state_and_reports_citations() {
         fs::read(&baseline_path).expect("read checked baseline after comparison"),
         baseline_before,
         "ordinary baseline comparison must be read-only"
+    );
+}
+
+#[test]
+fn eval_capture_json_uses_isolated_state_and_matches_the_exact_baseline() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    let sentinel = repo.path().join(".memzoi/records/user-record.md");
+    let baseline_path = checked_capture_baseline();
+    let baseline_before = fs::read(&baseline_path).expect("read checked capture baseline");
+    fs::create_dir_all(sentinel.parent().expect("sentinel parent")).expect("create sentinel root");
+    fs::write(&sentinel, "user canonical bytes").expect("write sentinel");
+
+    let mut cmd = memzoi();
+    let assert = cmd
+        .args(["eval", "capture", "--corpus"])
+        .arg(checked_capture_corpus())
+        .arg("--baseline")
+        .arg(&baseline_path)
+        .arg("--json")
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let report = json_from_stdout(&assert.get_output().stdout);
+
+    assert_eq!(
+        report.get("version").and_then(Value::as_str),
+        Some("memzoi-capture-report/v1")
+    );
+    assert_eq!(
+        report
+            .pointer("/corpus/profile_count")
+            .and_then(Value::as_u64),
+        Some(4)
+    );
+    assert_eq!(
+        report
+            .pointer("/metrics/candidate_precision/value")
+            .and_then(Value::as_f64),
+        Some(1.0)
+    );
+    assert_eq!(
+        report.get("gates_passed").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        report.pointer("/baseline/status").and_then(Value::as_str),
+        Some("match")
+    );
+    assert_eq!(report.get("passed").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        fs::read_to_string(&sentinel).expect("read sentinel"),
+        "user canonical bytes",
+        "capture evaluation must not mutate normal canonical state"
+    );
+    assert_eq!(
+        fs::read(&baseline_path).expect("read checked capture baseline after comparison"),
+        baseline_before,
+        "ordinary capture baseline comparison must be read-only"
+    );
+}
+
+#[test]
+fn eval_capture_can_update_and_compare_a_local_baseline() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    let baseline_path = repo.path().join("capture-baseline.json");
+    fs::write(&baseline_path, "existing baseline bytes").expect("seed baseline sentinel");
+    let mut cmd = memzoi();
+
+    let assert = cmd
+        .args(["eval", "capture", "--corpus"])
+        .arg(checked_capture_corpus())
+        .arg("--baseline")
+        .arg(&baseline_path)
+        .args(["--update-baseline", "--json"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let report = json_from_stdout(&assert.get_output().stdout);
+    let baseline = serde_json::from_str::<Value>(
+        &fs::read_to_string(&baseline_path).expect("read updated capture baseline"),
+    )
+    .expect("updated capture baseline is JSON");
+
+    assert_eq!(report.get("passed").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        report.pointer("/baseline/status").and_then(Value::as_str),
+        Some("match")
+    );
+    assert_eq!(
+        baseline.get("version").and_then(Value::as_str),
+        Some("memzoi-capture-baseline/v1")
+    );
+    assert_eq!(
+        baseline.pointer("/corpus/digest"),
+        report.pointer("/corpus/digest")
     );
 }
 
@@ -7253,6 +7518,14 @@ fn checked_recall_corpus() -> PathBuf {
 
 fn checked_recall_baseline() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v2/baseline.json")
+}
+
+fn checked_capture_corpus() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/v1/corpus.yaml")
+}
+
+fn checked_capture_baseline() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/v1/baseline.json")
 }
 
 fn failing_recall_corpus() -> (tempfile::TempDir, PathBuf) {

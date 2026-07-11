@@ -19,13 +19,13 @@ use uuid::Uuid;
 use crate::import::{self, ExistingDuplicate};
 use crate::{
     CaptureAction, CaptureApplyResult, CapturePlan, CaptureProvenance, CaptureReview,
-    CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome, CaptureWrite,
-    ContextPack, ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult, ImportDocument,
-    ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryLane, MemoryPath, MemoryPaths,
-    MemoryRecord, MemoryStatus, MemoryType, OkfProposalAction, OkfProposalFile, OkfProposalOutcome,
-    OkfProposalResolution, OkfProposalSource, PrecheckInput, PrecheckWarning, Proposal,
-    ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput, SearchResult, SupersedeResult,
-    ValidationResult, Visibility,
+    CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome, CaptureSourceInputs,
+    CaptureWrite, ContextPack, ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult,
+    ImportDocument, ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryLane,
+    MemoryPath, MemoryPaths, MemoryRecord, MemoryStatus, MemoryType, OkfProposalAction,
+    OkfProposalFile, OkfProposalOutcome, OkfProposalResolution, OkfProposalSource, PrecheckInput,
+    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput,
+    SearchResult, SupersedeResult, ValidationResult, Visibility,
 };
 use crate::{
     config::{
@@ -1999,11 +1999,31 @@ impl MemoryService {
         expected_plan_id: &str,
         expected_review_id: &str,
     ) -> Result<CaptureApplyResult> {
+        self.apply_capture_with_inputs(
+            actor,
+            plan,
+            review,
+            &CaptureSourceInputs::default(),
+            expected_plan_id,
+            expected_review_id,
+        )
+    }
+
+    pub fn apply_capture_with_inputs(
+        &self,
+        actor: &str,
+        plan: CapturePlan,
+        review: CaptureReview,
+        source_inputs: &CaptureSourceInputs,
+        expected_plan_id: &str,
+        expected_review_id: &str,
+    ) -> Result<CaptureApplyResult> {
         self.apply_capture_inner(
             actor,
             plan,
             review,
             None,
+            source_inputs,
             expected_plan_id,
             expected_review_id,
         )
@@ -2018,22 +2038,49 @@ impl MemoryService {
         expected_plan_id: &str,
         expected_review_id: &str,
     ) -> Result<CaptureApplyResult> {
-        self.apply_capture_inner(
+        self.apply_capture_with_prior_and_inputs(
             actor,
             plan,
             review,
-            Some(prior_review),
+            prior_review,
+            &CaptureSourceInputs::default(),
             expected_plan_id,
             expected_review_id,
         )
     }
 
+    // Prior-review lineage, replay material, and pinned IDs are separate trust inputs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_capture_with_prior_and_inputs(
+        &self,
+        actor: &str,
+        plan: CapturePlan,
+        review: CaptureReview,
+        prior_review: &CaptureReview,
+        source_inputs: &CaptureSourceInputs,
+        expected_plan_id: &str,
+        expected_review_id: &str,
+    ) -> Result<CaptureApplyResult> {
+        self.apply_capture_inner(
+            actor,
+            plan,
+            review,
+            Some(prior_review),
+            source_inputs,
+            expected_plan_id,
+            expected_review_id,
+        )
+    }
+
+    // Keep every apply-boundary input explicit through lock and transaction revalidation.
+    #[allow(clippy::too_many_arguments)]
     fn apply_capture_inner(
         &self,
         actor: &str,
         plan: CapturePlan,
         review: CaptureReview,
         prior_review: Option<&CaptureReview>,
+        source_inputs: &CaptureSourceInputs,
         expected_plan_id: &str,
         expected_review_id: &str,
     ) -> Result<CaptureApplyResult> {
@@ -2048,14 +2095,14 @@ impl MemoryService {
         if review.plan_id != plan.plan_id {
             bail!("capture review does not match the supplied plan");
         }
-        let current = crate::capture::plan_capture_with_connection(
+        crate::capture::validate_capture_plan_live_state(
             &self.paths,
-            plan.request.clone(),
-            &self.conn,
-        )?;
-        if current.plan_id != plan.plan_id || current != plan {
-            bail!("stale capture plan");
-        }
+            Some(&self.conn),
+            &plan,
+            source_inputs,
+            None,
+        )
+        .context("stale capture plan")?;
 
         let review_input = CaptureReviewInput {
             schema: crate::CAPTURE_REVIEW_INPUT_SCHEMA.to_owned(),
@@ -2087,12 +2134,13 @@ impl MemoryService {
                 })
                 .collect(),
         };
-        let rebuilt_review = crate::capture::build_capture_review_with_connection(
+        let rebuilt_review = crate::capture::build_capture_review_with_connection_and_inputs(
             &self.paths,
             &self.conn,
             &plan,
             review_input.clone(),
             prior_review,
+            source_inputs,
             &review.reviewed_by,
             &review.reviewed_at,
         )?;
@@ -2131,14 +2179,14 @@ impl MemoryService {
         recover_capture_apply(&self.paths, &self.conn)
             .context("failed to recover an interrupted capture apply")?;
 
-        let locked_current = crate::capture::plan_capture_with_connection(
+        crate::capture::validate_capture_plan_live_state(
             &self.paths,
-            plan.request.clone(),
-            &self.conn,
-        )?;
-        if locked_current.plan_id != plan.plan_id || locked_current != plan {
-            bail!("stale capture plan after lifecycle lock");
-        }
+            Some(&self.conn),
+            &plan,
+            source_inputs,
+            None,
+        )
+        .context("stale capture plan after lifecycle lock")?;
 
         let timestamp = self.now_timestamp()?;
         let pending_root = self.paths.proposals_dir().join("pending");
@@ -2164,10 +2212,14 @@ impl MemoryService {
                 sources: candidate
                     .evidence
                     .iter()
-                    .map(|evidence| OkfProposalSource {
-                        path: Some(evidence.locator.path().to_owned()),
-                        url: None,
-                        reference: None,
+                    .map(|evidence| {
+                        let path = evidence.locator.project_path().map(str::to_owned);
+                        OkfProposalSource {
+                            reference: (path.is_none() || evidence.semantic_location.is_some())
+                                .then(|| evidence.durable_reference()),
+                            path,
+                            url: None,
+                        }
                     })
                     .collect(),
                 sensitivity: candidate.classification.sensitivity,
@@ -2182,23 +2234,25 @@ impl MemoryService {
         let mut writes = Vec::new();
         let result = (|| -> Result<()> {
             let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-            let transactional_current = crate::capture::plan_capture_with_connection(
+            crate::capture::validate_capture_plan_live_state(
                 &self.paths,
-                plan.request.clone(),
-                &tx,
-            )?;
-            if transactional_current.plan_id != plan.plan_id || transactional_current != plan {
-                bail!("stale capture plan at write boundary");
-            }
-            let transactional_review = crate::capture::build_capture_review_with_connection(
-                &self.paths,
-                &tx,
+                Some(&tx),
                 &plan,
-                review_input.clone(),
-                prior_review,
-                &review.reviewed_by,
-                &review.reviewed_at,
-            )?;
+                source_inputs,
+                None,
+            )
+            .context("stale capture plan at write boundary")?;
+            let transactional_review =
+                crate::capture::build_capture_review_with_connection_and_inputs(
+                    &self.paths,
+                    &tx,
+                    &plan,
+                    review_input.clone(),
+                    prior_review,
+                    source_inputs,
+                    &review.reviewed_by,
+                    &review.reviewed_at,
+                )?;
             if transactional_review.review_id != review.review_id || transactional_review != review
             {
                 bail!("stale capture review at write boundary");
@@ -4263,7 +4317,7 @@ fn create_capture_runtime_with_conn(
         source_ref: candidate
             .evidence
             .first()
-            .map(|evidence| evidence.locator.path().to_owned()),
+            .map(crate::CaptureEvidence::durable_reference),
         proposal_id: None,
         capture: Some(provenance),
         content_hash: crate::import::content_hash(&candidate.memory.body),

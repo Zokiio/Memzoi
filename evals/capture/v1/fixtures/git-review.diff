@@ -1,0 +1,15 @@
+diff --git a/docs/review.md b/docs/review.md
+index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644
+--- a/docs/review.md
++++ b/docs/review.md
+@@ -1 +1,10 @@
+ existing
++# Procedure: Review Git guidance
++Require review before rollout.
++
++# Procedure: Review Git guidance
++Require review before rollout.
++
++# Procedure: Review Git guidance
++Skip review before rollout.
++

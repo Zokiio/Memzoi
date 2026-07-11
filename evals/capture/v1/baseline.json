@@ -1,0 +1,1511 @@
+{
+  "version": "memzoi-capture-baseline/v1",
+  "report_version": "memzoi-capture-report/v1",
+  "definitions_version": "memzoi-capture-metrics/v1",
+  "corpus": {
+    "name": "memzoi-capture-v1",
+    "version": "memzoi-capture-corpus/v1",
+    "digest": "blake3:2b7620349acd799b6fd4eebe7fe3352390aa6bff3bda4d7d951fcf9f32fb3971"
+  },
+  "profiles": [
+    {
+      "profile": "adr-deterministic",
+      "required": true,
+      "extractor_kind": "deterministic",
+      "extractor_id": "memzoi-adr",
+      "extractor_version": "1.0.0",
+      "extractor_configuration_hash": "blake3:bbc05fdd209998376a8de65a0d108f98644cbb087ea2398a6ad027f16aadd356",
+      "safeguard_policy_version": "memzoi/capture-safeguards-v1",
+      "safeguard_configuration_hash": "blake3:8b913b116512a4a530291e251e86a8e10473fb6f6b09d9edd09b91c258b75556"
+    },
+    {
+      "profile": "git-change-deterministic",
+      "required": true,
+      "extractor_kind": "deterministic",
+      "extractor_id": "memzoi-git-change",
+      "extractor_version": "1.0.0",
+      "extractor_configuration_hash": "blake3:0e0a910cb7a2604bfc04eb085e0d47eb032b28df1661e8d14a9d67a05dbf24eb",
+      "safeguard_policy_version": "memzoi/capture-safeguards-v1",
+      "safeguard_configuration_hash": "blake3:e752c60517d1eb6a708ca857aaac6aa65b644c5779fcafa7b58e41332dbcb0c0"
+    },
+    {
+      "profile": "instruction-deterministic",
+      "required": true,
+      "extractor_kind": "deterministic",
+      "extractor_id": "memzoi-instructions",
+      "extractor_version": "1.0.0",
+      "extractor_configuration_hash": "blake3:a8d205718755904de523a0ac91b2a1fbea96ada0cc3a3c89198c472ae84a41dd",
+      "safeguard_policy_version": "memzoi/capture-safeguards-v1",
+      "safeguard_configuration_hash": "blake3:25f352d74e458b06305a300bf5bdb158f6936c93b76600b49bfecbebf153070c"
+    },
+    {
+      "profile": "markdown-deterministic",
+      "required": true,
+      "extractor_kind": "deterministic",
+      "extractor_id": "memzoi-markdown",
+      "extractor_version": "1.0.0",
+      "extractor_configuration_hash": "blake3:eead488340e992f9eb29bba06b417f4e7fb5abc52fa2ffd8c627e2f1c691119a",
+      "safeguard_policy_version": "memzoi/capture-safeguards-v1",
+      "safeguard_configuration_hash": "blake3:25f352d74e458b06305a300bf5bdb158f6936c93b76600b49bfecbebf153070c"
+    }
+  ],
+  "metrics": {
+    "case_count": 23,
+    "candidate_precision": {
+      "numerator": 25,
+      "denominator": 25,
+      "value": 1.0
+    },
+    "candidate_recall": {
+      "numerator": 25,
+      "denominator": 25,
+      "value": 1.0
+    },
+    "evidence_validity": {
+      "valid": 33,
+      "checked": 33,
+      "rate": 1.0
+    },
+    "destination_accuracy": {
+      "valid": 25,
+      "checked": 25,
+      "rate": 1.0
+    },
+    "sensitivity_accuracy": {
+      "valid": 25,
+      "checked": 25,
+      "rate": 1.0
+    },
+    "action_accuracy": {
+      "valid": 25,
+      "checked": 25,
+      "rate": 1.0
+    },
+    "forbidden_hits": {
+      "hits": 0,
+      "opportunities": 4,
+      "rate": 0.0
+    },
+    "unsupported_outcome_accuracy": {
+      "valid": 7,
+      "checked": 7,
+      "rate": 1.0
+    },
+    "case_pass_rate": {
+      "numerator": 23,
+      "denominator": 23,
+      "value": 1.0
+    },
+    "extractor_failures": 0,
+    "optional_skips": 0,
+    "review_burden": {
+      "proposed": 25,
+      "accepted": 11,
+      "rejected": 9,
+      "edited": 1,
+      "deferred": 4,
+      "duplicates": 5,
+      "conflicts": 4,
+      "needs_review": 8
+    }
+  },
+  "profile_metrics": {
+    "adr-deterministic": {
+      "case_count": 3,
+      "candidate_precision": {
+        "numerator": 4,
+        "denominator": 4,
+        "value": 1.0
+      },
+      "candidate_recall": {
+        "numerator": 4,
+        "denominator": 4,
+        "value": 1.0
+      },
+      "evidence_validity": {
+        "valid": 12,
+        "checked": 12,
+        "rate": 1.0
+      },
+      "destination_accuracy": {
+        "valid": 4,
+        "checked": 4,
+        "rate": 1.0
+      },
+      "sensitivity_accuracy": {
+        "valid": 4,
+        "checked": 4,
+        "rate": 1.0
+      },
+      "action_accuracy": {
+        "valid": 4,
+        "checked": 4,
+        "rate": 1.0
+      },
+      "forbidden_hits": {
+        "hits": 0,
+        "opportunities": 1,
+        "rate": 0.0
+      },
+      "unsupported_outcome_accuracy": {
+        "valid": 1,
+        "checked": 1,
+        "rate": 1.0
+      },
+      "case_pass_rate": {
+        "numerator": 3,
+        "denominator": 3,
+        "value": 1.0
+      },
+      "extractor_failures": 0,
+      "optional_skips": 0,
+      "review_burden": {
+        "proposed": 4,
+        "accepted": 1,
+        "rejected": 2,
+        "edited": 0,
+        "deferred": 1,
+        "duplicates": 1,
+        "conflicts": 1,
+        "needs_review": 2
+      }
+    },
+    "git-change-deterministic": {
+      "case_count": 6,
+      "candidate_precision": {
+        "numerator": 6,
+        "denominator": 6,
+        "value": 1.0
+      },
+      "candidate_recall": {
+        "numerator": 6,
+        "denominator": 6,
+        "value": 1.0
+      },
+      "evidence_validity": {
+        "valid": 6,
+        "checked": 6,
+        "rate": 1.0
+      },
+      "destination_accuracy": {
+        "valid": 6,
+        "checked": 6,
+        "rate": 1.0
+      },
+      "sensitivity_accuracy": {
+        "valid": 6,
+        "checked": 6,
+        "rate": 1.0
+      },
+      "action_accuracy": {
+        "valid": 6,
+        "checked": 6,
+        "rate": 1.0
+      },
+      "forbidden_hits": {
+        "hits": 0,
+        "opportunities": 1,
+        "rate": 0.0
+      },
+      "unsupported_outcome_accuracy": {
+        "valid": 1,
+        "checked": 1,
+        "rate": 1.0
+      },
+      "case_pass_rate": {
+        "numerator": 6,
+        "denominator": 6,
+        "value": 1.0
+      },
+      "extractor_failures": 0,
+      "optional_skips": 0,
+      "review_burden": {
+        "proposed": 6,
+        "accepted": 3,
+        "rejected": 2,
+        "edited": 0,
+        "deferred": 1,
+        "duplicates": 1,
+        "conflicts": 1,
+        "needs_review": 2
+      }
+    },
+    "instruction-deterministic": {
+      "case_count": 3,
+      "candidate_precision": {
+        "numerator": 5,
+        "denominator": 5,
+        "value": 1.0
+      },
+      "candidate_recall": {
+        "numerator": 5,
+        "denominator": 5,
+        "value": 1.0
+      },
+      "evidence_validity": {
+        "valid": 5,
+        "checked": 5,
+        "rate": 1.0
+      },
+      "destination_accuracy": {
+        "valid": 5,
+        "checked": 5,
+        "rate": 1.0
+      },
+      "sensitivity_accuracy": {
+        "valid": 5,
+        "checked": 5,
+        "rate": 1.0
+      },
+      "action_accuracy": {
+        "valid": 5,
+        "checked": 5,
+        "rate": 1.0
+      },
+      "forbidden_hits": {
+        "hits": 0,
+        "opportunities": 1,
+        "rate": 0.0
+      },
+      "unsupported_outcome_accuracy": {
+        "valid": 0,
+        "checked": 0,
+        "rate": 1.0
+      },
+      "case_pass_rate": {
+        "numerator": 3,
+        "denominator": 3,
+        "value": 1.0
+      },
+      "extractor_failures": 0,
+      "optional_skips": 0,
+      "review_burden": {
+        "proposed": 5,
+        "accepted": 2,
+        "rejected": 2,
+        "edited": 0,
+        "deferred": 1,
+        "duplicates": 1,
+        "conflicts": 1,
+        "needs_review": 2
+      }
+    },
+    "markdown-deterministic": {
+      "case_count": 11,
+      "candidate_precision": {
+        "numerator": 10,
+        "denominator": 10,
+        "value": 1.0
+      },
+      "candidate_recall": {
+        "numerator": 10,
+        "denominator": 10,
+        "value": 1.0
+      },
+      "evidence_validity": {
+        "valid": 10,
+        "checked": 10,
+        "rate": 1.0
+      },
+      "destination_accuracy": {
+        "valid": 10,
+        "checked": 10,
+        "rate": 1.0
+      },
+      "sensitivity_accuracy": {
+        "valid": 10,
+        "checked": 10,
+        "rate": 1.0
+      },
+      "action_accuracy": {
+        "valid": 10,
+        "checked": 10,
+        "rate": 1.0
+      },
+      "forbidden_hits": {
+        "hits": 0,
+        "opportunities": 1,
+        "rate": 0.0
+      },
+      "unsupported_outcome_accuracy": {
+        "valid": 5,
+        "checked": 5,
+        "rate": 1.0
+      },
+      "case_pass_rate": {
+        "numerator": 11,
+        "denominator": 11,
+        "value": 1.0
+      },
+      "extractor_failures": 0,
+      "optional_skips": 0,
+      "review_burden": {
+        "proposed": 10,
+        "accepted": 5,
+        "rejected": 3,
+        "edited": 1,
+        "deferred": 1,
+        "duplicates": 2,
+        "conflicts": 1,
+        "needs_review": 2
+      }
+    }
+  },
+  "hard_gates": {
+    "determinism_violations": 0,
+    "planning_mutation_violations": 0,
+    "invalid_evidence_items": 0,
+    "unnamed_source_reads": 0,
+    "prohibited_output_echoes": 0,
+    "review_workflow_violations": 0,
+    "provenance_violations": 0,
+    "stale_review_acceptance_violations": 0,
+    "stale_apply_acceptance_violations": 0,
+    "stale_write_violations": 0,
+    "direct_canonical_write_violations": 0,
+    "required_profile_skips": 0
+  },
+  "cases": [
+    {
+      "id": "typed-markdown-candidates",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "deterministic-fact",
+        "review-procedure"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 2,
+        "accepted": 1,
+        "rejected": 1,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "unsupported-regions-do-not-overproduce",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [
+        "unsupported_markdown_content",
+        "unsupported_markdown_content"
+      ],
+      "matched_candidates": [
+        "supported-fact"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 1,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "earlier-candidate-duplicates-and-conflicts",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "private",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "exact-first",
+        "exact-duplicate",
+        "decision-first",
+        "decision-conflict"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 4,
+        "accepted": 2,
+        "rejected": 1,
+        "edited": 0,
+        "deferred": 1,
+        "duplicates": 1,
+        "conflicts": 1,
+        "needs_review": 1
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "canonical-inventory-duplicate",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "inventory-duplicate"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 1,
+        "accepted": 0,
+        "rejected": 1,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 1,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "stale-source-rejected-at-review-and-apply",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "stale-warning"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "prohibited-content-is-redacted",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "blocked",
+      "data_class": "blocked",
+      "diagnostic_codes": [
+        "prohibited_content_detected"
+      ],
+      "matched_candidates": [],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "unsupported-path-fails-closed",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "blocked",
+      "data_class": "blocked",
+      "diagnostic_codes": [
+        "source_preflight_failed"
+      ],
+      "matched_candidates": [],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "prompt-injection-is-redacted",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "blocked",
+      "data_class": "blocked",
+      "diagnostic_codes": [
+        "prohibited_content_detected"
+      ],
+      "matched_candidates": [],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "raw-chat-is-redacted",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "blocked",
+      "data_class": "blocked",
+      "diagnostic_codes": [
+        "prohibited_content_detected"
+      ],
+      "matched_candidates": [],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "private-personal-data-is-redacted",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "blocked",
+      "data_class": "blocked",
+      "diagnostic_codes": [
+        "prohibited_content_detected"
+      ],
+      "matched_candidates": [],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "prohibited-policy-input-is-redacted",
+      "profile": "adr-deterministic",
+      "execution": "executed",
+      "plan_status": "blocked",
+      "data_class": "blocked",
+      "diagnostic_codes": [
+        "source_preflight_failed"
+      ],
+      "matched_candidates": [],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "unclassified-content-needs-review",
+      "profile": "markdown-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "private",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "unknown-note"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 1,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 1,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 1
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "explicit-agent-instructions",
+      "profile": "instruction-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "review-agent-changes"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "generated-agent-projection-is-excluded",
+      "profile": "instruction-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [
+        "generated_projection_excluded"
+      ],
+      "matched_candidates": [],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 1,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "instruction-review-burden",
+      "profile": "instruction-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "private",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "instruction-workflow",
+        "instruction-duplicate",
+        "instruction-conflict",
+        "instruction-temporary"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 4,
+        "accepted": 1,
+        "rejected": 2,
+        "edited": 0,
+        "deferred": 1,
+        "duplicates": 1,
+        "conflicts": 1,
+        "needs_review": 2
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "accepted-adr-decision",
+      "profile": "adr-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "adr-evidence-decision"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 1,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "explicit-git-diff-guidance",
+      "profile": "git-change-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "git-preserve-evidence-warning"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "adr-review-burden",
+      "profile": "adr-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "private",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "adr-review-required",
+        "adr-review-duplicate",
+        "adr-review-conflict"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 3,
+        "accepted": 0,
+        "rejected": 2,
+        "edited": 0,
+        "deferred": 1,
+        "duplicates": 1,
+        "conflicts": 1,
+        "needs_review": 2
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "pinned-git-range-guidance",
+      "profile": "git-change-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "git-pin-evaluated-ranges"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "git-review-burden",
+      "profile": "git-change-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "private",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "git-review-guidance",
+        "git-review-duplicate",
+        "git-review-conflict"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 3,
+        "accepted": 1,
+        "rejected": 1,
+        "edited": 0,
+        "deferred": 1,
+        "duplicates": 1,
+        "conflicts": 1,
+        "needs_review": 1
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "git-rename-needs-review",
+      "profile": "git-change-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "repo_safe",
+      "diagnostic_codes": [
+        "git_rename_without_durable_candidate"
+      ],
+      "matched_candidates": [],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 1,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "git-delete-needs-review",
+      "profile": "git-change-deterministic",
+      "execution": "executed",
+      "plan_status": "ready",
+      "data_class": "private",
+      "diagnostic_codes": [],
+      "matched_candidates": [
+        "git-deleted-guidance"
+      ],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 1,
+        "accepted": 0,
+        "rejected": 1,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 1
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    },
+    {
+      "id": "malformed-git-diff-fails-closed",
+      "profile": "git-change-deterministic",
+      "execution": "executed",
+      "plan_status": "blocked",
+      "data_class": "blocked",
+      "diagnostic_codes": [
+        "extractor_safeguard_failed"
+      ],
+      "matched_candidates": [],
+      "missing_candidates": [],
+      "forbidden_hits": [],
+      "forbidden_opportunities": 0,
+      "unexpected_candidates": 0,
+      "review_burden": {
+        "proposed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0,
+        "deferred": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+        "needs_review": 0
+      },
+      "assertions": {
+        "actions": true,
+        "apply_workflow": true,
+        "candidate_set": true,
+        "classification": true,
+        "data_class": true,
+        "deterministic": true,
+        "diagnostics": true,
+        "evidence_integrity": true,
+        "forbidden_suppressed": true,
+        "named_evidence_only": true,
+        "plan_status": true,
+        "planning_no_write": true,
+        "policy_inputs_declared": true,
+        "profile_identity": true,
+        "prohibited_no_echo": true,
+        "provenance_and_citations": true,
+        "repo_candidates_proposal_only": true,
+        "review_workflow": true,
+        "stale_apply_rejected": true,
+        "stale_no_write": true,
+        "stale_review_rejected": true
+      },
+      "passed": true
+    }
+  ]
+}

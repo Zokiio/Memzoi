@@ -1,0 +1,2 @@
+# Fact: Unsupported path
+This non-Markdown path must fail closed.

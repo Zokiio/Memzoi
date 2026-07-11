@@ -23,8 +23,10 @@ path. Blocked plans contain redacted diagnostics only.
 Routing reviewed selections is a separate, explicit CLI operation. A
 versioned review artifact records accept, reject, edit, and defer decisions against
 one immutable plan. Apply revalidates that review, the saved plan, and its
-source snapshots without rerunning the extractor, then uses the existing
-destination policy and guarded routing primitives. A repo candidate
+source snapshots without rerunning a model or provider. Shipped in-process
+deterministic profiles are replayed over those exact snapshots to authenticate
+candidate completeness and derived fields before the existing destination
+policy and guarded routing primitives run. A repo candidate
 may create a pending, repo-safe OKF proposal; it can never create a canonical
 record. Canonical repo memory still requires review and the existing explicit
 proposal-file apply operation. MCP exposes planning only.
@@ -578,10 +580,13 @@ checks:
    require exact re-supplied bytes for `supplied_bytes`.
 4. Recompute source hashes, byte lengths, evidence ranges, evidence hashes, and
    evidence text.
-5. Resolve the same non-secret extractor profile definition without invoking
-   the extractor and recompute its configuration/template hash. A missing or
-   changed profile makes the plan stale; provider credentials and executor
-   availability are not required.
+5. Resolve the same non-secret extractor profile definition and recompute its
+   configuration/template hash. Replay an allow-listed in-process deterministic
+   adapter over the already resolved bytes and require exact candidate and
+   diagnostic equality. A future non-deterministic profile instead requires a
+   trusted issuance attestation; apply never invokes its model or provider. A
+   missing or changed profile makes the plan stale, and provider credentials
+   are never required at apply.
 6. Recompute safeguard configuration, destination policy, and each candidate's
    targeted routing preconditions: duplicate and conflict match sets, matched
    record hashes/statuses, and reserved proposal identity.
@@ -620,12 +625,15 @@ not invalidate it. The read-only snapshot loader may use broader indexes to
 find relevant records, but only the deterministic match sets and target state
 become apply preconditions.
 
-The extractor or provider is **not rerun during apply**. This avoids model
-nondeterminism and a second provider disclosure and ensures the human reviewed
-the candidate that will be routed. Apply still resolves and hashes the
-non-secret allow-listed profile definition. A review edit is validated and
-fingerprinted through `capture-review-v1`; it does not masquerade as extractor
-output.
+A model, remote provider, or other non-deterministic extractor is **not rerun
+during apply**. This avoids nondeterminism and a second disclosure and ensures
+the human reviewed the candidate that will be routed. Current deterministic,
+in-process adapters are replayed solely to authenticate the complete plan from
+exact pinned bytes; their output must be byte-equivalent. A future
+non-deterministic profile must provide a trusted issuance attestation instead.
+Apply always resolves and hashes the non-secret allow-listed profile
+definition. A review edit is validated and fingerprinted through
+`capture-review-v1`; it does not masquerade as extractor output.
 
 ### Deterministic extractor first
 
@@ -777,11 +785,15 @@ policy make them routeable. Mixed reviewed writes are transactional.
   Memzoi-managed instruction blocks are never evidence sources. Instruction
   adapters fingerprint and exclude their generated marker ranges to prevent
   feedback loops.
-- Directory adapters may read an explicitly versioned ignore-policy input
-  (for example the named root's applicable `.gitignore` files) as policy, not
-  evidence. Every such policy path/hash and the ignore-engine version appears
-  in the plan identity. “Explicit sources only” means zero unnamed evidence
-  reads; it does not hide these enumerated policy/state inputs.
+- Directory adapters may read an explicitly versioned ignore-policy input as
+  policy, not evidence. ADR directory capture uses applicable worktree
+  `.gitignore` files. Git-range capture reads applicable `.gitignore` blobs only
+  from the explicitly named head tree; project and supplied Git diffs do not
+  consult ambient worktree ignore files. Every such policy path/hash and the
+  ignore-engine version appears in the plan identity. Policy bytes receive the
+  same prohibited-content preflight before any derived hash can enter a plan.
+  “Explicit sources only” means zero unnamed evidence or policy reads; it does
+  not hide these enumerated policy/state inputs.
 
 ### Size and resource handling
 

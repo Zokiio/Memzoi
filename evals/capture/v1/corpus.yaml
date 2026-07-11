@@ -1,0 +1,1446 @@
+version: memzoi-capture-corpus/v1
+name: memzoi-capture-v1
+evaluated_at: 2026-07-10T12:00:00Z
+profiles:
+  - profile: markdown-deterministic
+    required: true
+    extractor_kind: deterministic
+    extractor_id: memzoi-markdown
+    extractor_version: 1.0.0
+  - profile: instruction-deterministic
+    required: true
+    extractor_kind: deterministic
+    extractor_id: memzoi-instructions
+    extractor_version: 1.0.0
+  - profile: adr-deterministic
+    required: true
+    extractor_kind: deterministic
+    extractor_id: memzoi-adr
+    extractor_version: 1.0.0
+  - profile: git-change-deterministic
+    required: true
+    extractor_kind: deterministic
+    extractor_id: memzoi-git-change
+    extractor_version: 1.0.0
+thresholds:
+  min_candidate_precision: 1.0
+  min_candidate_recall: 1.0
+  min_evidence_validity: 1.0
+  min_destination_accuracy: 1.0
+  min_sensitivity_accuracy: 1.0
+  min_action_accuracy: 1.0
+  max_forbidden_hit_rate: 0.0
+  min_unsupported_outcome_accuracy: 1.0
+  min_case_pass_rate: 1.0
+  review_burden:
+    proposed: 25
+    accepted: 11
+    rejected: 9
+    edited: 1
+    deferred: 4
+    duplicates: 5
+    conflicts: 4
+    needs_review: 8
+  max_plan_payload_bytes: 2093056
+  max_p95_latency_ms: 5000.0
+cases:
+  - id: typed-markdown-candidates
+    coverage: [useful, cited_provenance, review_reject]
+    project_files:
+      - fixture: fixtures/typed.md
+        path: notes/typed.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator:
+            kind: project_path
+            path: notes/typed.md
+          media_type: text/markdown
+      extractor:
+        profile: markdown-deterministic
+    expected:
+      status: ready
+      data_class: repo_safe
+      candidates:
+        - id: deterministic-fact
+          memory:
+            type: fact
+            lane: semantic
+            title: Deterministic capture plans
+            body: Identical sources produce identical capture plans.
+            scope:
+              kind: repo
+              id: null
+              paths: [notes/typed.md]
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/typed.md}
+              source_content_hash: blake3:dd96c45e68baa7b3e15f89c5cfa17fb6ddcbff7b35445e0471dfba80fbdf856b
+              span: {byte_start: 22, byte_end: 111, line_start: 3, line_end: 5}
+              heading_path: [Capture evaluation, "Fact: Deterministic capture plans"]
+              section_kind: fact
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+        - id: review-procedure
+          memory:
+            type: procedure
+            lane: procedural
+            title: Review capture candidates
+            body: Review repo candidates before applying proposal files.
+            scope:
+              kind: repo
+              id: null
+              paths: [notes/typed.md]
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/typed.md}
+              source_content_hash: blake3:dd96c45e68baa7b3e15f89c5cfa17fb6ddcbff7b35445e0471dfba80fbdf856b
+              span: {byte_start: 111, byte_end: 206, line_start: 6, line_end: 7}
+              heading_path: [Capture evaluation, "Procedure: Review capture candidates"]
+              section_kind: procedure
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+    review_outcomes:
+      - {candidate: deterministic-fact, outcome: accept}
+      - {candidate: review-procedure, outcome: reject}
+
+  - id: unsupported-regions-do-not-overproduce
+    coverage: [forbidden]
+    project_files:
+      - fixture: fixtures/mixed.md
+        path: notes/mixed.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/mixed.md}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: ready
+      data_class: repo_safe
+      diagnostic_codes: [unsupported_markdown_content, unsupported_markdown_content]
+      candidates:
+        - id: supported-fact
+          memory:
+            type: fact
+            lane: semantic
+            title: Supported capture candidate
+            body: Only the typed section becomes a candidate.
+            scope: {kind: repo, id: null, paths: [notes/mixed.md]}
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/mixed.md}
+              source_content_hash: blake3:6954b5db0dce107567a044ace06dd163c2f6814ff6cae11078980b5e7d28c161
+              span: {byte_start: 24, byte_end: 105, line_start: 3, line_end: 5}
+              heading_path: ["Fact: Supported capture candidate"]
+              section_kind: fact
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+      forbidden_candidates:
+        - id: temporary-implementation-chatter
+          memory:
+            type: fact
+            lane: semantic
+            title: Temporary notes
+            body: This implementation chatter must not become durable memory.
+            scope: {kind: repo, id: null, paths: [notes/mixed.md]}
+            tags: []
+    review_outcomes:
+      - {candidate: supported-fact, outcome: accept}
+
+  - id: earlier-candidate-duplicates-and-conflicts
+    coverage: [duplicate, conflict]
+    project_files:
+      - fixture: fixtures/matches.md
+        path: notes/matches.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/matches.md}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: ready
+      data_class: private
+      candidates:
+        - id: exact-first
+          memory:
+            type: fact
+            lane: semantic
+            title: Exact candidate
+            body: Identical evidence-backed body.
+            scope: {kind: repo, id: null, paths: [notes/matches.md]}
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/matches.md}
+              source_content_hash: blake3:952a345a8b120e9671608550c652a869c9c98a8800efb9c0335f45ef8a8ec6a6
+              span: {byte_start: 0, byte_end: 57, line_start: 1, line_end: 3}
+              heading_path: ["Fact: Exact candidate"]
+              section_kind: fact
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+        - id: exact-duplicate
+          memory:
+            type: fact
+            lane: semantic
+            title: Exact candidate
+            body: Identical evidence-backed body.
+            scope: {kind: repo, id: null, paths: [notes/matches.md]}
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/matches.md}
+              source_content_hash: blake3:952a345a8b120e9671608550c652a869c9c98a8800efb9c0335f45ef8a8ec6a6
+              span: {byte_start: 57, byte_end: 114, line_start: 4, line_end: 6}
+              heading_path: ["Fact: Exact candidate"]
+              section_kind: fact
+          destination: repo
+          sensitivity: repo-safe
+          action:
+            kind: duplicate
+            match_count: 1
+            match_kinds: [earlier_candidate]
+        - id: decision-first
+          memory:
+            type: decision
+            lane: semantic
+            title: Conflicting candidate
+            body: First proposed decision.
+            scope: {kind: repo, id: null, paths: [notes/matches.md]}
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/matches.md}
+              source_content_hash: blake3:952a345a8b120e9671608550c652a869c9c98a8800efb9c0335f45ef8a8ec6a6
+              span: {byte_start: 114, byte_end: 174, line_start: 7, line_end: 9}
+              heading_path: ["Decision: Conflicting candidate"]
+              section_kind: decision
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+        - id: decision-conflict
+          memory:
+            type: decision
+            lane: semantic
+            title: Conflicting candidate
+            body: Different proposed decision.
+            scope: {kind: repo, id: null, paths: [notes/matches.md]}
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/matches.md}
+              source_content_hash: blake3:952a345a8b120e9671608550c652a869c9c98a8800efb9c0335f45ef8a8ec6a6
+              span: {byte_start: 174, byte_end: 237, line_start: 10, line_end: 11}
+              heading_path: ["Decision: Conflicting candidate"]
+              section_kind: decision
+          destination: needs_review
+          sensitivity: repo-safe
+          action:
+            kind: conflict
+            match_count: 1
+            match_kinds: [earlier_candidate]
+    review_outcomes:
+      - {candidate: exact-first, outcome: accept}
+      - {candidate: exact-duplicate, outcome: reject}
+      - {candidate: decision-first, outcome: accept}
+      - {candidate: decision-conflict, outcome: defer}
+
+  - id: canonical-inventory-duplicate
+    project_files:
+      - fixture: fixtures/inventory.md
+        path: notes/inventory.md
+    record_fixtures:
+      - fixture: records/inventory-duplicate.md
+        path: inventory-duplicate.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/inventory.md}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: ready
+      data_class: repo_safe
+      candidates:
+        - id: inventory-duplicate
+          memory:
+            type: fact
+            lane: semantic
+            title: Existing inventory memory
+            body: An inventory-backed duplicate remains suppressed.
+            scope: {kind: repo, id: null, paths: [notes/inventory.md]}
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/inventory.md}
+              source_content_hash: blake3:3b87c2305ef4dccf2824661a7254c3cea33c32854f2857c626dcfd34c8a843c6
+              span: {byte_start: 0, byte_end: 84, line_start: 1, line_end: 2}
+              heading_path: ["Fact: Existing inventory memory"]
+              section_kind: fact
+          destination: repo
+          sensitivity: repo-safe
+          action:
+            kind: duplicate
+            match_count: 1
+            match_kinds: [canonical_record]
+    review_outcomes:
+      - {candidate: inventory-duplicate, outcome: reject}
+
+  - id: stale-source-rejected-at-review-and-apply
+    coverage: [stale]
+    project_files:
+      - fixture: fixtures/stale-before.md
+        path: notes/stale.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/stale.md}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: ready
+      data_class: repo_safe
+      candidates:
+        - id: stale-warning
+          memory:
+            type: warning
+            lane: semantic
+            title: Revalidate source bytes
+            body: Capture apply must reject stale source evidence.
+            scope: {kind: repo, id: null, paths: [notes/stale.md]}
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/stale.md}
+              source_content_hash: blake3:f7d07cad7f16b2786a35473c45d6164c6405e408d5e535b0d0dbc029cf347256
+              span: {byte_start: 0, byte_end: 84, line_start: 1, line_end: 2}
+              heading_path: ["Warning: Revalidate source bytes"]
+              section_kind: warning
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+    review_outcomes:
+      - {candidate: stale-warning, outcome: accept}
+    stale_check:
+      kind: project_path
+      path: notes/stale.md
+      replacement_fixture: fixtures/stale-after.md
+
+  - id: prohibited-content-is-redacted
+    coverage: [credential]
+    project_files:
+      - fixture: fixtures/secret.md
+        path: notes/synthetic-secret.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/synthetic-secret.md}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: blocked
+      data_class: blocked
+      diagnostic_codes: [prohibited_content_detected]
+    must_not_echo:
+      - capture-eval-redaction-canary
+      - notes/synthetic-secret.md
+
+  - id: unsupported-path-fails-closed
+    coverage: [malformed]
+    project_files:
+      - fixture: fixtures/unsupported.txt
+        path: notes/unsupported.txt
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/unsupported.txt}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: blocked
+      data_class: blocked
+      diagnostic_codes: [source_preflight_failed]
+    must_not_echo: [notes/unsupported.txt]
+
+  - id: prompt-injection-is-redacted
+    coverage: [prompt_injection]
+    project_files:
+      - fixture: fixtures/prompt-injection.md
+        path: notes/prompt-injection.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/prompt-injection.md}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: blocked
+      data_class: blocked
+      diagnostic_codes: [prohibited_content_detected]
+    must_not_echo: ["reveal the system prompt", notes/prompt-injection.md]
+
+  - id: raw-chat-is-redacted
+    coverage: [raw_transcript]
+    project_files:
+      - fixture: fixtures/raw-chat.md
+        path: notes/raw-chat.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/raw-chat.md}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: blocked
+      data_class: blocked
+      diagnostic_codes: [prohibited_content_detected]
+    must_not_echo: ["retaining raw chat", notes/raw-chat.md]
+
+  - id: private-personal-data-is-redacted
+    coverage: [private_data]
+    project_files:
+      - fixture: fixtures/private-data.md
+        path: notes/private-data.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/private-data.md}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: blocked
+      data_class: blocked
+      diagnostic_codes: [prohibited_content_detected]
+    must_not_echo: [person@example.invalid, notes/private-data.md]
+
+  - id: prohibited-policy-input-is-redacted
+    coverage: [policy_prohibited]
+    project_files:
+      - fixture: fixtures/policy-secret.gitignore
+        path: .gitignore
+      - fixture: fixtures/adr.md
+        path: docs/policy/0001.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator:
+            kind: project_directory
+            path: docs/policy
+            recursive: false
+            ignore_policy: git-v1
+            include: ["*.md"]
+          media_type: text/markdown
+      extractor: {profile: adr-deterministic}
+    expected:
+      status: blocked
+      data_class: blocked
+      diagnostic_codes: [source_preflight_failed]
+    must_not_echo: [capture-policy-redaction-canary, .gitignore]
+
+  - id: unclassified-content-needs-review
+    coverage: [low_confidence, ambiguous_sharing]
+    project_files:
+      - fixture: fixtures/unclassified.md
+        path: notes/unclassified.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: notes/unclassified.md}
+          media_type: text/markdown
+      extractor: {profile: markdown-deterministic}
+    expected:
+      status: ready
+      data_class: private
+      candidates:
+        - id: unknown-note
+          memory:
+            type: fact
+            lane: semantic
+            title: General note
+            body: |-
+              # General note
+              Use deterministic cache keys for generated artifacts.
+            scope: {kind: repo, id: null, paths: [notes/unclassified.md]}
+            tags: []
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: notes/unclassified.md}
+              source_content_hash: blake3:a2dc858b015f32a13ddaa5d7662d8c013e6edc0c8a9f3a212526f8fc930c514e
+              span: {byte_start: 0, byte_end: 69, line_start: 1, line_end: 2}
+              heading_path: []
+              section_kind: unclassified
+          destination: needs_review
+          sensitivity: unknown
+          action: {kind: no_write, reason_code: needs_review}
+    review_outcomes:
+      - candidate: unknown-note
+        outcome: edit
+        memory:
+          type: fact
+          lane: semantic
+          title: General note
+          body: Use deterministic cache keys for generated artifacts.
+          scope: {kind: repo, id: null, paths: [notes/unclassified.md]}
+          tags: []
+        requested_destination: local
+
+  - id: explicit-agent-instructions
+    coverage: [useful, cited_provenance, stale]
+    project_files:
+      - fixture: fixtures/AGENTS.md
+        path: nested/AGENTS.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: nested/AGENTS.md}
+          media_type: text/markdown
+      extractor: {profile: instruction-deterministic}
+    expected:
+      status: ready
+      data_class: repo_safe
+      candidates:
+        - id: review-agent-changes
+          memory:
+            type: procedure
+            lane: procedural
+            title: Agent rules
+            body: Always review source changes before applying them.
+            scope: {kind: repo, id: null, paths: [nested]}
+            tags: [agent-instructions]
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: nested/AGENTS.md}
+              source_content_hash: blake3:31e63ed83f59f3d4986b924ce8f790f13094eee21416844ee75d1e04c5aa8bee
+              span: {byte_start: 0, byte_end: 64, line_start: 1, line_end: 2}
+              heading_path: [Agent rules]
+              section_kind: instruction
+              semantic_location: {kind: instruction}
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+    review_outcomes:
+      - {candidate: review-agent-changes, outcome: accept}
+    stale_check:
+      kind: project_path
+      path: nested/AGENTS.md
+      replacement_fixture: fixtures/stale-after.md
+
+  - id: generated-agent-projection-is-excluded
+    coverage: [feedback_loop, forbidden]
+    project_files:
+      - fixture: fixtures/generated-AGENTS.md
+        path: AGENTS.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: AGENTS.md}
+          media_type: text/markdown
+      extractor: {profile: instruction-deterministic}
+    expected:
+      status: ready
+      data_class: repo_safe
+      diagnostic_codes: [generated_projection_excluded]
+      forbidden_candidates:
+        - id: generated-projection-memory
+          memory:
+            type: procedure
+            lane: procedural
+            title: Generated memory projection
+            body: Never ingest generated Memzoi projections.
+            scope: {kind: repo, id: null, paths: []}
+            tags: [agent-instructions]
+
+  - id: instruction-review-burden
+    coverage: [low_confidence, review_reject, duplicate, conflict, ambiguous_sharing]
+    project_files:
+      - fixture: fixtures/instruction-review.md
+        path: review/AGENTS.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: review/AGENTS.md}
+          media_type: text/markdown
+      extractor: {profile: instruction-deterministic}
+    expected:
+      status: ready
+      data_class: private
+      candidates:
+        - id: instruction-workflow
+          memory:
+            type: procedure
+            lane: procedural
+            title: Workflow
+            body: Review durable changes before applying them.
+            scope: {kind: repo, id: null, paths: [review]}
+            tags: [agent-instructions]
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: review/AGENTS.md}
+              source_content_hash: blake3:17d290af743f87c1c16893c7cd6d1eb15420793a13dc391bd89d25a2ad23fde3
+              span: {byte_start: 0, byte_end: 55, line_start: 1, line_end: 2}
+              heading_path: [Workflow]
+              section_kind: instruction
+              semantic_location: {kind: instruction}
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+        - id: instruction-duplicate
+          memory:
+            type: procedure
+            lane: procedural
+            title: Workflow
+            body: Review durable changes before applying them.
+            scope: {kind: repo, id: null, paths: [review]}
+            tags: [agent-instructions]
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: review/AGENTS.md}
+              source_content_hash: blake3:17d290af743f87c1c16893c7cd6d1eb15420793a13dc391bd89d25a2ad23fde3
+              span: {byte_start: 57, byte_end: 112, line_start: 4, line_end: 5}
+              heading_path: [Workflow]
+              section_kind: instruction
+              semantic_location: {kind: instruction}
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: duplicate, match_count: 1, match_kinds: [earlier_candidate]}
+        - id: instruction-conflict
+          memory:
+            type: procedure
+            lane: procedural
+            title: Workflow
+            body: Apply durable changes without review.
+            scope: {kind: repo, id: null, paths: [review]}
+            tags: [agent-instructions]
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: review/AGENTS.md}
+              source_content_hash: blake3:17d290af743f87c1c16893c7cd6d1eb15420793a13dc391bd89d25a2ad23fde3
+              span: {byte_start: 114, byte_end: 162, line_start: 7, line_end: 8}
+              heading_path: [Workflow]
+              section_kind: instruction
+              semantic_location: {kind: instruction}
+          destination: needs_review
+          sensitivity: repo-safe
+          action: {kind: conflict, match_count: 2, match_kinds: [earlier_candidate, earlier_candidate]}
+        - id: instruction-temporary
+          memory:
+            type: procedure
+            lane: procedural
+            title: Temporary
+            body: Keep this instruction only for the current task.
+            scope: {kind: repo, id: null, paths: [review]}
+            tags: [agent-instructions]
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: review/AGENTS.md}
+              source_content_hash: blake3:17d290af743f87c1c16893c7cd6d1eb15420793a13dc391bd89d25a2ad23fde3
+              span: {byte_start: 164, byte_end: 224, line_start: 10, line_end: 11}
+              heading_path: [Temporary]
+              section_kind: instruction
+              semantic_location: {kind: instruction}
+          destination: needs_review
+          sensitivity: unknown
+          action: {kind: no_write, reason_code: needs_review}
+    review_outcomes:
+      - {candidate: instruction-workflow, outcome: accept}
+      - {candidate: instruction-duplicate, outcome: reject}
+      - {candidate: instruction-conflict, outcome: defer}
+      - {candidate: instruction-temporary, outcome: reject}
+
+  - id: accepted-adr-decision
+    coverage: [useful, cited_provenance, stale, forbidden]
+    project_files:
+      - fixture: fixtures/adr.md
+        path: docs/adr/0001-evidence.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: docs/adr/0001-evidence.md}
+          media_type: text/markdown
+      extractor: {profile: adr-deterministic}
+    expected:
+      status: ready
+      data_class: repo_safe
+      candidates:
+        - id: adr-evidence-decision
+          memory:
+            type: decision
+            lane: semantic
+            title: "ADR: Evidence identity"
+            body: Use exact source spans.
+            scope: {kind: repo, id: null, paths: [docs/adr/0001-evidence.md]}
+            tags: [adr, "adr-status:accepted", "adr-field:decision"]
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: docs/adr/0001-evidence.md}
+              source_content_hash: blake3:53d19bc3cb99b6678eb8e055ab9c18b109e6b01fb2c4564592623d46aa7f7b02
+              span: {byte_start: 0, byte_end: 25, line_start: 1, line_end: 1}
+              heading_path: ["ADR: Evidence identity"]
+              section_kind: title
+              semantic_location: {kind: adr, field: title, status: accepted}
+            - source_id: source-1
+              locator: {kind: project_path, path: docs/adr/0001-evidence.md}
+              source_content_hash: blake3:53d19bc3cb99b6678eb8e055ab9c18b109e6b01fb2c4564592623d46aa7f7b02
+              span: {byte_start: 26, byte_end: 46, line_start: 3, line_end: 5}
+              heading_path: ["ADR: Evidence identity", Status]
+              section_kind: status
+              semantic_location: {kind: adr, field: status, status: accepted}
+            - source_id: source-1
+              locator: {kind: project_path, path: docs/adr/0001-evidence.md}
+              source_content_hash: blake3:53d19bc3cb99b6678eb8e055ab9c18b109e6b01fb2c4564592623d46aa7f7b02
+              span: {byte_start: 46, byte_end: 82, line_start: 6, line_end: 7}
+              heading_path: ["ADR: Evidence identity", Decision]
+              section_kind: decision
+              semantic_location: {kind: adr, field: decision, status: accepted}
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+      forbidden_candidates:
+        - id: adr-status-as-memory
+          memory:
+            type: fact
+            lane: semantic
+            title: "ADR: Evidence identity"
+            body: Accepted
+            scope: {kind: repo, id: null, paths: [docs/adr/0001-evidence.md]}
+            tags: [adr, "adr-status:accepted", "adr-field:status"]
+    review_outcomes:
+      - {candidate: adr-evidence-decision, outcome: accept}
+    stale_check:
+      kind: project_path
+      path: docs/adr/0001-evidence.md
+      replacement_fixture: fixtures/stale-after.md
+
+  - id: explicit-git-diff-guidance
+    coverage: [useful, cited_provenance, stale, supplied_bytes]
+    source_inputs:
+      - source_id: source-1
+        fixture: fixtures/change.diff
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator:
+            kind: supplied_bytes
+            display_name: reviewed.diff
+            media_type: text/x-diff
+            byte_length: 277
+            source_content_hash: blake3:52db88131e2d904dd0e061165d64b125ff09bbb37e3f61850d26dd31ea53d3de
+          media_type: text/x-diff
+          git:
+            repository: .
+            base: sha1:1111111111111111111111111111111111111111
+            head: sha1:2222222222222222222222222222222222222222
+      extractor: {profile: git-change-deterministic}
+    expected:
+      status: ready
+      data_class: repo_safe
+      candidates:
+        - id: git-preserve-evidence-warning
+          memory:
+            type: warning
+            lane: semantic
+            title: Preserve evidence
+            body: Never detach claims from source spans.
+            scope: {kind: repo, id: null, paths: [docs/rules.md]}
+            tags: [git-change]
+          evidence:
+            - source_id: source-1
+              locator:
+                kind: supplied_bytes
+                display_name: reviewed.diff
+                media_type: text/x-diff
+                byte_length: 277
+                source_content_hash: blake3:52db88131e2d904dd0e061165d64b125ff09bbb37e3f61850d26dd31ea53d3de
+              source_content_hash: blake3:52db88131e2d904dd0e061165d64b125ff09bbb37e3f61850d26dd31ea53d3de
+              span: {byte_start: 205, byte_end: 277, line_start: 7, line_end: 9}
+              heading_path: ["Warning: Preserve evidence"]
+              section_kind: warning
+              semantic_location:
+                kind: git_change
+                repository: .
+                base: sha1:1111111111111111111111111111111111111111
+                head: sha1:2222222222222222222222222222222222222222
+                old_blob: sha1:1111111111111111111111111111111111111111
+                new_blob: sha1:2222222222222222222222222222222222222222
+                old_path: docs/rules.md
+                new_path: docs/rules.md
+                change_kind: modified
+                hunk: blake3:cc457e8ae69846a22e3109b6bc4ecf8a1dbdb834610d903a0e22923ebff1b92c
+                side: new
+                old_line_start: 1
+                old_line_end: 1
+                new_line_start: 2
+                new_line_end: 4
+          destination: repo
+          sensitivity: repo-safe
+          action: {kind: create_proposal}
+    review_outcomes:
+      - {candidate: git-preserve-evidence-warning, outcome: accept}
+    stale_check:
+      kind: supplied_bytes
+      source_id: source-1
+      replacement_fixture: fixtures/stale-after.md
+
+  - id: adr-review-burden
+    coverage: [low_confidence, review_reject, duplicate, conflict, ambiguous_sharing]
+    project_files:
+      - fixture: fixtures/adr-review.md
+        path: docs/adr/0002-review.md
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: docs/adr/0002-review.md}
+          media_type: text/markdown
+      extractor: {profile: adr-deterministic}
+    expected:
+      status: ready
+      data_class: private
+      candidates:
+        - id: "adr-review-required"
+          memory:
+            type: "decision"
+            lane: "semantic"
+            title: "ADR: Review burden"
+            body: "Require review before rollout."
+            scope:
+              kind: "repo"
+              id: null
+              paths:
+                - "docs/adr/0002-review.md"
+            tags:
+              - "adr"
+              - "adr-status:draft"
+              - "adr-field:decision"
+          evidence:
+            - source_id: "source-1"
+              locator:
+                kind: "project_path"
+                path: "docs/adr/0002-review.md"
+              source_content_hash: "blake3:66dad345f18e562ec776c5fdd01e8a6e9a35117dc6b503e9807c1e1b64823cb1"
+              span:
+                byte_start: 0
+                byte_end: 21
+                line_start: 1
+                line_end: 1
+              heading_path:
+                - "ADR: Review burden"
+              section_kind: "title"
+              semantic_location:
+                kind: "adr"
+                field: "title"
+                status: "draft"
+            - source_id: "source-1"
+              locator:
+                kind: "project_path"
+                path: "docs/adr/0002-review.md"
+              source_content_hash: "blake3:66dad345f18e562ec776c5fdd01e8a6e9a35117dc6b503e9807c1e1b64823cb1"
+              span:
+                byte_start: 22
+                byte_end: 39
+                line_start: 3
+                line_end: 5
+              heading_path:
+                - "ADR: Review burden"
+                - "Status"
+              section_kind: "status"
+              semantic_location:
+                kind: "adr"
+                field: "status"
+                status: "draft"
+            - source_id: "source-1"
+              locator:
+                kind: "project_path"
+                path: "docs/adr/0002-review.md"
+              source_content_hash: "blake3:66dad345f18e562ec776c5fdd01e8a6e9a35117dc6b503e9807c1e1b64823cb1"
+              span:
+                byte_start: 39
+                byte_end: 83
+                line_start: 6
+                line_end: 8
+              heading_path:
+                - "ADR: Review burden"
+                - "Decision"
+              section_kind: "decision"
+              semantic_location:
+                kind: "adr"
+                field: "decision"
+                status: "draft"
+          destination: "needs_review"
+          sensitivity: "unknown"
+          action:
+            kind: "no_write"
+            reason_code: "needs_review"
+        - id: "adr-review-duplicate"
+          memory:
+            type: "decision"
+            lane: "semantic"
+            title: "ADR: Review burden"
+            body: "Require review before rollout."
+            scope:
+              kind: "repo"
+              id: null
+              paths:
+                - "docs/adr/0002-review.md"
+            tags:
+              - "adr"
+              - "adr-status:draft"
+              - "adr-field:decision"
+          evidence:
+            - source_id: "source-1"
+              locator:
+                kind: "project_path"
+                path: "docs/adr/0002-review.md"
+              source_content_hash: "blake3:66dad345f18e562ec776c5fdd01e8a6e9a35117dc6b503e9807c1e1b64823cb1"
+              span:
+                byte_start: 0
+                byte_end: 21
+                line_start: 1
+                line_end: 1
+              heading_path:
+                - "ADR: Review burden"
+              section_kind: "title"
+              semantic_location:
+                kind: "adr"
+                field: "title"
+                status: "draft"
+            - source_id: "source-1"
+              locator:
+                kind: "project_path"
+                path: "docs/adr/0002-review.md"
+              source_content_hash: "blake3:66dad345f18e562ec776c5fdd01e8a6e9a35117dc6b503e9807c1e1b64823cb1"
+              span:
+                byte_start: 22
+                byte_end: 39
+                line_start: 3
+                line_end: 5
+              heading_path:
+                - "ADR: Review burden"
+                - "Status"
+              section_kind: "status"
+              semantic_location:
+                kind: "adr"
+                field: "status"
+                status: "draft"
+            - source_id: "source-1"
+              locator:
+                kind: "project_path"
+                path: "docs/adr/0002-review.md"
+              source_content_hash: "blake3:66dad345f18e562ec776c5fdd01e8a6e9a35117dc6b503e9807c1e1b64823cb1"
+              span:
+                byte_start: 83
+                byte_end: 127
+                line_start: 9
+                line_end: 11
+              heading_path:
+                - "ADR: Review burden"
+                - "Decision"
+              section_kind: "decision"
+              semantic_location:
+                kind: "adr"
+                field: "decision"
+                status: "draft"
+          destination: "needs_review"
+          sensitivity: "unknown"
+          action:
+            kind: "duplicate"
+            match_count: 1
+            match_kinds:
+              - "earlier_candidate"
+        - id: "adr-review-conflict"
+          memory:
+            type: "decision"
+            lane: "semantic"
+            title: "ADR: Review burden"
+            body: "Skip review before rollout."
+            scope:
+              kind: "repo"
+              id: null
+              paths:
+                - "docs/adr/0002-review.md"
+            tags:
+              - "adr"
+              - "adr-status:draft"
+              - "adr-field:decision"
+          evidence:
+            - source_id: "source-1"
+              locator:
+                kind: "project_path"
+                path: "docs/adr/0002-review.md"
+              source_content_hash: "blake3:66dad345f18e562ec776c5fdd01e8a6e9a35117dc6b503e9807c1e1b64823cb1"
+              span:
+                byte_start: 0
+                byte_end: 21
+                line_start: 1
+                line_end: 1
+              heading_path:
+                - "ADR: Review burden"
+              section_kind: "title"
+              semantic_location:
+                kind: "adr"
+                field: "title"
+                status: "draft"
+            - source_id: "source-1"
+              locator:
+                kind: "project_path"
+                path: "docs/adr/0002-review.md"
+              source_content_hash: "blake3:66dad345f18e562ec776c5fdd01e8a6e9a35117dc6b503e9807c1e1b64823cb1"
+              span:
+                byte_start: 22
+                byte_end: 39
+                line_start: 3
+                line_end: 5
+              heading_path:
+                - "ADR: Review burden"
+                - "Status"
+              section_kind: "status"
+              semantic_location:
+                kind: "adr"
+                field: "status"
+                status: "draft"
+            - source_id: "source-1"
+              locator:
+                kind: "project_path"
+                path: "docs/adr/0002-review.md"
+              source_content_hash: "blake3:66dad345f18e562ec776c5fdd01e8a6e9a35117dc6b503e9807c1e1b64823cb1"
+              span:
+                byte_start: 127
+                byte_end: 167
+                line_start: 12
+                line_end: 13
+              heading_path:
+                - "ADR: Review burden"
+                - "Decision"
+              section_kind: "decision"
+              semantic_location:
+                kind: "adr"
+                field: "decision"
+                status: "draft"
+          destination: "needs_review"
+          sensitivity: "unknown"
+          action:
+            kind: "conflict"
+            match_count: 2
+            match_kinds:
+              - "earlier_candidate"
+              - "earlier_candidate"
+    review_outcomes:
+      - candidate: "adr-review-required"
+        outcome: "reject"
+      - candidate: "adr-review-duplicate"
+        outcome: "reject"
+      - candidate: "adr-review-conflict"
+        outcome: "defer"
+
+  - id: pinned-git-range-guidance
+    coverage: [useful, cited_provenance, stale, git_range, git_range_stale]
+    git_repository:
+      base_files:
+        - fixture: fixtures/git-range-base.md
+          path: docs/rules.md
+      head_files:
+        - fixture: fixtures/git-range-head.md
+          path: docs/rules.md
+    expected_policy_inputs:
+      - path: .git
+        engine_version: memzoi/git-repository-identity-v1
+      - path: .git/config
+        engine_version: memzoi/git-local-config-v1
+      - path: .git/renderer-version
+        engine_version: memzoi/git-unified-renderer-v1+git-
+        engine_match: prefix
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator:
+            kind: git_range
+            repository: .
+            base: sha1:8d1abf8f5f72c46c8929394a34a27c2c527f5e3e
+            head: sha1:28b25e8d27d036d59f77903f073fdabf22147108
+            merge_parent: base_to_head
+            rename_detection: true
+            diff_format: git-unified-v1
+          media_type: text/x-diff
+      extractor: {profile: git-change-deterministic}
+    expected:
+      status: ready
+      data_class: repo_safe
+      candidates:
+        - id: "git-pin-evaluated-ranges"
+          memory:
+            type: "decision"
+            lane: "semantic"
+            title: "Pin evaluated ranges"
+            body: "Use pinned range evidence for deterministic capture."
+            scope:
+              kind: "repo"
+              id: null
+              paths:
+                - "docs/rules.md"
+            tags:
+              - "git-change"
+          evidence:
+            - source_id: "source-1"
+              locator:
+                kind: "git_range"
+                repository: "."
+                base: "sha1:8d1abf8f5f72c46c8929394a34a27c2c527f5e3e"
+                head: "sha1:28b25e8d27d036d59f77903f073fdabf22147108"
+                merge_parent: "base_to_head"
+                rename_detection: true
+                diff_format: "git-unified-v1"
+              source_content_hash: "blake3:f637c42f2eabdae330bd7d01ab20e862ad3f20eef1e18702e2d6cc57425a3c5a"
+              span:
+                byte_start: 210
+                byte_end: 299
+                line_start: 8
+                line_end: 9
+              heading_path:
+                - "Decision: Pin evaluated ranges"
+              section_kind: "decision"
+              semantic_location:
+                kind: "git_change"
+                repository: "."
+                base: "sha1:8d1abf8f5f72c46c8929394a34a27c2c527f5e3e"
+                head: "sha1:28b25e8d27d036d59f77903f073fdabf22147108"
+                old_blob: "sha1:5b25c0afbcd0b8fdeababfb2cbc0e94c8e37d894"
+                new_blob: "sha1:98862ef60904ecc11eb093fe07932f1a8a31967f"
+                old_path: "docs/rules.md"
+                new_path: "docs/rules.md"
+                change_kind: "modified"
+                hunk: "blake3:ab61f58de1c628d517ba96c2dbd2352781d844123d9c3fa6a5af279f0acfad6a"
+                side: "new"
+                old_line_start: 1
+                old_line_end: 1
+                new_line_start: 3
+                new_line_end: 4
+          destination: "repo"
+          sensitivity: "repo-safe"
+          action:
+            kind: "create_proposal"
+    review_outcomes:
+      - candidate: "git-pin-evaluated-ranges"
+        outcome: "accept"
+    stale_check:
+      kind: git_object_missing
+      oid: sha1:28b25e8d27d036d59f77903f073fdabf22147108
+
+  - id: git-review-burden
+    coverage: [low_confidence, review_reject, duplicate, conflict, supplied_bytes, ambiguous_sharing]
+    source_inputs:
+      - source_id: source-1
+        fixture: fixtures/git-review.diff
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator:
+            kind: supplied_bytes
+            display_name: review.diff
+            media_type: text/x-diff
+            byte_length: 409
+            source_content_hash: blake3:0bf94f73432cf86da3beb9e887fc7f0a7d0afbbad93f4bc70919d6b62fb15b8c
+          media_type: text/x-diff
+          git:
+            repository: .
+            base: sha1:1111111111111111111111111111111111111111
+            head: sha1:2222222222222222222222222222222222222222
+      extractor: {profile: git-change-deterministic}
+    expected:
+      status: ready
+      data_class: private
+      candidates:
+        - id: "git-review-guidance"
+          memory:
+            type: "procedure"
+            lane: "procedural"
+            title: "Review Git guidance"
+            body: "Require review before rollout."
+            scope:
+              kind: "repo"
+              id: null
+              paths:
+                - "docs/review.md"
+            tags:
+              - "git-change"
+          evidence:
+            - source_id: "source-1"
+              locator:
+                kind: "supplied_bytes"
+                display_name: "review.diff"
+                media_type: "text/x-diff"
+                byte_length: 409
+                source_content_hash: "blake3:0bf94f73432cf86da3beb9e887fc7f0a7d0afbbad93f4bc70919d6b62fb15b8c"
+              source_content_hash: "blake3:0bf94f73432cf86da3beb9e887fc7f0a7d0afbbad93f4bc70919d6b62fb15b8c"
+              span:
+                byte_start: 208
+                byte_end: 276
+                line_start: 7
+                line_end: 9
+              heading_path:
+                - "Procedure: Review Git guidance"
+              section_kind: "procedure"
+              semantic_location:
+                kind: "git_change"
+                repository: "."
+                base: "sha1:1111111111111111111111111111111111111111"
+                head: "sha1:2222222222222222222222222222222222222222"
+                old_blob: "sha1:1111111111111111111111111111111111111111"
+                new_blob: "sha1:2222222222222222222222222222222222222222"
+                old_path: "docs/review.md"
+                new_path: "docs/review.md"
+                change_kind: "modified"
+                hunk: "blake3:378beb02a96b93b06583d4cb3b8d95a71a038f4135176d3db71676d8b92b16a1"
+                side: "new"
+                old_line_start: 1
+                old_line_end: 1
+                new_line_start: 2
+                new_line_end: 4
+          destination: "repo"
+          sensitivity: "repo-safe"
+          action:
+            kind: "create_proposal"
+        - id: "git-review-duplicate"
+          memory:
+            type: "procedure"
+            lane: "procedural"
+            title: "Review Git guidance"
+            body: "Require review before rollout."
+            scope:
+              kind: "repo"
+              id: null
+              paths:
+                - "docs/review.md"
+            tags:
+              - "git-change"
+          evidence:
+            - source_id: "source-1"
+              locator:
+                kind: "supplied_bytes"
+                display_name: "review.diff"
+                media_type: "text/x-diff"
+                byte_length: 409
+                source_content_hash: "blake3:0bf94f73432cf86da3beb9e887fc7f0a7d0afbbad93f4bc70919d6b62fb15b8c"
+              source_content_hash: "blake3:0bf94f73432cf86da3beb9e887fc7f0a7d0afbbad93f4bc70919d6b62fb15b8c"
+              span:
+                byte_start: 276
+                byte_end: 344
+                line_start: 10
+                line_end: 12
+              heading_path:
+                - "Procedure: Review Git guidance"
+              section_kind: "procedure"
+              semantic_location:
+                kind: "git_change"
+                repository: "."
+                base: "sha1:1111111111111111111111111111111111111111"
+                head: "sha1:2222222222222222222222222222222222222222"
+                old_blob: "sha1:1111111111111111111111111111111111111111"
+                new_blob: "sha1:2222222222222222222222222222222222222222"
+                old_path: "docs/review.md"
+                new_path: "docs/review.md"
+                change_kind: "modified"
+                hunk: "blake3:378beb02a96b93b06583d4cb3b8d95a71a038f4135176d3db71676d8b92b16a1"
+                side: "new"
+                old_line_start: 1
+                old_line_end: 1
+                new_line_start: 5
+                new_line_end: 7
+          destination: "repo"
+          sensitivity: "repo-safe"
+          action:
+            kind: "duplicate"
+            match_count: 1
+            match_kinds:
+              - "earlier_candidate"
+        - id: "git-review-conflict"
+          memory:
+            type: "procedure"
+            lane: "procedural"
+            title: "Review Git guidance"
+            body: "Skip review before rollout."
+            scope:
+              kind: "repo"
+              id: null
+              paths:
+                - "docs/review.md"
+            tags:
+              - "git-change"
+          evidence:
+            - source_id: "source-1"
+              locator:
+                kind: "supplied_bytes"
+                display_name: "review.diff"
+                media_type: "text/x-diff"
+                byte_length: 409
+                source_content_hash: "blake3:0bf94f73432cf86da3beb9e887fc7f0a7d0afbbad93f4bc70919d6b62fb15b8c"
+              source_content_hash: "blake3:0bf94f73432cf86da3beb9e887fc7f0a7d0afbbad93f4bc70919d6b62fb15b8c"
+              span:
+                byte_start: 344
+                byte_end: 409
+                line_start: 13
+                line_end: 15
+              heading_path:
+                - "Procedure: Review Git guidance"
+              section_kind: "procedure"
+              semantic_location:
+                kind: "git_change"
+                repository: "."
+                base: "sha1:1111111111111111111111111111111111111111"
+                head: "sha1:2222222222222222222222222222222222222222"
+                old_blob: "sha1:1111111111111111111111111111111111111111"
+                new_blob: "sha1:2222222222222222222222222222222222222222"
+                old_path: "docs/review.md"
+                new_path: "docs/review.md"
+                change_kind: "modified"
+                hunk: "blake3:378beb02a96b93b06583d4cb3b8d95a71a038f4135176d3db71676d8b92b16a1"
+                side: "new"
+                old_line_start: 1
+                old_line_end: 1
+                new_line_start: 8
+                new_line_end: 10
+          destination: "needs_review"
+          sensitivity: "repo-safe"
+          action:
+            kind: "conflict"
+            match_count: 2
+            match_kinds:
+              - "earlier_candidate"
+              - "earlier_candidate"
+    review_outcomes:
+      - candidate: "git-review-guidance"
+        outcome: "accept"
+      - candidate: "git-review-duplicate"
+        outcome: "reject"
+      - candidate: "git-review-conflict"
+        outcome: "defer"
+
+  - id: git-rename-needs-review
+    coverage: [rename, low_confidence, forbidden]
+    project_files:
+      - fixture: fixtures/rename.diff
+        path: changes/rename.diff
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: changes/rename.diff}
+          media_type: text/x-diff
+          git:
+            repository: .
+            base: sha1:1111111111111111111111111111111111111111
+            head: sha1:2222222222222222222222222222222222222222
+      extractor: {profile: git-change-deterministic}
+    expected:
+      status: ready
+      data_class: repo_safe
+      diagnostic_codes: [git_rename_without_durable_candidate]
+      forbidden_candidates:
+        - id: fabricated-rename-summary
+          memory:
+            type: relationship
+            lane: semantic
+            title: Git rename
+            body: docs/old.md was renamed to docs/new.md.
+            scope: {kind: repo, id: null, paths: [docs/old.md, docs/new.md]}
+            tags: [git-change, git-rename]
+
+  - id: git-delete-needs-review
+    coverage: [delete, low_confidence]
+    project_files:
+      - fixture: fixtures/delete.diff
+        path: changes/delete.diff
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: changes/delete.diff}
+          media_type: text/x-diff
+          git:
+            repository: .
+            base: sha1:1111111111111111111111111111111111111111
+            head: sha1:2222222222222222222222222222222222222222
+      extractor: {profile: git-change-deterministic}
+    expected:
+      status: ready
+      data_class: private
+      candidates:
+        - id: git-deleted-guidance
+          memory:
+            type: warning
+            lane: semantic
+            title: Removed guidance
+            body: Do not remove this without review.
+            scope: {kind: repo, id: null, paths: [docs/delete.md]}
+            tags: [git-change, git-deletion]
+          evidence:
+            - source_id: source-1
+              locator: {kind: project_path, path: changes/delete.diff}
+              source_content_hash: blake3:5375ac3bb7697f71f665000bbc9af5071eb55908e0c02e1d0640460df5cbcef4
+              span: {byte_start: 210, byte_end: 275, line_start: 7, line_end: 8}
+              heading_path: ["Warning: Removed guidance"]
+              section_kind: warning
+              semantic_location:
+                kind: git_change
+                repository: .
+                base: sha1:1111111111111111111111111111111111111111
+                head: sha1:2222222222222222222222222222222222222222
+                old_blob: sha1:1111111111111111111111111111111111111111
+                old_path: docs/delete.md
+                change_kind: deleted
+                hunk: blake3:96d992b2d5144251e7dcfa3f655c80e4457d339e39cfc5c9ac23be0daaa1867d
+                side: old
+                old_line_start: 1
+                old_line_end: 2
+          destination: needs_review
+          sensitivity: unknown
+          action: {kind: no_write, reason_code: needs_review}
+    review_outcomes:
+      - {candidate: git-deleted-guidance, outcome: reject}
+
+  - id: malformed-git-diff-fails-closed
+    coverage: [malformed]
+    project_files:
+      - fixture: fixtures/malformed.diff
+        path: changes/malformed.diff
+    request:
+      schema: memzoi/capture-request-v1
+      sources:
+        - source_id: source-1
+          locator: {kind: project_path, path: changes/malformed.diff}
+          media_type: text/x-diff
+          git:
+            repository: .
+            base: sha1:1111111111111111111111111111111111111111
+            head: sha1:2222222222222222222222222222222222222222
+      extractor: {profile: git-change-deterministic}
+    expected:
+      status: blocked
+      data_class: blocked
+      diagnostic_codes: [extractor_safeguard_failed]
