@@ -7,6 +7,11 @@ recall decision. It is additive: the checked recall-v2 baseline remains the
 release regression gate while v3 development and locked-test bundles collect
 graded retrieval evidence.
 
+Before expanding the public development corpus, follow the
+[development-corpus plan](recall-v3-development-corpus-plan.md). Blind human
+reviewers use the separate [public-corpus reviewer guide](recall-v3-reviewer-guide.md);
+locked-test custody remains a separate issue and process.
+
 Run the checked development smoke corpus with the production lexical baseline:
 
 ```bash
