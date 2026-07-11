@@ -67,6 +67,7 @@ expected = {
     'precheck_action',
     'precheck_command',
     'inspect_memory_expiry',
+    'plan_capture_v1',
 }
 assert tools == expected, tools
 print('onboarding smoke OK')
