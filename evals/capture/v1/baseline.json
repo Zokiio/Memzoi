@@ -5,7 +5,7 @@
   "corpus": {
     "name": "memzoi-capture-v1",
     "version": "memzoi-capture-corpus/v1",
-    "digest": "blake3:2b7620349acd799b6fd4eebe7fe3352390aa6bff3bda4d7d951fcf9f32fb3971"
+    "digest": "blake3:f52871bedc75e075abf1973bd0323f0f9dd3b17d62367c11899adf06f634c0ec"
   },
   "profiles": [
     {
@@ -34,7 +34,7 @@
       "extractor_kind": "deterministic",
       "extractor_id": "memzoi-instructions",
       "extractor_version": "1.0.0",
-      "extractor_configuration_hash": "blake3:a8d205718755904de523a0ac91b2a1fbea96ada0cc3a3c89198c472ae84a41dd",
+      "extractor_configuration_hash": "blake3:45c14a84a015ba48f5e76b58b4419b2c4fc119a287c24263024a1a4bc8352688",
       "safeguard_policy_version": "memzoi/capture-safeguards-v1",
       "safeguard_configuration_hash": "blake3:25f352d74e458b06305a300bf5bdb158f6936c93b76600b49bfecbebf153070c"
     },

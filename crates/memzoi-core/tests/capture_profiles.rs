@@ -12,8 +12,8 @@ use memzoi_core::{
     CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome, CaptureSemanticLocation,
     CaptureSourceInputs, CaptureSourceLocator, CaptureSourceRequest, GIT_CHANGE_EXTRACTOR_PROFILE,
     INSTRUCTION_EXTRACTOR_PROFILE, InitRequest, MemoryDestination, MemoryPaths, MemoryService,
-    SearchInput, build_capture_review, build_capture_review_with_inputs, plan_capture,
-    plan_capture_with_inputs, read_okf_proposal_files, read_okf_record_files,
+    OkfProposalSensitivity, SearchInput, build_capture_review, build_capture_review_with_inputs,
+    plan_capture, plan_capture_with_inputs, read_okf_proposal_files, read_okf_record_files,
 };
 use tempfile::TempDir;
 
@@ -229,6 +229,84 @@ fn generated_instruction_projection_is_excluded_without_feedback() -> anyhow::Re
     assert!(plan.candidates.is_empty());
     assert_eq!(plan.diagnostics[0].code, "generated_projection_excluded");
     assert!(!serde_json::to_string(&plan)?.contains("exportedprojectioncanary"));
+    Ok(())
+}
+
+#[test]
+fn instruction_heading_markers_force_review_routing() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    fixture.write(
+        "AGENTS.md",
+        concat!(
+            "# Agent instructions\n\n",
+            "## Temporary notes\n\n",
+            "Use this override during migration.\n\n",
+            "## Private instructions\n\n",
+            "Keep this guidance out of shared memory.\n\n",
+            "### Procedure: Nested shared rule\n\n",
+            "Use a stable cache key for generated artifacts.\n\n",
+            "## Temporarily stable\n\n",
+            "This durable guidance has a near-miss heading.\n\n",
+            "## Privateer workflow\n\n",
+            "This durable workflow also has a near-miss heading.\n",
+        ),
+    )?;
+
+    let plan = plan_capture(
+        &fixture.paths,
+        project_path_request("instructions", "AGENTS.md", INSTRUCTION_EXTRACTOR_PROFILE),
+    )?;
+
+    for title in [
+        "Temporary notes",
+        "Private instructions",
+        "Nested shared rule",
+    ] {
+        let candidate = candidate_named(&plan, title);
+        assert_eq!(
+            candidate.classification.destination,
+            MemoryDestination::NeedsReview
+        );
+        assert_eq!(
+            candidate.classification.sensitivity,
+            OkfProposalSensitivity::Unknown
+        );
+        assert!(matches!(
+            candidate.action,
+            CaptureAction::NoWrite { ref reason_code } if reason_code == "needs_review"
+        ));
+    }
+    for title in ["Temporarily stable", "Privateer workflow"] {
+        let candidate = candidate_named(&plan, title);
+        assert_eq!(
+            candidate.classification.destination,
+            MemoryDestination::Repo
+        );
+        assert_eq!(
+            candidate.classification.sensitivity,
+            OkfProposalSensitivity::RepoSafe
+        );
+    }
+
+    let decisions = plan
+        .candidates
+        .iter()
+        .map(|candidate| CaptureReviewDecisionInput {
+            candidate_id: candidate.candidate_id.clone(),
+            outcome: CaptureReviewOutcome::Reject,
+            reason_code: Some("review-routing-regression".to_owned()),
+            memory: None,
+            requested_destination: None,
+        })
+        .collect();
+    let review = build_capture_review(
+        &fixture.paths,
+        &plan,
+        review_input(&plan, decisions),
+        "profile-reviewer",
+        REVIEWED_AT,
+    )?;
+    assert_eq!(review.decisions.len(), plan.candidates.len());
     Ok(())
 }
 

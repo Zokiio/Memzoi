@@ -8,7 +8,8 @@ use crate::{MemoryDestination, MemoryLane, MemoryType, OkfProposalSensitivity, S
 use super::super::{
     CaptureDiagnostic, CaptureExtraction, CaptureExtractorIdentity, CaptureMemoryDraft,
     CapturePlanningControl, CaptureScope, CaptureSemanticLocation, CaptureSourceDocument,
-    EvidenceLocation, candidate, check_planning_control, evidence_for, markdown_sections,
+    EvidenceLocation, candidate, check_planning_control, contains_instruction_review_marker,
+    evidence_for, markdown_sections,
 };
 
 const MEMZOI_START: &str = "<!-- memzoi:start -->";
@@ -318,45 +319,13 @@ fn instruction_scope(document: &CaptureSourceDocument) -> CaptureScope {
 }
 
 fn temporary_or_ambiguous(heading_path: &[String]) -> bool {
-    heading_path.iter().any(|heading| {
-        let lower = heading.to_ascii_lowercase();
-        [
-            "temporary",
-            "current task",
-            "this task",
-            "session",
-            "wip",
-            "scratch",
-            "personal",
-            "private",
-            "local only",
-        ]
+    heading_path
         .iter()
-        .any(|marker| lower == *marker || lower.starts_with(&format!("{marker}:")))
-    })
+        .any(|heading| contains_instruction_review_marker(heading))
 }
 
 fn temporary_or_ambiguous_text(text: &str) -> bool {
-    text.lines().any(|line| {
-        let lower = line.trim().to_ascii_lowercase();
-        [
-            "temporary",
-            "current task",
-            "session",
-            "wip",
-            "scratch",
-            "personal",
-            "private",
-            "local only",
-        ]
-        .iter()
-        .any(|marker| {
-            marker.contains(' ') && lower.contains(marker)
-                || lower
-                    .split(|character: char| !character.is_alphanumeric())
-                    .any(|word| word == *marker)
-        })
-    })
+    text.lines().any(contains_instruction_review_marker)
 }
 
 #[cfg(test)]
@@ -376,5 +345,20 @@ mod tests {
     fn malformed_markers_are_rejected() {
         let error = generated_ranges(&format!("{MEMZOI_END}\n{MEMZOI_START}\n")).unwrap_err();
         assert!(error.to_string().contains("malformed"));
+    }
+
+    #[test]
+    fn ambiguity_markers_match_complete_words_inside_headings() {
+        for heading in [
+            "Temporary notes",
+            "Private instructions",
+            "Current-task overrides",
+            "Local-only guidance",
+        ] {
+            assert!(temporary_or_ambiguous(&[heading.to_owned()]), "{heading}");
+        }
+        for heading in ["Temporarily stable", "Privateer workflow"] {
+            assert!(!temporary_or_ambiguous(&[heading.to_owned()]), "{heading}");
+        }
     }
 }

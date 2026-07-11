@@ -63,6 +63,17 @@ pub const CAPTURE_MAX_RUNTIME_INVENTORY_BYTES: u64 = 32 * 1024 * 1024;
 pub const CAPTURE_MAX_RUNTIME_PATHS_PER_RECORD: usize = 256;
 pub const CAPTURE_MAX_SERIALIZED_PLAN_BYTES: usize = 2 * 1024 * 1024 - 4096;
 pub const CAPTURE_MAX_SERIALIZED_REVIEW_BYTES: usize = 2 * 1024 * 1024 - 4096;
+const INSTRUCTION_REVIEW_MARKERS: &[&[&str]] = &[
+    &["temporary"],
+    &["current", "task"],
+    &["this", "task"],
+    &["session"],
+    &["wip"],
+    &["scratch"],
+    &["personal"],
+    &["private"],
+    &["local", "only"],
+];
 
 #[derive(Debug, Clone)]
 pub struct CapturePlanningControl {
@@ -2122,32 +2133,26 @@ fn validate_untyped_instruction_heading(candidate: &CaptureCandidate) -> Result<
 
 fn instruction_evidence_requires_review(candidate: &CaptureCandidate) -> bool {
     candidate.evidence.iter().any(|evidence| {
-        let markers = [
-            "temporary",
-            "current task",
-            "session",
-            "wip",
-            "scratch",
-            "personal",
-            "private",
-            "local only",
-        ];
-        evidence.heading_path.iter().any(|heading| {
-            let lower = heading.to_ascii_lowercase();
-            markers
-                .iter()
-                .any(|marker| lower == *marker || lower.starts_with(&format!("{marker}:")))
-        }) || evidence.text.as_deref().is_some_and(|text| {
-            text.lines().any(|line| {
-                let lower = line.trim().to_ascii_lowercase();
-                markers.iter().any(|marker| {
-                    lower == *marker
-                        || lower.starts_with(&format!("{marker}:"))
-                        || lower.contains(&format!("for this {marker}"))
-                })
-            })
-        })
+        evidence
+            .heading_path
+            .iter()
+            .any(|heading| contains_instruction_review_marker(heading))
+            || evidence
+                .text
+                .as_deref()
+                .is_some_and(|text| text.lines().any(contains_instruction_review_marker))
     })
+}
+
+fn contains_instruction_review_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let words = lower
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    INSTRUCTION_REVIEW_MARKERS
+        .iter()
+        .any(|marker| words.windows(marker.len()).any(|window| window == *marker))
 }
 
 fn one_prefixed_tag<'a>(tags: &'a [String], prefix: &str) -> Result<&'a str> {
@@ -4053,7 +4058,7 @@ fn extractor_identity(profile: &str) -> Result<CaptureExtractorIdentity> {
         INSTRUCTION_EXTRACTOR_PROFILE => (
             "memzoi-instructions",
             INSTRUCTION_EXTRACTOR_VERSION,
-            b"memzoi/instruction-deterministic-v1\0structured-sections\0generated-blocks=exclude-v1\0temporary-heading-preamble-body=needs-review-v2"
+            b"memzoi/instruction-deterministic-v1\0structured-sections\0generated-blocks=exclude-v1\0temporary-heading-preamble-body=needs-review-v3"
                 .as_slice(),
         ),
         ADR_EXTRACTOR_PROFILE => (

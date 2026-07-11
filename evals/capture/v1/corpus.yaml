@@ -599,7 +599,7 @@ cases:
           evidence:
             - source_id: source-1
               locator: {kind: project_path, path: review/AGENTS.md}
-              source_content_hash: blake3:17d290af743f87c1c16893c7cd6d1eb15420793a13dc391bd89d25a2ad23fde3
+              source_content_hash: blake3:56d7aead582fc96889ca0457e60e86ee745204210714b62bdf18eb45aad39dec
               span: {byte_start: 0, byte_end: 55, line_start: 1, line_end: 2}
               heading_path: [Workflow]
               section_kind: instruction
@@ -618,7 +618,7 @@ cases:
           evidence:
             - source_id: source-1
               locator: {kind: project_path, path: review/AGENTS.md}
-              source_content_hash: blake3:17d290af743f87c1c16893c7cd6d1eb15420793a13dc391bd89d25a2ad23fde3
+              source_content_hash: blake3:56d7aead582fc96889ca0457e60e86ee745204210714b62bdf18eb45aad39dec
               span: {byte_start: 57, byte_end: 112, line_start: 4, line_end: 5}
               heading_path: [Workflow]
               section_kind: instruction
@@ -637,7 +637,7 @@ cases:
           evidence:
             - source_id: source-1
               locator: {kind: project_path, path: review/AGENTS.md}
-              source_content_hash: blake3:17d290af743f87c1c16893c7cd6d1eb15420793a13dc391bd89d25a2ad23fde3
+              source_content_hash: blake3:56d7aead582fc96889ca0457e60e86ee745204210714b62bdf18eb45aad39dec
               span: {byte_start: 114, byte_end: 162, line_start: 7, line_end: 8}
               heading_path: [Workflow]
               section_kind: instruction
@@ -649,16 +649,16 @@ cases:
           memory:
             type: procedure
             lane: procedural
-            title: Temporary
-            body: Keep this instruction only for the current task.
+            title: Temporary notes
+            body: Keep this guidance out of shared memory.
             scope: {kind: repo, id: null, paths: [review]}
             tags: [agent-instructions]
           evidence:
             - source_id: source-1
               locator: {kind: project_path, path: review/AGENTS.md}
-              source_content_hash: blake3:17d290af743f87c1c16893c7cd6d1eb15420793a13dc391bd89d25a2ad23fde3
-              span: {byte_start: 164, byte_end: 224, line_start: 10, line_end: 11}
-              heading_path: [Temporary]
+              source_content_hash: blake3:56d7aead582fc96889ca0457e60e86ee745204210714b62bdf18eb45aad39dec
+              span: {byte_start: 164, byte_end: 222, line_start: 10, line_end: 11}
+              heading_path: [Temporary notes]
               section_kind: instruction
               semantic_location: {kind: instruction}
           destination: needs_review
