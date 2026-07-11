@@ -31,15 +31,19 @@ const config = {
           routeBasePath: '/',
           sidebarPath: './sidebars.js',
           editUrl: 'https://github.com/Zokiio/Memzoi/tree/main/website/',
-          lastVersion: '0.3.1',
+          lastVersion: '0.4.0',
           versions: {
             current: {
               label: 'Next',
               path: 'next',
             },
+            '0.4.0': {
+              label: '0.4.0',
+              path: '',
+            },
             '0.3.1': {
               label: '0.3.1',
-              path: '',
+              path: '0.3.1',
             },
             '0.3.0': {
               label: '0.3.0',

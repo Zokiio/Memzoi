@@ -2,7 +2,7 @@
 
 Status: active
 Updated: 2026-07-11
-Shipped baseline: v0.3.1
+Shipped baseline: v0.4.0
 
 ## Product outcome
 
@@ -18,18 +18,18 @@ explicit evidence
   -> evaluation, recovery, and audit
 ```
 
-The v0.3 release supplies a strong governed memory kernel. The roadmap closes the gap between that kernel and a complete provider.
+The v0.4 release combines the governed memory kernel with explicit evidence-backed capture and checked-in recall and capture evaluation gates. The roadmap now builds from that measurable local loop toward hybrid recall, lifecycle maintenance, and a hardened provider surface.
 
 ## Current baseline
 
-| Capability | v0.3 reality | Roadmap implication |
+| Capability | v0.4 reality | Roadmap implication |
 | --- | --- | --- |
 | Canonical truth | Reviewed Markdown records are canonical; SQLite indexes and exports are disposable | Preserve this differentiator across every new feature |
 | Governance | Typed proposals, explicit apply, provenance, privacy planes, and pre-action warnings exist | Close route-parity and correctness gaps before expanding writes |
-| Memory formation | Import and session-end route already-structured candidates; they do not extract memories | Build evidence-backed capture from named sources |
+| Memory formation | Deterministic Markdown, instruction-file, ADR, explicit diff, and immutable Git-range adapters form reviewable candidates from named sources | Expand only through explicit, eval-gated adapters |
 | Retrieval | FTS5/BM25 plus scope, type, lane, confidence, and path reranking | Establish evals, then add semantic recall only if it wins measurably |
 | Consolidation | Exact duplicate suppression and manual supersede/tombstone exist | Add review-first near-duplicate, contradiction, staleness, and retention planning |
-| Evaluation | Fixed integration tests and latency benchmarks exist | Ship a file-native product eval runner and CI quality gates |
+| Evaluation | File-native recall v2 and capture v1 suites enforce deterministic baselines, provenance, safety, quality, latency, and review-burden gates in CI | Use measured regressions to govern future retrieval and capture work |
 | Provider surface | CLI, six safe MCP tools, integrations, and deterministic exports exist | Stabilize contracts and harden operations after capture, recall, and lifecycle are proven |
 
 Historical research under `.research/docs/` remains useful background, but current product documentation under `website/docs/`, shipped behavior, and this roadmap take precedence when they disagree. In particular, v0.3's two-plane file-native model supersedes the earlier SQLite-canonical direction.
@@ -69,7 +69,7 @@ Issues:
 - [#43 Resolve and index file-backed proposal packets atomically](https://github.com/Zokiio/Memzoi/issues/43)
 - [#46 Apply supersede and tombstone actions from reviewed proposal files](https://github.com/Zokiio/Memzoi/issues/46)
 
-### v0.4 - Evidence-backed Capture
+### v0.4 - Evidence-backed Capture (shipped 2026-07-11)
 
 Outcome: Memzoi can form useful, reviewable memory candidates from explicit project evidence and prove the quality and safety of doing so.
 
@@ -84,6 +84,18 @@ Delivery order:
 Implementation note: the v0.4 code and evaluation scope is tracked by #52-#55
 and the narrower #64-#67 slices below. Release metadata, candidate artifacts,
 and publication remain a separate post-merge decision under #68.
+
+Shipped baseline:
+
+- All 23 capture cases pass across the four required deterministic profiles.
+- Candidate precision and recall are 25/25, with 33/33 exact evidence items.
+- All four declared forbidden opportunities are suppressed and every capture hard gate is zero.
+- Recall v2 and capture v1 baselines match exactly in local and CI release gates.
+
+Accepted v0.4.0 limitation: CLI and MCP capture file operations fail closed on
+Windows because the release requires Unix handle-relative, no-symlink file
+access. Windows binaries continue to provide the rest of the CLI and MCP
+surface; equivalent Windows capture support is deferred beyond v0.4.0.
 
 Exit criteria:
 

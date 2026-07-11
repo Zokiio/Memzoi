@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] - 2026-07-11
 
 ### Added
 
@@ -10,6 +10,10 @@
 - File-native `memzoi eval capture` v1 suites with isolated fixtures, per-profile quality metrics, prohibited-output and mutation hard gates, human-review burden limits, and exact deterministic baseline enforcement in CI.
 - A planning-only MCP 2025-06-18 `plan_capture_v1` tool with bounded stdio, timeout/cancellation, structured output, no memory writes, and private-result denial by default.
 - An accepted evidence-backed capture and extractor boundary RFC defining the v0.4 plan/review/apply direction.
+
+### Known limitations
+
+- CLI and MCP capture file operations fail closed on Windows because v0.4.0 requires Unix handle-relative, no-symlink file access. Windows release binaries remain available for the rest of the CLI and MCP surface.
 
 ## [0.3.1] - 2026-07-10
 
@@ -52,5 +56,6 @@
 - Downloaded checksum sidecars now use archive basenames and work with standard `shasum -c` verification.
 - Pull requests targeting stacked feature branches now run Rust CI.
 
+[0.4.0]: https://github.com/Zokiio/Memzoi/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Zokiio/Memzoi/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Zokiio/Memzoi/compare/v0.2.0...v0.3.0
