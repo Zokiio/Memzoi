@@ -15,6 +15,7 @@ mod okf;
 mod precheck;
 mod proposals;
 mod recall_eval;
+mod recall_eval_v3;
 mod schema;
 mod search;
 mod service;
@@ -102,6 +103,7 @@ pub use recall_eval::{
     RecallEvalThresholdResults, RecallEvalThresholds, RecallEvalTokenUsageMetrics,
     attach_recall_eval_baseline, run_recall_eval, write_recall_eval_baseline,
 };
+pub use recall_eval_v3::*;
 pub use search::SearchInput;
 pub use service::{
     CheckpointInput, ExportFormat, ExportInput, ExportResult, FileProposalInventory,

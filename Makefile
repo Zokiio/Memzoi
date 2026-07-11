@@ -25,6 +25,10 @@ test:
 
 eval: eval-recall eval-capture
 
+.PHONY: eval-recall-v3
+eval-recall-v3:
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml
+
 eval-recall:
 	cargo run --locked -q -p memzoi-cli -- eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json
 

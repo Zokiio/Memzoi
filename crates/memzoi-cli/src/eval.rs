@@ -4,11 +4,49 @@ use anyhow::{Result, bail};
 use memzoi_core::{
     CaptureEvalBaselineStatus, CaptureEvalReport, RecallEvalBaselineStatus, RecallEvalForbiddenIds,
     RecallEvalIntegrityMetric, RecallEvalLeakageMetric, RecallEvalRatioMetric, RecallEvalReport,
-    RecallEvalSurface, attach_capture_eval_baseline, attach_recall_eval_baseline, run_capture_eval,
-    run_recall_eval, write_capture_eval_baseline, write_recall_eval_baseline,
+    RecallEvalSurface, RecallV3Report, attach_capture_eval_baseline, attach_recall_eval_baseline,
+    run_capture_eval, run_recall_eval, run_recall_v3_eval, write_capture_eval_baseline,
+    write_recall_eval_baseline, write_recall_v3_commitment,
 };
 
 use crate::output::print_json;
+
+pub(crate) fn recall_v3_eval_command(
+    corpus: PathBuf,
+    commitment: Option<PathBuf>,
+    as_json: bool,
+) -> Result<()> {
+    let report = run_recall_v3_eval(corpus)?;
+    if let Some(path) = commitment {
+        write_recall_v3_commitment(&report, path)?;
+    }
+    if as_json {
+        print_json(&serde_json::to_value(&report)?)?;
+    } else {
+        print_recall_v3_human_report(&report);
+    }
+    if !report.passed {
+        bail!("recall-v3 evaluation gates failed");
+    }
+    Ok(())
+}
+
+fn print_recall_v3_human_report(report: &RecallV3Report) {
+    println!("Memzoi recall evaluation ({})", report.version);
+    println!("corpus:\t{} ({:?})", report.corpus.name, report.corpus.kind);
+    println!("corpus_digest:\t{}", report.digests.corpus);
+    println!("judgment_digest:\t{}", report.digests.judgments);
+    for candidate in &report.candidates {
+        println!();
+        println!("candidate:\t{}", candidate.manifest.id);
+        println!("ndcg@10:\t{:.6}", candidate.aggregate.mean_ndcg_at_10);
+        println!("recall@k:\t{:.6}", candidate.aggregate.mean_recall_at_k);
+        println!("mrr:\t{:.6}", candidate.aggregate.mean_mrr);
+        println!("result:\t{}", pass_label(candidate.passed));
+    }
+    println!("isolated_state:\t{}", report.isolated_state);
+    println!("result:\t{}", pass_label(report.passed));
+}
 
 pub(crate) fn recall_eval_command(
     corpus: PathBuf,

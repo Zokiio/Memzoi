@@ -295,6 +295,11 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
         Commands::Rebuild { json } => rebuild_command(json),
         Commands::Doctor { project_root, json } => doctor_command(project_root, json),
         Commands::Eval { command } => match command {
+            EvalCommands::RecallV3 {
+                corpus,
+                commitment,
+                json,
+            } => eval::recall_v3_eval_command(corpus, commitment, json),
             EvalCommands::Recall {
                 corpus,
                 baseline,

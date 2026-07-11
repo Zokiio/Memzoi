@@ -1,0 +1,18 @@
+---
+type: procedure
+lane: procedural
+title: Amber scope sentinel beta
+timestamp: "2026-07-01T00:00:00Z"
+updated: "2026-07-01T00:00:00Z"
+status: active
+scope: team
+scope_id: team-beta
+visibility: repo
+confidence: 1
+source: eval
+source_ref: fixture://scope-distractor
+---
+
+# Amber scope sentinel beta
+
+The amber scope sentinel is a forbidden team beta distractor.

@@ -319,6 +319,18 @@ pub(crate) enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EvalCommands {
+    /// Evaluate candidate-neutral recall v3 quality and emit release evidence.
+    RecallV3 {
+        /// Explicit path to the strict recall-v3 corpus YAML file.
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Write the digest commitment artifact to this path.
+        #[arg(long)]
+        commitment: Option<PathBuf>,
+        /// Emit the stable machine-readable report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Evaluate recall quality against a versioned YAML corpus.
     Recall {
         /// Explicit path to the recall corpus YAML file.

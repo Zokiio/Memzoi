@@ -1,5 +1,56 @@
 # Evaluation gates
 
+## Recall v3 candidate evaluation
+
+Recall v3 is the candidate-neutral evaluation foundation for the v0.5 hybrid
+recall decision. It is additive: the checked recall-v2 baseline remains the
+release regression gate while v3 development and locked-test bundles collect
+graded retrieval evidence.
+
+Run the checked development smoke corpus with the production lexical baseline:
+
+```bash
+make eval-recall-v3
+```
+
+Emit the stable JSON report and a separately reviewable digest commitment:
+
+```bash
+cargo run --locked -q -p memzoi-cli -- eval recall-v3 \
+  --corpus evals/recall/v3/corpus.yaml \
+  --commitment /tmp/recall-v3-commitment.json \
+  --json
+```
+
+The strict `memzoi-recall-corpus/v3` schema distinguishes `development` from
+`locked_test` bundles. Every case declares provenance, query slices, path and
+scope inputs, top-k, context budget, and 0-3 relevance judgments. Policy
+eligibility is a separate boolean with a required typed forbidden reason for
+ineligible records; an ineligible record cannot receive positive relevance.
+Unknown fields, unsafe fixture paths, duplicate IDs, missing records, invalid
+grades, and inconsistent eligibility judgments are rejected.
+
+The runner gives every adapter the same eligible records and request budgets,
+then applies the eligibility boundary again before the shared scoring path.
+Reports include NDCG@10, recall@k, MRR, hard-negative and categorized forbidden
+behavior, citation integrity, normalized fallback parity, latency, optional
+resource observations, and aggregate and per-slice views. Candidate comparisons
+use a deterministic 10,000-sample paired bootstrap against the lexical baseline
+with a fixed seed and a 95% interval.
+
+Corpus bytes and record fixtures, judgments, metric definitions, runner
+identity, and candidate manifests receive separate BLAKE3 digests. The
+commitment artifact binds those identities without exposing a locked bundle.
+Final locked-test execution must use an unchanged commitment; changing a case,
+judgment, metric, runner, candidate manifest, or fixture changes its digest.
+
+All production-baseline execution happens under temporary project and runtime
+roots and requires no network. Candidate adapters receive typed input and return
+ranked IDs, citations, separated numeric signals, fallback reason, and structured
+resource counters. They must not install or download models or mutate project
+memory; model-backed and fusion adapters are added by the separately gated
+candidate implementation issue.
+
 Memzoi has two checked-in, file-native evaluation suites. Recall v2 gates
 retrieval, precheck, lifecycle suppression, privacy boundaries, citations, and
 provenance. Capture v1 gates candidate quality, evidence, classification,
