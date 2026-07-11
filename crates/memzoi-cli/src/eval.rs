@@ -100,7 +100,7 @@ pub(crate) fn recall_v3_eval_command(
 }
 
 fn print_recall_v3_human_report(report: &RecallV3Report) {
-    println!("Memzoi recall evaluation ({})", report.version);
+    println!("Memzoi recall v3 evaluation ({})", report.version);
     println!("corpus:\t{} ({:?})", report.corpus.name, report.corpus.kind);
     println!("corpus_digest:\t{}", report.digests.corpus);
     println!("judgment_digest:\t{}", report.digests.judgments);

@@ -277,11 +277,10 @@ impl RecallV3Candidate for ManifestDrivenRecallCandidate {
         Ok(RecallV3CandidateOutput {
             hits,
             fallback_reason: None,
-            resource_observations: BTreeMap::from([
-                ("vector_dimensions".into(), artifact.dimensions as f64),
-                ("indexed_records".into(), artifact.records.len() as f64),
-                ("exact_distance_comparisons".into(), eligible.len() as f64),
-            ]),
+            resource_observations: BTreeMap::from([(
+                "exact_distance_comparisons".into(),
+                eligible.len() as f64,
+            )]),
         })
     }
 }

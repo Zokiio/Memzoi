@@ -27,6 +27,7 @@ fn recall_v3_runs_lexical_baseline_in_isolated_state() -> anyhow::Result<()> {
     assert_eq!(first.candidates[0].paired_vs_lexical.lower_bound, 0.0);
     assert_eq!(first.digests.corpus, second.digests.corpus);
     assert_eq!(first.digests.judgments, second.digests.judgments);
+    assert_eq!(first.digests.report, second.digests.report);
     assert_eq!(RECALL_V3_METRICS_VERSION, "memzoi-recall-metrics/v3");
     assert_eq!(RECALL_V3_RUNNER_VERSION, "memzoi-recall-runner/v3");
     Ok(())
@@ -45,7 +46,10 @@ fn manifest_driven_exact_union_preserves_signals_and_citations() -> anyhow::Resu
     assert_eq!(candidate.manifest.id, "fixture-exact-union");
     assert_eq!(candidate.aggregate.mean_ndcg_at_10, 1.0);
     assert_eq!(candidate.aggregate.citation_integrity, 1.0);
-    assert_eq!(candidate.resource_observations["vector_dimensions"], 4.0);
+    assert_eq!(
+        candidate.resource_observations["exact_distance_comparisons"],
+        9.0
+    );
     assert!(
         candidate
             .cases

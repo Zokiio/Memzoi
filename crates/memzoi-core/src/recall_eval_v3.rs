@@ -494,12 +494,26 @@ impl RecallV3Candidate for LexicalCandidate<'_> {
         }
     }
     fn retrieve(&mut self, input: &RecallV3CandidateInput) -> Result<RecallV3CandidateOutput> {
+        if input.eligible_records.is_empty() {
+            return Ok(RecallV3CandidateOutput {
+                hits: Vec::new(),
+                fallback_reason: None,
+                resource_observations: BTreeMap::new(),
+            });
+        }
+        let ineligible_count = self
+            .record_count
+            .saturating_sub(input.eligible_records.len());
+        let fetch_limit = input
+            .top_k
+            .saturating_add(ineligible_count)
+            .min(self.record_count.max(input.top_k));
         let results = self.service.search_memory(SearchInput {
             query: input.query.clone(),
             scope_kind: input.scope_kind,
             scope_id: input.scope_id.clone(),
             path_prefix: input.path.clone(),
-            limit: self.record_count.max(input.top_k),
+            limit: fetch_limit,
             ..SearchInput::default()
         })?;
         Ok(RecallV3CandidateOutput {
@@ -607,7 +621,7 @@ fn run_loaded(
         });
     }
     let passed = candidate_reports.iter().all(|candidate| candidate.passed);
-    digests.report = digest_json(&(RECALL_V3_REPORT_VERSION, &candidate_reports))?;
+    digests.report = stable_report_digest(&candidate_reports)?;
     let commitment = RecallV3Commitment {
         version: RECALL_V3_COMMITMENT_VERSION.into(),
         corpus_kind: loaded.corpus.kind,
@@ -721,7 +735,7 @@ fn evaluate_candidate(
         }
         let latency = started.elapsed().as_secs_f64() * 1000.0;
         for (key, value) in output.resource_observations {
-            resources.insert(key, value);
+            *resources.entry(key).or_insert(0.0) += value;
         }
         reports.push(score_case(
             case,
@@ -732,6 +746,19 @@ fn evaluate_candidate(
         ));
     }
     Ok((reports, resources))
+}
+
+fn stable_report_digest(candidate_reports: &[RecallV3CandidateReport]) -> Result<String> {
+    let mut stable = candidate_reports.to_vec();
+    for candidate in &mut stable {
+        candidate.resource_observations.clear();
+        candidate.aggregate.latency_p50_ms = 0.0;
+        candidate.aggregate.latency_p95_ms = 0.0;
+        for case in &mut candidate.cases {
+            case.latency_ms = 0.0;
+        }
+    }
+    digest_json(&(RECALL_V3_REPORT_VERSION, stable))
 }
 
 fn score_case(
