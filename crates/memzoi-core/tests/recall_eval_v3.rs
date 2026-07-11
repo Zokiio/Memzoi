@@ -1,8 +1,9 @@
 use memzoi_core::{
     ManifestDrivenRecallCandidate, RECALL_V3_CORPUS_VERSION, RECALL_V3_METRICS_VERSION,
     RECALL_V3_REPORT_VERSION, RECALL_V3_RUNNER_VERSION, RecallRetrievalCandidateManifest,
-    RecallV3Candidate, RecallV3CandidateInput, RecallV3CandidateManifest, RecallV3CandidateOutput,
-    RecallV3Corpus, run_recall_v3_eval, run_recall_v3_eval_with_candidates,
+    RecallV3Candidate, RecallV3CandidateHit, RecallV3CandidateInput, RecallV3CandidateManifest,
+    RecallV3CandidateOutput, RecallV3Corpus, RecallV3ForbiddenReason, run_recall_v3_eval,
+    run_recall_v3_eval_with_candidates,
 };
 
 #[test]
@@ -160,5 +161,98 @@ fn recall_v3_rejects_cases_without_eligible_relevance() -> anyhow::Result<()> {
             .to_string()
             .contains("must have at least one eligible relevant judgment")
     );
+    Ok(())
+}
+
+#[test]
+fn recall_v3_rejects_empty_slices_and_record_ids() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let bytes = std::fs::read(root.join("corpus.yaml"))?;
+    let original: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
+    let mut invalid = Vec::new();
+    let mut empty_slice = original.clone();
+    empty_slice.cases[0].slices[0] = " ".into();
+    invalid.push((empty_slice, "empty or duplicate slices"));
+    let mut duplicate_slice = original.clone();
+    let repeated_slice = duplicate_slice.cases[0].slices[0].clone();
+    duplicate_slice.cases[0].slices.push(repeated_slice);
+    invalid.push((duplicate_slice, "empty or duplicate slices"));
+    let mut empty_record = original;
+    empty_record.cases[0].judgments[0].record_id = " ".into();
+    invalid.push((empty_record, "invalid judgment"));
+
+    for (corpus, expected) in invalid {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("corpus.yaml");
+        std::fs::write(&path, serde_yaml::to_string(&corpus)?)?;
+        let error = run_recall_v3_eval(path).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+    Ok(())
+}
+
+#[test]
+fn recall_v3_requires_every_staged_record_to_be_judged() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let bytes = std::fs::read(root.join("corpus.yaml"))?;
+    let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
+    corpus.cases[0].judgments.pop();
+    let dir = tempfile::tempdir()?;
+    let records = dir.path().join("records");
+    std::fs::create_dir(&records)?;
+    for record in &corpus.records {
+        std::fs::copy(root.join("records").join(record), records.join(record))?;
+    }
+    let path = dir.path().join("corpus.yaml");
+    std::fs::write(&path, serde_yaml::to_string(&corpus)?)?;
+
+    let error = run_recall_v3_eval(path).unwrap_err();
+    assert!(error.to_string().contains("must judge every staged record"));
+    Ok(())
+}
+
+struct UnknownRecordCandidate;
+
+impl RecallV3Candidate for UnknownRecordCandidate {
+    fn manifest(&self) -> RecallV3CandidateManifest {
+        RecallV3CandidateManifest {
+            id: "unknown-record".into(),
+            version: "1".into(),
+            adapter: "test".into(),
+            configuration_digest: "unknown-record".into(),
+            offline: true,
+        }
+    }
+
+    fn retrieve(
+        &mut self,
+        _input: &RecallV3CandidateInput,
+    ) -> anyhow::Result<RecallV3CandidateOutput> {
+        Ok(RecallV3CandidateOutput {
+            hits: vec![RecallV3CandidateHit {
+                record_id: "hallucinated-record".into(),
+                score: 1.0,
+                citations: Vec::new(),
+                signals: Default::default(),
+            }],
+            fallback_reason: None,
+            resource_observations: Default::default(),
+        })
+    }
+}
+
+#[test]
+fn unknown_candidate_ids_count_as_forbidden_other() -> anyhow::Result<()> {
+    let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/corpus.yaml");
+    let mut candidate = UnknownRecordCandidate;
+    let report = run_recall_v3_eval_with_candidates(&corpus, &mut [&mut candidate])?;
+    let candidate = &report.candidates[1];
+
+    assert_eq!(
+        candidate.aggregate.forbidden_hits[&RecallV3ForbiddenReason::Other],
+        3
+    );
+    assert!(!candidate.passed);
     Ok(())
 }

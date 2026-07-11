@@ -289,12 +289,17 @@ fn validate_evidence(evidence: &RecallCompetitorEvidence) -> Result<()> {
         "end-to-end",
     )?;
     for result in &evidence.retrieval_results {
-        validate_ratios(&[
-            result.ndcg_at_10,
-            result.recall_at_k,
-            result.mrr,
-            result.citation_integrity.unwrap_or(1.0),
-        ])?;
+        validate_ratios(&[result.ndcg_at_10, result.recall_at_k, result.mrr])?;
+        match (result.citations_supported, result.citation_integrity) {
+            (true, Some(integrity)) => validate_ratios(&[integrity])?,
+            (false, None) => {}
+            _ => {
+                bail!(
+                    "retrieval result {:?} must provide citation_integrity exactly when citations are supported",
+                    result.product_id
+                );
+            }
+        }
         validate_observations(&[
             result.latency_p50_ms,
             result.latency_p95_ms,

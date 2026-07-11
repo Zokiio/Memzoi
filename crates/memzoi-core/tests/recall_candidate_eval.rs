@@ -122,3 +122,39 @@ fn unsupported_structural_weights_are_rejected() -> anyhow::Result<()> {
     assert!(error.to_string().contains("must remain zero"));
     Ok(())
 }
+
+#[test]
+fn development_log_rejects_blank_attempt_metadata() {
+    let invalid_attempts = [
+        RecallDevelopmentAttempt {
+            candidate_id: "".into(),
+            candidate_digest: "digest".into(),
+            outcome: RecallDevelopmentAttemptOutcome::Completed,
+            reason_code: None,
+            report_digest: Some("report".into()),
+        },
+        RecallDevelopmentAttempt {
+            candidate_id: "completed".into(),
+            candidate_digest: "digest".into(),
+            outcome: RecallDevelopmentAttemptOutcome::Completed,
+            reason_code: None,
+            report_digest: Some(" ".into()),
+        },
+        RecallDevelopmentAttempt {
+            candidate_id: "failed".into(),
+            candidate_digest: "digest".into(),
+            outcome: RecallDevelopmentAttemptOutcome::Failed,
+            reason_code: Some(" ".into()),
+            report_digest: None,
+        },
+    ];
+    for attempt in invalid_attempts {
+        let log = RecallDevelopmentLog {
+            version: RECALL_DEVELOPMENT_LOG_VERSION.into(),
+            corpus_digest: "corpus".into(),
+            runner_digest: "runner".into(),
+            attempts: vec![attempt],
+        };
+        assert!(validate_development_log(&log).is_err());
+    }
+}

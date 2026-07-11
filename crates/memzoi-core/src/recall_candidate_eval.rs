@@ -295,14 +295,26 @@ pub fn validate_development_log(log: &RecallDevelopmentLog) -> Result<()> {
     }
     let mut candidates = BTreeSet::new();
     for attempt in &log.attempts {
-        if !candidates.insert(&attempt.candidate_id)
+        let valid_outcome_metadata = match attempt.outcome {
+            RecallDevelopmentAttemptOutcome::Completed => {
+                attempt.reason_code.is_none()
+                    && attempt
+                        .report_digest
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+            }
+            RecallDevelopmentAttemptOutcome::Rejected | RecallDevelopmentAttemptOutcome::Failed => {
+                attempt
+                    .reason_code
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && attempt.report_digest.is_none()
+            }
+        };
+        if attempt.candidate_id.trim().is_empty()
+            || !candidates.insert(&attempt.candidate_id)
             || attempt.candidate_digest.trim().is_empty()
-            || matches!(
-                attempt.outcome,
-                RecallDevelopmentAttemptOutcome::Rejected | RecallDevelopmentAttemptOutcome::Failed
-            ) != attempt.reason_code.is_some()
-            || matches!(attempt.outcome, RecallDevelopmentAttemptOutcome::Completed)
-                != attempt.report_digest.is_some()
+            || !valid_outcome_metadata
         {
             bail!(
                 "invalid or duplicate development attempt {:?}",

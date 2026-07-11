@@ -396,9 +396,18 @@ fn validate_corpus(corpus: &RecallV3Corpus) -> Result<()> {
         if case.provenance.reference.trim().is_empty() {
             bail!("case {:?} provenance reference is empty", case.id);
         }
+        let mut slices = BTreeSet::new();
+        if case
+            .slices
+            .iter()
+            .any(|slice| slice.trim().is_empty() || !slices.insert(slice))
+        {
+            bail!("case {:?} has empty or duplicate slices", case.id);
+        }
         let mut judged = BTreeSet::new();
         for judgment in &case.judgments {
-            if !judged.insert(&judgment.record_id)
+            if judgment.record_id.trim().is_empty()
+                || !judged.insert(&judgment.record_id)
                 || judgment.relevance > 3
                 || judgment.rationale.trim().is_empty()
             {
@@ -474,6 +483,19 @@ fn validate_record_ids(corpus: &RecallV3Corpus, records: &[MemoryRecord]) -> Res
         .map(|r| r.id.as_str())
         .collect::<BTreeSet<_>>();
     for case in &corpus.cases {
+        let judged = case
+            .judgments
+            .iter()
+            .map(|judgment| judgment.record_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if judged != ids {
+            let missing = ids.difference(&judged).copied().collect::<Vec<_>>();
+            let unknown = judged.difference(&ids).copied().collect::<Vec<_>>();
+            bail!(
+                "case {:?} must judge every staged record; missing={missing:?} unknown={unknown:?}",
+                case.id
+            );
+        }
         for judgment in &case.judgments {
             if !ids.contains(judgment.record_id.as_str()) {
                 bail!(
@@ -888,9 +910,11 @@ fn score_case(
         .count();
     let mut forbidden_hits = BTreeMap::new();
     for id in &suppressed {
-        if let Some(reason) = judgments.get(id.as_str()).and_then(|j| j.forbidden_reason) {
-            *forbidden_hits.entry(reason).or_insert(0) += 1;
-        }
+        let reason = judgments
+            .get(id.as_str())
+            .and_then(|judgment| judgment.forbidden_reason)
+            .unwrap_or(RecallV3ForbiddenReason::Other);
+        *forbidden_hits.entry(reason).or_insert(0) += 1;
     }
     RecallV3CaseReport {
         id: case.id.clone(),
