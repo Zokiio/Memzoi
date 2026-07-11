@@ -117,6 +117,55 @@ impl RecallV3Candidate for BrokenFallback {
     }
 }
 
+struct FullLexicalPoolCandidate;
+
+impl RecallV3Candidate for FullLexicalPoolCandidate {
+    fn manifest(&self) -> RecallV3CandidateManifest {
+        RecallV3CandidateManifest {
+            id: "full-lexical-pool".into(),
+            version: "1".into(),
+            adapter: "test".into(),
+            configuration_digest: "full-lexical-pool".into(),
+            offline: true,
+        }
+    }
+
+    fn retrieve(
+        &mut self,
+        input: &RecallV3CandidateInput,
+    ) -> anyhow::Result<RecallV3CandidateOutput> {
+        assert!(input.lexical_hits.len() > input.top_k);
+        Ok(RecallV3CandidateOutput {
+            hits: input.lexical_hits.clone(),
+            fallback_reason: None,
+            resource_observations: Default::default(),
+        })
+    }
+}
+
+#[test]
+fn recall_v3_candidates_receive_lexical_hits_beyond_top_k() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let bytes = std::fs::read(root.join("corpus.yaml"))?;
+    let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
+    corpus.cases.truncate(1);
+    corpus.cases[0].query = "sentinel".into();
+    corpus.cases[0].top_k = 1;
+
+    let dir = tempfile::tempdir()?;
+    let records = dir.path().join("records");
+    std::fs::create_dir(&records)?;
+    for record in &corpus.records {
+        std::fs::copy(root.join("records").join(record), records.join(record))?;
+    }
+    let path = dir.path().join("corpus.yaml");
+    std::fs::write(&path, serde_yaml::to_string(&corpus)?)?;
+
+    let mut candidate = FullLexicalPoolCandidate;
+    run_recall_v3_eval_with_candidates(path, &mut [&mut candidate])?;
+    Ok(())
+}
+
 #[test]
 fn recall_v3_candidates_share_eligibility_and_fallback_boundaries() -> anyhow::Result<()> {
     let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

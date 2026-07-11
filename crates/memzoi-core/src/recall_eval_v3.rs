@@ -739,7 +739,9 @@ fn evaluate_candidate(
             lexical_hits: Vec::new(),
         };
         if let Some(baseline) = lexical.as_deref_mut() {
-            let lexical_output = baseline.retrieve(&input)?;
+            let mut lexical_input = input.clone();
+            lexical_input.top_k = SEARCH_RESULT_LIMIT_MAX;
+            let lexical_output = baseline.retrieve(&lexical_input)?;
             let eligible_ids = input
                 .eligible_records
                 .iter()
@@ -749,7 +751,6 @@ fn evaluate_candidate(
                 .hits
                 .into_iter()
                 .filter(|hit| eligible_ids.contains(hit.record_id.as_str()))
-                .take(case.top_k)
                 .collect();
         }
         let started = Instant::now();

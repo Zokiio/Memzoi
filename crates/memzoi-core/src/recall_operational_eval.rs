@@ -324,9 +324,10 @@ pub fn run_recall_operational_eval(path: impl AsRef<Path>) -> Result<RecallOpera
         privacy_safe_trace: !trace_counters.is_empty(),
     };
     let passed = gates.passed();
+    let evidence_digest = digest_json(&evidence)?;
     Ok(RecallOperationalReport {
         version: RECALL_OPERATIONAL_REPORT_VERSION.into(),
-        evidence_digest: blake3::hash(&bytes).to_hex().to_string(),
+        evidence_digest,
         candidate_digest: evidence.candidate_digest,
         release_build_digest: evidence.release_build_digest,
         task_utility_pass_rate: ratio(task_passed, evidence.task_utility.len()),
@@ -348,6 +349,12 @@ pub fn run_recall_operational_eval(path: impl AsRef<Path>) -> Result<RecallOpera
         gates,
         passed,
     })
+}
+
+fn digest_json(value: &impl Serialize) -> Result<String> {
+    Ok(blake3::hash(&serde_json_canonicalizer::to_vec(value)?)
+        .to_hex()
+        .to_string())
 }
 
 fn validate_evidence(evidence: &RecallOperationalEvidence) -> Result<()> {

@@ -224,9 +224,10 @@ pub fn run_recall_competitor_eval(path: impl AsRef<Path>) -> Result<RecallCompet
         no_product_specific_tuning: !evidence.product_specific_tuning,
     };
     let passed = gates.passed();
+    let evidence_digest = digest_json(&evidence)?;
     Ok(RecallCompetitorReport {
         version: RECALL_COMPETITOR_REPORT_VERSION.into(),
-        evidence_digest: blake3::hash(&bytes).to_hex().to_string(),
+        evidence_digest,
         protocol_digest: digest_json(&evidence.protocol)?,
         products: evidence.products,
         retrieval_results: evidence.retrieval_results,

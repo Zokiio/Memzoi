@@ -18,6 +18,22 @@ fn two_track_competitor_fixture_is_complete_and_reproducible() -> anyhow::Result
 }
 
 #[test]
+fn competitor_evidence_digest_ignores_json_formatting() -> anyhow::Result<()> {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/competitors/fixture-evidence.json");
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&fixture)?)?;
+    let dir = tempfile::tempdir()?;
+    let compact = dir.path().join("compact.json");
+    std::fs::write(&compact, serde_json::to_vec(&value)?)?;
+
+    assert_eq!(
+        run_recall_competitor_eval(fixture)?.evidence_digest,
+        run_recall_competitor_eval(compact)?.evidence_digest
+    );
+    Ok(())
+}
+
+#[test]
 fn competitor_schema_rejects_hidden_fields() {
     let evidence = r#"{
       "version":"memzoi-recall-competitor-evidence/v1",

@@ -28,6 +28,22 @@ fn complete_operational_evidence_passes_every_gate() -> anyhow::Result<()> {
 }
 
 #[test]
+fn operational_evidence_digest_ignores_json_formatting() -> anyhow::Result<()> {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/operational/evidence.json");
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&fixture)?)?;
+    let dir = tempfile::tempdir()?;
+    let compact = dir.path().join("compact.json");
+    std::fs::write(&compact, serde_json::to_vec(&value)?)?;
+
+    assert_eq!(
+        run_recall_operational_eval(fixture)?.evidence_digest,
+        run_recall_operational_eval(compact)?.evidence_digest
+    );
+    Ok(())
+}
+
+#[test]
 fn operational_evidence_rejects_raw_unknown_trace_fields() {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../evals/recall/v3/operational/evidence.json");
