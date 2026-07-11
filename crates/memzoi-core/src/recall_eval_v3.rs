@@ -445,8 +445,12 @@ fn validate_corpus(corpus: &RecallV3Corpus) -> Result<()> {
         }
     }
     validate_relative_path(&corpus.records_root)?;
+    let mut record_paths = BTreeSet::new();
     for path in &corpus.records {
         validate_relative_path(path)?;
+        if !record_paths.insert(path) {
+            bail!("duplicate recall-v3 record path {}", path.display());
+        }
     }
     Ok(())
 }

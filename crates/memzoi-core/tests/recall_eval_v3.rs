@@ -211,6 +211,25 @@ fn recall_v3_requires_every_staged_record_to_be_judged() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn recall_v3_rejects_duplicate_record_paths() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let bytes = std::fs::read(root.join("corpus.yaml"))?;
+    let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
+    corpus.records.push(corpus.records[0].clone());
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("corpus.yaml");
+    std::fs::write(&path, serde_yaml::to_string(&corpus)?)?;
+
+    let error = run_recall_v3_eval(path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate recall-v3 record path")
+    );
+    Ok(())
+}
+
 struct UnknownRecordCandidate;
 
 impl RecallV3Candidate for UnknownRecordCandidate {
