@@ -16,7 +16,7 @@ name = "memzoi"
 path = "src/main.rs"
 
 [dependencies]
-memzoi-core = { version = "0.4.0", path = "../memzoi-core" }
+memzoi-core = { version = "0.5.0", path = "../memzoi-core" }
 anyhow.workspace = true
 clap.workspace = true
 flate2.workspace = true
