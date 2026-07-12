@@ -1,15 +1,17 @@
 {
   "version": "memzoi-recall-development-freeze/v1",
-  "frozen_at": "2026-07-12T20:00:00Z",
+  "frozen_at": "2026-07-12T20:32:56Z",
   "corpus_digest": "68b876318909d437d9b5d2592432edf11784d0e4dda9272e569d3fb30dbab8ea",
   "judgment_digest": "fea8e2613e97dc13369b91c8c1248bba69953bd0b827eb0012332913bd23eb22",
   "matrix_digest": "6a3635016f4fb92d2b013b7b1b07a0fc4c2233a7233aad211a3a4af4976e15c7",
-  "runner_digest": "131a1e67aeb405a6521b7d98a39784fe890fd88fe9639901bddadd9b5486b3db",
-  "log_digest": "baaa8501b0a802bb583c367eab1de73a22b6a697d91bd99dc5319bacc3bc5d9c",
-  "attempts_digest": "3d11721acec2e09eac76a1d7e16d28d503331e61059fb4c4f3826cb84c088e4c",
+  "metrics_digest": "c89c91a633a2655bf2e7f2fca4e5430c3d1010965ed85fbf58463b945a08565b",
+  "runner_digest": "54060611817ad28c92aacdfb5c298a58c9b799ef01c7333b6a096009bbba5aeb",
+  "log_digest": "2000e94dba233e4d8d34f8ae7edc47da9ce536800302853c7bee7d490c4a2c9b",
+  "attempts_digest": "7b474ddbd81c6c5f40efab58319b3886ba5a6fc08241de0882364f511df5acfb",
   "finalists": [
     {
       "architecture": "lexical_baseline",
+      "attempt_id": null,
       "candidate_id": "lexical-baseline",
       "candidate_digest": "4db07860f0f37a43285d3d16f981f065ed37b83f26b68e41154555d698c41070",
       "reason": "required baseline",
@@ -17,22 +19,25 @@
     },
     {
       "architecture": "semantic_only",
+      "attempt_id": "9d63614a2f2275c66f5c5fbbdf6b7c355dc3014199d5e83773b33d83b5ce987f",
       "candidate_id": "snowflake-arctic-embed-m-v2.0-title_body-v1-semantic_only",
-      "candidate_digest": "631c6b84386c5bed7942de41cab0240ab463d48b7085771d4953c39bf208c73b",
+      "candidate_digest": "4877a3963b2b411c367f9776acc872ac0d2022f687186a893b89d9529de3c5ab",
       "reason": "highest development ranking under the documented deterministic tie-break",
       "development_quality_passed": true
     },
     {
       "architecture": "lexical_rerank",
-      "candidate_id": "snowflake-arctic-embed-m-v2.0-title_body-v1-lexical_rerank",
-      "candidate_digest": "63391971ba5aa274ce09f8f554adc9b34b905ce5215ab9f2adc1154b68c0bc99",
+      "attempt_id": "d1da877a65393ccd7bc68ef0db50556f2de232dd1426878d510d8fafd8fdf87e",
+      "candidate_id": "snowflake-arctic-embed-m-v2.0-type_title_body-v1-lexical_rerank",
+      "candidate_digest": "aa64eddc97d198c273d9bd4f54eed0450d7c4f206ac99abc5dd5a394d2490d25",
       "reason": "highest development ranking under the documented deterministic tie-break",
       "development_quality_passed": true
     },
     {
       "architecture": "lexical_semantic_union",
+      "attempt_id": "9f81b435702a465f271c14d97505e75e7774a8ea9e6e6814b6e9f130228e3d60",
       "candidate_id": "snowflake-arctic-embed-m-v2.0-title_body-v1-lexical_semantic_union",
-      "candidate_digest": "ab81ca1940a8a6adf5742220b7cea3cfb563d034479601d4df9bf54e294d4c26",
+      "candidate_digest": "7c4ba17dc6bf71e9f122de91e01b874ebeb21cecaab84e84cc422cd2654ef60e",
       "reason": "highest development ranking under the documented deterministic tie-break",
       "development_quality_passed": true
     }
@@ -50,7 +55,7 @@
     "multilingual-e5-small-type_title_body-v1-lexical_rerank",
     "multilingual-e5-small-type_title_body-v1-lexical_semantic_union",
     "multilingual-e5-small-type_title_body-v1-semantic_only",
-    "snowflake-arctic-embed-m-v2.0-type_title_body-v1-lexical_rerank",
+    "snowflake-arctic-embed-m-v2.0-title_body-v1-lexical_rerank",
     "snowflake-arctic-embed-m-v2.0-type_title_body-v1-lexical_semantic_union",
     "snowflake-arctic-embed-m-v2.0-type_title_body-v1-semantic_only"
   ]

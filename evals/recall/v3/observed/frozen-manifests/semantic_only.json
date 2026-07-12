@@ -49,6 +49,12 @@
   "environment": {
     "target_os": "macos",
     "target_arch": "aarch64",
-    "cpu_features": []
+    "cpu_features": [
+      "aes",
+      "crc",
+      "dotprod",
+      "neon",
+      "sha2"
+    ]
   }
 }

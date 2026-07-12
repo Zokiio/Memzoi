@@ -1,6 +1,6 @@
 {
   "version": "memzoi-recall-candidate/v2",
-  "id": "snowflake-arctic-embed-m-v2.0-title_body-v1-lexical_rerank",
+  "id": "snowflake-arctic-embed-m-v2.0-type_title_body-v1-lexical_rerank",
   "revision": "development-v1",
   "model": {
     "id": "Snowflake/snowflake-arctic-embed-m-v2.0",
@@ -17,8 +17,8 @@
   },
   "document": {
     "version": "memzoi-recall-document/v1",
-    "template": "title_body/v1",
-    "digest": "aedec750c61f471f7e8f63d07553268bd0ca351824ac93f1b4a0011b30a9dd2a"
+    "template": "type_title_body/v1",
+    "digest": "2b4f17e8c5128e957733998f32fe8afaca40ac165fe155c1019693ad92d17b04"
   },
   "retrieval": {
     "architecture": "lexical_rerank",
@@ -41,7 +41,7 @@
     "profile_id": "snowflake-arctic-embed-m-v2.0",
     "generation": "development-generation-1",
     "vector_artifact": "vectors.json",
-    "vector_artifact_digest": "ccb3a499541ac4d09df9311f324b4c134cff42ff2b3d7af4ffc5e10fc6989ea6",
+    "vector_artifact_digest": "17cf43da479e3785338c2bf89c0a18f8c5f6c5156c6620f0b94a29796d82730b",
     "content_fingerprint": "8033b32f4e4efe409c72a34a0fb6752aeb6e9c6a3f48fc6a933bc3564a4dcf91",
     "exact_search": true,
     "destination": "repo"
@@ -49,6 +49,12 @@
   "environment": {
     "target_os": "macos",
     "target_arch": "aarch64",
-    "cpu_features": []
+    "cpu_features": [
+      "aes",
+      "crc",
+      "dotprod",
+      "neon",
+      "sha2"
+    ]
   }
 }
