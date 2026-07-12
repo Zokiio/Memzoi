@@ -41,8 +41,8 @@
     "profile_id": "snowflake-arctic-embed-m-v2.0",
     "generation": "development-generation-1",
     "vector_artifact": "vectors.json",
-    "vector_artifact_digest": "17cf43da479e3785338c2bf89c0a18f8c5f6c5156c6620f0b94a29796d82730b",
-    "content_fingerprint": "8033b32f4e4efe409c72a34a0fb6752aeb6e9c6a3f48fc6a933bc3564a4dcf91",
+    "vector_artifact_digest": "87f0b69e7f4889a50f096a84902a3661ca93224e2c179d49ba3e7114e80c9ec1",
+    "content_fingerprint": "1bad47a05bb9917596cad7b07a3879411f9e6632b79fd45908f63fe80debe8f9",
     "exact_search": true,
     "destination": "repo"
   },

@@ -1,6 +1,6 @@
 {
   "version": "memzoi-recall-development-environment/v1",
-  "git_commit": "2d9c08c1275e2a9facca31a8f438bf391a680eca",
+  "git_commit": "54af03dbda99b7d5f1e4223bc7a62111c0de6e9b",
   "cargo_lock_digest": "ad2b25815593c7698fa6ade3ee9c872fbd0af7d964baf3e9b956add0d1ccb8fa",
   "rustc_version": "rustc 1.97.0 (2d8144b78 2026-07-07)\nbinary: rustc\ncommit-hash: 2d8144b7880597b6e6d3dfd63a9a9efae3f533d3\ncommit-date: 2026-07-07\nhost: aarch64-apple-darwin\nrelease: 1.97.0\nLLVM version: 22.1.6",
   "target_triple": "aarch64-apple-darwin",
