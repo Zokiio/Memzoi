@@ -335,7 +335,7 @@ pub fn prepare_recall_v3_locked_commitment(
     if loaded.corpus.kind != RecallV3CorpusKind::LockedTest {
         bail!("locked commitment preparation requires a locked_test corpus");
     }
-    let mut manifests = vec![lexical_candidate_manifest()];
+    let mut manifests = vec![recall_v3_lexical_candidate_manifest()];
     manifests.extend_from_slice(candidates);
     let candidate_digests = candidate_digests(&manifests)?;
     Ok(commitment_for(&loaded, candidate_digests))
@@ -633,7 +633,7 @@ struct LexicalCandidate<'a> {
 }
 impl RecallV3Candidate for LexicalCandidate<'_> {
     fn manifest(&self) -> RecallV3CandidateManifest {
-        lexical_candidate_manifest()
+        recall_v3_lexical_candidate_manifest()
     }
     fn retrieve(&mut self, input: &RecallV3CandidateInput) -> Result<RecallV3CandidateOutput> {
         if input.eligible_records.is_empty() {
@@ -671,7 +671,7 @@ impl RecallV3Candidate for LexicalCandidate<'_> {
     }
 }
 
-fn lexical_candidate_manifest() -> RecallV3CandidateManifest {
+pub fn recall_v3_lexical_candidate_manifest() -> RecallV3CandidateManifest {
     RecallV3CandidateManifest {
         id: "lexical-baseline".into(),
         version: env!("CARGO_PKG_VERSION").into(),

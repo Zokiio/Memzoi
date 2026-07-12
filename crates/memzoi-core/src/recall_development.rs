@@ -518,10 +518,12 @@ pub fn freeze_development(
     frozen_at: &str,
 ) -> Result<RecallDevelopmentFreeze> {
     log.validate()?;
+    crate::FixedClock::from_rfc3339(frozen_at).context("freeze timestamp must be valid RFC3339")?;
+    let lexical_manifest = crate::recall_v3_lexical_candidate_manifest();
     let mut finalists = vec![RecallFrozenCandidate {
         architecture: "lexical_baseline".into(),
-        candidate_id: "lexical-baseline".into(),
-        candidate_digest: log.runner_digest.clone(),
+        candidate_id: lexical_manifest.id.clone(),
+        candidate_digest: canonical_digest(&lexical_manifest)?,
         reason: "required baseline".into(),
     }];
     for architecture in [
@@ -540,7 +542,7 @@ pub fn freeze_development(
             .min_by(|a, b| compare_attempts(a, b))
             .with_context(|| format!("no trust-safe completed finalist for {architecture:?}"))?;
         finalists.push(RecallFrozenCandidate {
-            architecture: format!("{architecture:?}").to_lowercase(),
+            architecture: architecture_identifier(architecture).into(),
             candidate_id: best.candidate_id.clone(),
             candidate_digest: best.candidate_digest.clone(),
             reason: "highest development ranking under the documented deterministic tie-break"
@@ -571,6 +573,14 @@ pub fn freeze_development(
         finalists,
         rejected,
     })
+}
+
+fn architecture_identifier(architecture: RecallCandidateArchitecture) -> &'static str {
+    match architecture {
+        RecallCandidateArchitecture::SemanticOnly => "semantic_only",
+        RecallCandidateArchitecture::LexicalRerank => "lexical_rerank",
+        RecallCandidateArchitecture::LexicalSemanticUnion => "lexical_semantic_union",
+    }
 }
 
 pub fn validate_development_report(report: &RecallV3Report) -> Result<()> {
@@ -1060,6 +1070,30 @@ mod tests {
             attempts: vec![attempt],
         };
         log.validate().unwrap();
+        assert!(
+            freeze_development(&log, "not-a-timestamp")
+                .unwrap_err()
+                .to_string()
+                .contains("RFC3339")
+        );
+        assert_eq!(
+            architecture_identifier(RecallCandidateArchitecture::SemanticOnly),
+            "semantic_only"
+        );
+        assert_eq!(
+            architecture_identifier(RecallCandidateArchitecture::LexicalRerank),
+            "lexical_rerank"
+        );
+        assert_eq!(
+            architecture_identifier(RecallCandidateArchitecture::LexicalSemanticUnion),
+            "lexical_semantic_union"
+        );
+        let lexical_manifest = crate::recall_v3_lexical_candidate_manifest();
+        assert_eq!(lexical_manifest.id, "lexical-baseline");
+        assert_ne!(
+            canonical_digest(&lexical_manifest).unwrap(),
+            log.runner_digest
+        );
 
         let mut malformed = log.clone();
         malformed.attempts[0].artifact_digest = Some("unexpected-artifact".into());
