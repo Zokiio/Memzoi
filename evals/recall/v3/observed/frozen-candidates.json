@@ -1,13 +1,13 @@
 {
   "version": "memzoi-recall-development-freeze/v1",
-  "frozen_at": "2026-07-12T20:32:56Z",
+  "frozen_at": "2026-07-12T20:56:33Z",
   "corpus_digest": "68b876318909d437d9b5d2592432edf11784d0e4dda9272e569d3fb30dbab8ea",
   "judgment_digest": "fea8e2613e97dc13369b91c8c1248bba69953bd0b827eb0012332913bd23eb22",
   "matrix_digest": "6a3635016f4fb92d2b013b7b1b07a0fc4c2233a7233aad211a3a4af4976e15c7",
   "metrics_digest": "c89c91a633a2655bf2e7f2fca4e5430c3d1010965ed85fbf58463b945a08565b",
-  "runner_digest": "54060611817ad28c92aacdfb5c298a58c9b799ef01c7333b6a096009bbba5aeb",
-  "log_digest": "2000e94dba233e4d8d34f8ae7edc47da9ce536800302853c7bee7d490c4a2c9b",
-  "attempts_digest": "7b474ddbd81c6c5f40efab58319b3886ba5a6fc08241de0882364f511df5acfb",
+  "runner_digest": "19f88f3f12664308a227f83ac8f0c44446795b5f5e7c20a86a3ae5ff1292a2f2",
+  "log_digest": "69195a201f920d3619c5933ba7c20244fdbc8c1b43cd7e76c572b26797b9417a",
+  "attempts_digest": "cd3bf62a8f901de0816ee1686b13ed5ffc5129741c376ac719af206b358ecffc",
   "finalists": [
     {
       "architecture": "lexical_baseline",
@@ -19,7 +19,7 @@
     },
     {
       "architecture": "semantic_only",
-      "attempt_id": "9d63614a2f2275c66f5c5fbbdf6b7c355dc3014199d5e83773b33d83b5ce987f",
+      "attempt_id": "76170507922b9fbd870a3533e0864cc39ee497c35778aa9df112a6725f47f5ee",
       "candidate_id": "snowflake-arctic-embed-m-v2.0-title_body-v1-semantic_only",
       "candidate_digest": "4877a3963b2b411c367f9776acc872ac0d2022f687186a893b89d9529de3c5ab",
       "reason": "highest development ranking under the documented deterministic tie-break",
@@ -27,7 +27,7 @@
     },
     {
       "architecture": "lexical_rerank",
-      "attempt_id": "d1da877a65393ccd7bc68ef0db50556f2de232dd1426878d510d8fafd8fdf87e",
+      "attempt_id": "6f51c0c1a04ba14de3ed1a56b1fe3b98f7225fa4ab45c8a14bd1d0316605f89e",
       "candidate_id": "snowflake-arctic-embed-m-v2.0-type_title_body-v1-lexical_rerank",
       "candidate_digest": "aa64eddc97d198c273d9bd4f54eed0450d7c4f206ac99abc5dd5a394d2490d25",
       "reason": "highest development ranking under the documented deterministic tie-break",
@@ -35,7 +35,7 @@
     },
     {
       "architecture": "lexical_semantic_union",
-      "attempt_id": "9f81b435702a465f271c14d97505e75e7774a8ea9e6e6814b6e9f130228e3d60",
+      "attempt_id": "42a7018eb6736a9159ccca28f63ff8f4914b423c7447f8829fc7144bf079bddd",
       "candidate_id": "snowflake-arctic-embed-m-v2.0-title_body-v1-lexical_semantic_union",
       "candidate_digest": "7c4ba17dc6bf71e9f122de91e01b874ebeb21cecaab84e84cc422cd2654ef60e",
       "reason": "highest development ranking under the documented deterministic tie-break",
