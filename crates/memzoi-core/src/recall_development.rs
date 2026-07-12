@@ -218,19 +218,23 @@ pub fn inspect_recall_model(
     {
         bail!("model install manifest does not match profile");
     }
-    let expected = profile
+    let mut expected_files = profile
         .files
         .iter()
-        .map(|file| file.path.clone())
-        .collect::<BTreeSet<_>>();
-    let actual = manifest
-        .files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect::<BTreeSet<_>>();
-    if expected != actual {
-        bail!("model install file set does not match profile");
+        .map(|file| RecallInstalledFile {
+            path: file.path.clone(),
+            sha256: file.sha256.clone(),
+            bytes: file.bytes,
+        })
+        .collect::<Vec<_>>();
+    expected_files.sort_by(|left, right| left.path.cmp(&right.path));
+    if manifest.files != expected_files {
+        bail!("model install file metadata does not match profile");
     }
+    let expected = expected_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<BTreeSet<_>>();
     for file in &profile.files {
         verify_regular_file(&directory.join(&file.path), file)?;
     }
@@ -981,6 +985,18 @@ mod tests {
             |_| -> Result<std::io::Cursor<Vec<u8>>> { panic!("valid install must not fetch") },
         )
         .unwrap();
+        let install_manifest_path = installed.join("install.json");
+        let original_manifest = fs::read(&install_manifest_path).unwrap();
+        let mut tampered_manifest: RecallModelInstallManifest =
+            serde_json::from_slice(&original_manifest).unwrap();
+        tampered_manifest.files[0].bytes += 1;
+        fs::write(
+            &install_manifest_path,
+            serde_json::to_vec(&tampered_manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(inspect_recall_model(&profile, &installed).is_err());
+        fs::write(&install_manifest_path, original_manifest).unwrap();
         fs::write(installed.join("config.json"), b"tampered").unwrap();
         assert!(inspect_recall_model(&profile, &installed).is_err());
 
