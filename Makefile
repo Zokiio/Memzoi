@@ -53,14 +53,14 @@ recall-v3-model-inspect:
 
 recall-v3-development-run:
 	@test -n "$(RECALL_V3_ATTEMPTED_AT)" || (echo 'RECALL_V3_ATTEMPTED_AT=<RFC3339> is required' >&2; exit 2)
-	cargo run --locked -q -p memzoi-cli --features recall-models -- eval recall-v3 development run --matrix evals/recall/v3/development-matrix.json --corpus evals/recall/v3/corpus.yaml --model-root .research/recall-v3/models --output .research/recall-v3/observed --attempted-at "$(RECALL_V3_ATTEMPTED_AT)"
+	cargo run --release --locked -q -p memzoi-cli --features recall-models -- eval recall-v3 development run --matrix evals/recall/v3/development-matrix.json --corpus evals/recall/v3/corpus.yaml --model-root .research/recall-v3/models --output .research/recall-v3/observed --attempted-at "$(RECALL_V3_ATTEMPTED_AT)"
 
 recall-v3-development-freeze:
 	@test -n "$(RECALL_V3_FROZEN_AT)" || (echo 'RECALL_V3_FROZEN_AT=<RFC3339> is required' >&2; exit 2)
-	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development freeze --log .research/recall-v3/observed/development-log.json --output .research/recall-v3/observed/frozen-candidates.json --frozen-at "$(RECALL_V3_FROZEN_AT)"
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development freeze --run .research/recall-v3/observed --corpus evals/recall/v3/corpus.yaml --matrix evals/recall/v3/development-matrix.json --profile-root evals/recall/v3/profiles --output .research/recall-v3/observed/frozen-candidates.json --frozen-at "$(RECALL_V3_FROZEN_AT)"
 
 recall-v3-development-publish:
-	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development publish --run .research/recall-v3/observed --output "$${RECALL_V3_PUBLISH_OUTPUT:-evals/recall/v3/observed}"
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development publish --run .research/recall-v3/observed --corpus evals/recall/v3/corpus.yaml --matrix evals/recall/v3/development-matrix.json --profile-root evals/recall/v3/profiles --output "$${RECALL_V3_PUBLISH_OUTPUT:-evals/recall/v3/observed}"
 
 .PHONY: eval-recall-operational
 eval-recall-operational:

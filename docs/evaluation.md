@@ -37,6 +37,12 @@ download models. Compiling the local ONNX adapter explicitly with
 and the pinned ONNX Runtime build dependency when they are not already cached;
 the compiled adapter itself only opens explicitly installed local model files.
 
+The BGE development profile intentionally freezes an empty query prefix. BGE
+v1.5 supports no-instruction retrieval, and this matrix compares the three
+profiles under their checked-in profile contracts. Testing BGE's recommended
+English retrieval instruction is a separate profile experiment that requires a
+new observed run; it is not silently substituted into this frozen evidence.
+
 After installation, build and evaluate all 18 candidates offline. The timestamp
 is explicit so the append-only attempt identity is reproducible:
 
@@ -46,19 +52,43 @@ RECALL_V3_FROZEN_AT=2026-07-12T13:00:00Z make recall-v3-development-freeze
 RECALL_V3_PUBLISH_OUTPUT=/tmp/recall-v3-observed make recall-v3-development-publish
 ```
 
-`development run` writes the generated vector artifacts, all immutable
-candidate manifests, `matrix-report.json`, `development-log.json`, the exact
-matrix snapshot, and `environment.json` below the ignored research root. The
-freeze command reopens those files, recomputes their digests, requires the
-complete 3 × 2 × 3 matrix in one environment, and only then selects the lexical
-baseline plus the highest-ranked trust-eligible candidate per architecture.
-Quality threshold status is recorded separately and does not exclude a
-trust-safe family winner from the locked evaluation.
+`development run` uses a release build and writes generated vector artifacts,
+immutable candidate manifests, per-attempt reports, `matrix-report.json`, an
+append-only logical `development-log.json`, the exact matrix snapshot, and
+canonical environment artifacts below the ignored research root. Build and
+load failures are retained immediately with stable reason codes while the rest
+of the matrix continues. A later invocation may append a new attempt and select
+exactly one completed attempt for every matrix combination.
+
+The environment document binds the source checkout, Cargo.lock, rustc and
+target, build profile, FastEmbed and ONNX Runtime versions, CPU identity and
+features, embedding concurrency, application-offline network contract, and
+installed model-manifest digests. Attempt environment IDs are canonical BLAKE3
+digests of these documents rather than descriptive labels.
+
+The freeze command takes the current corpus, matrix, and profile root as
+explicit inputs. It recomputes current corpus, judgment, matrix, runner,
+metrics, profile, manifest, artifact, report, Cargo.lock, and environment
+bindings, reconstructs every selected manifest from the current profile and
+matrix, requires the complete 3 × 2 × 3 selection, and only then selects the
+lexical baseline plus the highest-ranked trust-eligible candidate per
+architecture. Quality threshold status is recorded separately and does not
+exclude a trust-safe family winner from the locked evaluation.
 
 `development publish` accepts only a complete verified run whose recomputed
 freeze matches the stored freeze. It copies the matrix, report, log,
 environment, freeze, and finalist manifests to a reviewable directory while
 deliberately excluding installed model weights and generated vector artifacts.
+The published manifests keep their logical relative vector key and can be
+loaded against a separately regenerated local artifact directory:
+
+```bash
+memzoi eval recall-v3 \
+  --corpus .research/recall-v3/locked/corpus.yaml \
+  --candidate evals/recall/v3/observed/frozen-manifests/semantic_only.json \
+  --artifact-root .research/recall-v3/locked-artifacts/semantic_only \
+  --require-ready-candidates
+```
 
 Emit the stable JSON report and a separately reviewable digest commitment:
 

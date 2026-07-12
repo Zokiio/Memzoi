@@ -61,6 +61,30 @@ fn modified_vector_artifacts_fall_back_without_using_unbound_scores() -> anyhow:
 }
 
 #[test]
+fn published_manifest_can_resolve_a_separate_local_artifact_root() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/candidates");
+    let manifest_dir = tempfile::tempdir()?;
+    let artifact_dir = tempfile::tempdir()?;
+    std::fs::copy(
+        root.join("exact-union.json"),
+        manifest_dir.path().join("candidate.json"),
+    )?;
+    std::fs::create_dir(artifact_dir.path().join("vectors"))?;
+    std::fs::copy(
+        root.join("vectors/exact-union.json"),
+        artifact_dir.path().join("vectors/exact-union.json"),
+    )?;
+
+    let candidate = ManifestDrivenRecallCandidate::load_with_artifact_root(
+        manifest_dir.path().join("candidate.json"),
+        artifact_dir.path(),
+    )?;
+    candidate.require_ready()?;
+    Ok(())
+}
+
+#[test]
 fn development_log_retains_completed_rejected_and_failed_attempts() -> anyhow::Result<()> {
     let log = RecallDevelopmentLog {
         version: RECALL_DEVELOPMENT_LOG_VERSION.into(),

@@ -321,7 +321,9 @@ pub fn load_recall_v3_embedding_corpus(
     if loaded.corpus.kind != RecallV3CorpusKind::Development {
         bail!("embedding artifact builds require a development corpus");
     }
-    let record_files = crate::read_okf_record_files(loaded.root.join(&loaded.corpus.records_root))?;
+    let staged = TempDir::new().context("failed to stage declared embedding records")?;
+    stage_records(&loaded.root, &loaded.corpus, staged.path())?;
+    let record_files = crate::read_okf_record_files(staged.path())?;
     let record_paths = recall_record_paths(&record_files);
     let records = record_files
         .iter()
@@ -1325,14 +1327,14 @@ fn source_bound_digest(version: &str, source_digest: &str) -> String {
     digest_bytes(format!("{version}\n{source_digest}").as_bytes())
 }
 
-fn recall_v3_metrics_digest() -> String {
+pub fn recall_v3_metrics_digest() -> String {
     source_bound_digest(
         RECALL_V3_METRICS_VERSION,
         env!("MEMZOI_RECALL_V3_METRICS_SOURCE_DIGEST"),
     )
 }
 
-fn recall_v3_runner_digest() -> String {
+pub fn recall_v3_runner_digest() -> String {
     source_bound_digest(
         RECALL_V3_RUNNER_VERSION,
         env!("MEMZOI_RECALL_V3_RUNNER_SOURCE_DIGEST"),

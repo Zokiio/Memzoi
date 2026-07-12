@@ -347,6 +347,9 @@ pub(crate) enum EvalCommands {
         /// Strict candidate manifest JSON files to evaluate after the lexical baseline.
         #[arg(long = "candidate")]
         candidates: Vec<PathBuf>,
+        /// Local vector-artifact roots paired positionally with --candidate values.
+        #[arg(long = "artifact-root", requires = "candidates")]
+        artifact_roots: Vec<PathBuf>,
         /// Write the digest commitment artifact to this path.
         #[arg(long)]
         commitment: Option<PathBuf>,
@@ -459,7 +462,13 @@ pub(crate) enum RecallV3DevelopmentCommands {
     /// Freeze the lexical baseline and best trust-safe candidate per architecture.
     Freeze {
         #[arg(long)]
-        log: PathBuf,
+        run: PathBuf,
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        matrix: PathBuf,
+        #[arg(long)]
+        profile_root: PathBuf,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
@@ -471,6 +480,12 @@ pub(crate) enum RecallV3DevelopmentCommands {
     Publish {
         #[arg(long)]
         run: PathBuf,
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        matrix: PathBuf,
+        #[arg(long)]
+        profile_root: PathBuf,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]

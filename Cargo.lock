@@ -1086,6 +1086,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "toml",
  "ureq 2.12.1",
  "url",
 ]

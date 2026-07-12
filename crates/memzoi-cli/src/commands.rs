@@ -303,6 +303,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                     command,
                     corpus,
                     candidates,
+                    artifact_roots,
                     commitment,
                     prepare_locked_commitment,
                     verify_locked_commitment,
@@ -315,15 +316,16 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                         let corpus = corpus.ok_or_else(|| anyhow::anyhow!(
                         "--corpus <PATH> is required when no recall-v3 subcommand is selected"
                     ))?;
-                        eval::recall_v3_eval_command(
+                        eval::recall_v3_eval_command(eval::RecallV3EvalRequest {
                             corpus,
-                            candidates,
+                            candidate_paths: candidates,
+                            artifact_roots,
                             commitment,
                             prepare_locked_commitment,
                             verify_locked_commitment,
                             require_ready_candidates,
-                            json,
-                        )
+                            as_json: json,
+                        })
                     }
                 }
                 EvalCommands::Recall {

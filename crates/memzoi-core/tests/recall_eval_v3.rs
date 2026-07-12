@@ -3,9 +3,9 @@ use memzoi_core::{
     RECALL_V3_REPORT_VERSION, RECALL_V3_RUNNER_VERSION, RecallRetrievalCandidateManifest,
     RecallV3Candidate, RecallV3CandidateHit, RecallV3CandidateInput, RecallV3CandidateManifest,
     RecallV3CandidateOutput, RecallV3Corpus, RecallV3CorpusKind, RecallV3ForbiddenReason,
-    prepare_recall_v3_locked_commitment, require_recall_v3_candidates_ready, run_recall_v3_eval,
-    run_recall_v3_eval_with_candidates, verify_recall_v3_locked_commitment,
-    write_recall_v3_locked_commitment,
+    load_recall_v3_embedding_corpus, prepare_recall_v3_locked_commitment,
+    require_recall_v3_candidates_ready, run_recall_v3_eval, run_recall_v3_eval_with_candidates,
+    verify_recall_v3_locked_commitment, write_recall_v3_locked_commitment,
 };
 
 fn locked_corpus_fixture() -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf)> {
@@ -22,6 +22,28 @@ fn locked_corpus_fixture() -> anyhow::Result<(tempfile::TempDir, std::path::Path
     let path = dir.path().join("corpus.yaml");
     std::fs::write(&path, serde_yaml::to_string(&corpus)?)?;
     Ok((dir, path))
+}
+
+#[test]
+fn embedding_builder_reads_only_declared_corpus_files() -> anyhow::Result<()> {
+    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let bytes = std::fs::read(source.join("corpus.yaml"))?;
+    let corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
+    let dir = tempfile::tempdir()?;
+    let records = dir.path().join("records");
+    std::fs::create_dir(&records)?;
+    for record in &corpus.records {
+        std::fs::copy(source.join("records").join(record), records.join(record))?;
+    }
+    std::fs::copy(
+        source.join("records").join(&corpus.records[0]),
+        records.join("undeclared-local-record.md"),
+    )?;
+    std::fs::write(dir.path().join("corpus.yaml"), bytes)?;
+
+    let embedding = load_recall_v3_embedding_corpus(dir.path().join("corpus.yaml"))?;
+    assert_eq!(embedding.inputs.records.len(), corpus.records.len());
+    Ok(())
 }
 
 #[test]
