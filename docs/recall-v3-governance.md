@@ -4,7 +4,7 @@ The v0.5 evaluation code validates evidence, but it cannot manufacture the
 independence required by the benchmark protocol. Candidate implementers must
 not mark these gates complete alone.
 
-## Development corpus — issue #74
+## Development corpus — external prerequisite
 
 1. Author enough cases for every ratified lexical, semantic, adversarial, path,
    scope, privacy, and lifecycle slice.
@@ -26,7 +26,8 @@ raw chat, or repository-confidential source.
 
 ## Candidate freeze — issue #77
 
-After #74 and candidate implementation, run every documented profile, document
+After an independently reviewed public development corpus is available and
+candidate implementation is complete, run every documented profile, document
 template, and architecture on development data. Retain failed and rejected
 attempts. A maintainer reviews immutable manifests, selects the frozen set
 without locked-test access, and records inclusion/exclusion reasons. The lexical
