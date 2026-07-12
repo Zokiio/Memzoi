@@ -176,7 +176,7 @@ fn workspace_root_from(path: &Path) -> Result<PathBuf> {
     let start = if path.is_dir() {
         path.to_owned()
     } else {
-        path.parent().unwrap_or_else(|| Path::new(".")).to_owned()
+        parent_or_current(path).to_owned()
     };
     let mut current = fs::canonicalize(&start)
         .with_context(|| format!("failed to resolve {}", start.display()))?;
@@ -191,6 +191,12 @@ fn workspace_root_from(path: &Path) -> Result<PathBuf> {
             );
         }
     }
+}
+
+fn parent_or_current(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn cargo_lock_identity(workspace_root: &Path) -> Result<(String, String, String)> {
@@ -1680,4 +1686,18 @@ fn baseline_status_label(status: RecallEvalBaselineStatus) -> &'static str {
 
 fn pass_label(passed: bool) -> &'static str {
     if passed { "PASS" } else { "FAIL" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_matrix_paths_start_workspace_search_in_current_directory() {
+        assert_eq!(parent_or_current(Path::new("matrix.json")), Path::new("."));
+        assert_eq!(
+            parent_or_current(Path::new("evals/matrix.json")),
+            Path::new("evals")
+        );
+    }
 }

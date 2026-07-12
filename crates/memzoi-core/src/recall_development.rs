@@ -783,7 +783,7 @@ impl RecallDevelopmentLogV2 {
                     attempt.template.as_str(),
                     TITLE_BODY_TEMPLATE | TYPE_TITLE_BODY_TEMPLATE
                 )
-                || attempt.environment_digest.trim().is_empty()
+                || !is_sha256(&attempt.environment_digest)
                 || (attempt.outcome != RecallDevelopmentOutcome::Completed
                     && (attempt.trust_eligible || attempt.development_quality_passed))
                 || match attempt.outcome {
@@ -1700,7 +1700,7 @@ mod tests {
             report: None,
             report_digest: None,
             artifact_digest: None,
-            environment_digest: "environment-digest".into(),
+            environment_digest: "e".repeat(64),
             trust_eligible: false,
             development_quality_passed: false,
         };
@@ -1748,6 +1748,9 @@ mod tests {
         assert!(malformed.validate().is_err());
         malformed = log.clone();
         malformed.attempts[0].attempted_at = String::new();
+        assert!(malformed.validate().is_err());
+        malformed = log.clone();
+        malformed.attempts[0].environment_digest = "../escape".into();
         assert!(malformed.validate().is_err());
         malformed = log;
         malformed.attempts[0].template = "unknown/v1".into();

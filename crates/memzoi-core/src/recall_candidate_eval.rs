@@ -179,7 +179,7 @@ pub struct ManifestDrivenRecallCandidate {
 impl ManifestDrivenRecallCandidate {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let artifact_root = path.parent().unwrap_or_else(|| Path::new("."));
+        let artifact_root = parent_or_current(path);
         Self::load_with_artifact_root(path, artifact_root)
     }
 
@@ -243,6 +243,12 @@ impl ManifestDrivenRecallCandidate {
             ),
         }
     }
+}
+
+fn parent_or_current(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 impl RecallV3Candidate for ManifestDrivenRecallCandidate {
@@ -651,4 +657,21 @@ fn digest_json(value: &impl Serialize) -> Result<String> {
     Ok(blake3::hash(&serde_json_canonicalizer::to_vec(value)?)
         .to_hex()
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_manifest_paths_resolve_artifacts_from_current_directory() {
+        assert_eq!(
+            parent_or_current(Path::new("candidate.json")),
+            Path::new(".")
+        );
+        assert_eq!(
+            parent_or_current(Path::new("fixtures/candidate.json")),
+            Path::new("fixtures")
+        );
+    }
 }
