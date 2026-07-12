@@ -1,12 +1,14 @@
-use std::path::PathBuf;
+use std::{io::Read, path::PathBuf};
 
 use anyhow::{Result, bail};
 use memzoi_core::{
     CaptureEvalBaselineStatus, CaptureEvalReport, ManifestDrivenRecallCandidate,
-    RecallCompetitorReport, RecallEvalBaselineStatus, RecallEvalForbiddenIds,
-    RecallEvalIntegrityMetric, RecallEvalLeakageMetric, RecallEvalRatioMetric, RecallEvalReport,
-    RecallEvalSurface, RecallOperationalReport, RecallV3Candidate, RecallV3Report,
-    attach_capture_eval_baseline, attach_recall_eval_baseline, prepare_recall_v3_locked_commitment,
+    RecallCompetitorReport, RecallDevelopmentLogV2, RecallEvalBaselineStatus,
+    RecallEvalForbiddenIds, RecallEvalIntegrityMetric, RecallEvalLeakageMetric,
+    RecallEvalRatioMetric, RecallEvalReport, RecallEvalSurface, RecallModelProfile,
+    RecallOperationalReport, RecallV3Candidate, RecallV3Report, attach_capture_eval_baseline,
+    attach_recall_eval_baseline, freeze_development, inspect_recall_model,
+    install_recall_model_with, prepare_recall_v3_locked_commitment,
     require_recall_v3_candidates_ready, run_capture_eval, run_recall_competitor_eval,
     run_recall_eval, run_recall_operational_eval, run_recall_v3_eval,
     run_recall_v3_eval_with_candidates, verify_recall_v3_locked_commitment,
@@ -14,7 +16,103 @@ use memzoi_core::{
     write_recall_v3_locked_commitment,
 };
 
-use crate::output::print_json;
+use crate::{
+    cli::{RecallV3Commands, RecallV3DevelopmentCommands, RecallV3ModelCommands},
+    output::print_json,
+};
+
+pub(crate) fn recall_v3_subcommand(command: RecallV3Commands) -> Result<()> {
+    match command {
+        RecallV3Commands::Model { command } => match command {
+            RecallV3ModelCommands::Install {
+                profile,
+                model_root,
+                force,
+                json,
+            } => {
+                let profile = RecallModelProfile::load(&profile)?;
+                let agent = ureq::AgentBuilder::new().redirects(5).build();
+                let installed = install_recall_model_with(&profile, &model_root, force, |url| {
+                    let expected = profile
+                        .files
+                        .iter()
+                        .find(|file| file.url == url)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("download URL is not declared by the profile")
+                        })?;
+                    let response = agent
+                        .get(url)
+                        .call()
+                        .map_err(|error| anyhow::anyhow!("model download failed: {error}"))?;
+                    if !profile.permits_url(response.get_url())? {
+                        bail!("model download redirected to a non-allowlisted origin");
+                    }
+                    let mut bytes = Vec::new();
+                    response
+                        .into_reader()
+                        .take(expected.bytes + 1)
+                        .read_to_end(&mut bytes)?;
+                    Ok(bytes)
+                })?;
+                if json {
+                    print_json(
+                        &serde_json::json!({"profile_id": profile.id, "path": installed, "verified": true}),
+                    )?;
+                } else {
+                    println!("installed:\t{}\nverified:\ttrue", installed.display());
+                }
+                Ok(())
+            }
+            RecallV3ModelCommands::Inspect {
+                profile,
+                model_root,
+                json,
+            } => {
+                let profile = RecallModelProfile::load(&profile)?;
+                let manifest = inspect_recall_model(&profile, &model_root.join(&profile.id))?;
+                if json {
+                    print_json(&serde_json::to_value(&manifest)?)?;
+                } else {
+                    println!(
+                        "profile:\t{}\nverified:\ttrue\nfiles:\t{}",
+                        profile.id,
+                        manifest.files.len()
+                    );
+                }
+                Ok(())
+            }
+        },
+        RecallV3Commands::Development { command } => match command {
+            RecallV3DevelopmentCommands::Freeze {
+                log,
+                output,
+                frozen_at,
+                json,
+            } => {
+                if output.exists() {
+                    bail!("refusing to overwrite an existing freeze artifact");
+                }
+                let log: RecallDevelopmentLogV2 = serde_json::from_slice(&std::fs::read(log)?)?;
+                let freeze = freeze_development(&log, &frozen_at)?;
+                let parent = output.parent().unwrap_or_else(|| std::path::Path::new("."));
+                std::fs::create_dir_all(parent)?;
+                let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+                serde_json::to_writer_pretty(&mut temporary, &freeze)?;
+                temporary.persist(&output)?;
+                if json {
+                    print_json(&serde_json::to_value(&freeze)?)?;
+                } else {
+                    println!(
+                        "frozen:\t{}\nfinalists:\t{}",
+                        output.display(),
+                        freeze.finalists.len()
+                    );
+                }
+                Ok(())
+            }
+        },
+    }
+}
 
 pub(crate) fn recall_operational_eval_command(evidence: PathBuf, as_json: bool) -> Result<()> {
     let report = run_recall_operational_eval(evidence)?;

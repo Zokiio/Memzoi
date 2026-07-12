@@ -121,7 +121,7 @@ fn manifest_driven_exact_union_preserves_signals_and_citations() -> anyhow::Resu
     assert_eq!(candidate.aggregate.citation_integrity, 1.0);
     assert_eq!(
         candidate.resource_observations["exact_distance_comparisons"],
-        9.0
+        (candidate.cases.len() * 3) as f64
     );
     assert!(
         candidate
@@ -450,7 +450,7 @@ fn unknown_candidate_ids_count_as_forbidden_other() -> anyhow::Result<()> {
 
     assert_eq!(
         candidate.aggregate.forbidden_hits[&RecallV3ForbiddenReason::Other],
-        3
+        candidate.cases.len()
     );
     assert!(!candidate.passed);
     Ok(())

@@ -339,9 +339,11 @@ pub(crate) enum EvalCommands {
     },
     /// Evaluate candidate-neutral recall v3 quality and emit release evidence.
     RecallV3 {
+        #[command(subcommand)]
+        command: Option<RecallV3Commands>,
         /// Explicit path to the strict recall-v3 corpus YAML file.
         #[arg(long)]
-        corpus: PathBuf,
+        corpus: Option<PathBuf>,
         /// Strict candidate manifest JSON files to evaluate after the lexical baseline.
         #[arg(long = "candidate")]
         candidates: Vec<PathBuf>,
@@ -388,6 +390,59 @@ pub(crate) enum EvalCommands {
         #[arg(long, requires = "baseline")]
         update_baseline: bool,
         /// Emit the stable machine-readable report.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RecallV3Commands {
+    /// Manage explicitly installed offline embedding models.
+    Model {
+        #[command(subcommand)]
+        command: RecallV3ModelCommands,
+    },
+    /// Freeze the development-only candidate process.
+    Development {
+        #[command(subcommand)]
+        command: RecallV3DevelopmentCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RecallV3DevelopmentCommands {
+    /// Freeze the lexical baseline and best trust-safe candidate per architecture.
+    Freeze {
+        #[arg(long)]
+        log: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        frozen_at: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RecallV3ModelCommands {
+    /// Download, verify, and atomically install one pinned profile.
+    Install {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        model_root: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify an installed model without network access.
+    Inspect {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        model_root: PathBuf,
         #[arg(long)]
         json: bool,
     },

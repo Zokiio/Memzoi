@@ -41,7 +41,7 @@
     "profile_id": "fixture-exact-v1",
     "generation": "generation-1",
     "vector_artifact": "vectors/exact-union.json",
-    "vector_artifact_digest": "53a6e4853929154bbd07fc030ed214076e83ba90286fc974727a1ad1c820a548",
+    "vector_artifact_digest": "4ca6912b05999e9c9277d24c162356bf17c468b7b9ac53e19c651ddb0b12fde7",
     "content_fingerprint": "blake3:fixture-record-set-v1",
     "exact_search": true,
     "destination": "repo"

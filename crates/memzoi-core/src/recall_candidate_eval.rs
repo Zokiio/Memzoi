@@ -16,7 +16,7 @@ pub const RECALL_CANDIDATE_MANIFEST_VERSION: &str = "memzoi-recall-candidate/v2"
 pub const RECALL_VECTOR_ARTIFACT_VERSION: &str = "memzoi-recall-vectors/v1";
 pub const RECALL_DEVELOPMENT_LOG_VERSION: &str = "memzoi-recall-development-log/v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecallCandidateArchitecture {
     SemanticOnly,

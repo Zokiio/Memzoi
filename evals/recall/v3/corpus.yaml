@@ -1,5 +1,5 @@
 version: memzoi-recall-corpus/v3
-name: recall-v3-development-smoke
+name: recall-v3-development-corpus
 kind: development
 evaluated_at: 2026-07-10T12:00:00Z
 records_root: records
@@ -107,3 +107,993 @@ cases:
         eligible: false
         forbidden_reason: scope
         rationale: Team beta is outside repo scope.
+  - id: development-01
+    query: safe rollout activation question 01
+    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-01
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-02
+    query: indigo citation sentinel cited roadmap source development example 02
+    slices: [identifiers, hard_negatives]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-02
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-03
+    query: atomic release pointer fully built generation current pointer development example 03
+    slices: [negation, temporal_conflict]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-03
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-04
+    query: quartz lexical sentinel ordinary title body terms development example 04
+    slices: [procedure, causal]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-04
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-05
+    query: indigo citation sentinel cited roadmap source development example 05
+    slices: [path, scope, privacy]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-05
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-06
+    query: atomic release pointer fully built generation current pointer development example 06
+    slices: [destination, lifecycle]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-06
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-07
+    query: pointer 07
+    slices: [ambiguous_short, multi_relevant]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-07
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 2
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-08
+    query: safe rollout activation question 08
+    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-08
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-09
+    query: atomic release pointer fully built generation current pointer development example 09
+    slices: [identifiers, hard_negatives]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-09
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-10
+    query: quartz lexical sentinel ordinary title body terms development example 10
+    slices: [negation, temporal_conflict]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-10
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-11
+    query: indigo citation sentinel cited roadmap source development example 11
+    slices: [procedure, causal]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-11
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-12
+    query: atomic release pointer fully built generation current pointer development example 12
+    slices: [path, scope, privacy]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-12
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-13
+    query: quartz lexical sentinel ordinary title body terms development example 13
+    slices: [destination, lifecycle]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-13
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-14
+    query: pointer 14
+    slices: [ambiguous_short, multi_relevant]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-14
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 2
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-15
+    query: safe rollout activation question 15
+    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-15
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-16
+    query: quartz lexical sentinel ordinary title body terms development example 16
+    slices: [identifiers, hard_negatives]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-16
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-17
+    query: indigo citation sentinel cited roadmap source development example 17
+    slices: [negation, temporal_conflict]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-17
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-18
+    query: atomic release pointer fully built generation current pointer development example 18
+    slices: [procedure, causal]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-18
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-19
+    query: quartz lexical sentinel ordinary title body terms development example 19
+    slices: [path, scope, privacy]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-19
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-20
+    query: indigo citation sentinel cited roadmap source development example 20
+    slices: [destination, lifecycle]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-20
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-21
+    query: pointer 21
+    slices: [ambiguous_short, multi_relevant]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-21
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-22
+    query: safe rollout activation question 22
+    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-22
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-23
+    query: indigo citation sentinel cited roadmap source development example 23
+    slices: [identifiers, hard_negatives]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-23
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-24
+    query: atomic release pointer fully built generation current pointer development example 24
+    slices: [negation, temporal_conflict]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-24
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-25
+    query: quartz lexical sentinel ordinary title body terms development example 25
+    slices: [procedure, causal]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-25
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-26
+    query: indigo citation sentinel cited roadmap source development example 26
+    slices: [path, scope, privacy]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-26
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-27
+    query: atomic release pointer fully built generation current pointer development example 27
+    slices: [destination, lifecycle]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-27
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-28
+    query: pointer 28
+    slices: [ambiguous_short, multi_relevant]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-28
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 2
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-29
+    query: safe rollout activation question 29
+    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-29
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-30
+    query: atomic release pointer fully built generation current pointer development example 30
+    slices: [identifiers, hard_negatives]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-30
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-31
+    query: quartz lexical sentinel ordinary title body terms development example 31
+    slices: [negation, temporal_conflict]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-31
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-32
+    query: indigo citation sentinel cited roadmap source development example 32
+    slices: [procedure, causal]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-32
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.
+  - id: development-33
+    query: atomic release pointer fully built generation current pointer development example 33
+    slices: [path, scope, privacy]
+    provenance:
+      kind: human_written
+      reference: issue://77/development-33
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible but intentionally irrelevant hard negative.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: Relevant development judgment for the declared slice.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta remains outside the repo eligibility boundary.

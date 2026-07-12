@@ -11,14 +11,20 @@ description = "File-native AI memory core library with SQLite storage, search, a
 keywords = ["ai", "agents", "memory", "sqlite", "search"]
 categories = ["development-tools"]
 
+[features]
+default = []
+recall-models = ["dep:fastembed"]
+
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
+fastembed = { workspace = true, optional = true }
 ignore.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_json_canonicalizer.workspace = true
+sha2.workspace = true
 serde_yaml = "0.9.34"
 tempfile.workspace = true
 thiserror.workspace = true

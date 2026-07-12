@@ -13,6 +13,27 @@ Run the checked development smoke corpus with the production lexical baseline:
 make eval-recall-v3
 ```
 
+### Recall-v3 development candidates
+
+Issue #77 uses the checked-in 3 × 2 × 3 matrix in
+`evals/recall/v3/development-matrix.json`: three pinned offline embedding
+profiles, two deterministic document templates, and three retrieval
+architectures. Model weights and generated vectors are research artifacts and
+stay below the ignored `.research/recall-v3/` path.
+
+Installation is the only network-enabled step and must be invoked explicitly:
+
+```bash
+make recall-v3-model-install
+make recall-v3-model-inspect
+```
+
+Every profile pins its immutable repository revision, file sizes, SHA-256
+digests, license, dimensions, pooling, normalization, and query/document
+prefixes. Normal `make eval`, default builds, and candidate evaluation never
+download models. Compile the local ONNX adapter explicitly with
+`cargo check -p memzoi-core --features recall-models`.
+
 Emit the stable JSON report and a separately reviewable digest commitment:
 
 ```bash

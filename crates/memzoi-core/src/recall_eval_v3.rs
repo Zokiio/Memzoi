@@ -137,6 +137,7 @@ pub struct RecallV3CandidateInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecallV3CandidateRecord {
     pub id: String,
+    pub memory_type: crate::MemoryType,
     pub title: String,
     pub body: String,
     pub citation: MemoryCitation,
@@ -853,6 +854,7 @@ fn evaluate_candidate(
                 .filter(|r| eligible.contains(r.id.as_str()))
                 .map(|r| RecallV3CandidateRecord {
                     id: r.id.clone(),
+                    memory_type: r.memory_type,
                     title: r.title.clone(),
                     body: r.body.clone(),
                     citation: MemoryCitation {

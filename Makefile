@@ -29,12 +29,24 @@ eval: eval-recall eval-capture eval-v0.5-foundation
 eval-recall-v3:
 	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml
 
-.PHONY: eval-recall-v3-candidate eval-recall-v3-candidate-matrix
+.PHONY: eval-recall-v3-candidate eval-recall-v3-candidate-matrix recall-v3-model-install recall-v3-model-inspect
 eval-recall-v3-candidate:
 	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml --candidate evals/recall/v3/candidates/exact-union.json --require-ready-candidates
 
 eval-recall-v3-candidate-matrix:
 	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml --candidate evals/recall/v3/candidates/semantic-only.json --candidate evals/recall/v3/candidates/lexical-rerank.json --candidate evals/recall/v3/candidates/lexical-union.json --require-ready-candidates
+
+# Explicit network step. Model files remain under the ignored research root.
+recall-v3-model-install:
+	@for profile in evals/recall/v3/profiles/*.json; do \
+		cargo run --locked -q -p memzoi-cli -- eval recall-v3 model install --profile "$$profile" --model-root .research/recall-v3/models; \
+	done
+
+# Offline integrity check for all explicitly installed profiles.
+recall-v3-model-inspect:
+	@for profile in evals/recall/v3/profiles/*.json; do \
+		cargo run --locked -q -p memzoi-cli -- eval recall-v3 model inspect --profile "$$profile" --model-root .research/recall-v3/models; \
+	done
 
 .PHONY: eval-recall-operational
 eval-recall-operational:

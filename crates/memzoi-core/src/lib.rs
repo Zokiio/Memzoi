@@ -16,6 +16,7 @@ mod precheck;
 mod proposals;
 mod recall_candidate_eval;
 mod recall_competitor_eval;
+mod recall_development;
 mod recall_eval;
 mod recall_eval_v3;
 mod recall_operational_eval;
@@ -94,6 +95,7 @@ pub use proposals::{
 };
 pub use recall_candidate_eval::*;
 pub use recall_competitor_eval::*;
+pub use recall_development::*;
 pub use recall_eval::{
     RECALL_EVAL_BASELINE_VERSION, RECALL_EVAL_CORPUS_VERSION,
     RECALL_EVAL_METRIC_DEFINITIONS_VERSION, RECALL_EVAL_REPORT_VERSION, RecallEvalBaseline,
