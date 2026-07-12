@@ -452,18 +452,31 @@ impl RecallDevelopmentLogV2 {
         }
         for attempt in &self.attempts {
             let complete = attempt.report.is_some()
-                && attempt.report_digest.is_some()
-                && attempt.artifact_digest.is_some()
+                && attempt
+                    .report_digest
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                && attempt
+                    .artifact_digest
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
                 && attempt.reason_code.is_none();
             let unsuccessful = attempt.report.is_none()
                 && attempt.report_digest.is_none()
+                && attempt.artifact_digest.is_none()
                 && attempt
                     .reason_code
                     .as_deref()
-                    .is_some_and(|v| !v.is_empty());
-            if attempt.candidate_id.is_empty()
-                || attempt.candidate_digest.is_empty()
-                || attempt.environment_digest.is_empty()
+                    .is_some_and(|value| !value.trim().is_empty());
+            if crate::FixedClock::from_rfc3339(&attempt.attempted_at).is_err()
+                || attempt.candidate_id.trim().is_empty()
+                || attempt.candidate_digest.trim().is_empty()
+                || attempt.profile_id.trim().is_empty()
+                || !matches!(
+                    attempt.template.as_str(),
+                    TITLE_BODY_TEMPLATE | TYPE_TITLE_BODY_TEMPLATE
+                )
+                || attempt.environment_digest.trim().is_empty()
                 || match attempt.outcome {
                     RecallDevelopmentOutcome::Completed => !complete,
                     _ => !unsuccessful,
@@ -1020,5 +1033,42 @@ mod tests {
                 "development slice {required:?} has fewer than three cases"
             );
         }
+    }
+
+    #[test]
+    fn development_log_rejects_partial_unsuccessful_attempts() {
+        let attempt = RecallDevelopmentAttemptV2 {
+            attempted_at: "2026-07-12T12:00:00Z".into(),
+            candidate_id: "candidate-a".into(),
+            candidate_digest: "candidate-digest".into(),
+            profile_id: "profile-a".into(),
+            template: TITLE_BODY_TEMPLATE.into(),
+            architecture: RecallCandidateArchitecture::SemanticOnly,
+            outcome: RecallDevelopmentOutcome::Rejected,
+            reason_code: Some("quality_gate".into()),
+            report: None,
+            report_digest: None,
+            artifact_digest: None,
+            environment_digest: "environment-digest".into(),
+        };
+        let log = RecallDevelopmentLogV2 {
+            version: RECALL_DEVELOPMENT_LOG_V2.into(),
+            corpus_digest: "corpus-digest".into(),
+            judgment_digest: "judgment-digest".into(),
+            matrix_digest: "matrix-digest".into(),
+            runner_digest: "runner-digest".into(),
+            attempts: vec![attempt],
+        };
+        log.validate().unwrap();
+
+        let mut malformed = log.clone();
+        malformed.attempts[0].artifact_digest = Some("unexpected-artifact".into());
+        assert!(malformed.validate().is_err());
+        malformed = log.clone();
+        malformed.attempts[0].attempted_at = String::new();
+        assert!(malformed.validate().is_err());
+        malformed = log;
+        malformed.attempts[0].template = "unknown/v1".into();
+        assert!(malformed.validate().is_err());
     }
 }

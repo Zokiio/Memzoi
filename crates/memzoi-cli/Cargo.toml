@@ -28,6 +28,7 @@ sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
+url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

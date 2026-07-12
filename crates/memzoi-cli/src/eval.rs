@@ -15,6 +15,9 @@ use memzoi_core::{
     write_capture_eval_baseline, write_recall_eval_baseline, write_recall_v3_commitment,
     write_recall_v3_locked_commitment,
 };
+use url::Url;
+
+const MODEL_DOWNLOAD_REDIRECT_LIMIT: usize = 5;
 
 use crate::{
     cli::{RecallV3Commands, RecallV3DevelopmentCommands, RecallV3ModelCommands},
@@ -32,20 +35,13 @@ pub(crate) fn recall_v3_subcommand(command: RecallV3Commands) -> Result<()> {
             } => {
                 let profile = RecallModelProfile::load(&profile)?;
                 let agent = ureq::AgentBuilder::new()
-                    .redirects(5)
+                    .redirects(0)
                     .timeout_connect(Duration::from_secs(10))
                     .timeout_read(Duration::from_secs(60))
                     .timeout_write(Duration::from_secs(30))
                     .build();
                 let installed = install_recall_model_with(&profile, &model_root, force, |url| {
-                    let response = agent
-                        .get(url)
-                        .set("User-Agent", concat!("memzoi/", env!("CARGO_PKG_VERSION")))
-                        .call()
-                        .map_err(|error| anyhow::anyhow!("model download failed: {error}"))?;
-                    if !profile.permits_url(response.get_url())? {
-                        bail!("model download redirected to a non-allowlisted origin");
-                    }
+                    let response = model_download_response(&agent, &profile, url)?;
                     Ok(response.into_reader())
                 })?;
                 if json {
@@ -106,6 +102,39 @@ pub(crate) fn recall_v3_subcommand(command: RecallV3Commands) -> Result<()> {
             }
         },
     }
+}
+
+fn model_download_response(
+    agent: &ureq::Agent,
+    profile: &RecallModelProfile,
+    initial_url: &str,
+) -> Result<ureq::Response> {
+    let mut url = Url::parse(initial_url)?;
+    for redirects_followed in 0..=MODEL_DOWNLOAD_REDIRECT_LIMIT {
+        if !profile.permits_url(url.as_str())? {
+            bail!("model download URL has a non-allowlisted origin");
+        }
+        let response = agent
+            .get(url.as_str())
+            .set("User-Agent", concat!("memzoi/", env!("CARGO_PKG_VERSION")))
+            .call()
+            .map_err(|error| anyhow::anyhow!("model download failed: {error}"))?;
+        if !(300..400).contains(&response.status()) {
+            return Ok(response);
+        }
+        if redirects_followed == MODEL_DOWNLOAD_REDIRECT_LIMIT {
+            bail!("model download exceeded the redirect limit");
+        }
+        let location = response
+            .header("Location")
+            .ok_or_else(|| anyhow::anyhow!("model download redirect omitted Location"))?;
+        let redirected = url.join(location)?;
+        if !profile.permits_url(redirected.as_str())? {
+            bail!("model download redirect targets a non-allowlisted origin");
+        }
+        url = redirected;
+    }
+    unreachable!("bounded redirect loop returns or fails")
 }
 
 pub(crate) fn recall_operational_eval_command(evidence: PathBuf, as_json: bool) -> Result<()> {
