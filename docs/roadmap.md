@@ -1,8 +1,8 @@
 # Memzoi roadmap
 
 Status: active
-Updated: 2026-07-11
-Shipped baseline: v0.4.0
+Updated: 2026-07-12
+Shipped baseline: v0.5.0
 
 ## Product outcome
 
@@ -18,7 +18,7 @@ explicit evidence
   -> evaluation, recovery, and audit
 ```
 
-The v0.4 release combines the governed memory kernel with explicit evidence-backed capture and checked-in recall and capture evaluation gates. The roadmap now builds from that measurable local loop toward hybrid recall, lifecycle maintenance, and a hardened provider surface.
+The v0.4 release combines the governed memory kernel with explicit evidence-backed capture and checked-in recall and capture evaluation gates. v0.5.0 adds the candidate-neutral recall evaluation foundation; semantic recall remains an eval-gated, opt-in decision rather than shipped product behavior. The roadmap now builds from that measurable local loop toward lifecycle maintenance and a hardened provider surface.
 
 ## Current baseline
 
@@ -124,13 +124,17 @@ Issues:
 - [#67 Gate v0.4 on capture quality, safety, and review burden](https://github.com/Zokiio/Memzoi/issues/67)
 - [#68 Prepare and release v0.4.0](https://github.com/Zokiio/Memzoi/issues/68)
 
-### v0.5 - Trustworthy Hybrid Recall
+### v0.5 - Trustworthy Hybrid Recall (evaluation foundation shipped 2026-07-12)
 
 Outcome: decide whether semantic retrieval should ship and add it only if it materially improves the same corpus while preserving deterministic fallback, citations, scope, lifecycle suppression, and latency.
 
 The first deliverable is [#56 RFC: Decide whether eval-gated semantic recall should ship](https://github.com/Zokiio/Memzoi/issues/56). It freezes the recall-v3 benchmark and candidate evaluation process before recording a no-go, conditional-go, or full-go decision. Architecture-specific implementation issues are created only for accepted scope after the locked evaluation, avoiding commitment to a vector stack before the evidence exists.
 
 The ratified initial boundary is repository memory, one explicitly installed offline profile per project, exact vector search unless it misses the approved performance gate, and opt-in behavior for v0.5.0. Local/session indexing, remote providers, multiple active profiles, semantic prechecks, and default promotion are deferred. Any future default promotion requires a separate post-release decision and preserves lexical-only mode.
+
+v0.5.0 ships the evaluation, candidate-validation, operational-validation, and
+competitor-report foundations only. It does not record a D56-4 ship decision or
+enable semantic retrieval in normal product operation.
 
 Exit criteria:
 

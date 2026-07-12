@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.5.0] - 2026-07-12
+
+### Added
+
+- Candidate-neutral recall-v3 evaluation with strict public/locked corpus
+  contracts, digest commitments, isolated production lexical-baseline runs, and
+  stable machine-readable reports.
+- Offline manifest-driven exact-vector candidate validation for semantic-only,
+  lexical-reranking, and lexical/semantic-union experiments, with shared
+  eligibility, citation, context-budget, and lexical-fallback boundaries.
+- Candidate-bound operational, task-utility, privacy-safe trace, deterministic
+  workload, and two-track competitor-evidence validators.
+
+### Changed
+
+- The v0.5 roadmap now treats semantic recall as an eval-gated decision. Any
+  accepted profile remains repository-only, offline, single-profile, and opt-in;
+  default promotion is not authorized by this release.
+
+### Known limitations
+
+- The checked-in recall-v3 candidate, operational, and competitor inputs are
+  synthetic contract fixtures. They validate the evaluation harness and are not
+  evidence that semantic or hybrid recall should ship.
+- Semantic retrieval remains undecided. Memzoi continues to use lexical recall
+  in normal product operation without model installation, network access, or an
+  embedding index.
+
 ## [0.4.0] - 2026-07-11
 
 ### Added
@@ -56,6 +84,7 @@
 - Downloaded checksum sidecars now use archive basenames and work with standard `shasum -c` verification.
 - Pull requests targeting stacked feature branches now run Rust CI.
 
+[0.5.0]: https://github.com/Zokiio/Memzoi/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Zokiio/Memzoi/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Zokiio/Memzoi/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Zokiio/Memzoi/compare/v0.2.0...v0.3.0
