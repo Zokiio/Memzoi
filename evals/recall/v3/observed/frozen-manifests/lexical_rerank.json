@@ -1,0 +1,54 @@
+{
+  "version": "memzoi-recall-candidate/v2",
+  "id": "snowflake-arctic-embed-m-v2.0-title_body-v1-lexical_rerank",
+  "revision": "development-v1",
+  "model": {
+    "id": "Snowflake/snowflake-arctic-embed-m-v2.0",
+    "revision": "95c2741480856aa9666782eb4afe11959938017f",
+    "artifact_digest": "acf4ec70b10ab44c6657e48b20c4201165af5d51b61e0d02953626a65f750a7c",
+    "license": "Apache-2.0",
+    "dimensions": 768,
+    "pooling": "cls",
+    "normalization": "l2",
+    "query_prefix": "query: ",
+    "document_prefix": "",
+    "explicitly_installed": true,
+    "offline": true
+  },
+  "document": {
+    "version": "memzoi-recall-document/v1",
+    "template": "title_body/v1",
+    "digest": "aedec750c61f471f7e8f63d07553268bd0ca351824ac93f1b4a0011b30a9dd2a"
+  },
+  "retrieval": {
+    "architecture": "lexical_rerank",
+    "lexical_candidates": 20,
+    "semantic_candidates": 20,
+    "final_results": 10,
+    "similarity_cutoff": 0.0,
+    "fusion": "weighted_sum",
+    "lexical_weight": 1.0,
+    "semantic_weight": 1.0,
+    "reciprocal_rank_k": 60.0,
+    "path_weight": 0.0,
+    "type_weight": 0.0,
+    "lane_weight": 0.0,
+    "destination_weight": 0.0,
+    "confidence_weight": 0.0,
+    "tie_break": "record_id_ascending"
+  },
+  "storage": {
+    "profile_id": "snowflake-arctic-embed-m-v2.0",
+    "generation": "development-generation-1",
+    "vector_artifact": "vectors.json",
+    "vector_artifact_digest": "ccb3a499541ac4d09df9311f324b4c134cff42ff2b3d7af4ffc5e10fc6989ea6",
+    "content_fingerprint": "8033b32f4e4efe409c72a34a0fb6752aeb6e9c6a3f48fc6a933bc3564a4dcf91",
+    "exact_search": true,
+    "destination": "repo"
+  },
+  "environment": {
+    "target_os": "macos",
+    "target_arch": "aarch64",
+    "cpu_features": []
+  }
+}

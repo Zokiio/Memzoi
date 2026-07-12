@@ -1,0 +1,57 @@
+{
+  "version": "memzoi-recall-development-freeze/v1",
+  "frozen_at": "2026-07-12T20:00:00Z",
+  "corpus_digest": "68b876318909d437d9b5d2592432edf11784d0e4dda9272e569d3fb30dbab8ea",
+  "judgment_digest": "fea8e2613e97dc13369b91c8c1248bba69953bd0b827eb0012332913bd23eb22",
+  "matrix_digest": "6a3635016f4fb92d2b013b7b1b07a0fc4c2233a7233aad211a3a4af4976e15c7",
+  "runner_digest": "131a1e67aeb405a6521b7d98a39784fe890fd88fe9639901bddadd9b5486b3db",
+  "log_digest": "baaa8501b0a802bb583c367eab1de73a22b6a697d91bd99dc5319bacc3bc5d9c",
+  "attempts_digest": "3d11721acec2e09eac76a1d7e16d28d503331e61059fb4c4f3826cb84c088e4c",
+  "finalists": [
+    {
+      "architecture": "lexical_baseline",
+      "candidate_id": "lexical-baseline",
+      "candidate_digest": "4db07860f0f37a43285d3d16f981f065ed37b83f26b68e41154555d698c41070",
+      "reason": "required baseline",
+      "development_quality_passed": true
+    },
+    {
+      "architecture": "semantic_only",
+      "candidate_id": "snowflake-arctic-embed-m-v2.0-title_body-v1-semantic_only",
+      "candidate_digest": "631c6b84386c5bed7942de41cab0240ab463d48b7085771d4953c39bf208c73b",
+      "reason": "highest development ranking under the documented deterministic tie-break",
+      "development_quality_passed": true
+    },
+    {
+      "architecture": "lexical_rerank",
+      "candidate_id": "snowflake-arctic-embed-m-v2.0-title_body-v1-lexical_rerank",
+      "candidate_digest": "63391971ba5aa274ce09f8f554adc9b34b905ce5215ab9f2adc1154b68c0bc99",
+      "reason": "highest development ranking under the documented deterministic tie-break",
+      "development_quality_passed": true
+    },
+    {
+      "architecture": "lexical_semantic_union",
+      "candidate_id": "snowflake-arctic-embed-m-v2.0-title_body-v1-lexical_semantic_union",
+      "candidate_digest": "ab81ca1940a8a6adf5742220b7cea3cfb563d034479601d4df9bf54e294d4c26",
+      "reason": "highest development ranking under the documented deterministic tie-break",
+      "development_quality_passed": true
+    }
+  ],
+  "rejected": [
+    "bge-small-en-v1.5-title_body-v1-lexical_rerank",
+    "bge-small-en-v1.5-title_body-v1-lexical_semantic_union",
+    "bge-small-en-v1.5-title_body-v1-semantic_only",
+    "bge-small-en-v1.5-type_title_body-v1-lexical_rerank",
+    "bge-small-en-v1.5-type_title_body-v1-lexical_semantic_union",
+    "bge-small-en-v1.5-type_title_body-v1-semantic_only",
+    "multilingual-e5-small-title_body-v1-lexical_rerank",
+    "multilingual-e5-small-title_body-v1-lexical_semantic_union",
+    "multilingual-e5-small-title_body-v1-semantic_only",
+    "multilingual-e5-small-type_title_body-v1-lexical_rerank",
+    "multilingual-e5-small-type_title_body-v1-lexical_semantic_union",
+    "multilingual-e5-small-type_title_body-v1-semantic_only",
+    "snowflake-arctic-embed-m-v2.0-type_title_body-v1-lexical_rerank",
+    "snowflake-arctic-embed-m-v2.0-type_title_body-v1-lexical_semantic_union",
+    "snowflake-arctic-embed-m-v2.0-type_title_body-v1-semantic_only"
+  ]
+}

@@ -1,0 +1,3 @@
+# Recall-v3 observed development evidence
+
+This directory contains the verified 18-candidate development run and frozen manifests for issue #77. Model weights and vector artifacts are intentionally excluded. Reproduce with `make recall-v3-model-install`, `RECALL_V3_ATTEMPTED_AT=<RFC3339> make recall-v3-development-run`, and `RECALL_V3_FROZEN_AT=<RFC3339> make recall-v3-development-freeze`. Publish a verified copy to a new directory with `RECALL_V3_PUBLISH_OUTPUT=<path> make recall-v3-development-publish`. The freeze and publish commands recompute every candidate, artifact, report, matrix, corpus, runner, and environment binding from the ignored run directory.

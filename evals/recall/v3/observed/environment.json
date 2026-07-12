@@ -1,0 +1,6 @@
+{
+  "digest": "macos-aarch64-threads-4",
+  "target_arch": "aarch64",
+  "target_os": "macos",
+  "threads": 4
+}
