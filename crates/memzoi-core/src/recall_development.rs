@@ -39,6 +39,7 @@ pub struct RecallModelProfile {
     pub repository: String,
     pub revision: String,
     pub license: String,
+    pub provenance: RecallModelProvenance,
     pub dimensions: usize,
     pub pooling: String,
     pub normalization: String,
@@ -47,6 +48,18 @@ pub struct RecallModelProfile {
     pub max_length: usize,
     pub allowed_origins: Vec<String>,
     pub files: Vec<RecallModelFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecallModelProvenance {
+    pub upstream_repository: String,
+    pub upstream_revision: String,
+    pub artifact_repository: String,
+    pub artifact_revision: String,
+    pub conversion: String,
+    pub upstream_license: String,
+    pub artifact_license: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +98,20 @@ impl RecallModelProfile {
             || self.repository.trim().is_empty()
             || self.revision.trim().is_empty()
             || self.license.trim().is_empty()
+            || [
+                self.provenance.upstream_repository.as_str(),
+                self.provenance.upstream_revision.as_str(),
+                self.provenance.artifact_repository.as_str(),
+                self.provenance.artifact_revision.as_str(),
+                self.provenance.conversion.as_str(),
+                self.provenance.upstream_license.as_str(),
+                self.provenance.artifact_license.as_str(),
+            ]
+            .iter()
+            .any(|value| value.trim().is_empty())
+            || self.repository != self.provenance.artifact_repository
+            || self.revision != self.provenance.artifact_revision
+            || self.license != self.provenance.artifact_license
             || self.dimensions == 0
             || self.max_length == 0
             || !matches!(self.pooling.as_str(), "cls" | "mean")
@@ -190,15 +217,37 @@ where
         &staging.path().join("install.json"),
         &canonical_json(&manifest)?,
     )?;
-    if destination.exists() {
+    let backup = model_root.join(format!(".{}.backup-{}", profile.id, uuid::Uuid::now_v7()));
+    let had_previous = destination.exists();
+    if had_previous {
         let metadata = fs::symlink_metadata(&destination)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             bail!("existing model destination must be a non-symlink directory");
         }
-        fs::remove_dir_all(&destination)?;
+        fs::rename(&destination, &backup)?;
     }
-    fs::rename(staging.keep(), &destination)?;
-    inspect_recall_model(profile, &destination)?;
+    // TempDir::keep returns the retained directory path (NamedTempFile::keep is
+    // the tempfile API that returns a Result).
+    let staged: PathBuf = staging.keep();
+    if let Err(error) = fs::rename(&staged, &destination) {
+        if had_previous {
+            fs::rename(&backup, &destination)
+                .context("failed to restore the previous model after promotion failed")?;
+        }
+        return Err(error).context("failed to promote verified model installation");
+    }
+    if let Err(error) = inspect_recall_model(profile, &destination) {
+        fs::remove_dir_all(&destination)
+            .context("failed to remove invalid promoted model installation")?;
+        if had_previous {
+            fs::rename(&backup, &destination)
+                .context("failed to restore the previous model after verification failed")?;
+        }
+        return Err(error).context("promoted model installation failed verification");
+    }
+    if had_previous {
+        fs::remove_dir_all(&backup)?;
+    }
     Ok(destination)
 }
 
@@ -270,6 +319,14 @@ pub trait RecallEmbedder {
 pub struct RecallEmbeddingInputs {
     pub queries: BTreeMap<String, String>,
     pub records: BTreeMap<String, RecallV3CandidateRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecallEmbeddingCorpus {
+    pub inputs: RecallEmbeddingInputs,
+    pub corpus_digest: String,
+    pub judgment_digest: String,
 }
 
 pub fn build_recall_vector_artifact<E: RecallEmbedder>(
@@ -347,6 +404,16 @@ pub struct RecallMatrixParameters {
     pub lexical_weight: f64,
     pub semantic_weight: f64,
     pub reciprocal_rank_k: f64,
+    pub lexical_rerank_fusion: crate::RecallFusionMethod,
+    pub lexical_semantic_union_fusion: crate::RecallFusionMethod,
+    pub path_weight: f64,
+    pub type_weight: f64,
+    pub lane_weight: f64,
+    pub destination_weight: f64,
+    pub confidence_weight: f64,
+    pub tie_break: String,
+    pub batch_size: usize,
+    pub threads: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -360,6 +427,13 @@ pub struct RecallDevelopmentMatrix {
 }
 
 impl RecallDevelopmentMatrix {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let matrix: Self = serde_json::from_slice(&regular_file_bytes(path.as_ref())?)
+            .with_context(|| format!("invalid development matrix {}", path.as_ref().display()))?;
+        matrix.validate()?;
+        Ok(matrix)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.version != RECALL_MATRIX_VERSION
             || self.profiles.len() != 3
@@ -388,11 +462,32 @@ impl RecallDevelopmentMatrix {
                 self.parameters.lexical_weight,
                 self.parameters.semantic_weight,
                 self.parameters.reciprocal_rank_k,
+                self.parameters.path_weight,
+                self.parameters.type_weight,
+                self.parameters.lane_weight,
+                self.parameters.destination_weight,
+                self.parameters.confidence_weight,
             ]
             .iter()
             .all(|v| v.is_finite())
         {
             bail!("invalid matrix parameters");
+        }
+        if self.parameters.lexical_rerank_fusion != crate::RecallFusionMethod::WeightedSum
+            || [
+                self.parameters.path_weight,
+                self.parameters.type_weight,
+                self.parameters.lane_weight,
+                self.parameters.destination_weight,
+                self.parameters.confidence_weight,
+            ]
+            .iter()
+            .any(|weight| *weight != 0.0)
+            || self.parameters.tie_break != "record_id_ascending"
+            || self.parameters.batch_size == 0
+            || self.parameters.threads == 0
+        {
+            bail!("matrix execution and ranking parameters are invalid");
         }
         Ok(())
     }
@@ -401,6 +496,104 @@ impl RecallDevelopmentMatrix {
         self.validate()?;
         Ok(self.profiles.len() * self.templates.len() * self.architectures.len())
     }
+}
+
+pub fn recall_development_matrix_digest(matrix: &RecallDevelopmentMatrix) -> Result<String> {
+    matrix.validate()?;
+    canonical_digest(matrix)
+}
+
+pub fn recall_model_install_digest(install: &RecallModelInstallManifest) -> Result<String> {
+    canonical_digest(install)
+}
+
+pub fn recall_candidate_manifest_digest(
+    manifest: &crate::RecallRetrievalCandidateManifest,
+) -> Result<String> {
+    canonical_digest(manifest)
+}
+
+pub fn recall_candidate_report_digest(report: &RecallV3CandidateReport) -> Result<String> {
+    canonical_digest(report)
+}
+
+pub fn build_recall_candidate_manifest(
+    profile: &RecallModelProfile,
+    template: &str,
+    architecture: RecallCandidateArchitecture,
+    parameters: &RecallMatrixParameters,
+    artifact: &crate::RecallVectorArtifact,
+    artifact_digest: &str,
+    vector_artifact: PathBuf,
+) -> Result<crate::RecallRetrievalCandidateManifest> {
+    validate_relative_path(&vector_artifact)?;
+    let fusion = match architecture {
+        RecallCandidateArchitecture::SemanticOnly => crate::RecallFusionMethod::WeightedSum,
+        RecallCandidateArchitecture::LexicalRerank => parameters.lexical_rerank_fusion,
+        RecallCandidateArchitecture::LexicalSemanticUnion => {
+            parameters.lexical_semantic_union_fusion
+        }
+    };
+    let template_id = template.replace('/', "-");
+    Ok(crate::RecallRetrievalCandidateManifest {
+        version: crate::RECALL_CANDIDATE_MANIFEST_VERSION.into(),
+        id: format!(
+            "{}-{}-{}",
+            profile.id,
+            template_id,
+            architecture_identifier(architecture)
+        ),
+        revision: "development-v1".into(),
+        model: crate::RecallModelIdentity {
+            id: profile.repository.clone(),
+            revision: profile.revision.clone(),
+            artifact_digest: artifact.model_artifact_digest.clone(),
+            license: profile.license.clone(),
+            dimensions: profile.dimensions,
+            pooling: profile.pooling.clone(),
+            normalization: profile.normalization.clone(),
+            query_prefix: profile.query_prefix.clone(),
+            document_prefix: profile.document_prefix.clone(),
+            explicitly_installed: true,
+            offline: true,
+        },
+        document: crate::RecallEmbeddingDocument {
+            version: "memzoi-recall-document/v1".into(),
+            template: template.into(),
+            digest: artifact.document_digest.clone(),
+        },
+        retrieval: crate::RecallCandidateRetrieval {
+            architecture,
+            lexical_candidates: parameters.lexical_candidates,
+            semantic_candidates: parameters.semantic_candidates,
+            final_results: parameters.final_results,
+            similarity_cutoff: parameters.similarity_cutoff,
+            fusion,
+            lexical_weight: parameters.lexical_weight,
+            semantic_weight: parameters.semantic_weight,
+            reciprocal_rank_k: parameters.reciprocal_rank_k,
+            path_weight: parameters.path_weight,
+            type_weight: parameters.type_weight,
+            lane_weight: parameters.lane_weight,
+            destination_weight: parameters.destination_weight,
+            confidence_weight: parameters.confidence_weight,
+            tie_break: parameters.tie_break.clone(),
+        },
+        storage: crate::RecallCandidateStorage {
+            profile_id: profile.id.clone(),
+            generation: artifact.generation.clone(),
+            vector_artifact,
+            vector_artifact_digest: artifact_digest.into(),
+            content_fingerprint: artifact.content_fingerprint.clone(),
+            exact_search: true,
+            destination: crate::MemoryDestination::Repo,
+        },
+        environment: crate::RecallCandidateEnvironment {
+            target_os: std::env::consts::OS.into(),
+            target_arch: std::env::consts::ARCH.into(),
+            cpu_features: Vec::new(),
+        },
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,12 +613,16 @@ pub struct RecallDevelopmentAttemptV2 {
     pub profile_id: String,
     pub template: String,
     pub architecture: RecallCandidateArchitecture,
+    pub candidate_manifest: Option<PathBuf>,
+    pub vector_artifact: Option<PathBuf>,
     pub outcome: RecallDevelopmentOutcome,
     pub reason_code: Option<String>,
     pub report: Option<RecallV3CandidateReport>,
     pub report_digest: Option<String>,
     pub artifact_digest: Option<String>,
     pub environment_digest: String,
+    pub trust_eligible: bool,
+    pub development_quality_passed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -457,6 +654,14 @@ impl RecallDevelopmentLogV2 {
         for attempt in &self.attempts {
             let complete = attempt.report.is_some()
                 && attempt
+                    .candidate_manifest
+                    .as_deref()
+                    .is_some_and(|path| validate_relative_path(path).is_ok())
+                && attempt
+                    .vector_artifact
+                    .as_deref()
+                    .is_some_and(|path| validate_relative_path(path).is_ok())
+                && attempt
                     .report_digest
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty())
@@ -466,6 +671,8 @@ impl RecallDevelopmentLogV2 {
                     .is_some_and(|value| !value.trim().is_empty())
                 && attempt.reason_code.is_none();
             let unsuccessful = attempt.report.is_none()
+                && attempt.candidate_manifest.is_none()
+                && attempt.vector_artifact.is_none()
                 && attempt.report_digest.is_none()
                 && attempt.artifact_digest.is_none()
                 && attempt
@@ -481,6 +688,8 @@ impl RecallDevelopmentLogV2 {
                     TITLE_BODY_TEMPLATE | TYPE_TITLE_BODY_TEMPLATE
                 )
                 || attempt.environment_digest.trim().is_empty()
+                || (attempt.outcome != RecallDevelopmentOutcome::Completed
+                    && (attempt.trust_eligible || attempt.development_quality_passed))
                 || match attempt.outcome {
                     RecallDevelopmentOutcome::Completed => !complete,
                     _ => !unsuccessful,
@@ -500,6 +709,7 @@ pub struct RecallFrozenCandidate {
     pub candidate_id: String,
     pub candidate_digest: String,
     pub reason: String,
+    pub development_quality_passed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -529,6 +739,7 @@ pub fn freeze_development(
         candidate_id: lexical_manifest.id.clone(),
         candidate_digest: canonical_digest(&lexical_manifest)?,
         reason: "required baseline".into(),
+        development_quality_passed: true,
     }];
     for architecture in [
         RecallCandidateArchitecture::SemanticOnly,
@@ -541,7 +752,7 @@ pub fn freeze_development(
             .filter(|a| {
                 a.architecture == architecture
                     && a.outcome == RecallDevelopmentOutcome::Completed
-                    && a.report.as_ref().is_some_and(|r| r.passed)
+                    && a.trust_eligible
             })
             .min_by(|a, b| compare_attempts(a, b))
             .with_context(|| format!("no trust-safe completed finalist for {architecture:?}"))?;
@@ -551,6 +762,7 @@ pub fn freeze_development(
             candidate_digest: best.candidate_digest.clone(),
             reason: "highest development ranking under the documented deterministic tie-break"
                 .into(),
+            development_quality_passed: best.development_quality_passed,
         });
     }
     let selected = finalists
@@ -577,6 +789,118 @@ pub fn freeze_development(
         finalists,
         rejected,
     })
+}
+
+pub fn recall_candidate_trust_eligible(report: &RecallV3CandidateReport) -> bool {
+    report.manifest.offline
+        && report.aggregate.forbidden_hits.values().sum::<usize>() == 0
+        && report.aggregate.citation_integrity == 1.0
+        && report.aggregate.fallback_parity == 1.0
+        && report
+            .cases
+            .iter()
+            .all(|case| case.fallback_reason.is_none())
+}
+
+pub fn verify_development_evidence(
+    log: &RecallDevelopmentLogV2,
+    matrix: &RecallDevelopmentMatrix,
+    report: &RecallV3Report,
+    evidence_root: &Path,
+) -> Result<()> {
+    log.validate()?;
+    matrix.validate()?;
+    validate_development_report(report)?;
+    if log.attempts.len() != 18
+        || log.corpus_digest != report.digests.corpus
+        || log.judgment_digest != report.digests.judgments
+        || log.runner_digest != report.digests.runner
+        || log.matrix_digest != recall_development_matrix_digest(matrix)?
+    {
+        bail!("development evidence identity or matrix cardinality mismatch");
+    }
+    let combinations = log
+        .attempts
+        .iter()
+        .map(|attempt| {
+            (
+                attempt.profile_id.clone(),
+                attempt.template.clone(),
+                attempt.architecture,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_combinations = matrix
+        .profiles
+        .iter()
+        .filter_map(|profile| profile.file_stem().and_then(|stem| stem.to_str()))
+        .flat_map(|profile| {
+            matrix.templates.iter().flat_map(move |template| {
+                matrix
+                    .architectures
+                    .iter()
+                    .copied()
+                    .map(move |architecture| (profile.to_owned(), template.clone(), architecture))
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    if combinations != expected_combinations
+        || report.candidates.len() != 19
+        || log
+            .attempts
+            .iter()
+            .map(|attempt| attempt.environment_digest.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != 1
+    {
+        bail!("development attempts do not form one complete environment-bound matrix");
+    }
+    let reports = report
+        .candidates
+        .iter()
+        .skip(1)
+        .map(|candidate| (candidate.manifest.id.as_str(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    for attempt in &log.attempts {
+        if attempt.outcome != RecallDevelopmentOutcome::Completed {
+            bail!("verified matrix evidence requires completed attempts");
+        }
+        let manifest_path = evidence_root.join(
+            attempt
+                .candidate_manifest
+                .as_deref()
+                .context("completed attempt omitted candidate manifest")?,
+        );
+        let artifact_path = evidence_root.join(
+            attempt
+                .vector_artifact
+                .as_deref()
+                .context("completed attempt omitted vector artifact")?,
+        );
+        let manifest: crate::RecallRetrievalCandidateManifest =
+            serde_json::from_slice(&regular_file_bytes(&manifest_path)?)?;
+        let artifact: crate::RecallVectorArtifact =
+            serde_json::from_slice(&regular_file_bytes(&artifact_path)?)?;
+        let candidate_report = reports
+            .get(attempt.candidate_id.as_str())
+            .context("matrix report omitted a development attempt")?;
+        if recall_candidate_manifest_digest(&manifest)? != attempt.candidate_digest
+            || crate::recall_vector_artifact_digest(&artifact)?
+                != attempt.artifact_digest.as_deref().unwrap_or_default()
+            || recall_candidate_report_digest(candidate_report)?
+                != attempt.report_digest.as_deref().unwrap_or_default()
+            || attempt.report.as_ref() != Some(*candidate_report)
+            || candidate_report.manifest.id != attempt.candidate_id
+            || recall_candidate_trust_eligible(candidate_report) != attempt.trust_eligible
+            || candidate_report.passed != attempt.development_quality_passed
+            || manifest.storage.vector_artifact_digest
+                != attempt.artifact_digest.as_deref().unwrap_or_default()
+        {
+            bail!("development attempt evidence failed digest or trust verification");
+        }
+    }
+    Ok(())
 }
 
 fn architecture_identifier(architecture: RecallCandidateArchitecture) -> &'static str {
@@ -606,6 +930,17 @@ pub struct LocalRecallEmbedder {
 #[cfg(feature = "recall-models")]
 impl LocalRecallEmbedder {
     pub fn load(profile: RecallModelProfile, directory: &Path) -> Result<Self> {
+        Self::load_with_threads(profile, directory, 1)
+    }
+
+    pub fn load_with_threads(
+        profile: RecallModelProfile,
+        directory: &Path,
+        threads: usize,
+    ) -> Result<Self> {
+        if threads == 0 {
+            bail!("embedding thread count must be non-zero");
+        }
         inspect_recall_model(&profile, directory)?;
         let read = |name: &str| regular_file_bytes(&directory.join(name));
         let tokenizer = fastembed::TokenizerFiles {
@@ -621,7 +956,9 @@ impl LocalRecallEmbedder {
         };
         let definition = fastembed::UserDefinedEmbeddingModel::new(read("model.onnx")?, tokenizer)
             .with_pooling(pooling);
-        let options = fastembed::InitOptionsUserDefined::new().with_max_length(profile.max_length);
+        let options = fastembed::InitOptionsUserDefined::new()
+            .with_max_length(profile.max_length)
+            .with_intra_threads(threads);
         let model = fastembed::TextEmbedding::try_new_from_user_defined(definition, options)?;
         Ok(Self { profile, model })
     }
@@ -921,6 +1258,16 @@ mod tests {
                 lexical_weight: 1.0,
                 semantic_weight: 1.0,
                 reciprocal_rank_k: 60.0,
+                lexical_rerank_fusion: crate::RecallFusionMethod::WeightedSum,
+                lexical_semantic_union_fusion: crate::RecallFusionMethod::ReciprocalRank,
+                path_weight: 0.0,
+                type_weight: 0.0,
+                lane_weight: 0.0,
+                destination_weight: 0.0,
+                confidence_weight: 0.0,
+                tie_break: "record_id_ascending".into(),
+                batch_size: 32,
+                threads: 4,
             },
         };
         assert_eq!(matrix.candidate_count().unwrap(), 18);
@@ -954,6 +1301,15 @@ mod tests {
             repository: "fixture/model".into(),
             revision: "abc123".into(),
             license: "MIT".into(),
+            provenance: RecallModelProvenance {
+                upstream_repository: "fixture/model".into(),
+                upstream_revision: "abc123".into(),
+                artifact_repository: "fixture/model".into(),
+                artifact_revision: "abc123".into(),
+                conversion: "fixture conversion v1".into(),
+                upstream_license: "MIT".into(),
+                artifact_license: "MIT".into(),
+            },
             dimensions: 3,
             pooling: "mean".into(),
             normalization: "l2".into(),
@@ -1031,6 +1387,17 @@ mod tests {
         let corpus: crate::RecallV3Corpus =
             serde_yaml::from_slice(&fs::read(root.join("corpus.yaml")).unwrap()).unwrap();
         assert_eq!(corpus.cases.len(), 36);
+        let queries = corpus
+            .cases
+            .iter()
+            .map(|case| case.query.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(queries.len(), 36);
+        assert!(
+            queries
+                .iter()
+                .all(|query| !query.contains("development example"))
+        );
         for required in [
             "paraphrase",
             "zero_overlap",
@@ -1059,6 +1426,63 @@ mod tests {
                 "development slice {required:?} has fewer than three cases"
             );
         }
+        for case in &corpus.cases {
+            let has_forbidden = |reason| {
+                case.judgments
+                    .iter()
+                    .any(|judgment| judgment.forbidden_reason == Some(reason))
+            };
+            if case.slices.iter().any(|slice| slice == "privacy") {
+                assert!(has_forbidden(crate::RecallV3ForbiddenReason::Private));
+            }
+            if case.slices.iter().any(|slice| slice == "destination") {
+                assert!(has_forbidden(crate::RecallV3ForbiddenReason::Destination));
+            }
+            if case.slices.iter().any(|slice| slice == "path") {
+                assert!(has_forbidden(crate::RecallV3ForbiddenReason::Path));
+            }
+            if case.slices.iter().any(|slice| slice == "lifecycle") {
+                assert!(
+                    has_forbidden(crate::RecallV3ForbiddenReason::Expired)
+                        && has_forbidden(crate::RecallV3ForbiddenReason::Tombstoned)
+                        && has_forbidden(crate::RecallV3ForbiddenReason::Superseded)
+                );
+            }
+            if case.slices.iter().any(|slice| slice == "multi_relevant") {
+                assert!(
+                    case.judgments
+                        .iter()
+                        .filter(|judgment| judgment.eligible && judgment.relevance > 0)
+                        .count()
+                        >= 2
+                );
+            }
+            if case.slices.iter().any(|slice| slice == "hard_negatives") {
+                assert!(
+                    case.judgments
+                        .iter()
+                        .any(|judgment| judgment.eligible && judgment.hard_negative)
+                );
+            }
+        }
+
+        let observed = root.join("observed");
+        let log: RecallDevelopmentLogV2 =
+            serde_json::from_slice(&fs::read(observed.join("development-log.json")).unwrap())
+                .unwrap();
+        let report: RecallV3Report =
+            serde_json::from_slice(&fs::read(observed.join("matrix-report.json")).unwrap())
+                .unwrap();
+        let freeze: RecallDevelopmentFreeze =
+            serde_json::from_slice(&fs::read(observed.join("frozen-candidates.json")).unwrap())
+                .unwrap();
+        assert_eq!(log.attempts.len(), 18);
+        assert_eq!(report.candidates.len(), 19);
+        assert_eq!(freeze.finalists.len(), 4);
+        assert_eq!(freeze_development(&log, &freeze.frozen_at).unwrap(), freeze);
+        let mut quality_failure = report.candidates[1].clone();
+        quality_failure.passed = false;
+        assert!(recall_candidate_trust_eligible(&quality_failure));
     }
 
     #[test]
@@ -1070,12 +1494,16 @@ mod tests {
             profile_id: "profile-a".into(),
             template: TITLE_BODY_TEMPLATE.into(),
             architecture: RecallCandidateArchitecture::SemanticOnly,
+            candidate_manifest: None,
+            vector_artifact: None,
             outcome: RecallDevelopmentOutcome::Rejected,
             reason_code: Some("quality_gate".into()),
             report: None,
             report_digest: None,
             artifact_digest: None,
             environment_digest: "environment-digest".into(),
+            trust_eligible: false,
+            development_quality_passed: false,
         };
         let log = RecallDevelopmentLogV2 {
             version: RECALL_DEVELOPMENT_LOG_V2.into(),

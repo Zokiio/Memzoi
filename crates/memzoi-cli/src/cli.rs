@@ -340,7 +340,7 @@ pub(crate) enum EvalCommands {
     /// Evaluate candidate-neutral recall v3 quality and emit release evidence.
     RecallV3 {
         #[command(subcommand)]
-        command: Option<RecallV3Commands>,
+        command: Option<Box<RecallV3Commands>>,
         /// Explicit path to the strict recall-v3 corpus YAML file.
         #[arg(long)]
         corpus: Option<PathBuf>,
@@ -407,10 +407,55 @@ pub(crate) enum RecallV3Commands {
         #[command(subcommand)]
         command: RecallV3DevelopmentCommands,
     },
+    /// Build immutable vector artifacts and candidate manifests.
+    Candidate {
+        #[command(subcommand)]
+        command: RecallV3CandidateCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RecallV3CandidateCommands {
+    /// Build one profile/template artifact and its three architecture manifests.
+    Build {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        matrix: PathBuf,
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        model_root: PathBuf,
+        #[arg(long)]
+        template: String,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value = "development-generation-1")]
+        generation: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum RecallV3DevelopmentCommands {
+    /// Build and evaluate the complete checked-in candidate matrix.
+    Run {
+        #[arg(long)]
+        matrix: PathBuf,
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        model_root: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        attempted_at: String,
+        #[arg(long, default_value = "development-generation-1")]
+        generation: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Freeze the lexical baseline and best trust-safe candidate per architecture.
     Freeze {
         #[arg(long)]
@@ -419,6 +464,15 @@ pub(crate) enum RecallV3DevelopmentCommands {
         output: PathBuf,
         #[arg(long)]
         frozen_at: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify and publish compact evidence without model or vector files.
+    Publish {
+        #[arg(long)]
+        run: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
         #[arg(long)]
         json: bool,
     },

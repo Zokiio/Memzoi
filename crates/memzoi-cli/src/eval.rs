@@ -1,5 +1,7 @@
+use std::{fs, path::Path};
 use std::{path::PathBuf, time::Duration};
 
+use anyhow::Context;
 use anyhow::{Result, bail};
 use memzoi_core::{
     CaptureEvalBaselineStatus, CaptureEvalReport, ManifestDrivenRecallCandidate,
@@ -20,7 +22,10 @@ use url::Url;
 const MODEL_DOWNLOAD_REDIRECT_LIMIT: usize = 5;
 
 use crate::{
-    cli::{RecallV3Commands, RecallV3DevelopmentCommands, RecallV3ModelCommands},
+    cli::{
+        RecallV3CandidateCommands, RecallV3Commands, RecallV3DevelopmentCommands,
+        RecallV3ModelCommands,
+    },
     output::print_json,
 };
 
@@ -73,6 +78,23 @@ pub(crate) fn recall_v3_subcommand(command: RecallV3Commands) -> Result<()> {
             }
         },
         RecallV3Commands::Development { command } => match command {
+            RecallV3DevelopmentCommands::Run {
+                matrix,
+                corpus,
+                model_root,
+                output,
+                attempted_at,
+                generation,
+                json,
+            } => recall_v3_development_run(
+                matrix,
+                corpus,
+                model_root,
+                output,
+                attempted_at,
+                generation,
+                json,
+            ),
             RecallV3DevelopmentCommands::Freeze {
                 log,
                 output,
@@ -82,13 +104,17 @@ pub(crate) fn recall_v3_subcommand(command: RecallV3Commands) -> Result<()> {
                 if output.exists() {
                     bail!("refusing to overwrite an existing freeze artifact");
                 }
-                let log: RecallDevelopmentLogV2 = serde_json::from_slice(&std::fs::read(log)?)?;
+                let evidence_root = log.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let log: RecallDevelopmentLogV2 = serde_json::from_slice(&std::fs::read(&log)?)?;
+                let matrix = memzoi_core::RecallDevelopmentMatrix::load(
+                    evidence_root.join("development-matrix.json"),
+                )?;
+                let report: RecallV3Report = serde_json::from_slice(&std::fs::read(
+                    evidence_root.join("matrix-report.json"),
+                )?)?;
+                memzoi_core::verify_development_evidence(&log, &matrix, &report, evidence_root)?;
                 let freeze = freeze_development(&log, &frozen_at)?;
-                let parent = output.parent().unwrap_or_else(|| std::path::Path::new("."));
-                std::fs::create_dir_all(parent)?;
-                let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-                serde_json::to_writer_pretty(&mut temporary, &freeze)?;
-                temporary.persist(&output)?;
+                write_json_new(&output, &freeze)?;
                 if json {
                     print_json(&serde_json::to_value(&freeze)?)?;
                 } else {
@@ -100,8 +126,396 @@ pub(crate) fn recall_v3_subcommand(command: RecallV3Commands) -> Result<()> {
                 }
                 Ok(())
             }
+            RecallV3DevelopmentCommands::Publish { run, output, json } => {
+                recall_v3_development_publish(&run, &output, json)
+            }
+        },
+        RecallV3Commands::Candidate { command } => match command {
+            RecallV3CandidateCommands::Build {
+                profile,
+                matrix,
+                corpus,
+                model_root,
+                template,
+                output,
+                generation,
+                json,
+            } => recall_v3_candidate_build(RecallCandidateBuildRequest {
+                profile,
+                matrix,
+                corpus,
+                model_root,
+                template,
+                output,
+                generation,
+                json,
+            }),
         },
     }
+}
+
+#[cfg_attr(not(feature = "recall-models"), allow(dead_code))]
+struct RecallCandidateBuildRequest {
+    profile: PathBuf,
+    matrix: PathBuf,
+    corpus: PathBuf,
+    model_root: PathBuf,
+    template: String,
+    output: PathBuf,
+    generation: String,
+    json: bool,
+}
+
+#[cfg(not(feature = "recall-models"))]
+fn recall_v3_candidate_build(_request: RecallCandidateBuildRequest) -> Result<()> {
+    bail!("candidate build requires --features recall-models")
+}
+
+#[cfg(not(feature = "recall-models"))]
+fn recall_v3_development_run(
+    _matrix: PathBuf,
+    _corpus: PathBuf,
+    _model_root: PathBuf,
+    _output: PathBuf,
+    _attempted_at: String,
+    _generation: String,
+    _json: bool,
+) -> Result<()> {
+    bail!("development run requires --features recall-models")
+}
+
+#[cfg(feature = "recall-models")]
+#[derive(Debug)]
+struct BuiltCandidate {
+    path: PathBuf,
+    profile_id: String,
+    template: String,
+    architecture: memzoi_core::RecallCandidateArchitecture,
+    artifact_digest: String,
+    candidate_digest: String,
+}
+
+#[cfg(feature = "recall-models")]
+fn build_candidate_bundle(
+    profile_path: &Path,
+    matrix: &memzoi_core::RecallDevelopmentMatrix,
+    corpus: &Path,
+    model_root: &Path,
+    template: &str,
+    output: &Path,
+    generation: &str,
+) -> Result<Vec<BuiltCandidate>> {
+    if !matrix.templates.iter().any(|value| value == template) {
+        bail!("template is not declared by the development matrix");
+    }
+    let profile = memzoi_core::RecallModelProfile::load(profile_path)?;
+    let model_dir = model_root.join(&profile.id);
+    let install = memzoi_core::inspect_recall_model(&profile, &model_dir)?;
+    let model_digest = memzoi_core::recall_model_install_digest(&install)?;
+    let embedding_corpus = memzoi_core::load_recall_v3_embedding_corpus(corpus)?;
+    let mut embedder = memzoi_core::LocalRecallEmbedder::load_with_threads(
+        profile.clone(),
+        &model_dir,
+        matrix.parameters.threads,
+    )?;
+    let artifact = memzoi_core::build_recall_vector_artifact(
+        &profile,
+        template,
+        &model_digest,
+        generation,
+        &embedding_corpus.inputs,
+        matrix.parameters.batch_size,
+        &mut embedder,
+    )?;
+    fs::create_dir_all(output)?;
+    let artifact_digest =
+        memzoi_core::write_recall_vector_artifact(&artifact, output, Path::new("vectors.json"))?;
+    matrix
+        .architectures
+        .iter()
+        .copied()
+        .map(|architecture| {
+            let manifest = memzoi_core::build_recall_candidate_manifest(
+                &profile,
+                template,
+                architecture,
+                &matrix.parameters,
+                &artifact,
+                &artifact_digest,
+                PathBuf::from("vectors.json"),
+            )?;
+            let candidate_digest = memzoi_core::recall_candidate_manifest_digest(&manifest)?;
+            let name = match architecture {
+                memzoi_core::RecallCandidateArchitecture::SemanticOnly => "semantic_only.json",
+                memzoi_core::RecallCandidateArchitecture::LexicalRerank => "lexical_rerank.json",
+                memzoi_core::RecallCandidateArchitecture::LexicalSemanticUnion => {
+                    "lexical_semantic_union.json"
+                }
+            };
+            let path = output.join(name);
+            write_json_new(&path, &manifest)?;
+            Ok(BuiltCandidate {
+                path,
+                profile_id: profile.id.clone(),
+                template: template.into(),
+                architecture,
+                artifact_digest: artifact_digest.clone(),
+                candidate_digest,
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "recall-models")]
+fn recall_v3_candidate_build(request: RecallCandidateBuildRequest) -> Result<()> {
+    let RecallCandidateBuildRequest {
+        profile,
+        matrix,
+        corpus,
+        model_root,
+        template,
+        output,
+        generation,
+        json,
+    } = request;
+    let matrix = memzoi_core::RecallDevelopmentMatrix::load(matrix)?;
+    let built = build_candidate_bundle(
+        &profile,
+        &matrix,
+        &corpus,
+        &model_root,
+        &template,
+        &output,
+        &generation,
+    )?;
+    if json {
+        print_json(&serde_json::json!({"candidate_count": built.len(), "output": output}))?;
+    } else {
+        println!(
+            "candidates:\t{}\noutput:\t{}",
+            built.len(),
+            output.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "recall-models")]
+fn recall_v3_development_run(
+    matrix_path: PathBuf,
+    corpus: PathBuf,
+    model_root: PathBuf,
+    output: PathBuf,
+    attempted_at: String,
+    generation: String,
+    json: bool,
+) -> Result<()> {
+    use memzoi_core::RecallV3Candidate as _;
+    memzoi_core::FixedClock::from_rfc3339(&attempted_at)?;
+    let matrix = memzoi_core::RecallDevelopmentMatrix::load(&matrix_path)?;
+    fs::create_dir_all(&output)?;
+    write_json_new(&output.join("development-matrix.json"), &matrix)?;
+    let matrix_root = matrix_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut built = Vec::new();
+    for profile in &matrix.profiles {
+        for template in &matrix.templates {
+            let profile_path = matrix_root.join(profile);
+            let profile_id = memzoi_core::RecallModelProfile::load(&profile_path)?.id;
+            let bundle_root = output
+                .join("candidates")
+                .join(profile_id)
+                .join(template.replace('/', "-"));
+            built.extend(build_candidate_bundle(
+                &profile_path,
+                &matrix,
+                &corpus,
+                &model_root,
+                template,
+                &bundle_root,
+                &generation,
+            )?);
+        }
+    }
+    if built.len() != 18 {
+        bail!("development matrix did not produce exactly 18 candidates");
+    }
+    let mut candidates = built
+        .iter()
+        .map(|candidate| ManifestDrivenRecallCandidate::load(&candidate.path))
+        .collect::<Result<Vec<_>>>()?;
+    for candidate in &candidates {
+        candidate.require_ready()?;
+    }
+    let mut refs = candidates
+        .iter_mut()
+        .map(|candidate| candidate as &mut dyn RecallV3Candidate)
+        .collect::<Vec<_>>();
+    let report = run_recall_v3_eval_with_candidates(&corpus, &mut refs)?;
+    memzoi_core::validate_development_report(&report)?;
+    memzoi_core::require_recall_v3_candidates_ready(&report)?;
+    let report_path = output.join("matrix-report.json");
+    write_json_new(&report_path, &report)?;
+    let reports = report
+        .candidates
+        .iter()
+        .skip(1)
+        .map(|candidate| (candidate.manifest.id.as_str(), candidate))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let environment_digest = format!(
+        "{}-{}-threads-{}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        matrix.parameters.threads
+    );
+    let attempts = built
+        .iter()
+        .map(|candidate| {
+            let manifest = ManifestDrivenRecallCandidate::load(&candidate.path)?.manifest();
+            let candidate_report = reports
+                .get(manifest.id.as_str())
+                .context("matrix report omitted a built candidate")?;
+            Ok(memzoi_core::RecallDevelopmentAttemptV2 {
+                attempted_at: attempted_at.clone(),
+                candidate_id: manifest.id,
+                candidate_digest: candidate.candidate_digest.clone(),
+                profile_id: candidate.profile_id.clone(),
+                template: candidate.template.clone(),
+                architecture: candidate.architecture,
+                candidate_manifest: Some(candidate.path.strip_prefix(&output)?.to_owned()),
+                vector_artifact: Some(
+                    candidate
+                        .path
+                        .parent()
+                        .context("candidate manifest has no parent")?
+                        .join("vectors.json")
+                        .strip_prefix(&output)?
+                        .to_owned(),
+                ),
+                outcome: memzoi_core::RecallDevelopmentOutcome::Completed,
+                reason_code: None,
+                report: Some((*candidate_report).clone()),
+                report_digest: Some(memzoi_core::recall_candidate_report_digest(
+                    candidate_report,
+                )?),
+                artifact_digest: Some(candidate.artifact_digest.clone()),
+                environment_digest: environment_digest.clone(),
+                trust_eligible: memzoi_core::recall_candidate_trust_eligible(candidate_report),
+                development_quality_passed: candidate_report.passed,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let log = memzoi_core::RecallDevelopmentLogV2 {
+        version: memzoi_core::RECALL_DEVELOPMENT_LOG_V2.into(),
+        corpus_digest: report.digests.corpus.clone(),
+        judgment_digest: report.digests.judgments.clone(),
+        matrix_digest: memzoi_core::recall_development_matrix_digest(&matrix)?,
+        runner_digest: report.digests.runner.clone(),
+        attempts,
+    };
+    log.validate()?;
+    write_json_new(&output.join("development-log.json"), &log)?;
+    write_json_new(
+        &output.join("environment.json"),
+        &serde_json::json!({
+            "target_os": std::env::consts::OS,
+            "target_arch": std::env::consts::ARCH,
+            "threads": matrix.parameters.threads,
+            "digest": environment_digest,
+        }),
+    )?;
+    if json {
+        print_json(
+            &serde_json::json!({"candidate_count": built.len(), "output": output, "passed": report.passed}),
+        )?;
+    } else {
+        println!(
+            "candidates:\t{}\noutput:\t{}\npassed:\t{}",
+            built.len(),
+            output.display(),
+            report.passed
+        );
+    }
+    Ok(())
+}
+
+fn write_json_new(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    if path.exists() {
+        bail!("refusing to overwrite {}", path.display());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    serde_json::to_writer_pretty(&mut temporary, value)?;
+    temporary.as_file_mut().sync_all()?;
+    temporary.persist_noclobber(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(())
+}
+
+fn recall_v3_development_publish(run: &Path, output: &Path, json: bool) -> Result<()> {
+    if output.exists() {
+        bail!("refusing to overwrite published development evidence");
+    }
+    let log: RecallDevelopmentLogV2 =
+        serde_json::from_slice(&fs::read(run.join("development-log.json"))?)?;
+    let matrix = memzoi_core::RecallDevelopmentMatrix::load(run.join("development-matrix.json"))?;
+    let report: RecallV3Report =
+        serde_json::from_slice(&fs::read(run.join("matrix-report.json"))?)?;
+    memzoi_core::verify_development_evidence(&log, &matrix, &report, run)?;
+    let freeze: memzoi_core::RecallDevelopmentFreeze =
+        serde_json::from_slice(&fs::read(run.join("frozen-candidates.json"))?)?;
+    if memzoi_core::freeze_development(&log, &freeze.frozen_at)? != freeze {
+        bail!("frozen candidate artifact does not match verified development evidence");
+    }
+    fs::create_dir_all(output.join("frozen-manifests"))?;
+    write_json_new(&output.join("development-matrix.json"), &matrix)?;
+    write_json_new(&output.join("matrix-report.json"), &report)?;
+    write_json_new(&output.join("development-log.json"), &log)?;
+    write_json_new(&output.join("frozen-candidates.json"), &freeze)?;
+    let environment: serde_json::Value =
+        serde_json::from_slice(&fs::read(run.join("environment.json"))?)?;
+    write_json_new(&output.join("environment.json"), &environment)?;
+    for finalist in freeze.finalists.iter().skip(1) {
+        let attempt = log
+            .attempts
+            .iter()
+            .find(|attempt| attempt.candidate_id == finalist.candidate_id)
+            .context("frozen finalist is missing from development attempts")?;
+        let source = run.join(
+            attempt
+                .candidate_manifest
+                .as_deref()
+                .context("frozen finalist omitted its manifest path")?,
+        );
+        let manifest: memzoi_core::RecallRetrievalCandidateManifest =
+            serde_json::from_slice(&fs::read(source)?)?;
+        write_json_new(
+            &output
+                .join("frozen-manifests")
+                .join(format!("{}.json", finalist.architecture)),
+            &manifest,
+        )?;
+    }
+    fs::write(
+        output.join("README.md"),
+        "# Recall-v3 observed development evidence\n\nThis directory contains the verified 18-candidate development run and frozen manifests for issue #77. Model weights and vector artifacts are intentionally excluded. Reproduce with `make recall-v3-model-install`, `RECALL_V3_ATTEMPTED_AT=<RFC3339> make recall-v3-development-run`, and `RECALL_V3_FROZEN_AT=<RFC3339> make recall-v3-development-freeze`. Publish a verified copy to a new directory with `RECALL_V3_PUBLISH_OUTPUT=<path> make recall-v3-development-publish`. The freeze and publish commands recompute every candidate, artifact, report, matrix, corpus, runner, and environment binding from the ignored run directory.\n",
+    )?;
+    if json {
+        print_json(&serde_json::json!({"output": output, "finalists": freeze.finalists.len()}))?;
+    } else {
+        println!(
+            "published:\t{}\nfinalists:\t{}",
+            output.display(),
+            freeze.finalists.len()
+        );
+    }
+    Ok(())
 }
 
 fn model_download_response(

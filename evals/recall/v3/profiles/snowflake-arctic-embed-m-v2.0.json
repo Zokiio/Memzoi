@@ -4,13 +4,22 @@
   "repository": "Snowflake/snowflake-arctic-embed-m-v2.0",
   "revision": "95c2741480856aa9666782eb4afe11959938017f",
   "license": "Apache-2.0",
+  "provenance": {
+    "upstream_repository": "Snowflake/snowflake-arctic-embed-m-v2.0",
+    "upstream_revision": "95c2741480856aa9666782eb4afe11959938017f",
+    "artifact_repository": "Snowflake/snowflake-arctic-embed-m-v2.0",
+    "artifact_revision": "95c2741480856aa9666782eb4afe11959938017f",
+    "conversion": "ONNX artifact published in the upstream revision; exporter version not published",
+    "upstream_license": "Apache-2.0",
+    "artifact_license": "Apache-2.0"
+  },
   "dimensions": 768,
   "pooling": "cls",
   "normalization": "l2",
   "query_prefix": "query: ",
   "document_prefix": "",
   "max_length": 8192,
-  "allowed_origins": ["https://huggingface.co", "https://cdn-lfs.hf.co", "https://cas-bridge.xethub.hf.co"],
+  "allowed_origins": ["https://huggingface.co", "https://cdn-lfs.hf.co", "https://cas-bridge.xethub.hf.co", "https://us.aws.cdn.hf.co"],
   "files": [
     {"path":"model.onnx","url":"https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v2.0/resolve/95c2741480856aa9666782eb4afe11959938017f/onnx/model.onnx","sha256":"c0c53d7f49a2db60761b92b7bbf5be87a7b3cf5d92dbbd7f1b5028bd5a40aa39","bytes":1226099913},
     {"path":"tokenizer.json","url":"https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v2.0/resolve/95c2741480856aa9666782eb4afe11959938017f/tokenizer.json","sha256":"f1cc44ad7faaeec47241864835473fd5403f2da94673f3f764a77ebcb0a803ec","bytes":17083009},

@@ -13,7 +13,7 @@ fn fixture_vector_artifact_digest_is_stable() -> anyhow::Result<()> {
     let digest = recall_vector_artifact_digest(&artifact)?;
     assert_eq!(
         digest,
-        "4ca6912b05999e9c9277d24c162356bf17c468b7b9ac53e19c651ddb0b12fde7"
+        "f86016fc537eef4d311e9656a51990eacd24d3e7e1165eaf3d793b78e274b1ee"
     );
     Ok(())
 }

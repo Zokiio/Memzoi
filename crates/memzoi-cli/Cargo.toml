@@ -11,6 +11,10 @@ description = "Command-line interface for Memzoi file-native AI memory workflows
 keywords = ["ai", "agents", "memory", "sqlite", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
+[features]
+default = []
+recall-models = ["memzoi-core/recall-models"]
+
 [[bin]]
 name = "memzoi"
 path = "src/main.rs"

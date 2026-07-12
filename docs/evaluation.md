@@ -37,6 +37,29 @@ download models. Compiling the local ONNX adapter explicitly with
 and the pinned ONNX Runtime build dependency when they are not already cached;
 the compiled adapter itself only opens explicitly installed local model files.
 
+After installation, build and evaluate all 18 candidates offline. The timestamp
+is explicit so the append-only attempt identity is reproducible:
+
+```bash
+RECALL_V3_ATTEMPTED_AT=2026-07-12T12:00:00Z make recall-v3-development-run
+RECALL_V3_FROZEN_AT=2026-07-12T13:00:00Z make recall-v3-development-freeze
+RECALL_V3_PUBLISH_OUTPUT=/tmp/recall-v3-observed make recall-v3-development-publish
+```
+
+`development run` writes the generated vector artifacts, all immutable
+candidate manifests, `matrix-report.json`, `development-log.json`, the exact
+matrix snapshot, and `environment.json` below the ignored research root. The
+freeze command reopens those files, recomputes their digests, requires the
+complete 3 × 2 × 3 matrix in one environment, and only then selects the lexical
+baseline plus the highest-ranked trust-eligible candidate per architecture.
+Quality threshold status is recorded separately and does not exclude a
+trust-safe family winner from the locked evaluation.
+
+`development publish` accepts only a complete verified run whose recomputed
+freeze matches the stored freeze. It copies the matrix, report, log,
+environment, freeze, and finalist manifests to a reviewable directory while
+deliberately excluding installed model weights and generated vector artifacts.
+
 Emit the stable JSON report and a separately reviewable digest commitment:
 
 ```bash

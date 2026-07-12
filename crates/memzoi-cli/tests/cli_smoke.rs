@@ -125,6 +125,55 @@ fn eval_recall_v3_help_exposes_local_locked_commitment_controls() {
 }
 
 #[test]
+fn eval_recall_v3_help_exposes_complete_development_workflow() {
+    let mut candidate = memzoi();
+    candidate
+        .args(["eval", "recall-v3", "candidate", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("build"));
+
+    let mut development = memzoi();
+    development
+        .args(["eval", "recall-v3", "development", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("run")
+                .and(predicate::str::contains("freeze"))
+                .and(predicate::str::contains("publish")),
+        );
+}
+
+#[test]
+fn candidate_build_without_model_feature_fails_explicitly() {
+    let mut cmd = memzoi();
+    cmd.args([
+        "eval",
+        "recall-v3",
+        "candidate",
+        "build",
+        "--profile",
+        "profile.json",
+        "--matrix",
+        "matrix.json",
+        "--corpus",
+        "corpus.yaml",
+        "--model-root",
+        "models",
+        "--template",
+        "title_body/v1",
+        "--output",
+        "output",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(
+        "candidate build requires --features recall-models",
+    ));
+}
+
+#[test]
 fn capture_help_exposes_explicit_plan_review_and_apply_boundaries() {
     let mut root = memzoi();
     root.args(["capture", "--help"]).assert().success().stdout(

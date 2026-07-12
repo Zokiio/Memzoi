@@ -310,7 +310,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                     json,
                 } => {
                     if let Some(command) = command {
-                        eval::recall_v3_subcommand(command)
+                        eval::recall_v3_subcommand(*command)
                     } else {
                         let corpus = corpus.ok_or_else(|| anyhow::anyhow!(
                         "--corpus <PATH> is required when no recall-v3 subcommand is selected"
