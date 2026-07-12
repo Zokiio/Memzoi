@@ -14,10 +14,8 @@ use memzoi_core::{
     MemoryType, OkfProposalOutcome, OkfProposalSensitivity, OkfProposalStatus, PrecheckInput,
     Proposal, ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus, ProposalStatusFilter,
     ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult, SessionEndWrite,
-    Visibility, build_capture_review_with_inputs, build_capture_review_with_prior_and_inputs,
-    discover_paths, lifecycle_transaction_artifact_count, okf_proposal_matches_identity,
-    parse_capture_plan, parse_capture_request, parse_capture_review, parse_capture_review_input,
-    parse_import_document, parse_session_end_document, plan_capture_with_inputs,
+    Visibility, discover_paths, lifecycle_transaction_artifact_count,
+    okf_proposal_matches_identity, parse_import_document, parse_session_end_document,
     scan_file_proposal_inventory,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -33,6 +31,8 @@ use crate::{
     output::{print_json, print_jsonl_row},
     update,
 };
+
+mod capture;
 
 pub(crate) fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -118,7 +118,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 source_id,
                 output,
                 json,
-            } => capture_plan_command(source, request_file, source_bytes, source_id, output, json),
+            } => capture::plan_command(source, request_file, source_bytes, source_id, output, json),
             CaptureCommands::Review {
                 plan_file,
                 decisions_file,
@@ -128,7 +128,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 reviewed_at,
                 output,
                 json,
-            } => capture_review_command(CaptureReviewCommand {
+            } => capture::review_command(capture::ReviewCommand {
                 plan_file,
                 decisions_file,
                 prior_review_file,
@@ -147,7 +147,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 review_id,
                 actor,
                 json,
-            } => capture_apply_command(CaptureApplyCommand {
+            } => capture::apply_command(capture::ApplyCommand {
                 plan_file,
                 review_file,
                 prior_review_file,
@@ -490,180 +490,6 @@ fn print_import_plan_human(plan: &ImportPlan) {
             serde_json::to_string(&candidate.action).unwrap_or_default()
         );
         println!("body\t{}", candidate.body);
-    }
-}
-
-fn capture_plan_command(
-    source: Option<String>,
-    request_file: Option<PathBuf>,
-    source_bytes: Option<PathBuf>,
-    source_id: String,
-    output: Option<PathBuf>,
-    as_json: bool,
-) -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let paths = discover_paths(&cwd)?;
-    let request = match (source, request_file) {
-        (Some(source), None) => serde_json::from_value::<CaptureRequest>(json!({
-            "schema": "memzoi/capture-request-v1",
-            "sources": [{
-                "source_id": source_id,
-                "locator": {
-                    "kind": "project_path",
-                    "path": source,
-                },
-                "media_type": "text/markdown",
-            }],
-            "extractor": {
-                "profile": "markdown-deterministic",
-            },
-        }))
-        .context("failed to construct capture request")?,
-        (None, Some(request_file)) => {
-            parse_capture_request(&read_capture_artifact(&request_file, "capture request")?)?
-        }
-        _ => bail!("capture plan requires exactly one --source or --request-file"),
-    };
-    let source_inputs = capture_source_inputs(&request, source_bytes.as_deref())?;
-    let plan = plan_capture_with_inputs(&paths, request, &source_inputs)?;
-    let write_result = output
-        .as_deref()
-        .map(|destination| write_classified_capture_artifact(&plan, destination, &paths))
-        .transpose();
-
-    if as_json {
-        print_json(&serde_json::to_value(&plan).context("failed to serialize capture plan")?)?;
-    } else {
-        print_capture_human("capture-plan", &plan)?;
-    }
-    write_result.map(|_| ())
-}
-
-struct CaptureReviewCommand {
-    plan_file: PathBuf,
-    decisions_file: PathBuf,
-    prior_review_file: Option<PathBuf>,
-    source_bytes: Option<PathBuf>,
-    reviewed_by: String,
-    reviewed_at: String,
-    output: Option<PathBuf>,
-    as_json: bool,
-}
-
-fn capture_review_command(command: CaptureReviewCommand) -> Result<()> {
-    let CaptureReviewCommand {
-        plan_file,
-        decisions_file,
-        prior_review_file,
-        source_bytes,
-        reviewed_by,
-        reviewed_at,
-        output,
-        as_json,
-    } = command;
-    let plan = parse_capture_plan(&read_capture_artifact(&plan_file, "capture plan")?)?;
-    let input = parse_capture_review_input(&read_capture_artifact(
-        &decisions_file,
-        "capture decisions",
-    )?)?;
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let paths = discover_paths(&cwd)?;
-    let source_inputs = capture_source_inputs(&plan.request, source_bytes.as_deref())?;
-    let review = match prior_review_file {
-        Some(prior_review_file) => {
-            let prior = parse_capture_review(&read_capture_artifact(
-                &prior_review_file,
-                "prior capture review",
-            )?)?;
-            build_capture_review_with_prior_and_inputs(
-                &paths,
-                &plan,
-                input,
-                &prior,
-                &source_inputs,
-                &reviewed_by,
-                &reviewed_at,
-            )?
-        }
-        None => build_capture_review_with_inputs(
-            &paths,
-            &plan,
-            input,
-            &source_inputs,
-            &reviewed_by,
-            &reviewed_at,
-        )?,
-    };
-    let write_result = output
-        .as_deref()
-        .map(|destination| write_classified_capture_artifact(&review, destination, &paths))
-        .transpose();
-
-    if as_json {
-        print_json(&serde_json::to_value(&review).context("failed to serialize capture review")?)?;
-    } else {
-        print_capture_human("capture-review", &review)?;
-    }
-    write_result.map(|_| ())
-}
-
-struct CaptureApplyCommand {
-    plan_file: PathBuf,
-    review_file: PathBuf,
-    prior_review_file: Option<PathBuf>,
-    source_bytes: Option<PathBuf>,
-    plan_id: String,
-    review_id: String,
-    actor: String,
-    as_json: bool,
-}
-
-fn capture_apply_command(command: CaptureApplyCommand) -> Result<()> {
-    let CaptureApplyCommand {
-        plan_file,
-        review_file,
-        prior_review_file,
-        source_bytes,
-        plan_id,
-        review_id,
-        actor,
-        as_json,
-    } = command;
-    let plan = parse_capture_plan(&read_capture_artifact(&plan_file, "capture plan")?)?;
-    let review = parse_capture_review(&read_capture_artifact(&review_file, "capture review")?)?;
-    let source_inputs = capture_source_inputs(&plan.request, source_bytes.as_deref())?;
-    let service = open_service()?;
-    let result = match prior_review_file {
-        Some(prior_review_file) => {
-            let prior = parse_capture_review(&read_capture_artifact(
-                &prior_review_file,
-                "prior capture review",
-            )?)?;
-            service.apply_capture_with_prior_and_inputs(
-                &actor,
-                plan,
-                review,
-                &prior,
-                &source_inputs,
-                &plan_id,
-                &review_id,
-            )?
-        }
-        None => service.apply_capture_with_inputs(
-            &actor,
-            plan,
-            review,
-            &source_inputs,
-            &plan_id,
-            &review_id,
-        )?,
-    };
-    if as_json {
-        print_json(
-            &serde_json::to_value(&result).context("failed to serialize capture apply result")?,
-        )
-    } else {
-        print_capture_human("capture-apply", &result)
     }
 }
 
