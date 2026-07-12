@@ -1,43 +1,44 @@
-# Recall v3 human governance handoff
+# Recall v3 code-based evaluation workflow
 
-The v0.5 evaluation code validates evidence, but it cannot manufacture the
-independence required by the benchmark protocol. Candidate implementers must
-not mark these gates complete alone.
+Recall v3 is maintained by one developer and is validated with deterministic,
+reproducible code and fixtures. External user testing and independent human
+review are welcome later, but are not prerequisites for this work.
 
-## Development corpus — external prerequisite
+## Development corpus
 
-1. Author enough cases for every ratified lexical, semantic, adversarial, path,
-   scope, privacy, and lifecycle slice.
-2. Record human-written, real-failure-derived, or generated provenance without
-   using an evaluated candidate as its sole author.
-3. Collect two blind relevance/eligibility reviews where possible. At least one
-   reviewer must be independent of candidate implementation.
-4. Adjudicate disagreements with rationales and publish agreement statistics.
-5. Run the v3 schema and lexical baseline, review all digests, and commit the
-   public corpus before selecting candidate parameters.
+1. Add deterministic cases for lexical, semantic, adversarial, path, scope,
+   privacy, and lifecycle behavior.
+2. Record case provenance and rationale in the checked corpus.
+3. Run every candidate under the same corpus, eligibility boundary, top-k,
+   context budget, runner, and hardware procedure.
+4. Keep completed, rejected, and failed candidate attempts in the development
+   record. The lexical baseline is always included.
 
-## Locked bundle custody — issue #75
+## Local locked bundle — issue #75
 
-Author locked cases independently from development queries and keep them outside
-candidate-implementer access. A custodian records the sealed corpus, judgment,
-metric, and runner digests. Any substantive correction creates a new version
-and invalidates prior results. Never include secrets, private personal data,
-raw chat, or repository-confidential source.
+A future locked corpus lives in an ignored local path such as
+`.research/recall-v3/locked/`; it must never contain secrets, private personal
+data, raw chat, or repository-confidential material. Before an evaluation, run
+the CLI's locked-commitment preflight to write the corpus, judgments, metric,
+runner, and candidate-manifest identities. Verify that commitment immediately
+before the locked evaluation.
+
+The commitment prevents accidental input or configuration drift. An ignored
+directory is not access control: a solo maintainer remains able to read its own
+local files.
 
 ## Candidate freeze — issue #77
 
-After an independently reviewed public development corpus is available and
-candidate implementation is complete, run every documented profile, document
-template, and architecture on development data. Retain failed and rejected
-attempts. A maintainer reviews immutable manifests, selects the frozen set
-without locked-test access, and records inclusion/exclusion reasons. The lexical
-baseline is always included.
+Freeze explicit candidate manifests after the development run. Every manifest
+binds its offline model metadata, deterministic document template, exact vector
+artifact digest, profile/generation, and retrieval parameters. Any artifact or
+configuration change produces a different candidate identity and requires a
+new run.
 
 ## Locked decision — issue #80
 
-Only after candidate, operational, task-utility, competitor, and sealed-test
-prerequisites are frozen may the custodian execute the locked run. Reruns are
-limited to documented infrastructure failures. The maintainer records exactly
-`no_go`, `conditional_go`, or `full_go`, cites every digest and limitation, and
-states that v0.5 remains opt-in with lexical-only mode available. A full go does
-not authorize default promotion.
+Once the automated development, operational, competitor-harness, and locked
+commitment checks pass, run the locked suite once per frozen candidate. Record
+`no_go`, `conditional_go`, or `full_go` with the resulting digests and known
+limitations. Lexical-only mode remains available; a full go does not imply
+default promotion.

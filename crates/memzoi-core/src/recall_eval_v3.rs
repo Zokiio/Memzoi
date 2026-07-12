@@ -198,6 +198,7 @@ pub struct RecallV3Digests {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecallV3Commitment {
     pub version: String,
     pub corpus_kind: RecallV3CorpusKind,
@@ -323,6 +324,80 @@ pub fn run_recall_v3_eval_with_candidates(
     run_loaded(loaded, &records, &record_paths, &mut lexical, candidates)
 }
 
+/// Prepares the immutable identity for a local locked-test bundle without
+/// executing retrieval. The caller can write this value before a locked run
+/// and verify it immediately before evaluation.
+pub fn prepare_recall_v3_locked_commitment(
+    path: impl AsRef<Path>,
+    candidates: &[RecallV3CandidateManifest],
+) -> Result<RecallV3Commitment> {
+    let loaded = load_corpus(path.as_ref())?;
+    if loaded.corpus.kind != RecallV3CorpusKind::LockedTest {
+        bail!("locked commitment preparation requires a locked_test corpus");
+    }
+    let mut manifests = vec![lexical_candidate_manifest()];
+    manifests.extend_from_slice(candidates);
+    let candidate_digests = candidate_digests(&manifests)?;
+    Ok(commitment_for(&loaded, candidate_digests))
+}
+
+/// Verifies that a local locked-test corpus and its frozen candidate manifests
+/// still match a previously prepared commitment before evaluation begins.
+pub fn verify_recall_v3_locked_commitment(
+    corpus: impl AsRef<Path>,
+    commitment_path: impl AsRef<Path>,
+    candidates: &[RecallV3CandidateManifest],
+) -> Result<RecallV3Commitment> {
+    let actual = prepare_recall_v3_locked_commitment(corpus, candidates)?;
+    let bytes = fs::read(commitment_path.as_ref()).with_context(|| {
+        format!(
+            "failed to read locked recall commitment {}",
+            commitment_path.as_ref().display()
+        )
+    })?;
+    let expected: RecallV3Commitment = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse locked recall commitment {}",
+            commitment_path.as_ref().display()
+        )
+    })?;
+    if expected.version != RECALL_V3_COMMITMENT_VERSION {
+        bail!(
+            "unsupported locked recall commitment version {:?}",
+            expected.version
+        );
+    }
+    if actual != expected {
+        bail!("locked recall commitment does not match the corpus or candidate manifests");
+    }
+    Ok(actual)
+}
+
+/// Fails when a non-lexical candidate did not execute for every evaluated case.
+/// Production fallback remains valid; fixture and locked evaluation runs use
+/// this gate to prove that the candidate itself was actually exercised.
+pub fn require_recall_v3_candidates_ready(report: &RecallV3Report) -> Result<()> {
+    for candidate in report.candidates.iter().skip(1) {
+        if let Some(case) = candidate
+            .cases
+            .iter()
+            .find(|case| case.fallback_reason.is_some())
+        {
+            let reason = case
+                .fallback_reason
+                .as_deref()
+                .expect("fallback case has a fallback reason");
+            bail!(
+                "recall candidate {:?} fell back for case {:?}: {}",
+                candidate.manifest.id,
+                case.id,
+                reason
+            );
+        }
+    }
+    Ok(())
+}
+
 fn recall_record_paths(records: &[crate::okf::OkfRecordFile]) -> BTreeMap<String, Vec<String>> {
     records
         .iter()
@@ -346,7 +421,15 @@ fn recall_citation_path(paths: &[String], requested: Option<&str>) -> Option<Str
 }
 
 pub fn write_recall_v3_commitment(report: &RecallV3Report, path: impl AsRef<Path>) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(&report.commitment)?;
+    write_recall_v3_locked_commitment(&report.commitment, path)
+}
+
+/// Writes a prepared or verified local locked-test commitment artifact.
+pub fn write_recall_v3_locked_commitment(
+    commitment: &RecallV3Commitment,
+    path: impl AsRef<Path>,
+) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(commitment)?;
     fs::write(path.as_ref(), bytes)
         .with_context(|| format!("failed to write {}", path.as_ref().display()))
 }
@@ -550,15 +633,7 @@ struct LexicalCandidate<'a> {
 }
 impl RecallV3Candidate for LexicalCandidate<'_> {
     fn manifest(&self) -> RecallV3CandidateManifest {
-        RecallV3CandidateManifest {
-            id: "lexical-baseline".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            adapter: "production-fts5".into(),
-            configuration_digest: digest_bytes(
-                b"production SearchInput defaults; exact policy filters; deterministic ties",
-            ),
-            offline: true,
-        }
+        lexical_candidate_manifest()
     }
     fn retrieve(&mut self, input: &RecallV3CandidateInput) -> Result<RecallV3CandidateOutput> {
         if input.eligible_records.is_empty() {
@@ -596,8 +671,55 @@ impl RecallV3Candidate for LexicalCandidate<'_> {
     }
 }
 
+fn lexical_candidate_manifest() -> RecallV3CandidateManifest {
+    RecallV3CandidateManifest {
+        id: "lexical-baseline".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        adapter: "production-fts5".into(),
+        configuration_digest: digest_bytes(
+            b"production SearchInput defaults; exact policy filters; deterministic ties",
+        ),
+        offline: true,
+    }
+}
+
 fn lexical_fetch_limit(record_count: usize, ineligible_count: usize, top_k: usize) -> usize {
     top_k.saturating_add(ineligible_count).min(record_count)
+}
+
+fn candidate_digests(manifests: &[RecallV3CandidateManifest]) -> Result<BTreeMap<String, String>> {
+    let mut digests = BTreeMap::new();
+    for manifest in manifests {
+        if manifest.id.trim().is_empty()
+            || manifest.version.trim().is_empty()
+            || manifest.adapter.trim().is_empty()
+            || manifest.configuration_digest.trim().is_empty()
+        {
+            bail!("candidate manifest identity fields must be non-empty");
+        }
+        if digests
+            .insert(manifest.id.clone(), digest_json(manifest)?)
+            .is_some()
+        {
+            bail!("duplicate candidate id {:?}", manifest.id);
+        }
+    }
+    Ok(digests)
+}
+
+fn commitment_for(
+    loaded: &LoadedV3Corpus,
+    candidate_digests: BTreeMap<String, String>,
+) -> RecallV3Commitment {
+    RecallV3Commitment {
+        version: RECALL_V3_COMMITMENT_VERSION.into(),
+        corpus_kind: loaded.corpus.kind,
+        corpus_digest: loaded.corpus_digest.clone(),
+        judgment_digest: loaded.judgment_digest.clone(),
+        metrics_digest: recall_v3_metrics_digest(),
+        runner_digest: recall_v3_runner_digest(),
+        candidate_digests,
+    }
 }
 
 fn run_loaded(
@@ -609,25 +731,10 @@ fn run_loaded(
 ) -> Result<RecallV3Report> {
     let mut manifests = vec![lexical.manifest()];
     manifests.extend(candidates.iter().map(|c| c.manifest()));
-    let mut candidate_digests = BTreeMap::new();
-    for manifest in &manifests {
-        if manifest.id.trim().is_empty()
-            || manifest.version.trim().is_empty()
-            || manifest.adapter.trim().is_empty()
-            || manifest.configuration_digest.trim().is_empty()
-        {
-            bail!("candidate manifest identity fields must be non-empty");
-        }
-        if candidate_digests
-            .insert(manifest.id.clone(), digest_json(manifest)?)
-            .is_some()
-        {
-            bail!("duplicate candidate id {:?}", manifest.id);
-        }
-    }
+    let candidate_digests = candidate_digests(&manifests)?;
     let network_required = manifests.iter().any(|manifest| !manifest.offline);
-    let metrics_digest = digest_bytes(RECALL_V3_METRICS_VERSION.as_bytes());
-    let runner_digest = digest_bytes(RECALL_V3_RUNNER_VERSION.as_bytes());
+    let metrics_digest = recall_v3_metrics_digest();
+    let runner_digest = recall_v3_runner_digest();
     let mut digests = RecallV3Digests {
         corpus: loaded.corpus_digest.clone(),
         judgments: loaded.judgment_digest.clone(),
@@ -697,15 +804,7 @@ fn run_loaded(
     }
     let passed = candidate_reports.iter().all(|candidate| candidate.passed);
     digests.report = stable_report_digest(&candidate_reports)?;
-    let commitment = RecallV3Commitment {
-        version: RECALL_V3_COMMITMENT_VERSION.into(),
-        corpus_kind: loaded.corpus.kind,
-        corpus_digest: loaded.corpus_digest,
-        judgment_digest: loaded.judgment_digest,
-        metrics_digest,
-        runner_digest,
-        candidate_digests,
-    };
+    let commitment = commitment_for(&loaded, candidate_digests);
     Ok(RecallV3Report {
         version: RECALL_V3_REPORT_VERSION.into(),
         corpus: RecallV3CorpusMetadata {
@@ -1097,6 +1196,24 @@ fn percentile(values: &[f64], p: f64) -> f64 {
 }
 fn digest_bytes(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
+}
+
+fn source_bound_digest(version: &str, source_digest: &str) -> String {
+    digest_bytes(format!("{version}\n{source_digest}").as_bytes())
+}
+
+fn recall_v3_metrics_digest() -> String {
+    source_bound_digest(
+        RECALL_V3_METRICS_VERSION,
+        env!("MEMZOI_RECALL_V3_METRICS_SOURCE_DIGEST"),
+    )
+}
+
+fn recall_v3_runner_digest() -> String {
+    source_bound_digest(
+        RECALL_V3_RUNNER_VERSION,
+        env!("MEMZOI_RECALL_V3_RUNNER_SOURCE_DIGEST"),
+    )
 }
 fn digest_json(value: &impl Serialize) -> Result<String> {
     Ok(digest_bytes(&serde_json_canonicalizer::to_vec(value)?))

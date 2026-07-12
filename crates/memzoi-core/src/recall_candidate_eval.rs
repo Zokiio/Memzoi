@@ -12,7 +12,7 @@ use crate::{
     RecallV3CandidateManifest, RecallV3CandidateOutput,
 };
 
-pub const RECALL_CANDIDATE_MANIFEST_VERSION: &str = "memzoi-recall-candidate/v1";
+pub const RECALL_CANDIDATE_MANIFEST_VERSION: &str = "memzoi-recall-candidate/v2";
 pub const RECALL_VECTOR_ARTIFACT_VERSION: &str = "memzoi-recall-vectors/v1";
 pub const RECALL_DEVELOPMENT_LOG_VERSION: &str = "memzoi-recall-development-log/v1";
 
@@ -81,6 +81,7 @@ pub struct RecallCandidateStorage {
     pub profile_id: String,
     pub generation: String,
     pub vector_artifact: PathBuf,
+    pub vector_artifact_digest: String,
     pub content_fingerprint: String,
     pub exact_search: bool,
     pub destination: MemoryDestination,
@@ -159,6 +160,11 @@ pub struct RecallDevelopmentLog {
     pub attempts: Vec<RecallDevelopmentAttempt>,
 }
 
+/// Returns the canonical digest that binds a candidate manifest to its vector artifact.
+pub fn recall_vector_artifact_digest(artifact: &RecallVectorArtifact) -> Result<String> {
+    digest_json(artifact)
+}
+
 enum CandidateState {
     Ready(RecallVectorArtifact),
     Fallback(String),
@@ -206,6 +212,18 @@ impl ManifestDrivenRecallCandidate {
 
     pub fn retrieval_manifest(&self) -> &RecallRetrievalCandidateManifest {
         &self.manifest
+    }
+
+    /// Rejects a candidate that could only provide lexical fallback at load time.
+    pub fn require_ready(&self) -> Result<()> {
+        match &self.state {
+            CandidateState::Ready(_) => Ok(()),
+            CandidateState::Fallback(reason) => bail!(
+                "recall candidate {:?} is not ready: {}",
+                self.manifest.id,
+                reason
+            ),
+        }
     }
 }
 
@@ -346,6 +364,7 @@ fn validate_manifest(manifest: &RecallRetrievalCandidateManifest) -> Result<()> 
         manifest.document.digest.as_str(),
         manifest.storage.profile_id.as_str(),
         manifest.storage.generation.as_str(),
+        manifest.storage.vector_artifact_digest.as_str(),
         manifest.storage.content_fingerprint.as_str(),
         manifest.environment.target_os.as_str(),
         manifest.environment.target_arch.as_str(),
@@ -402,6 +421,14 @@ fn validate_manifest(manifest: &RecallRetrievalCandidateManifest) -> Result<()> 
     {
         bail!("structural ranking weights must remain zero until structural scoring is supported");
     }
+    if retrieval.tie_break != "record_id_ascending" {
+        bail!("candidate tie_break must be record_id_ascending");
+    }
+    if retrieval.architecture == RecallCandidateArchitecture::LexicalRerank
+        && retrieval.fusion != RecallFusionMethod::WeightedSum
+    {
+        bail!("lexical rerank currently supports weighted_sum fusion only");
+    }
     Ok(())
 }
 
@@ -421,6 +448,13 @@ fn load_artifact(manifest: &RecallRetrievalCandidateManifest, path: &Path) -> Ca
         Ok(artifact) => artifact,
         Err(_) => return CandidateState::Fallback("corrupt_index".into()),
     };
+    let artifact_digest = match recall_vector_artifact_digest(&artifact) {
+        Ok(digest) => digest,
+        Err(_) => return CandidateState::Fallback("corrupt_index".into()),
+    };
+    if artifact_digest != manifest.storage.vector_artifact_digest {
+        return CandidateState::Fallback("corrupt_index".into());
+    }
     if artifact.version != RECALL_VECTOR_ARTIFACT_VERSION
         || artifact.profile_id != manifest.storage.profile_id
         || artifact.generation != manifest.storage.generation

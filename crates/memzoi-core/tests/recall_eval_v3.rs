@@ -2,9 +2,69 @@ use memzoi_core::{
     ManifestDrivenRecallCandidate, RECALL_V3_CORPUS_VERSION, RECALL_V3_METRICS_VERSION,
     RECALL_V3_REPORT_VERSION, RECALL_V3_RUNNER_VERSION, RecallRetrievalCandidateManifest,
     RecallV3Candidate, RecallV3CandidateHit, RecallV3CandidateInput, RecallV3CandidateManifest,
-    RecallV3CandidateOutput, RecallV3Corpus, RecallV3ForbiddenReason, run_recall_v3_eval,
-    run_recall_v3_eval_with_candidates,
+    RecallV3CandidateOutput, RecallV3Corpus, RecallV3CorpusKind, RecallV3ForbiddenReason,
+    prepare_recall_v3_locked_commitment, require_recall_v3_candidates_ready, run_recall_v3_eval,
+    run_recall_v3_eval_with_candidates, verify_recall_v3_locked_commitment,
+    write_recall_v3_locked_commitment,
 };
+
+fn locked_corpus_fixture() -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf)> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let bytes = std::fs::read(root.join("corpus.yaml"))?;
+    let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
+    corpus.kind = RecallV3CorpusKind::LockedTest;
+    let dir = tempfile::tempdir()?;
+    let records = dir.path().join("records");
+    std::fs::create_dir(&records)?;
+    for record in &corpus.records {
+        std::fs::copy(root.join("records").join(record), records.join(record))?;
+    }
+    let path = dir.path().join("corpus.yaml");
+    std::fs::write(&path, serde_yaml::to_string(&corpus)?)?;
+    Ok((dir, path))
+}
+
+#[test]
+fn locked_commitment_preflight_detects_corpus_tampering() -> anyhow::Result<()> {
+    let (_dir, corpus_path) = locked_corpus_fixture()?;
+    let prepared = prepare_recall_v3_locked_commitment(&corpus_path, &[])?;
+    let commitment_path = corpus_path.with_extension("commitment.json");
+    write_recall_v3_locked_commitment(&prepared, &commitment_path)?;
+
+    assert_eq!(
+        verify_recall_v3_locked_commitment(&corpus_path, &commitment_path, &[])?,
+        prepared
+    );
+
+    let bytes = std::fs::read(&corpus_path)?;
+    let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
+    corpus.cases[0].query.push_str(" changed");
+    std::fs::write(&corpus_path, serde_yaml::to_string(&corpus)?)?;
+    let error = verify_recall_v3_locked_commitment(&corpus_path, &commitment_path, &[])
+        .expect_err("changed locked corpus must not verify");
+    assert!(error.to_string().contains("does not match"));
+    Ok(())
+}
+
+#[test]
+fn locked_commitment_rejects_development_corpora_and_unknown_fields() -> anyhow::Result<()> {
+    let development = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/corpus.yaml");
+    let error = prepare_recall_v3_locked_commitment(&development, &[])
+        .expect_err("development corpus must not produce a locked commitment");
+    assert!(error.to_string().contains("locked_test"));
+
+    let (_dir, corpus_path) = locked_corpus_fixture()?;
+    let prepared = prepare_recall_v3_locked_commitment(&corpus_path, &[])?;
+    let mut value = serde_json::to_value(prepared)?;
+    value["unexpected"] = serde_json::json!(true);
+    let commitment_path = corpus_path.with_extension("invalid.json");
+    std::fs::write(&commitment_path, serde_json::to_vec(&value)?)?;
+    let error = verify_recall_v3_locked_commitment(&corpus_path, &commitment_path, &[])
+        .expect_err("unknown commitment field must fail");
+    assert!(error.to_string().contains("failed to parse"));
+    Ok(())
+}
 
 #[test]
 fn recall_v3_runs_lexical_baseline_in_isolated_state() -> anyhow::Result<()> {
@@ -31,6 +91,18 @@ fn recall_v3_runs_lexical_baseline_in_isolated_state() -> anyhow::Result<()> {
     assert_eq!(first.digests.report, second.digests.report);
     assert_eq!(RECALL_V3_METRICS_VERSION, "memzoi-recall-metrics/v3");
     assert_eq!(RECALL_V3_RUNNER_VERSION, "memzoi-recall-runner/v3");
+    assert_ne!(
+        first.digests.metrics,
+        blake3::hash(RECALL_V3_METRICS_VERSION.as_bytes())
+            .to_hex()
+            .to_string()
+    );
+    assert_ne!(
+        first.digests.runner,
+        blake3::hash(RECALL_V3_RUNNER_VERSION.as_bytes())
+            .to_hex()
+            .to_string()
+    );
     Ok(())
 }
 
@@ -57,6 +129,7 @@ fn manifest_driven_exact_union_preserves_signals_and_citations() -> anyhow::Resu
             .iter()
             .all(|case| case.fallback_reason.is_none())
     );
+    require_recall_v3_candidates_ready(&report)?;
     Ok(())
 }
 
@@ -83,6 +156,9 @@ fn missing_manifest_artifact_normalizes_to_lexical_fallback() -> anyhow::Result<
             .all(|case| case.fallback_reason.as_deref() == Some("missing_index"))
     );
     assert!(candidate.passed);
+    let error = require_recall_v3_candidates_ready(&report)
+        .expect_err("a fallback candidate must not satisfy the ready-candidate gate");
+    assert!(error.to_string().contains("fell back"));
     Ok(())
 }
 

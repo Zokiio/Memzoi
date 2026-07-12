@@ -22,6 +22,20 @@ cargo run --locked -q -p memzoi-cli -- eval recall-v3 \
   --json
 ```
 
+Prepare and verify a local locked bundle without requiring an external tester:
+
+```bash
+memzoi eval recall-v3 \
+  --corpus .research/recall-v3/locked/corpus.yaml \
+  --candidate .research/recall-v3/locked/candidates/frozen.json \
+  --prepare-locked-commitment .research/recall-v3/locked/commitment.json
+
+memzoi eval recall-v3 \
+  --corpus .research/recall-v3/locked/corpus.yaml \
+  --candidate .research/recall-v3/locked/candidates/frozen.json \
+  --verify-locked-commitment .research/recall-v3/locked/commitment.json
+```
+
 The strict `memzoi-recall-corpus/v3` schema distinguishes `development` from
 `locked_test` bundles. Every case declares provenance, query slices, path and
 scope inputs, top-k, context budget, and 0-3 relevance judgments. Policy
@@ -70,19 +84,31 @@ cargo run --locked -q -p memzoi-cli -- eval recall-v3 \
   --json
 ```
 
-`memzoi-recall-candidate/v1` binds the model/artifact revision, license,
+Run the checked architecture matrix with deterministic fixture vectors:
+
+```bash
+make eval-recall-v3-candidate-matrix
+```
+
+`memzoi-recall-candidate/v2` binds the model/artifact revision, license,
 dimensions, pooling, normalization, query/document prefixes, embedding document,
 retrieval architecture, candidate counts, cutoff, fusion, structural weights,
 tie policy, profile/generation, content fingerprint, vector artifact, and
 environment. The v0.5 validator rejects non-repo destinations, approximate
 search, implicit installation, online-only models, unsafe paths, unknown fields,
-and non-finite parameters.
+non-finite parameters, unsupported tie-breaking, and a vector artifact whose
+canonical BLAKE3 digest no longer matches the manifest.
 
 Missing, stale, incomplete, incompatible, corrupt, query-embedding-failed, or
 unsupported state returns the production lexical projection with a typed reason
 and must achieve normalized parity of 1.0. Exact cosine search runs before any
 approximate index. Semantic-only, lexical reranking, and lexical/semantic union
 share eligibility, lexical ranking, citations, top-k, and context budget.
+
+The checked candidate matrix uses `--require-ready-candidates`, so a fixture
+that falls back to lexical retrieval fails CI even though fallback remains safe
+in normal product operation. Locked commitment preparation and verification
+also require every supplied candidate to be ready.
 
 ### Operational and task-utility evidence
 
@@ -115,6 +141,8 @@ forbidden-memory use, context tokens, latency, and cost. Every product names its
 version/configuration, raw-result digest, reproduction steps, and limitations.
 Locked-test access and product-specific tuning fail the report. The committed
 products are synthetic contract fixtures, not claims about real competitors.
+Their reports are explicitly ineligible for a ship decision; only a future
+executor-verified `observed_bakeoff` evidence package can become such evidence.
 Competitor ranking remains informative only: D56-4 depends on safely beating
 Memzoi's lexical baseline.
 
@@ -131,11 +159,11 @@ Run the same gate as CI:
 make eval
 ```
 
-This evaluates `evals/recall/v2/corpus.yaml` and compares the result with
-`evals/recall/v2/baseline.json`, then evaluates
-`evals/capture/v1/corpus.yaml` against `evals/capture/v1/baseline.json`. The
-command exits non-zero when a corpus or baseline is invalid, a documented gate
-fails, or the capture report differs from its accepted deterministic baseline.
+This evaluates the recall-v2 and capture-v1 baselines, then runs every checked
+recall-v3 contract fixture: lexical, candidate, operational, and competitor
+harnesses. The command exits non-zero when a corpus or baseline is invalid, a
+documented gate fails, or the capture report differs from its accepted
+deterministic baseline.
 
 Run one suite while iterating:
 

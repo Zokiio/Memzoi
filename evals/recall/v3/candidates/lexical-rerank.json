@@ -1,6 +1,6 @@
 {
   "version": "memzoi-recall-candidate/v2",
-  "id": "fixture-exact-union",
+  "id": "fixture-lexical-rerank",
   "revision": "1",
   "model": {
     "id": "fixture-orthogonal",
@@ -21,12 +21,12 @@
     "digest": "blake3:fixture-document-v1"
   },
   "retrieval": {
-    "architecture": "lexical_semantic_union",
+    "architecture": "lexical_rerank",
     "lexical_candidates": 10,
     "semantic_candidates": 10,
     "final_results": 10,
     "similarity_cutoff": 0.1,
-    "fusion": "reciprocal_rank",
+    "fusion": "weighted_sum",
     "lexical_weight": 1.0,
     "semantic_weight": 1.0,
     "reciprocal_rank_k": 60.0,

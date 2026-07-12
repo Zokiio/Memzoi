@@ -108,6 +108,23 @@ fn eval_capture_help_requires_an_explicit_corpus() {
 }
 
 #[test]
+fn eval_recall_v3_help_exposes_local_locked_commitment_controls() {
+    let mut cmd = memzoi();
+
+    cmd.args(["eval", "recall-v3", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--corpus <CORPUS>")
+                .and(predicate::str::contains("--candidate <CANDIDATES>"))
+                .and(predicate::str::contains("--prepare-locked-commitment"))
+                .and(predicate::str::contains("--verify-locked-commitment"))
+                .and(predicate::str::contains("--require-ready-candidates"))
+                .and(predicate::str::contains("--commitment <COMMITMENT>")),
+        );
+}
+
+#[test]
 fn capture_help_exposes_explicit_plan_review_and_apply_boundaries() {
     let mut root = memzoi();
     root.args(["capture", "--help"]).assert().success().stdout(

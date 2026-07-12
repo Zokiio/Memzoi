@@ -7,8 +7,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub const RECALL_COMPETITOR_EVIDENCE_VERSION: &str = "memzoi-recall-competitor-evidence/v1";
-pub const RECALL_COMPETITOR_REPORT_VERSION: &str = "memzoi-recall-competitor-report/v1";
+pub const RECALL_COMPETITOR_EVIDENCE_VERSION: &str = "memzoi-recall-competitor-evidence/v2";
+pub const RECALL_COMPETITOR_REPORT_VERSION: &str = "memzoi-recall-competitor-report/v2";
 pub const RECALL_INTERNAL_GATE_STATEMENT: &str = "D56-4 depends on safely beating Memzoi's lexical baseline; competitor ranking is informative only.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +23,16 @@ pub enum RecallCompetitorTrack {
 pub enum RecallCompetitorHosting {
     Local,
     Hosted,
+}
+
+/// Distinguishes executable contract fixtures from observed third-party runs.
+/// Contract fixtures validate the harness but must never be presented as
+/// competitor evidence for a semantic-retrieval ship decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallCompetitorEvidenceKind {
+    ContractFixture,
+    ObservedBakeoff,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +119,7 @@ pub struct RecallCompetitorArtifact {
 #[serde(deny_unknown_fields)]
 pub struct RecallCompetitorEvidence {
     pub version: String,
+    pub evidence_kind: RecallCompetitorEvidenceKind,
     pub protocol: RecallCompetitorProtocol,
     pub products: Vec<RecallCompetitorProduct>,
     pub retrieval_results: Vec<RecallRetrievalTrackResult>,
@@ -122,6 +133,7 @@ pub struct RecallCompetitorEvidence {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecallCompetitorReport {
     pub version: String,
+    pub evidence_kind: RecallCompetitorEvidenceKind,
     pub evidence_digest: String,
     pub protocol_digest: String,
     pub products: Vec<RecallCompetitorProduct>,
@@ -133,6 +145,7 @@ pub struct RecallCompetitorReport {
     pub internal_release_gate: String,
     pub gates: RecallCompetitorGates,
     pub passed: bool,
+    pub eligible_for_ship_decision: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +240,7 @@ pub fn run_recall_competitor_eval(path: impl AsRef<Path>) -> Result<RecallCompet
     let evidence_digest = digest_json(&evidence)?;
     Ok(RecallCompetitorReport {
         version: RECALL_COMPETITOR_REPORT_VERSION.into(),
+        evidence_kind: evidence.evidence_kind,
         evidence_digest,
         protocol_digest: digest_json(&evidence.protocol)?,
         products: evidence.products,
@@ -238,6 +252,10 @@ pub fn run_recall_competitor_eval(path: impl AsRef<Path>) -> Result<RecallCompet
         internal_release_gate: RECALL_INTERNAL_GATE_STATEMENT.into(),
         gates,
         passed,
+        // v2 only validates a self-contained evidence contract. A future runner
+        // must execute and verify raw third-party output before any observed
+        // bakeoff can become release-decision evidence.
+        eligible_for_ship_decision: false,
     })
 }
 

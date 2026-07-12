@@ -348,6 +348,15 @@ pub(crate) enum EvalCommands {
         /// Write the digest commitment artifact to this path.
         #[arg(long)]
         commitment: Option<PathBuf>,
+        /// Prepare a commitment for a local locked-test corpus without running retrieval.
+        #[arg(long, conflicts_with_all = ["commitment", "verify_locked_commitment"])]
+        prepare_locked_commitment: Option<PathBuf>,
+        /// Verify a local locked-test corpus and candidate set before evaluating it.
+        #[arg(long)]
+        verify_locked_commitment: Option<PathBuf>,
+        /// Fail if a non-lexical candidate falls back instead of executing.
+        #[arg(long)]
+        require_ready_candidates: bool,
         /// Emit the stable machine-readable report.
         #[arg(long)]
         json: bool,
