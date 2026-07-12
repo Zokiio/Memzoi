@@ -26,6 +26,9 @@ time.workspace = true
 toml.workspace = true
 uuid.workspace = true
 
+[build-dependencies]
+blake3.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 

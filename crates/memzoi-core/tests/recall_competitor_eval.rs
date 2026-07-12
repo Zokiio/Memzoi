@@ -10,6 +10,7 @@ fn two_track_competitor_fixture_is_complete_and_reproducible() -> anyhow::Result
 
     assert_eq!(report.version, RECALL_COMPETITOR_REPORT_VERSION);
     assert!(report.passed, "{report:#?}");
+    assert!(!report.eligible_for_ship_decision);
     assert_eq!(report.retrieval_results.len(), 1);
     assert_eq!(report.end_to_end_results.len(), 1);
     assert_eq!(report.internal_release_gate, RECALL_INTERNAL_GATE_STATEMENT);
@@ -36,7 +37,8 @@ fn competitor_evidence_digest_ignores_json_formatting() -> anyhow::Result<()> {
 #[test]
 fn competitor_schema_rejects_hidden_fields() {
     let evidence = r#"{
-      "version":"memzoi-recall-competitor-evidence/v1",
+      "version":"memzoi-recall-competitor-evidence/v2",
+      "evidence_kind":"contract_fixture",
       "protocol":{},
       "products":[],
       "retrieval_results":[],
@@ -77,4 +79,20 @@ fn competitor_citation_support_and_integrity_must_agree() {
                 .contains("exactly when citations are supported")
         );
     }
+}
+
+#[test]
+fn observed_label_without_executable_verification_is_not_ship_evidence() -> anyhow::Result<()> {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/competitors/fixture-evidence.json");
+    let mut evidence: serde_json::Value = serde_json::from_slice(&std::fs::read(fixture)?)?;
+    evidence["evidence_kind"] = serde_json::json!("observed_bakeoff");
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("observed.json");
+    std::fs::write(&path, serde_json::to_vec(&evidence)?)?;
+
+    let report = run_recall_competitor_eval(path)?;
+    assert!(report.passed);
+    assert!(!report.eligible_for_ship_decision);
+    Ok(())
 }

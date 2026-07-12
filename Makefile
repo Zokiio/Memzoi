@@ -23,15 +23,18 @@ build:
 test:
 	cargo test --workspace
 
-eval: eval-recall eval-capture
+eval: eval-recall eval-capture eval-v0.5-foundation
 
 .PHONY: eval-recall-v3
 eval-recall-v3:
 	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml
 
-.PHONY: eval-recall-v3-candidate
+.PHONY: eval-recall-v3-candidate eval-recall-v3-candidate-matrix
 eval-recall-v3-candidate:
-	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml --candidate evals/recall/v3/candidates/exact-union.json
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml --candidate evals/recall/v3/candidates/exact-union.json --require-ready-candidates
+
+eval-recall-v3-candidate-matrix:
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml --candidate evals/recall/v3/candidates/semantic-only.json --candidate evals/recall/v3/candidates/lexical-rerank.json --candidate evals/recall/v3/candidates/lexical-union.json --require-ready-candidates
 
 .PHONY: eval-recall-operational
 eval-recall-operational:
@@ -42,7 +45,7 @@ eval-recall-competitors:
 	cargo run --locked -q -p memzoi-cli -- eval recall-competitors --evidence evals/recall/v3/competitors/fixture-evidence.json
 
 .PHONY: eval-v0.5-foundation
-eval-v0.5-foundation: eval-recall-v3 eval-recall-v3-candidate eval-recall-operational eval-recall-competitors
+eval-v0.5-foundation: eval-recall-v3 eval-recall-v3-candidate-matrix eval-recall-operational eval-recall-competitors
 
 eval-recall:
 	cargo run --locked -q -p memzoi-cli -- eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json

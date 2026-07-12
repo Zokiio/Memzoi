@@ -1,5 +1,6 @@
 {
-  "version": "memzoi-recall-competitor-evidence/v1",
+  "version": "memzoi-recall-competitor-evidence/v2",
+  "evidence_kind": "contract_fixture",
   "protocol": {
     "frozen_at": "2026-07-11T00:00:00Z",
     "corpus_digest": "blake3:fixture-development-corpus",

@@ -1,9 +1,63 @@
 use memzoi_core::{
     ManifestDrivenRecallCandidate, RECALL_DEVELOPMENT_LOG_VERSION, RecallCandidateArchitecture,
     RecallDevelopmentAttempt, RecallDevelopmentAttemptOutcome, RecallDevelopmentLog,
-    RecallRetrievalCandidateManifest, RecallV3Candidate, run_recall_v3_eval_with_candidates,
-    validate_development_log,
+    RecallRetrievalCandidateManifest, RecallV3Candidate, RecallVectorArtifact,
+    recall_vector_artifact_digest, run_recall_v3_eval_with_candidates, validate_development_log,
 };
+
+#[test]
+fn fixture_vector_artifact_digest_is_stable() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/candidates/vectors/exact-union.json");
+    let artifact: RecallVectorArtifact = serde_json::from_slice(&std::fs::read(root)?)?;
+    assert_eq!(
+        recall_vector_artifact_digest(&artifact)?,
+        "53a6e4853929154bbd07fc030ed214076e83ba90286fc974727a1ad1c820a548"
+    );
+    Ok(())
+}
+
+#[test]
+fn modified_vector_artifacts_fall_back_without_using_unbound_scores() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let mut manifest: RecallRetrievalCandidateManifest =
+        serde_json::from_slice(&std::fs::read(root.join("candidates/exact-union.json"))?)?;
+    manifest.id = "fixture-tampered-index".into();
+
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir(dir.path().join("vectors"))?;
+    std::fs::write(
+        dir.path().join("candidate.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    let mut vectors: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join("candidates/vectors/exact-union.json"),
+    )?)?;
+    vectors["records"]["semantic-target"][0] = serde_json::json!(0.5);
+    std::fs::write(
+        dir.path().join("vectors/exact-union.json"),
+        serde_json::to_vec_pretty(&vectors)?,
+    )?;
+
+    let mut candidate = ManifestDrivenRecallCandidate::load(dir.path().join("candidate.json"))?;
+    let error = candidate
+        .require_ready()
+        .expect_err("a tampered vector artifact must not be ready for evaluation");
+    assert!(error.to_string().contains("corrupt_index"));
+    let report =
+        run_recall_v3_eval_with_candidates(root.join("corpus.yaml"), &mut [&mut candidate])?;
+    let candidate = &report.candidates[1];
+    assert!(
+        candidate
+            .cases
+            .iter()
+            .all(|case| case.fallback_reason.as_deref() == Some("corrupt_index")),
+        "{:#?}",
+        candidate.cases
+    );
+    assert_eq!(candidate.aggregate.fallback_parity, 1.0);
+    Ok(())
+}
 
 #[test]
 fn development_log_retains_completed_rejected_and_failed_attempts() -> anyhow::Result<()> {
@@ -63,6 +117,9 @@ fn all_required_candidate_architectures_run_through_one_boundary() -> anyhow::Re
         let mut manifest = base.clone();
         manifest.id = id.into();
         manifest.retrieval.architecture = architecture;
+        if architecture == RecallCandidateArchitecture::LexicalRerank {
+            manifest.retrieval.fusion = memzoi_core::RecallFusionMethod::WeightedSum;
+        }
         let path = dir.path().join(format!("{id}.json"));
         std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
         paths.push(path);
@@ -120,6 +177,41 @@ fn unsupported_structural_weights_are_rejected() -> anyhow::Result<()> {
         Err(error) => error,
     };
     assert!(error.to_string().contains("must remain zero"));
+    Ok(())
+}
+
+#[test]
+fn unsupported_tie_breaking_and_rerank_fusion_are_rejected() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/candidates");
+    let bytes = std::fs::read(root.join("exact-union.json"))?;
+    let base: RecallRetrievalCandidateManifest = serde_json::from_slice(&bytes)?;
+    let invalid = [
+        ("tie-break", {
+            let mut manifest = base.clone();
+            manifest.retrieval.tie_break = "score_only".into();
+            manifest
+        }),
+        ("rerank-fusion", {
+            let mut manifest = base;
+            manifest.retrieval.architecture = RecallCandidateArchitecture::LexicalRerank;
+            manifest
+        }),
+    ];
+    for (id, manifest) in invalid {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("candidate.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
+        let error = match ManifestDrivenRecallCandidate::load(path) {
+            Ok(_) => panic!("unsupported retrieval contract unexpectedly loaded"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(if id == "tie-break" {
+            "tie_break"
+        } else {
+            "weighted_sum"
+        }));
+    }
     Ok(())
 }
 

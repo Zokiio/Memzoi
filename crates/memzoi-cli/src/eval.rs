@@ -6,10 +6,12 @@ use memzoi_core::{
     RecallCompetitorReport, RecallEvalBaselineStatus, RecallEvalForbiddenIds,
     RecallEvalIntegrityMetric, RecallEvalLeakageMetric, RecallEvalRatioMetric, RecallEvalReport,
     RecallEvalSurface, RecallOperationalReport, RecallV3Candidate, RecallV3Report,
-    attach_capture_eval_baseline, attach_recall_eval_baseline, run_capture_eval,
-    run_recall_competitor_eval, run_recall_eval, run_recall_operational_eval, run_recall_v3_eval,
-    run_recall_v3_eval_with_candidates, write_capture_eval_baseline, write_recall_eval_baseline,
-    write_recall_v3_commitment,
+    attach_capture_eval_baseline, attach_recall_eval_baseline, prepare_recall_v3_locked_commitment,
+    require_recall_v3_candidates_ready, run_capture_eval, run_recall_competitor_eval,
+    run_recall_eval, run_recall_operational_eval, run_recall_v3_eval,
+    run_recall_v3_eval_with_candidates, verify_recall_v3_locked_commitment,
+    write_capture_eval_baseline, write_recall_eval_baseline, write_recall_v3_commitment,
+    write_recall_v3_locked_commitment,
 };
 
 use crate::output::print_json;
@@ -62,6 +64,11 @@ fn print_competitor_human_report(report: &RecallCompetitorReport) {
     println!("products:\t{}", report.products.len());
     println!("retrieval_tracks:\t{}", report.retrieval_results.len());
     println!("end_to_end_tracks:\t{}", report.end_to_end_results.len());
+    println!("evidence_kind:\t{:?}", report.evidence_kind);
+    println!(
+        "eligible_for_ship_decision:\t{}",
+        report.eligible_for_ship_decision
+    );
     println!("release_gate:\t{}", report.internal_release_gate);
     println!("result:\t{}", pass_label(report.passed));
 }
@@ -70,21 +77,57 @@ pub(crate) fn recall_v3_eval_command(
     corpus: PathBuf,
     candidate_paths: Vec<PathBuf>,
     commitment: Option<PathBuf>,
+    prepare_locked_commitment: Option<PathBuf>,
+    verify_locked_commitment: Option<PathBuf>,
+    require_ready_candidates: bool,
     as_json: bool,
 ) -> Result<()> {
-    let report = if candidate_paths.is_empty() {
-        run_recall_v3_eval(corpus)?
+    let mut candidates = candidate_paths
+        .into_iter()
+        .map(ManifestDrivenRecallCandidate::load)
+        .collect::<Result<Vec<_>>>()?;
+    let candidate_manifests = candidates
+        .iter()
+        .map(|candidate| candidate.manifest())
+        .collect::<Vec<_>>();
+    let require_ready = require_ready_candidates
+        || prepare_locked_commitment.is_some()
+        || verify_locked_commitment.is_some();
+    if require_ready {
+        for candidate in &candidates {
+            candidate.require_ready()?;
+        }
+    }
+    if let Some(path) = prepare_locked_commitment {
+        let prepared = prepare_recall_v3_locked_commitment(&corpus, &candidate_manifests)?;
+        write_recall_v3_locked_commitment(&prepared, path)?;
+        if as_json {
+            print_json(&serde_json::to_value(&prepared)?)?;
+        } else {
+            println!("locked_commitment:\tprepared");
+            println!("corpus_digest:\t{}", prepared.corpus_digest);
+            println!("judgment_digest:\t{}", prepared.judgment_digest);
+        }
+        return Ok(());
+    }
+    let verified_locked_commitment = verify_locked_commitment
+        .as_deref()
+        .map(|path| verify_recall_v3_locked_commitment(&corpus, path, &candidate_manifests))
+        .transpose()?;
+    let report = if candidates.is_empty() {
+        run_recall_v3_eval(&corpus)?
     } else {
-        let mut candidates = candidate_paths
-            .into_iter()
-            .map(ManifestDrivenRecallCandidate::load)
-            .collect::<Result<Vec<_>>>()?;
         let mut candidate_refs = candidates
             .iter_mut()
             .map(|candidate| candidate as &mut dyn RecallV3Candidate)
             .collect::<Vec<_>>();
-        run_recall_v3_eval_with_candidates(corpus, &mut candidate_refs)?
+        run_recall_v3_eval_with_candidates(&corpus, &mut candidate_refs)?
     };
+    if let Some(expected) = verified_locked_commitment
+        && report.commitment != expected
+    {
+        bail!("locked recall commitment changed during evaluation");
+    }
     if let Some(path) = commitment {
         write_recall_v3_commitment(&report, path)?;
     }
@@ -95,6 +138,9 @@ pub(crate) fn recall_v3_eval_command(
     }
     if !report.passed {
         bail!("recall-v3 evaluation gates failed");
+    }
+    if require_ready {
+        require_recall_v3_candidates_ready(&report)?;
     }
     Ok(())
 }

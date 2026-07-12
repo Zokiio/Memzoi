@@ -1,6 +1,6 @@
 {
   "version": "memzoi-recall-candidate/v2",
-  "id": "fixture-exact-union",
+  "id": "fixture-lexical-semantic-union",
   "revision": "1",
   "model": {
     "id": "fixture-orthogonal",
