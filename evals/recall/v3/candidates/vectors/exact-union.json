@@ -1,0 +1,21 @@
+{
+  "version": "memzoi-recall-vectors/v1",
+  "profile_id": "fixture-exact-v1",
+  "generation": "generation-1",
+  "model_artifact_digest": "blake3:fixture-model-v1",
+  "document_digest": "blake3:fixture-document-v1",
+  "content_fingerprint": "blake3:fixture-record-set-v1",
+  "dimensions": 4,
+  "state": "complete",
+  "queries": {
+    "exact-terminology": [1.0, 0.0, 0.0, 0.0],
+    "citation-and-path": [0.0, 1.0, 0.0, 0.0],
+    "zero-lexical-overlap": [0.0, 0.0, 1.0, 0.0]
+  },
+  "records": {
+    "lexical-target": [1.0, 0.0, 0.0, 0.0],
+    "citation-target": [0.0, 1.0, 0.0, 0.0],
+    "semantic-target": [0.0, 0.0, 1.0, 0.0],
+    "scope-distractor": [0.0, 0.0, 0.0, 1.0]
+  }
+}

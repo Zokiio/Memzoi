@@ -1,0 +1,109 @@
+version: memzoi-recall-corpus/v3
+name: recall-v3-development-smoke
+kind: development
+evaluated_at: 2026-07-10T12:00:00Z
+records_root: records
+records:
+  - citation-target.md
+  - lexical-target.md
+  - semantic-target.md
+  - scope-distractor.md
+thresholds:
+  min_mean_ndcg_at_10: 0.66
+  min_mean_recall_at_k: 0.66
+  min_mean_mrr: 0.66
+  max_forbidden_hits: 0
+  min_citation_integrity: 1.0
+  min_fallback_parity: 1.0
+cases:
+  - id: exact-terminology
+    query: quartz lexical sentinel
+    slices: [exact_terminology, lexical]
+    provenance:
+      kind: human_written
+      reference: issue://73/exact-terminology
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: lexical-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://lexical-target]
+        rationale: Exact title and body match.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta is outside repo scope.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Valid but irrelevant memory.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Valid but irrelevant memory.
+  - id: citation-and-path
+    query: indigo citation sentinel
+    slices: [citation, path]
+    provenance:
+      kind: human_written
+      reference: issue://73/citation
+    path: docs/roadmap.md
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: Exact query, path, and source citation match.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Valid but irrelevant memory.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta is outside repo scope.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Valid but irrelevant memory.
+  - id: zero-lexical-overlap
+    query: how do releases switch safely
+    slices: [paraphrase, zero_overlap, semantic]
+    provenance:
+      kind: human_written
+      reference: issue://76/zero-overlap
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: The atomic pointer procedure directly answers the paraphrased query.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Valid but irrelevant memory.
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Valid but irrelevant memory.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: Team beta is outside repo scope.

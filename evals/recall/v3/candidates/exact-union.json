@@ -1,0 +1,53 @@
+{
+  "version": "memzoi-recall-candidate/v1",
+  "id": "fixture-exact-union",
+  "revision": "1",
+  "model": {
+    "id": "fixture-orthogonal",
+    "revision": "1",
+    "artifact_digest": "blake3:fixture-model-v1",
+    "license": "test-fixture-only",
+    "dimensions": 4,
+    "pooling": "fixture",
+    "normalization": "l2",
+    "query_prefix": "query: ",
+    "document_prefix": "document: ",
+    "explicitly_installed": true,
+    "offline": true
+  },
+  "document": {
+    "version": "fixture-title-body/v1",
+    "template": "{title}\n\n{body}",
+    "digest": "blake3:fixture-document-v1"
+  },
+  "retrieval": {
+    "architecture": "lexical_semantic_union",
+    "lexical_candidates": 10,
+    "semantic_candidates": 10,
+    "final_results": 10,
+    "similarity_cutoff": 0.1,
+    "fusion": "reciprocal_rank",
+    "lexical_weight": 1.0,
+    "semantic_weight": 1.0,
+    "reciprocal_rank_k": 60.0,
+    "path_weight": 0.0,
+    "type_weight": 0.0,
+    "lane_weight": 0.0,
+    "destination_weight": 0.0,
+    "confidence_weight": 0.0,
+    "tie_break": "record_id_ascending"
+  },
+  "storage": {
+    "profile_id": "fixture-exact-v1",
+    "generation": "generation-1",
+    "vector_artifact": "vectors/exact-union.json",
+    "content_fingerprint": "blake3:fixture-record-set-v1",
+    "exact_search": true,
+    "destination": "repo"
+  },
+  "environment": {
+    "target_os": "portable-fixture",
+    "target_arch": "portable-fixture",
+    "cpu_features": []
+  }
+}
