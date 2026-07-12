@@ -407,8 +407,11 @@ fn build_candidate_bundle(request: CandidateBundleRequest<'_>) -> Result<Vec<Bui
         &mut embedder,
     )?;
     fs::create_dir_all(output)?;
-    let artifact_digest =
-        memzoi_core::write_recall_vector_artifact(&artifact, output, Path::new("vectors.json"))?;
+    let artifact_digest = memzoi_core::write_recall_vector_artifact(
+        &artifact,
+        output,
+        Path::new(memzoi_core::RECALL_DEVELOPMENT_VECTOR_ARTIFACT),
+    )?;
     matrix
         .architectures
         .iter()
@@ -423,7 +426,7 @@ fn build_candidate_bundle(request: CandidateBundleRequest<'_>) -> Result<Vec<Bui
                 memzoi_core::RecallCandidateArtifactBinding {
                     artifact: &artifact,
                     digest: &artifact_digest,
-                    path: PathBuf::from("vectors.json"),
+                    path: PathBuf::from(memzoi_core::RECALL_DEVELOPMENT_VECTOR_ARTIFACT),
                 },
             )?;
             let candidate_digest = memzoi_core::recall_candidate_manifest_digest(&manifest)?;
@@ -775,7 +778,7 @@ fn recall_v3_development_run(
                     .path
                     .parent()
                     .context("candidate manifest has no parent")?
-                    .join("vectors.json")
+                    .join(memzoi_core::RECALL_DEVELOPMENT_VECTOR_ARTIFACT)
                     .strip_prefix(&output)?
                     .to_owned(),
             ),

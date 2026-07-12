@@ -22,6 +22,7 @@ pub const RECALL_FREEZE_VERSION: &str = "memzoi-recall-development-freeze/v1";
 pub const RECALL_DEVELOPMENT_ENVIRONMENT_VERSION: &str = "memzoi-recall-development-environment/v1";
 pub const TITLE_BODY_TEMPLATE: &str = "title_body/v1";
 pub const TYPE_TITLE_BODY_TEMPLATE: &str = "type_title_body/v1";
+pub const RECALL_DEVELOPMENT_VECTOR_ARTIFACT: &str = "vectors.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -475,6 +476,8 @@ impl RecallDevelopmentMatrix {
             bail!("invalid matrix parameters");
         }
         if self.parameters.lexical_rerank_fusion != crate::RecallFusionMethod::WeightedSum
+            || self.parameters.lexical_semantic_union_fusion
+                != crate::RecallFusionMethod::ReciprocalRank
             || [
                 self.parameters.path_weight,
                 self.parameters.type_weight,
@@ -1056,7 +1059,7 @@ pub fn verify_development_evidence(
             RecallCandidateArtifactBinding {
                 artifact: &artifact,
                 digest: attempt.artifact_digest.as_deref().unwrap_or_default(),
-                path: manifest.storage.vector_artifact.clone(),
+                path: PathBuf::from(RECALL_DEVELOPMENT_VECTOR_ARTIFACT),
             },
         )?;
         let candidate_digest = attempt.candidate_digest.as_deref().unwrap_or_default();
@@ -1439,7 +1442,7 @@ mod tests {
 
     #[test]
     fn matrix_requires_exactly_eighteen_candidates() {
-        let matrix = RecallDevelopmentMatrix {
+        let mut matrix = RecallDevelopmentMatrix {
             version: RECALL_MATRIX_VERSION.into(),
             profiles: vec!["a".into(), "b".into(), "c".into()],
             templates: vec![TITLE_BODY_TEMPLATE.into(), TYPE_TITLE_BODY_TEMPLATE.into()],
@@ -1469,6 +1472,8 @@ mod tests {
             },
         };
         assert_eq!(matrix.candidate_count().unwrap(), 18);
+        matrix.parameters.lexical_semantic_union_fusion = crate::RecallFusionMethod::WeightedSum;
+        assert!(matrix.validate().is_err());
     }
 
     #[test]
@@ -1678,6 +1683,21 @@ mod tests {
         assert_eq!(report.candidates.len(), 19);
         assert_eq!(freeze.finalists.len(), 4);
         assert_eq!(freeze_development(&log, &freeze.frozen_at).unwrap(), freeze);
+        for architecture in ["semantic_only", "lexical_rerank", "lexical_semantic_union"] {
+            let manifest: crate::RecallRetrievalCandidateManifest = serde_json::from_slice(
+                &fs::read(
+                    observed
+                        .join("frozen-manifests")
+                        .join(format!("{architecture}.json")),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                manifest.storage.vector_artifact,
+                Path::new(RECALL_DEVELOPMENT_VECTOR_ARTIFACT)
+            );
+        }
         let mut quality_failure = report.candidates[1].clone();
         quality_failure.passed = false;
         assert!(recall_candidate_trust_eligible(&quality_failure));
