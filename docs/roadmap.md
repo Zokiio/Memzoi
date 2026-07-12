@@ -126,16 +126,20 @@ Issues:
 
 ### v0.5 - Trustworthy Hybrid Recall
 
-Outcome: semantic retrieval is added only if it materially improves the same corpus while preserving deterministic fallback, citations, scope, lifecycle suppression, and latency.
+Outcome: decide whether semantic retrieval should ship and add it only if it materially improves the same corpus while preserving deterministic fallback, citations, scope, lifecycle suppression, and latency.
 
-The first deliverable is [#56 RFC: Select an eval-gated disposable hybrid recall design](https://github.com/Zokiio/Memzoi/issues/56). That decision will create thin implementation issues for the selected index adapter, semantic search tracer, explainable fusion, local/session opt-in, and competitor bakeoff. This avoids committing to a vector stack before the v0.4 evidence exists.
+The first deliverable is [#56 RFC: Decide whether eval-gated semantic recall should ship](https://github.com/Zokiio/Memzoi/issues/56). It freezes the recall-v3 benchmark and candidate evaluation process before recording a no-go, conditional-go, or full-go decision. Architecture-specific implementation issues are created only for accepted scope after the locked evaluation, avoiding commitment to a vector stack before the evidence exists.
+
+The ratified initial boundary is repository memory, one explicitly installed offline profile per project, exact vector search unless it misses the approved performance gate, and opt-in behavior for v0.5.0. Local/session indexing, remote providers, multiple active profiles, semantic prechecks, and default promotion are deferred. Any future default promotion requires a separate post-release decision and preserves lexical-only mode.
 
 Exit criteria:
 
-- The accepted hybrid method clears a documented material-improvement threshold over lexical recall.
+- The RFC records a no-go, conditional-go, or full-go decision from a locked recall-v3 evaluation while recall v2 remains the immutable trust gate.
+- Any accepted semantic method clears a documented material-improvement threshold over lexical recall; a no-go publishes the findings and keeps Memzoi lexical.
 - There is zero regression in stale, expired, scope, or private-memory leakage.
 - Every result exposes lexical, semantic, fusion, and suppression signals with original citations.
 - Lexical recall remains available without network, credentials, or an embedding index.
+- Any accepted v0.5.0 semantic profile remains opt-in; a full-go result does not authorize default promotion.
 - The target hybrid p95 is below 200 ms at 10,000 records unless the eval-backed RFC revises it.
 
 ### v0.6 - Memory Quality and Lifecycle
