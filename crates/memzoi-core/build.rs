@@ -10,6 +10,7 @@ fn digest_sources(root: &Path, sources: &[&str]) -> String {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         println!("cargo:rerun-if-changed={}", path.display());
+        hasher.update(&(source.len() as u64).to_le_bytes());
         hasher.update(source.as_bytes());
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
