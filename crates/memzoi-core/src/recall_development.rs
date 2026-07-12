@@ -392,8 +392,16 @@ pub fn write_recall_vector_artifact(
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(&canonical_json(artifact)?)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(&destination)?;
+    persist_vector_artifact_noclobber(temporary, &destination)?;
     crate::recall_vector_artifact_digest(artifact)
+}
+
+fn persist_vector_artifact_noclobber(
+    temporary: tempfile::NamedTempFile,
+    destination: &Path,
+) -> Result<()> {
+    temporary.persist_noclobber(destination)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1474,6 +1482,20 @@ mod tests {
         assert_eq!(matrix.candidate_count().unwrap(), 18);
         matrix.parameters.lexical_semantic_union_fusion = crate::RecallFusionMethod::WeightedSum;
         assert!(matrix.validate().is_err());
+    }
+
+    #[test]
+    fn vector_artifact_commit_does_not_clobber_a_racing_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("vectors.json");
+        let mut temporary = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+        temporary.write_all(b"new artifact").unwrap();
+        temporary.as_file().sync_all().unwrap();
+
+        fs::write(&destination, b"existing artifact").unwrap();
+
+        assert!(persist_vector_artifact_noclobber(temporary, &destination).is_err());
+        assert_eq!(fs::read(destination).unwrap(), b"existing artifact");
     }
 
     #[test]
