@@ -21,7 +21,8 @@ profiles, two deterministic document templates, and three retrieval
 architectures. Model weights and generated vectors are research artifacts and
 stay below the ignored `.research/recall-v3/` path.
 
-Installation is the only network-enabled step and must be invoked explicitly:
+Model installation is the only runtime workflow that uses the network and must
+be invoked explicitly:
 
 ```bash
 make recall-v3-model-install
@@ -31,8 +32,10 @@ make recall-v3-model-inspect
 Every profile pins its immutable repository revision, file sizes, SHA-256
 digests, license, dimensions, pooling, normalization, and query/document
 prefixes. Normal `make eval`, default builds, and candidate evaluation never
-download models. Compile the local ONNX adapter explicitly with
-`cargo check -p memzoi-core --features recall-models`.
+download models. Compiling the local ONNX adapter explicitly with
+`cargo check -p memzoi-core --features recall-models` may download Rust crates
+and the pinned ONNX Runtime build dependency when they are not already cached;
+the compiled adapter itself only opens explicitly installed local model files.
 
 Emit the stable JSON report and a separately reviewable digest commitment:
 

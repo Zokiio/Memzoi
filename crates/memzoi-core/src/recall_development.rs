@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -87,6 +87,8 @@ impl RecallModelProfile {
             || self.license.trim().is_empty()
             || self.dimensions == 0
             || self.max_length == 0
+            || !matches!(self.pooling.as_str(), "cls" | "mean")
+            || self.normalization != "l2"
             || self.files.is_empty()
             || self.allowed_origins.is_empty()
         {
@@ -138,14 +140,15 @@ impl RecallModelProfile {
     }
 }
 
-pub fn install_recall_model_with<F>(
+pub fn install_recall_model_with<F, R>(
     profile: &RecallModelProfile,
     model_root: &Path,
     force: bool,
     mut fetch: F,
 ) -> Result<PathBuf>
 where
-    F: FnMut(&str) -> Result<Vec<u8>>,
+    F: FnMut(&str) -> Result<R>,
+    R: Read,
 {
     profile.validate()?;
     fs::create_dir_all(model_root)?;
@@ -163,13 +166,13 @@ where
         .tempdir_in(model_root)?;
     let mut installed = Vec::new();
     for file in &profile.files {
-        let bytes = fetch(&file.url).with_context(|| format!("failed to fetch {}", file.url))?;
-        verify_bytes(file, &bytes)?;
+        let mut reader =
+            fetch(&file.url).with_context(|| format!("failed to fetch {}", file.url))?;
         let target = staging.path().join(&file.path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        write_new_file(&target, &bytes)?;
+        write_verified_stream(&target, &mut reader, file)?;
         installed.push(RecallInstalledFile {
             path: file.path.clone(),
             sha256: file.sha256.clone(),
@@ -229,8 +232,7 @@ pub fn inspect_recall_model(
         bail!("model install file set does not match profile");
     }
     for file in &profile.files {
-        let bytes = regular_file_bytes(&directory.join(&file.path))?;
-        verify_bytes(file, &bytes)?;
+        verify_regular_file(&directory.join(&file.path), file)?;
     }
     let mut disk = BTreeSet::new();
     collect_files(directory, directory, &mut disk)?;
@@ -248,7 +250,7 @@ pub fn render_recall_document(template: &str, record: &RecallV3CandidateRecord) 
         TITLE_BODY_TEMPLATE => Ok(format!("title: {title}\nbody: {body}\n")),
         TYPE_TITLE_BODY_TEMPLATE => Ok(format!(
             "type: {}\ntitle: {title}\nbody: {body}\n",
-            format!("{:?}", record.memory_type).to_lowercase()
+            format!("{:?}", record.citation.memory_type).to_lowercase()
         )),
         _ => bail!("unsupported embedding document template {template:?}"),
     }
@@ -541,6 +543,8 @@ pub fn freeze_development(
         .iter()
         .filter(|a| !selected.contains(a.candidate_id.as_str()))
         .map(|a| a.candidate_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
     Ok(RecallDevelopmentFreeze {
         version: RECALL_FREEZE_VERSION.into(),
@@ -728,10 +732,30 @@ fn validate_relative_path(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn verify_bytes(file: &RecallModelFile, bytes: &[u8]) -> Result<()> {
-    let digest = format!("{:x}", Sha256::digest(bytes));
-    if bytes.len() as u64 != file.bytes || digest != file.sha256.to_ascii_lowercase() {
-        bail!("download verification failed for {}", file.path.display());
+fn verify_regular_file(path: &Path, expected: &RecallModelFile) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("{} must be a regular non-symlink file", path.display());
+    }
+    if metadata.len() != expected.bytes {
+        bail!(
+            "installed model file has the wrong size: {}",
+            path.display()
+        );
+    }
+    let mut reader = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if format!("{:x}", hasher.finalize()) != expected.sha256.to_ascii_lowercase() {
+        bail!("installed model file digest mismatch: {}", path.display());
     }
     Ok(())
 }
@@ -748,6 +772,46 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
     options.write(true).create_new(true);
     let mut file = options.open(path)?;
     file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn write_verified_stream(
+    path: &Path,
+    reader: &mut impl Read,
+    expected: &RecallModelFile,
+) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .context("model file size overflow")?;
+        if total > expected.bytes {
+            bail!(
+                "download exceeded declared size for {}",
+                expected.path.display()
+            );
+        }
+        hasher.update(&buffer[..read]);
+        file.write_all(&buffer[..read])?;
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    if total != expected.bytes || digest != expected.sha256.to_ascii_lowercase() {
+        bail!(
+            "download verification failed for {}",
+            expected.path.display()
+        );
+    }
     file.sync_all()?;
     Ok(())
 }
@@ -786,7 +850,6 @@ mod tests {
     fn templates_are_exact_and_normalize_line_endings() {
         let record = RecallV3CandidateRecord {
             id: "r".into(),
-            memory_type: MemoryType::Procedure,
             title: "Deploy\r\nnow".into(),
             body: "Step 1\rStep 2".into(),
             citation: MemoryCitation {
@@ -873,19 +936,42 @@ mod tests {
             allowed_origins: vec!["https://models.example".into()],
             files,
         };
+        let mut unsupported = profile.clone();
+        unsupported.pooling = "maximum".into();
+        assert!(unsupported.validate().is_err());
+        unsupported = profile.clone();
+        unsupported.normalization = "none".into();
+        assert!(unsupported.validate().is_err());
         let mut fetches = 0;
         let installed = install_recall_model_with(&profile, root.path(), false, |url| {
             fetches += 1;
-            Ok(url.rsplit('/').next().unwrap().as_bytes().to_vec())
+            Ok(std::io::Cursor::new(
+                url.rsplit('/').next().unwrap().as_bytes().to_vec(),
+            ))
         })
         .unwrap();
         assert_eq!(fetches, 5);
-        install_recall_model_with(&profile, root.path(), false, |_| {
-            panic!("valid install must not fetch")
-        })
+        install_recall_model_with(
+            &profile,
+            root.path(),
+            false,
+            |_| -> Result<std::io::Cursor<Vec<u8>>> { panic!("valid install must not fetch") },
+        )
         .unwrap();
         fs::write(installed.join("config.json"), b"tampered").unwrap();
         assert!(inspect_recall_model(&profile, &installed).is_err());
+
+        let mut oversized = profile.clone();
+        oversized.id = "oversized-fixture".into();
+        assert!(
+            install_recall_model_with(&oversized, root.path(), false, |url| {
+                let mut bytes = url.rsplit('/').next().unwrap().as_bytes().to_vec();
+                bytes.push(0);
+                Ok(std::io::Cursor::new(bytes))
+            })
+            .is_err()
+        );
+        assert!(!root.path().join("oversized-fixture").exists());
     }
 
     #[test]

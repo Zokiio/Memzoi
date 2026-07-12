@@ -38,13 +38,13 @@ eval-recall-v3-candidate-matrix:
 
 # Explicit network step. Model files remain under the ignored research root.
 recall-v3-model-install:
-	@for profile in evals/recall/v3/profiles/*.json; do \
+	@set -e; for profile in evals/recall/v3/profiles/*.json; do \
 		cargo run --locked -q -p memzoi-cli -- eval recall-v3 model install --profile "$$profile" --model-root .research/recall-v3/models; \
 	done
 
 # Offline integrity check for all explicitly installed profiles.
 recall-v3-model-inspect:
-	@for profile in evals/recall/v3/profiles/*.json; do \
+	@set -e; for profile in evals/recall/v3/profiles/*.json; do \
 		cargo run --locked -q -p memzoi-cli -- eval recall-v3 model inspect --profile "$$profile" --model-root .research/recall-v3/models; \
 	done
 

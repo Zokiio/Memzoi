@@ -1,4 +1,4 @@
-use std::{io::Read, path::PathBuf};
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Result, bail};
 use memzoi_core::{
@@ -31,28 +31,22 @@ pub(crate) fn recall_v3_subcommand(command: RecallV3Commands) -> Result<()> {
                 json,
             } => {
                 let profile = RecallModelProfile::load(&profile)?;
-                let agent = ureq::AgentBuilder::new().redirects(5).build();
+                let agent = ureq::AgentBuilder::new()
+                    .redirects(5)
+                    .timeout_connect(Duration::from_secs(10))
+                    .timeout_read(Duration::from_secs(60))
+                    .timeout_write(Duration::from_secs(30))
+                    .build();
                 let installed = install_recall_model_with(&profile, &model_root, force, |url| {
-                    let expected = profile
-                        .files
-                        .iter()
-                        .find(|file| file.url == url)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("download URL is not declared by the profile")
-                        })?;
                     let response = agent
                         .get(url)
+                        .set("User-Agent", concat!("memzoi/", env!("CARGO_PKG_VERSION")))
                         .call()
                         .map_err(|error| anyhow::anyhow!("model download failed: {error}"))?;
                     if !profile.permits_url(response.get_url())? {
                         bail!("model download redirected to a non-allowlisted origin");
                     }
-                    let mut bytes = Vec::new();
-                    response
-                        .into_reader()
-                        .take(expected.bytes + 1)
-                        .read_to_end(&mut bytes)?;
-                    Ok(bytes)
+                    Ok(response.into_reader())
                 })?;
                 if json {
                     print_json(

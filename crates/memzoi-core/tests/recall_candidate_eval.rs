@@ -137,12 +137,20 @@ fn all_required_candidate_architectures_run_through_one_boundary() -> anyhow::Re
 
     assert_eq!(report.candidates.len(), 4);
     assert!(report.candidates.iter().all(|candidate| candidate.passed));
-    assert!(
-        report.candidates[1].aggregate.mean_ndcg_at_10
-            > report.candidates[0].aggregate.mean_ndcg_at_10
-    );
-    assert!(report.candidates[2].aggregate.mean_ndcg_at_10 < 1.0);
-    assert_eq!(report.candidates[3].aggregate.mean_ndcg_at_10, 1.0);
+    let candidate = |id: &str| {
+        report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.manifest.id == id)
+            .expect("candidate report exists")
+    };
+    let baseline = candidate("lexical-baseline");
+    let semantic = candidate("semantic-only");
+    let rerank = candidate("lexical-rerank");
+    let union = candidate("lexical-union");
+    assert!(semantic.aggregate.mean_ndcg_at_10 > baseline.aggregate.mean_ndcg_at_10);
+    assert!(rerank.aggregate.mean_ndcg_at_10 < 1.0);
+    assert_eq!(union.aggregate.mean_ndcg_at_10, 1.0);
     Ok(())
 }
 
