@@ -7,7 +7,7 @@
     "revision": "1",
     "artifact_digest": "blake3:fixture-model-v1",
     "license": "test-fixture-only",
-    "dimensions": 4,
+    "dimensions": 12,
     "pooling": "fixture",
     "normalization": "l2",
     "query_prefix": "query: ",
@@ -39,10 +39,10 @@
   },
   "storage": {
     "profile_id": "fixture-exact-v1",
-    "generation": "generation-1",
+    "generation": "generation-2",
     "vector_artifact": "vectors/exact-union.json",
-    "vector_artifact_digest": "4ca6912b05999e9c9277d24c162356bf17c468b7b9ac53e19c651ddb0b12fde7",
-    "content_fingerprint": "blake3:fixture-record-set-v1",
+    "vector_artifact_digest": "f86016fc537eef4d311e9656a51990eacd24d3e7e1165eaf3d793b78e274b1ee",
+    "content_fingerprint": "blake3:substantive-record-set-v2",
     "exact_search": true,
     "destination": "repo"
   },

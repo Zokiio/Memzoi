@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 use crate::{
-    FixedClock, InitRequest, MemoryCitation, MemoryPaths, MemoryPlane, MemoryRecord, MemoryService,
-    ScopeKind, SearchInput, search::SEARCH_RESULT_LIMIT_MAX,
+    CheckpointInput, FixedClock, InitRequest, LocalMemoryInput, MemoryCitation, MemoryDestination,
+    MemoryLane, MemoryPaths, MemoryPlane, MemoryRecord, MemoryService, MemoryType, ScopeKind,
+    SearchInput, search::SEARCH_RESULT_LIMIT_MAX,
 };
 
 pub const RECALL_V3_CORPUS_VERSION: &str = "memzoi-recall-corpus/v3";
@@ -33,6 +34,7 @@ pub enum RecallV3ForbiddenReason {
     Stale,
     Expired,
     Scope,
+    Path,
     Destination,
     Private,
     Prohibited,
@@ -107,8 +109,21 @@ pub struct RecallV3Corpus {
     #[serde(default = "default_records_root")]
     pub records_root: PathBuf,
     pub records: Vec<PathBuf>,
+    #[serde(default)]
+    pub runtime_fixtures: Vec<RecallV3RuntimeFixture>,
     pub thresholds: RecallV3Thresholds,
     pub cases: Vec<RecallV3Case>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecallV3RuntimeFixture {
+    pub id: String,
+    pub destination: MemoryDestination,
+    pub memory_type: MemoryType,
+    pub lane: MemoryLane,
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,18 +298,72 @@ pub fn run_recall_v3_eval(path: impl AsRef<Path>) -> Result<RecallV3Report> {
     MemoryService::rebuild_paths(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
+    let runtime_records = seed_runtime_fixtures(&service, &loaded.corpus.runtime_fixtures)?;
     let record_files = crate::read_okf_record_files(paths.records_dir())?;
     let record_paths = recall_record_paths(&record_files);
-    let records = record_files
+    let mut records = record_files
         .iter()
         .map(crate::okf::project_okf_record)
         .collect::<Vec<_>>();
+    records.extend(runtime_records);
     validate_record_ids(&loaded.corpus, &records)?;
     let mut lexical = LexicalCandidate {
         service: &service,
         record_count: records.len(),
     };
     run_loaded(loaded, &records, &record_paths, &mut lexical, &mut [])
+}
+
+pub fn load_recall_v3_embedding_corpus(
+    path: impl AsRef<Path>,
+) -> Result<crate::RecallEmbeddingCorpus> {
+    let loaded = load_corpus(path.as_ref())?;
+    if loaded.corpus.kind != RecallV3CorpusKind::Development {
+        bail!("embedding artifact builds require a development corpus");
+    }
+    let record_files = crate::read_okf_record_files(loaded.root.join(&loaded.corpus.records_root))?;
+    let record_paths = recall_record_paths(&record_files);
+    let records = record_files
+        .iter()
+        .map(crate::okf::project_okf_record)
+        .map(|record| {
+            let path = record_paths
+                .get(&record.id)
+                .and_then(|paths| paths.first())
+                .cloned();
+            (
+                record.id.clone(),
+                RecallV3CandidateRecord {
+                    id: record.id.clone(),
+                    title: record.title.clone(),
+                    body: record.body.clone(),
+                    citation: MemoryCitation {
+                        record_id: record.id,
+                        memory_type: record.memory_type,
+                        scope_kind: record.scope_kind,
+                        provenance: MemoryPlane::Git,
+                        destination: record.destination,
+                        visibility: record.visibility,
+                        source_kind: record.source_kind,
+                        source_ref: record.source_ref,
+                        path,
+                        capture: record.capture,
+                    },
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let queries = loaded
+        .corpus
+        .cases
+        .iter()
+        .map(|case| (case.id.clone(), case.query.clone()))
+        .collect();
+    Ok(crate::RecallEmbeddingCorpus {
+        inputs: crate::RecallEmbeddingInputs { queries, records },
+        corpus_digest: loaded.corpus_digest,
+        judgment_digest: loaded.judgment_digest,
+    })
 }
 
 pub fn run_recall_v3_eval_with_candidates(
@@ -310,12 +379,14 @@ pub fn run_recall_v3_eval_with_candidates(
     MemoryService::rebuild_paths(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
+    let runtime_records = seed_runtime_fixtures(&service, &loaded.corpus.runtime_fixtures)?;
     let record_files = crate::read_okf_record_files(paths.records_dir())?;
     let record_paths = recall_record_paths(&record_files);
-    let records = record_files
+    let mut records = record_files
         .iter()
         .map(crate::okf::project_okf_record)
         .collect::<Vec<_>>();
+    records.extend(runtime_records);
     validate_record_ids(&loaded.corpus, &records)?;
     let mut lexical = LexicalCandidate {
         service: &service,
@@ -561,7 +632,59 @@ fn validate_corpus(corpus: &RecallV3Corpus) -> Result<()> {
             bail!("duplicate recall-v3 record path {}", path.display());
         }
     }
+    let mut runtime_ids = BTreeSet::new();
+    for fixture in &corpus.runtime_fixtures {
+        if fixture.id.trim().is_empty()
+            || !runtime_ids.insert(&fixture.id)
+            || !matches!(
+                fixture.destination,
+                MemoryDestination::Local | MemoryDestination::Session
+            )
+            || fixture.title.trim().is_empty()
+            || fixture.body.trim().is_empty()
+        {
+            bail!("invalid recall-v3 runtime fixture {:?}", fixture.id);
+        }
+    }
     Ok(())
+}
+
+fn seed_runtime_fixtures(
+    service: &MemoryService,
+    fixtures: &[RecallV3RuntimeFixture],
+) -> Result<Vec<MemoryRecord>> {
+    fixtures
+        .iter()
+        .map(|fixture| {
+            let record = match fixture.destination {
+                MemoryDestination::Local => service.create_local_memory(
+                    "memzoi-recall-v3-eval",
+                    LocalMemoryInput {
+                        memory_type: fixture.memory_type,
+                        lane: fixture.lane,
+                        title: fixture.title.clone(),
+                        body: fixture.body.clone(),
+                    },
+                )?,
+                MemoryDestination::Session => service.create_checkpoint(
+                    "memzoi-recall-v3-eval",
+                    CheckpointInput {
+                        task: fixture.title.clone(),
+                        note: fixture.body.clone(),
+                    },
+                )?,
+                _ => unreachable!("runtime fixture destination was validated"),
+            };
+            if record.id != fixture.id {
+                bail!(
+                    "runtime fixture {:?} produced unexpected id {:?}",
+                    fixture.id,
+                    record.id
+                );
+            }
+            Ok(record)
+        })
+        .collect()
 }
 
 fn validate_relative_path(path: &Path) -> Result<()> {

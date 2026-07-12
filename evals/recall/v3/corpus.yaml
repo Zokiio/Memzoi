@@ -7,7 +7,21 @@ records:
   - citation-target.md
   - lexical-target.md
   - semantic-target.md
+  - negation-target.md
+  - hard-negative.md
+  - path-distractor.md
   - scope-distractor.md
+  - temporal-current.md
+  - temporal-old.md
+  - expired-procedure.md
+  - tombstoned-procedure.md
+runtime_fixtures:
+  - id: local-destination-private-distractor
+    destination: local
+    memory_type: fact
+    lane: semantic
+    title: Destination private distractor
+    body: Private local memory may download a model automatically and must never enter repo recall.
 thresholds:
   min_mean_ndcg_at_10: 0.66
   min_mean_recall_at_k: 0.66
@@ -16,42 +30,292 @@ thresholds:
   min_citation_integrity: 1.0
   min_fallback_parity: 1.0
 cases:
-  - id: exact-terminology
-    query: quartz lexical sentinel
-    slices: [exact_terminology, lexical]
+  - id: paraphrase-safe-activation
+    query: How can a completed deployment become active without exposing partial files?
+    slices: [paraphrase, zero_overlap]
     provenance:
       kind: human_written
-      reference: issue://73/exact-terminology
+      reference: issue://77/paraphrase-safe-activation
     scope_kind: repo
     top_k: 2
     context_budget: 500
     judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Exact title and body match.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta is outside repo scope.
       - record_id: citation-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Valid but irrelevant memory.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: paraphrase-indivisible-rollout
+    query: Which rollout method swaps an already built version in one indivisible step?
+    slices: [paraphrase, zero_overlap]
+    provenance:
+      kind: human_written
+      reference: issue://77/paraphrase-indivisible-rollout
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: paraphrase-reader-safe-switch
+    query: How should releases change over while readers continue safely?
+    slices: [paraphrase, zero_overlap]
+    provenance:
+      kind: human_written
+      reference: issue://77/paraphrase-reader-safe-switch
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: identifier-adr
+    query: What decision is recorded by ADR-042?
+    slices: [synonyms_abbreviation, identifiers]
+    provenance:
+      kind: human_written
+      reference: issue://77/identifier-adr
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: The record directly answers this substantive development query.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Valid but irrelevant memory.
-  - id: citation-and-path
-    query: indigo citation sentinel
-    slices: [citation, path]
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: identifier-pr
+    query: Which roadmap memory preserves PR-77?
+    slices: [synonyms_abbreviation, identifiers]
     provenance:
       kind: human_written
-      reference: issue://73/citation
+      reference: issue://77/identifier-pr
     path: docs/roadmap.md
     scope_kind: repo
     top_k: 2
@@ -61,1039 +325,2233 @@ cases:
         relevance: 3
         eligible: true
         expected_citations: [issue://47]
-        rationale: Exact query, path, and source citation match.
+        rationale: The record directly answers this substantive development query.
       - record_id: lexical-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Valid but irrelevant memory.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta is outside repo scope.
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Valid but irrelevant memory.
-  - id: zero-lexical-overlap
-    query: how do releases switch safely
-    slices: [paraphrase, zero_overlap, semantic]
-    provenance:
-      kind: human_written
-      reference: issue://76/zero-overlap
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: semantic-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: The atomic pointer procedure directly answers the paraphrased query.
-      - record_id: lexical-target
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Valid but irrelevant memory.
-      - record_id: citation-target
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Valid but irrelevant memory.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: path
+        rationale: This fixture exercises the path exclusion boundary.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta is outside repo scope.
-  - id: development-01
-    query: safe rollout activation question 01
-    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-01
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: citation-target
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
         relevance: 0
         eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-02
-    query: indigo citation sentinel cited roadmap source development example 02
-    slices: [identifiers, hard_negatives]
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: identifier-sha
+    query: Find the cited decision associated with SHA abc123.
+    slices: [synonyms_abbreviation, identifiers]
     provenance:
       kind: human_written
-      reference: issue://77/development-02
+      reference: issue://77/identifier-sha
     scope_kind: repo
     top_k: 2
     context_budget: 500
     judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
       - record_id: citation-target
         relevance: 3
         eligible: true
         expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-03
-    query: atomic release pointer fully built generation current pointer development example 03
-    slices: [negation, temporal_conflict]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-03
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
+        rationale: The record directly answers this substantive development query.
       - record_id: lexical-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 3
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
         eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-04
-    query: quartz lexical sentinel ordinary title body terms development example 04
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: negation-no-implicit-fetch
+    query: Why should recall not download embedding weights automatically?
+    slices: [negation, hard_negatives]
+    provenance:
+      kind: human_written
+      reference: issue://77/negation-no-implicit-fetch
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://negation-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: negation-install-boundary
+    query: What must never fetch a model without an explicit command?
+    slices: [negation, hard_negatives]
+    provenance:
+      kind: human_written
+      reference: issue://77/negation-install-boundary
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://negation-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: negation-rejected-convenience
+    query: Which automatic model-loading behavior was rejected?
+    slices: [negation, hard_negatives]
+    provenance:
+      kind: human_written
+      reference: issue://77/negation-rejected-convenience
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://negation-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: temporal-current-channel
+    query: Is the current release channel stable or beta?
+    slices: [temporal_conflict, lifecycle]
+    provenance:
+      kind: human_written
+      reference: issue://77/temporal-current-channel
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://temporal-current]
+        rationale: The record directly answers this substantive development query.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: temporal-july-over-june
+    query: Which July channel decision replaced the June guidance?
+    slices: [temporal_conflict, lifecycle]
+    provenance:
+      kind: human_written
+      reference: issue://77/temporal-july-over-june
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://temporal-current]
+        rationale: The record directly answers this substantive development query.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: temporal-latest-guidance
+    query: What is the latest non-superseded release channel?
+    slices: [temporal_conflict, lifecycle]
+    provenance:
+      kind: human_written
+      reference: issue://77/temporal-latest-guidance
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://temporal-current]
+        rationale: The record directly answers this substantive development query.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: procedure-atomic-promotion
+    query: What procedure promotes a fully built generation?
     slices: [procedure, causal]
     provenance:
       kind: human_written
-      reference: issue://77/development-04
+      reference: issue://77/procedure-atomic-promotion
     scope_kind: repo
     top_k: 2
     context_budget: 500
     judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
       - record_id: citation-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-05
-    query: indigo citation sentinel cited roadmap source development example 05
-    slices: [path, scope, privacy]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-05
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: lexical-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 3
-        eligible: true
-        expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-06
-    query: atomic release pointer fully built generation current pointer development example 06
-    slices: [destination, lifecycle]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-06
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 3
         eligible: true
         expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-07
-    query: pointer 07
-    slices: [ambiguous_short, multi_relevant]
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: procedure-partial-safety
+    query: Why does deployment replace the current pointer atomically?
+    slices: [procedure, causal]
     provenance:
       kind: human_written
-      reference: issue://77/development-07
+      reference: issue://77/procedure-partial-safety
     scope_kind: repo
     top_k: 2
     context_budget: 500
     judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
       - record_id: citation-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: procedure-generation-switch
+    query: How is a completed generation switched into service?
+    slices: [procedure, causal]
+    provenance:
+      kind: human_written
+      reference: issue://77/procedure-generation-switch
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: path-active-roadmap
+    query: Which citation applies specifically to docs/roadmap.md?
+    slices: [path, scope]
+    provenance:
+      kind: human_written
+      reference: issue://77/path-active-roadmap
+    path: docs/roadmap.md
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: The record directly answers this substantive development query.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: path
+        rationale: This fixture exercises the path exclusion boundary.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: path-not-archive
+    query: Find the active roadmap citation, not the archived-doc decision.
+    slices: [path, scope, negation]
+    provenance:
+      kind: human_written
+      reference: issue://77/path-not-archive
+    path: docs/roadmap.md
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: The record directly answers this substantive development query.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: path
+        rationale: This fixture exercises the path exclusion boundary.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: path-repo-boundary
+    query: Which repo-scoped issue citation governs the roadmap path?
+    slices: [path, scope]
+    provenance:
+      kind: human_written
+      reference: issue://77/path-repo-boundary
+    path: docs/roadmap.md
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: The record directly answers this substantive development query.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: path
+        rationale: This fixture exercises the path exclusion boundary.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: privacy-no-local-memory
+    query: Which shared repo policy says model installation must be explicit?
+    slices: [privacy]
+    provenance:
+      kind: human_written
+      reference: issue://77/privacy-no-local-memory
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://negation-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: private
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: privacy-repo-over-personal
+    query: Return the repository model-download rule, not private local memory.
+    slices: [privacy, negation]
+    provenance:
+      kind: human_written
+      reference: issue://77/privacy-repo-over-personal
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://negation-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: private
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: destination-shared-policy
+    query: What model policy is available to repo recall without local opt-in?
+    slices: [privacy]
+    provenance:
+      kind: human_written
+      reference: issue://77/destination-shared-policy
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://negation-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: private
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: lifecycle-ignore-expired
+    query: Which active release procedure replaces the expired migration window?
+    slices: [lifecycle, procedure, destination]
+    provenance:
+      kind: human_written
+      reference: issue://77/lifecycle-ignore-expired
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: lifecycle-ignore-tombstone
+    query: How should deployment work after direct deployment was deleted?
+    slices: [lifecycle, procedure, destination]
+    provenance:
+      kind: human_written
+      reference: issue://77/lifecycle-ignore-tombstone
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: lifecycle-ignore-superseded
+    query: Which current channel guidance supersedes the obsolete beta record?
+    slices: [lifecycle, temporal_conflict, destination]
+    provenance:
+      kind: human_written
+      reference: issue://77/lifecycle-ignore-superseded
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://temporal-current]
+        rationale: The record directly answers this substantive development query.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: ambiguous-release-pointer
+    query: release pointer
+    slices: [ambiguous_short]
+    provenance:
+      kind: human_written
+      reference: issue://77/ambiguous-release-pointer
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://semantic-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: ambiguous-model-policy
+    query: model install policy
+    slices: [ambiguous_short]
+    provenance:
+      kind: human_written
+      reference: issue://77/ambiguous-model-policy
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://negation-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: ambiguous-roadmap-source
+    query: roadmap source
+    slices: [ambiguous_short]
+    provenance:
+      kind: human_written
+      reference: issue://77/ambiguous-roadmap-source
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [issue://47]
+        rationale: The record directly answers this substantive development query.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: multi-release-safety
+    query: What current guidance covers safe activation and the stable release channel?
+    slices: [multi_relevant]
+    provenance:
+      kind: human_written
+      reference: issue://77/multi-release-safety
+    scope_kind: repo
+    top_k: 3
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 2
         eligible: true
         expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-08
-    query: safe rollout activation question 08
-    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 2
+        eligible: true
+        expected_citations: [fixture://temporal-current]
+        rationale: The record directly answers this substantive development query.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: multi-model-evidence
+    query: Which memories cover explicit model installation and its cited PR evidence?
+    slices: [multi_relevant]
     provenance:
       kind: human_written
-      reference: issue://77/development-08
+      reference: issue://77/multi-model-evidence
     scope_kind: repo
-    top_k: 2
+    top_k: 3
     context_budget: 500
     judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
       - record_id: citation-target
-        relevance: 3
+        relevance: 2
         eligible: true
         expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-09
-    query: atomic release pointer fully built generation current pointer development example 09
-    slices: [identifiers, hard_negatives]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-09
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
+        rationale: The record directly answers this substantive development query.
       - record_id: lexical-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-10
-    query: quartz lexical sentinel ordinary title body terms development example 10
-    slices: [negation, temporal_conflict]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-10
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 2
+        eligible: true
+        expected_citations: [fixture://negation-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-11
-    query: indigo citation sentinel cited roadmap source development example 11
-    slices: [procedure, causal]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-11
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: multi-roadmap-release
+    query: Return both the active roadmap citation and atomic rollout procedure.
+    slices: [multi_relevant, path]
+    provenance:
+      kind: human_written
+      reference: issue://77/multi-roadmap-release
+    path: docs/roadmap.md
+    scope_kind: repo
+    top_k: 3
+    context_budget: 500
+    judgments:
       - record_id: citation-target
-        relevance: 3
+        relevance: 2
         eligible: true
         expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-12
-    query: atomic release pointer fully built generation current pointer development example 12
-    slices: [path, scope, privacy]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-12
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
+        rationale: The record directly answers this substantive development query.
       - record_id: lexical-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-13
-    query: quartz lexical sentinel ordinary title body terms development example 13
-    slices: [destination, lifecycle]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-13
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-14
-    query: pointer 14
-    slices: [ambiguous_short, multi_relevant]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-14
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 3
-        eligible: true
-        expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 2
         eligible: true
         expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: path
+        rationale: This fixture exercises the path exclusion boundary.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-15
-    query: safe rollout activation question 15
-    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-15
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: scope-distractor
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
         relevance: 0
         eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-16
-    query: quartz lexical sentinel ordinary title body terms development example 16
-    slices: [identifiers, hard_negatives]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-16
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
         relevance: 0
         eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-17
-    query: indigo citation sentinel cited roadmap source development example 17
-    slices: [negation, temporal_conflict]
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: abbreviation-adr-source
+    query: Expand the ADR reference connected to the active roadmap decision.
+    slices: [synonyms_abbreviation, identifiers]
     provenance:
       kind: human_written
-      reference: issue://77/development-17
+      reference: issue://77/abbreviation-adr-source
     scope_kind: repo
     top_k: 2
     context_budget: 500
     judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
       - record_id: citation-target
         relevance: 3
         eligible: true
         expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-18
-    query: atomic release pointer fully built generation current pointer development example 18
-    slices: [procedure, causal]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-18
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
+        rationale: The record directly answers this substantive development query.
       - record_id: lexical-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-19
-    query: quartz lexical sentinel ordinary title body terms development example 19
-    slices: [path, scope, privacy]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-19
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-20
-    query: indigo citation sentinel cited roadmap source development example 20
-    slices: [destination, lifecycle]
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: abbreviation-pr-evidence
+    query: Locate the pull-request evidence abbreviated as PR-77.
+    slices: [synonyms_abbreviation, identifiers]
     provenance:
       kind: human_written
-      reference: issue://77/development-20
+      reference: issue://77/abbreviation-pr-evidence
     scope_kind: repo
     top_k: 2
     context_budget: 500
     judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
       - record_id: citation-target
         relevance: 3
         eligible: true
         expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-21
-    query: pointer 21
-    slices: [ambiguous_short, multi_relevant]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-21
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
+        rationale: The record directly answers this substantive development query.
       - record_id: lexical-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-22
-    query: safe rollout activation question 22
-    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-22
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-23
-    query: indigo citation sentinel cited roadmap source development example 23
-    slices: [identifiers, hard_negatives]
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: abbreviation-commit-evidence
+    query: Which memory names commit abc123 alongside an ADR?
+    slices: [synonyms_abbreviation, identifiers]
     provenance:
       kind: human_written
-      reference: issue://77/development-23
+      reference: issue://77/abbreviation-commit-evidence
     scope_kind: repo
     top_k: 2
     context_budget: 500
     judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
       - record_id: citation-target
         relevance: 3
         eligible: true
         expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-24
-    query: atomic release pointer fully built generation current pointer development example 24
-    slices: [negation, temporal_conflict]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-24
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
+        rationale: The record directly answers this substantive development query.
       - record_id: lexical-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: causal-no-first-use-download
+    query: Why is first-use automatic model download not allowed?
+    slices: [causal, hard_negatives]
+    provenance:
+      kind: human_written
+      reference: issue://77/causal-no-first-use-download
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
       - record_id: citation-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: semantic-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 3
+        eligible: true
+        expected_citations: [fixture://negation-target]
+        rationale: The record directly answers this substantive development query.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: scope-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: scope
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: causal-atomic-not-direct
+    query: Why use pointer replacement instead of direct live-file deployment?
+    slices: [causal, hard_negatives, procedure]
+    provenance:
+      kind: human_written
+      reference: issue://77/causal-atomic-not-direct
+    scope_kind: repo
+    top_k: 2
+    context_budget: 500
+    judgments:
+      - record_id: citation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: lexical-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 3
         eligible: true
         expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
+        rationale: The record directly answers this substantive development query.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-25
-    query: quartz lexical sentinel ordinary title body terms development example 25
-    slices: [procedure, causal]
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: temporal-old
+        relevance: 0
+        eligible: false
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
+        relevance: 0
+        eligible: false
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
+        relevance: 0
+        eligible: false
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.
+  - id: causal-current-not-obsolete
+    query: Why should stable-channel guidance win over beta guidance?
+    slices: [causal, hard_negatives, temporal_conflict]
     provenance:
       kind: human_written
-      reference: issue://77/development-25
+      reference: issue://77/causal-current-not-obsolete
     scope_kind: repo
     top_k: 2
     context_budget: 500
     judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
       - record_id: citation-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-26
-    query: indigo citation sentinel cited roadmap source development example 26
-    slices: [path, scope, privacy]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-26
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: lexical-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 3
-        eligible: true
-        expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: semantic-target
         relevance: 0
         eligible: true
         hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: negation-target
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: hard-negative
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
+      - record_id: path-distractor
+        relevance: 0
+        eligible: true
+        hard_negative: true
+        rationale: Eligible record that should not outrank the relevant judgment.
       - record_id: scope-distractor
         relevance: 0
         eligible: false
         forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-27
-    query: atomic release pointer fully built generation current pointer development example 27
-    slices: [destination, lifecycle]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-27
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
+        rationale: This fixture exercises the scope exclusion boundary.
+      - record_id: temporal-current
         relevance: 3
         eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: scope-distractor
+        expected_citations: [fixture://temporal-current]
+        rationale: The record directly answers this substantive development query.
+      - record_id: temporal-old
         relevance: 0
         eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-28
-    query: pointer 28
-    slices: [ambiguous_short, multi_relevant]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-28
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 2
-        eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: scope-distractor
+        forbidden_reason: superseded
+        rationale: This fixture exercises the superseded exclusion boundary.
+      - record_id: expired-procedure
         relevance: 0
         eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-29
-    query: safe rollout activation question 29
-    slices: [paraphrase, zero_overlap, synonyms_abbreviation]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-29
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 3
-        eligible: true
-        expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
+        forbidden_reason: expired
+        rationale: This fixture exercises the expired exclusion boundary.
+      - record_id: tombstoned-procedure
         relevance: 0
         eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-30
-    query: atomic release pointer fully built generation current pointer development example 30
-    slices: [identifiers, hard_negatives]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-30
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: scope-distractor
+        forbidden_reason: tombstoned
+        rationale: This fixture exercises the tombstoned exclusion boundary.
+      - record_id: local-destination-private-distractor
         relevance: 0
         eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-31
-    query: quartz lexical sentinel ordinary title body terms development example 31
-    slices: [negation, temporal_conflict]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-31
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://lexical-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-32
-    query: indigo citation sentinel cited roadmap source development example 32
-    slices: [procedure, causal]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-32
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 3
-        eligible: true
-        expected_citations: [issue://47]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: semantic-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
-  - id: development-33
-    query: atomic release pointer fully built generation current pointer development example 33
-    slices: [path, scope, privacy]
-    provenance:
-      kind: human_written
-      reference: issue://77/development-33
-    scope_kind: repo
-    top_k: 2
-    context_budget: 500
-    judgments:
-      - record_id: lexical-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: citation-target
-        relevance: 0
-        eligible: true
-        hard_negative: true
-        rationale: Eligible but intentionally irrelevant hard negative.
-      - record_id: semantic-target
-        relevance: 3
-        eligible: true
-        expected_citations: [fixture://semantic-target]
-        rationale: Relevant development judgment for the declared slice.
-      - record_id: scope-distractor
-        relevance: 0
-        eligible: false
-        forbidden_reason: scope
-        rationale: Team beta remains outside the repo eligibility boundary.
+        forbidden_reason: destination
+        rationale: Private local memory is outside repo recall eligibility.

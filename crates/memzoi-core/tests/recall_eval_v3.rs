@@ -109,6 +109,17 @@ fn recall_v3_runs_lexical_baseline_in_isolated_state() -> anyhow::Result<()> {
 #[test]
 fn manifest_driven_exact_union_preserves_signals_and_citations() -> anyhow::Result<()> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let corpus: RecallV3Corpus = serde_yaml::from_slice(&std::fs::read(root.join("corpus.yaml"))?)?;
+    let expected_comparisons = corpus
+        .cases
+        .iter()
+        .map(|case| {
+            case.judgments
+                .iter()
+                .filter(|judgment| judgment.eligible)
+                .count()
+        })
+        .sum::<usize>();
     let mut candidate =
         ManifestDrivenRecallCandidate::load(root.join("candidates/exact-union.json"))?;
     let report =
@@ -121,7 +132,7 @@ fn manifest_driven_exact_union_preserves_signals_and_citations() -> anyhow::Resu
     assert_eq!(candidate.aggregate.citation_integrity, 1.0);
     assert_eq!(
         candidate.resource_observations["exact_distance_comparisons"],
-        (candidate.cases.len() * 3) as f64
+        expected_comparisons as f64
     );
     assert!(
         candidate

@@ -10,6 +10,8 @@ visibility: repo
 confidence: 1
 source: eval
 source_ref: fixture://semantic-target
+applies_to:
+  - docs/roadmap.md
 ---
 
 # Atomic release pointer
