@@ -1,29 +1,100 @@
 # Memzoi
 
-File-native project memory for coding agents.
+**The unified memory provider for AI agents.**
 
+AI coding agents are becoming interchangeable. Their memory should not be.
 
-> **Motivation for building**
->
-> I am constantly trying out different AI providers, agent harnesses, CLIs, and prompting workflows. Most of them have some form of memory, but that memory is usually siloed inside the tool that created it. As I move between tools, useful project knowledge gets fragmented across chats, prompts, provider state, and local runtimes.
->
-> The result is that a new agent often feels dumber than it should because it cannot see the context another agent already helped uncover.
->
-> Memzoi is a way to collect, review, and reuse that knowledge as file-native project memory: durable enough to survive tool switches, transparent enough for humans to review, and portable enough for different agents to build on.
+Every day I switch between AI providers, coding agents, CLIs, editors, and prompting workflows. Each one can discover valuable knowledge about a project, but that knowledge usually stays trapped inside the tool that created it.
 
-Memzoi, pronounced "mem-zoy", gives AI coding agents a safe way to recall durable project knowledge, propose new memory, run pre-action checks, and export reviewable agent instructions. Canonical memory lives in human-readable files, while generated indexes and exports are disposable runtime state.
+When I move from Claude to Codex, or from Copilot to another agent, the new agent often feels dumber because it has no memory of everything that has already been learned.
 
-Memzoi is currently a local-first v0 for dogfooding and early experimentation. The CLI and MCP server are available through release binaries or from a source checkout; package-manager installs are roadmap items.
+Memzoi exists to solve that problem.
+
+Instead of every AI tool maintaining its own isolated memory, Memzoi aims to provide one shared memory layer that every coding agent can use.
+
+Today that starts with file-native, reviewable repository memory. Over time it will extend to personal memory, runtime memory, cross-agent memory, intelligent retrieval, and long-term knowledge that survives conversations, providers, and entire development environments.
+
+The goal is simple:
+
+> No matter which coding agent you use, you should only need one memory provider.
+
+Memzoi, pronounced "mem-zoy", is currently a local-first v0 for dogfooding and early experimentation. It gives coding agents a safe way to recall durable project knowledge, propose new memory, run pre-action checks, and export reviewable agent instructions. The CLI and MCP server are available through release binaries or from a source checkout; package-manager installs are roadmap items.
 
 ## Why Memzoi?
 
-- Keep durable agent memory in Markdown/YAML files that humans can review and diff.
-- Separate canonical repo memory from generated SQLite indexes and exports.
-- Require proposed, reviewable writes before durable memory changes are applied.
-- Build prompt-ready context packs for the task at hand.
-- Build compact handoff packs when switching agents or harnesses.
-- Check risky paths, actions, and shell commands against known warnings.
-- Expose safe recall and proposal workflows through a minimal stdio MCP server.
+Most AI memory systems optimize for one specific agent or provider. Many are cloud-hosted, opaque, difficult to review or version, and impossible to share through normal software engineering workflows.
+
+Memzoi takes a different approach: repository knowledge should look and behave like the rest of your project.
+
+If an AI discovers something important about the codebase, that knowledge should be reviewable in exactly the same way as code—not hidden inside another database, trapped inside another provider, or locked to a single model.
+
+## Core Principles
+
+### One memory model
+
+Repository memory. Personal memory. Session memory. Future memory types.
+
+Every kind of memory should follow the same lifecycle, provenance model, and retrieval APIs.
+
+### Git-native where Git makes sense
+
+Shared project knowledge belongs in Git. Repository memories should appear as normal file changes that are reviewed through `git diff`, staged changes, pull requests, and code review.
+
+Developers should not need to remember to open a separate memory inbox before every commit. Git is already where durable project changes are reviewed; Memzoi should integrate with it instead of replacing it.
+
+### Personal memory stays personal
+
+Not everything belongs in Git. Personal preferences, working habits, private notes, and runtime memories should remain private while still being available across coding agents.
+
+Repository memory and personal memory should work together without becoming the same thing.
+
+### Agent-independent
+
+The memory belongs to the developer—not to Claude, Codex, Copilot, Cursor, OpenAI, Anthropic, or any other provider.
+
+Any agent should be able to contribute to the same memory and benefit from knowledge discovered by previous agents.
+
+### Reviewable by default
+
+Knowledge should never silently become canonical. Personal memory may be captured automatically, but shared repository memory should remain explicit and reviewable through normal software engineering workflows.
+
+### Retrieval is replaceable
+
+Lexical search, semantic search, embeddings, graph retrieval, and future retrieval methods are implementation details.
+
+The canonical memory remains the same. Derived indexes should always be rebuildable.
+
+## Vision
+
+Memzoi is building a unified memory layer for AI agents.
+
+Today:
+
+- ✅ File-native repository memory
+- ✅ Reviewable Git workflow
+- ✅ Agent integrations
+- ✅ Context generation
+- ✅ Memory lifecycle
+- ✅ Provenance
+
+Tomorrow:
+
+- Personal memory
+- Runtime memory
+- Cross-agent memory
+- Intelligent retrieval
+- Automatic capture
+- Memory consolidation
+- Knowledge promotion
+- Organization memory
+
+## Long-term Goal
+
+The long-term goal is not to become another vector database, LLM framework, or agent.
+
+The goal is to become the memory system every coding agent wants to use.
+
+Whether the agent is Claude, Codex, Copilot, Cursor, Antigravity, or something that does not exist yet, they should all be able to share the same durable knowledge through Memzoi.
 
 ## Status
 
