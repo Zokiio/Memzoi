@@ -16,4 +16,4 @@ applies_to:
 
 # Indigo citation sentinel
 
-The indigo citation sentinel preserves its issue source and cited roadmap path.
+The indigo citation sentinel preserves ADR-042, PR-77, commit abc123, its issue source, and the cited roadmap path.

@@ -16,7 +16,7 @@ pub const RECALL_CANDIDATE_MANIFEST_VERSION: &str = "memzoi-recall-candidate/v2"
 pub const RECALL_VECTOR_ARTIFACT_VERSION: &str = "memzoi-recall-vectors/v1";
 pub const RECALL_DEVELOPMENT_LOG_VERSION: &str = "memzoi-recall-development-log/v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecallCandidateArchitecture {
     SemanticOnly,
@@ -179,6 +179,17 @@ pub struct ManifestDrivenRecallCandidate {
 impl ManifestDrivenRecallCandidate {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        let artifact_root = parent_or_current(path);
+        Self::load_with_artifact_root(path, artifact_root)
+    }
+
+    /// Loads a versioned manifest while resolving its logical vector-artifact
+    /// key below a separate local artifact root.
+    pub fn load_with_artifact_root(
+        path: impl AsRef<Path>,
+        artifact_root: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let path = path.as_ref();
         let metadata = fs::symlink_metadata(path)
             .with_context(|| format!("failed to inspect candidate manifest {}", path.display()))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -190,10 +201,17 @@ impl ManifestDrivenRecallCandidate {
             .with_context(|| format!("failed to parse candidate manifest {}", path.display()))?;
         validate_manifest(&manifest)?;
         let manifest_digest = digest_json(&manifest)?;
-        let artifact_path = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(&manifest.storage.vector_artifact);
+        let artifact_root = artifact_root.as_ref();
+        let artifact_root_metadata = fs::symlink_metadata(artifact_root).with_context(|| {
+            format!(
+                "failed to inspect candidate artifact root {}",
+                artifact_root.display()
+            )
+        })?;
+        if artifact_root_metadata.file_type().is_symlink() || !artifact_root_metadata.is_dir() {
+            bail!("candidate artifact root must be a non-symlink directory");
+        }
+        let artifact_path = artifact_root.join(&manifest.storage.vector_artifact);
         let state = if (manifest.environment.target_os == std::env::consts::OS
             && manifest.environment.target_arch == std::env::consts::ARCH)
             || (manifest.environment.target_os == "portable-fixture"
@@ -225,6 +243,12 @@ impl ManifestDrivenRecallCandidate {
             ),
         }
     }
+}
+
+fn parent_or_current(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 impl RecallV3Candidate for ManifestDrivenRecallCandidate {
@@ -633,4 +657,21 @@ fn digest_json(value: &impl Serialize) -> Result<String> {
     Ok(blake3::hash(&serde_json_canonicalizer::to_vec(value)?)
         .to_hex()
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_manifest_paths_resolve_artifacts_from_current_directory() {
+        assert_eq!(
+            parent_or_current(Path::new("candidate.json")),
+            Path::new(".")
+        );
+        assert_eq!(
+            parent_or_current(Path::new("fixtures/candidate.json")),
+            Path::new("fixtures")
+        );
+    }
 }

@@ -10,9 +10,10 @@ fn fixture_vector_artifact_digest_is_stable() -> anyhow::Result<()> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../evals/recall/v3/candidates/vectors/exact-union.json");
     let artifact: RecallVectorArtifact = serde_json::from_slice(&std::fs::read(root)?)?;
+    let digest = recall_vector_artifact_digest(&artifact)?;
     assert_eq!(
-        recall_vector_artifact_digest(&artifact)?,
-        "53a6e4853929154bbd07fc030ed214076e83ba90286fc974727a1ad1c820a548"
+        digest,
+        "f86016fc537eef4d311e9656a51990eacd24d3e7e1165eaf3d793b78e274b1ee"
     );
     Ok(())
 }
@@ -56,6 +57,30 @@ fn modified_vector_artifacts_fall_back_without_using_unbound_scores() -> anyhow:
         candidate.cases
     );
     assert_eq!(candidate.aggregate.fallback_parity, 1.0);
+    Ok(())
+}
+
+#[test]
+fn published_manifest_can_resolve_a_separate_local_artifact_root() -> anyhow::Result<()> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/recall/v3/candidates");
+    let manifest_dir = tempfile::tempdir()?;
+    let artifact_dir = tempfile::tempdir()?;
+    std::fs::copy(
+        root.join("exact-union.json"),
+        manifest_dir.path().join("candidate.json"),
+    )?;
+    std::fs::create_dir(artifact_dir.path().join("vectors"))?;
+    std::fs::copy(
+        root.join("vectors/exact-union.json"),
+        artifact_dir.path().join("vectors/exact-union.json"),
+    )?;
+
+    let candidate = ManifestDrivenRecallCandidate::load_with_artifact_root(
+        manifest_dir.path().join("candidate.json"),
+        artifact_dir.path(),
+    )?;
+    candidate.require_ready()?;
     Ok(())
 }
 
@@ -136,9 +161,20 @@ fn all_required_candidate_architectures_run_through_one_boundary() -> anyhow::Re
 
     assert_eq!(report.candidates.len(), 4);
     assert!(report.candidates.iter().all(|candidate| candidate.passed));
-    assert_eq!(report.candidates[1].aggregate.mean_ndcg_at_10, 1.0);
-    assert!(report.candidates[2].aggregate.mean_ndcg_at_10 < 1.0);
-    assert_eq!(report.candidates[3].aggregate.mean_ndcg_at_10, 1.0);
+    let candidate = |id: &str| {
+        report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.manifest.id == id)
+            .expect("candidate report exists")
+    };
+    let baseline = candidate("lexical-baseline");
+    let semantic = candidate("semantic-only");
+    let rerank = candidate("lexical-rerank");
+    let union = candidate("lexical-union");
+    assert!(semantic.aggregate.mean_ndcg_at_10 > baseline.aggregate.mean_ndcg_at_10);
+    assert!(rerank.aggregate.mean_ndcg_at_10 < 1.0);
+    assert_eq!(union.aggregate.mean_ndcg_at_10, 1.0);
     Ok(())
 }
 

@@ -117,11 +117,73 @@ fn eval_recall_v3_help_exposes_local_locked_commitment_controls() {
         .stdout(
             predicate::str::contains("--corpus <CORPUS>")
                 .and(predicate::str::contains("--candidate <CANDIDATES>"))
+                .and(predicate::str::contains("--artifact-root <ARTIFACT_ROOTS>"))
                 .and(predicate::str::contains("--prepare-locked-commitment"))
                 .and(predicate::str::contains("--verify-locked-commitment"))
                 .and(predicate::str::contains("--require-ready-candidates"))
                 .and(predicate::str::contains("--commitment <COMMITMENT>")),
         );
+}
+
+#[test]
+fn eval_recall_v3_help_exposes_complete_development_workflow() {
+    let mut candidate = memzoi();
+    candidate
+        .args(["eval", "recall-v3", "candidate", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("build"));
+
+    let mut development = memzoi();
+    development
+        .args(["eval", "recall-v3", "development", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("run")
+                .and(predicate::str::contains("freeze"))
+                .and(predicate::str::contains("publish")),
+        );
+
+    let mut freeze = memzoi();
+    freeze
+        .args(["eval", "recall-v3", "development", "freeze", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--run <RUN>")
+                .and(predicate::str::contains("--corpus <CORPUS>"))
+                .and(predicate::str::contains("--matrix <MATRIX>"))
+                .and(predicate::str::contains("--profile-root <PROFILE_ROOT>")),
+        );
+}
+
+#[test]
+fn candidate_build_without_model_feature_fails_explicitly() {
+    let mut cmd = memzoi();
+    cmd.args([
+        "eval",
+        "recall-v3",
+        "candidate",
+        "build",
+        "--profile",
+        "profile.json",
+        "--matrix",
+        "matrix.json",
+        "--corpus",
+        "corpus.yaml",
+        "--model-root",
+        "models",
+        "--template",
+        "title_body/v1",
+        "--output",
+        "output",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(
+        "candidate build requires --features recall-models",
+    ));
 }
 
 #[test]

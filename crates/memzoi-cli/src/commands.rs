@@ -291,43 +291,57 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
         } => export_command(&format, &scope_kind, json),
         Commands::Rebuild { json } => rebuild_command(json),
         Commands::Doctor { project_root, json } => doctor_command(project_root, json),
-        Commands::Eval { command } => match command {
-            EvalCommands::RecallOperational { evidence, json } => {
-                eval::recall_operational_eval_command(evidence, json)
+        Commands::Eval { command } => {
+            match command {
+                EvalCommands::RecallOperational { evidence, json } => {
+                    eval::recall_operational_eval_command(evidence, json)
+                }
+                EvalCommands::RecallCompetitors { evidence, json } => {
+                    eval::recall_competitor_eval_command(evidence, json)
+                }
+                EvalCommands::RecallV3 {
+                    command,
+                    corpus,
+                    candidates,
+                    artifact_roots,
+                    commitment,
+                    prepare_locked_commitment,
+                    verify_locked_commitment,
+                    require_ready_candidates,
+                    json,
+                } => {
+                    if let Some(command) = command {
+                        eval::recall_v3_subcommand(*command)
+                    } else {
+                        let corpus = corpus.ok_or_else(|| anyhow::anyhow!(
+                        "--corpus <PATH> is required when no recall-v3 subcommand is selected"
+                    ))?;
+                        eval::recall_v3_eval_command(eval::RecallV3EvalRequest {
+                            corpus,
+                            candidate_paths: candidates,
+                            artifact_roots,
+                            commitment,
+                            prepare_locked_commitment,
+                            verify_locked_commitment,
+                            require_ready_candidates,
+                            as_json: json,
+                        })
+                    }
+                }
+                EvalCommands::Recall {
+                    corpus,
+                    baseline,
+                    update_baseline,
+                    json,
+                } => eval::recall_eval_command(corpus, baseline, update_baseline, json),
+                EvalCommands::Capture {
+                    corpus,
+                    baseline,
+                    update_baseline,
+                    json,
+                } => eval::capture_eval_command(corpus, baseline, update_baseline, json),
             }
-            EvalCommands::RecallCompetitors { evidence, json } => {
-                eval::recall_competitor_eval_command(evidence, json)
-            }
-            EvalCommands::RecallV3 {
-                corpus,
-                candidates,
-                commitment,
-                prepare_locked_commitment,
-                verify_locked_commitment,
-                require_ready_candidates,
-                json,
-            } => eval::recall_v3_eval_command(
-                corpus,
-                candidates,
-                commitment,
-                prepare_locked_commitment,
-                verify_locked_commitment,
-                require_ready_candidates,
-                json,
-            ),
-            EvalCommands::Recall {
-                corpus,
-                baseline,
-                update_baseline,
-                json,
-            } => eval::recall_eval_command(corpus, baseline, update_baseline, json),
-            EvalCommands::Capture {
-                corpus,
-                baseline,
-                update_baseline,
-                json,
-            } => eval::capture_eval_command(corpus, baseline, update_baseline, json),
-        },
+        }
         Commands::Quickstart { apply_sample, json } => quickstart_command(apply_sample, json),
         Commands::Update {
             check,

@@ -1,0 +1,30 @@
+{
+  "version": "memzoi-recall-model-profile/v1",
+  "id": "bge-small-en-v1.5",
+  "repository": "Xenova/bge-small-en-v1.5",
+  "revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
+  "license": "MIT",
+  "provenance": {
+    "upstream_repository": "BAAI/bge-small-en-v1.5",
+    "upstream_revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    "artifact_repository": "Xenova/bge-small-en-v1.5",
+    "artifact_revision": "ea104dacec62c0de699686887e3f920caeb4f3e3",
+    "conversion": "Xenova ONNX conversion; tool version not published by the artifact repository",
+    "upstream_license": "MIT",
+    "artifact_license": "MIT"
+  },
+  "dimensions": 384,
+  "pooling": "cls",
+  "normalization": "l2",
+  "query_prefix": "",
+  "document_prefix": "",
+  "max_length": 512,
+  "allowed_origins": ["https://huggingface.co", "https://cdn-lfs.hf.co", "https://cas-bridge.xethub.hf.co", "https://us.aws.cdn.hf.co"],
+  "files": [
+    {"path":"model.onnx","url":"https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/ea104dacec62c0de699686887e3f920caeb4f3e3/onnx/model.onnx","sha256":"828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35","bytes":133093490},
+    {"path":"tokenizer.json","url":"https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/ea104dacec62c0de699686887e3f920caeb4f3e3/tokenizer.json","sha256":"d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66","bytes":711396},
+    {"path":"config.json","url":"https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/ea104dacec62c0de699686887e3f920caeb4f3e3/config.json","sha256":"fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350","bytes":683},
+    {"path":"special_tokens_map.json","url":"https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/ea104dacec62c0de699686887e3f920caeb4f3e3/special_tokens_map.json","sha256":"b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3","bytes":125},
+    {"path":"tokenizer_config.json","url":"https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/ea104dacec62c0de699686887e3f920caeb4f3e3/tokenizer_config.json","sha256":"9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3","bytes":366}
+  ]
+}

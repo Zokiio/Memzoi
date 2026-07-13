@@ -1,0 +1,36 @@
+{
+  "version": "memzoi-recall-development-matrix/v1",
+  "profiles": [
+    "profiles/bge-small-en-v1.5.json",
+    "profiles/multilingual-e5-small.json",
+    "profiles/snowflake-arctic-embed-m-v2.0.json"
+  ],
+  "templates": [
+    "title_body/v1",
+    "type_title_body/v1"
+  ],
+  "architectures": [
+    "semantic_only",
+    "lexical_rerank",
+    "lexical_semantic_union"
+  ],
+  "parameters": {
+    "lexical_candidates": 20,
+    "semantic_candidates": 20,
+    "final_results": 10,
+    "similarity_cutoff": 0.0,
+    "lexical_weight": 1.0,
+    "semantic_weight": 1.0,
+    "reciprocal_rank_k": 60.0,
+    "lexical_rerank_fusion": "weighted_sum",
+    "lexical_semantic_union_fusion": "reciprocal_rank",
+    "path_weight": 0.0,
+    "type_weight": 0.0,
+    "lane_weight": 0.0,
+    "destination_weight": 0.0,
+    "confidence_weight": 0.0,
+    "tie_break": "record_id_ascending",
+    "batch_size": 32,
+    "threads": 4
+  }
+}

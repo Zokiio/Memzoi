@@ -16,6 +16,9 @@ help:
 	@printf '%s\n' '  smoke             Run developer smoke checks'
 	@printf '%s\n' '  onboarding-smoke  Run first-run onboarding smoke checks'
 	@printf '%s\n' '  capture-smoke     Run CLI and MCP capture through built binaries'
+	@printf '%s\n' '  recall-v3-development-run  Build and evaluate the complete offline 18-candidate matrix'
+	@printf '%s\n' '  recall-v3-development-freeze  Verify evidence and freeze development finalists'
+	@printf '%s\n' '  recall-v3-development-publish  Publish verified evidence without model/vector artifacts'
 
 build:
 	cargo build --workspace
@@ -29,12 +32,35 @@ eval: eval-recall eval-capture eval-v0.5-foundation
 eval-recall-v3:
 	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml
 
-.PHONY: eval-recall-v3-candidate eval-recall-v3-candidate-matrix
+.PHONY: eval-recall-v3-candidate eval-recall-v3-candidate-matrix recall-v3-model-install recall-v3-model-inspect recall-v3-development-run recall-v3-development-freeze recall-v3-development-publish
 eval-recall-v3-candidate:
 	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml --candidate evals/recall/v3/candidates/exact-union.json --require-ready-candidates
 
 eval-recall-v3-candidate-matrix:
 	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml --candidate evals/recall/v3/candidates/semantic-only.json --candidate evals/recall/v3/candidates/lexical-rerank.json --candidate evals/recall/v3/candidates/lexical-union.json --require-ready-candidates
+
+# Explicit network step. Model files remain under the ignored research root.
+recall-v3-model-install:
+	@set -e; for profile in evals/recall/v3/profiles/*.json; do \
+		cargo run --locked -q -p memzoi-cli -- eval recall-v3 model install --profile "$$profile" --model-root .research/recall-v3/models; \
+	done
+
+# Offline integrity check for all explicitly installed profiles.
+recall-v3-model-inspect:
+	@set -e; for profile in evals/recall/v3/profiles/*.json; do \
+		cargo run --locked -q -p memzoi-cli -- eval recall-v3 model inspect --profile "$$profile" --model-root .research/recall-v3/models; \
+	done
+
+recall-v3-development-run:
+	@test -n "$(RECALL_V3_ATTEMPTED_AT)" || (echo 'RECALL_V3_ATTEMPTED_AT=<RFC3339> is required' >&2; exit 2)
+	cargo run --release --locked -q -p memzoi-cli --features recall-models -- eval recall-v3 development run --matrix evals/recall/v3/development-matrix.json --corpus evals/recall/v3/corpus.yaml --model-root .research/recall-v3/models --output .research/recall-v3/observed --attempted-at "$(RECALL_V3_ATTEMPTED_AT)"
+
+recall-v3-development-freeze:
+	@test -n "$(RECALL_V3_FROZEN_AT)" || (echo 'RECALL_V3_FROZEN_AT=<RFC3339> is required' >&2; exit 2)
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development freeze --run .research/recall-v3/observed --corpus evals/recall/v3/corpus.yaml --matrix evals/recall/v3/development-matrix.json --profile-root evals/recall/v3/profiles --output .research/recall-v3/observed/frozen-candidates.json --frozen-at "$(RECALL_V3_FROZEN_AT)"
+
+recall-v3-development-publish:
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development publish --run .research/recall-v3/observed --corpus evals/recall/v3/corpus.yaml --matrix evals/recall/v3/development-matrix.json --profile-root evals/recall/v3/profiles --output "$${RECALL_V3_PUBLISH_OUTPUT:-evals/recall/v3/observed}"
 
 .PHONY: eval-recall-operational
 eval-recall-operational:

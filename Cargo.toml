@@ -21,6 +21,7 @@ assert_cmd = "2"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
+fastembed = { version = "=5.17.2", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 ignore = "=0.4.28"
 predicates = "3"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
@@ -36,4 +37,5 @@ thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 toml = "1"
 ureq = "2"
+url = "2"
 uuid = { version = "1", features = ["v7", "serde"] }

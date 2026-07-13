@@ -1,0 +1,27 @@
+{
+  "version": "memzoi-recall-development-environment/v1",
+  "git_commit": "54af03dbda99b7d5f1e4223bc7a62111c0de6e9b",
+  "cargo_lock_digest": "ad2b25815593c7698fa6ade3ee9c872fbd0af7d964baf3e9b956add0d1ccb8fa",
+  "rustc_version": "rustc 1.97.0 (2d8144b78 2026-07-07)\nbinary: rustc\ncommit-hash: 2d8144b7880597b6e6d3dfd63a9a9efae3f533d3\ncommit-date: 2026-07-07\nhost: aarch64-apple-darwin\nrelease: 1.97.0\nLLVM version: 22.1.6",
+  "target_triple": "aarch64-apple-darwin",
+  "target_os": "macos",
+  "target_arch": "aarch64",
+  "build_profile": "release",
+  "fastembed_version": "5.17.2",
+  "ort_version": "2.0.0-rc.12",
+  "cpu_model": "Apple M4",
+  "cpu_features": [
+    "aes",
+    "crc",
+    "dotprod",
+    "neon",
+    "sha2"
+  ],
+  "embedding_threads": 4,
+  "network_mode": "application_offline",
+  "model_install_digests": {
+    "bge-small-en-v1.5": "2fa1747a76fd553b6ae8be93e73aff8241c1839ee86e490d1209be613f621df0",
+    "multilingual-e5-small": "4348af0fcd2c01d48cfe1534c1824a7eadf77191259cffa9bdf0f18b9435d2c0",
+    "snowflake-arctic-embed-m-v2.0": "acf4ec70b10ab44c6657e48b20c4201165af5d51b61e0d02953626a65f750a7c"
+  }
+}
