@@ -1012,12 +1012,18 @@ fn model_download_response(
         if !profile.permits_url(url.as_str())? {
             bail!("model download URL has a non-allowlisted origin");
         }
-        let response = agent
+        let response = match agent
             .get(url.as_str())
             .set("User-Agent", concat!("memzoi/", env!("CARGO_PKG_VERSION")))
             .call()
-            .map_err(|error| anyhow::anyhow!("model download failed: {error}"))?;
-        if !(300..400).contains(&response.status()) {
+        {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, _)) => {
+                bail!("model download failed with HTTP status {status}")
+            }
+            Err(error) => bail!("model download failed: {error}"),
+        };
+        if !model_download_status_is_redirect(response.status())? {
             return Ok(response);
         }
         if redirects_followed == MODEL_DOWNLOAD_REDIRECT_LIMIT {
@@ -1033,6 +1039,16 @@ fn model_download_response(
         url = redirected;
     }
     unreachable!("bounded redirect loop returns or fails")
+}
+
+fn model_download_status_is_redirect(status: u16) -> Result<bool> {
+    if (200..300).contains(&status) {
+        return Ok(false);
+    }
+    if (300..400).contains(&status) {
+        return Ok(true);
+    }
+    bail!("model download failed with HTTP status {status}")
 }
 
 pub(crate) fn recall_operational_eval_command(evidence: PathBuf, as_json: bool) -> Result<()> {
@@ -1702,5 +1718,20 @@ mod tests {
             parent_or_current(Path::new("evals/matrix.json")),
             Path::new("evals")
         );
+    }
+
+    #[test]
+    fn model_download_statuses_fail_fast_outside_success_and_redirects() {
+        assert!(!model_download_status_is_redirect(200).unwrap());
+        assert!(!model_download_status_is_redirect(299).unwrap());
+        assert!(model_download_status_is_redirect(300).unwrap());
+        assert!(model_download_status_is_redirect(399).unwrap());
+        assert_eq!(
+            model_download_status_is_redirect(404)
+                .unwrap_err()
+                .to_string(),
+            "model download failed with HTTP status 404"
+        );
+        assert!(model_download_status_is_redirect(500).is_err());
     }
 }
