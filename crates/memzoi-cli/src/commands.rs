@@ -13,6 +13,7 @@ use memzoi_core::{
     ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult,
     SessionEndWrite, Visibility, discover_paths, lifecycle_transaction_artifact_count,
     parse_import_document, parse_session_end_document, scan_file_proposal_inventory,
+    scan_repository_blob,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -21,7 +22,7 @@ use crate::{
     cli::{
         CaptureCommands, CheckpointCommands, Cli, Commands, DraftCommand, EvalCommands,
         EventCommands, ImportCommands, IntegrateCommands, LocalCommands, McpCommands,
-        ProposalCommands, ProposalFileCommands,
+        ProposalCommands, ProposalFileCommands, SafetyCommands,
     },
     eval, integrate, mcp,
     output::{print_json, print_jsonl_row},
@@ -30,6 +31,208 @@ use crate::{
 
 mod capture;
 mod proposal_files;
+
+fn safety_scan_command(
+    staged: bool,
+    range: Option<String>,
+    file: Option<PathBuf>,
+    as_json: bool,
+) -> Result<()> {
+    let selected = usize::from(staged) + usize::from(range.is_some()) + usize::from(file.is_some());
+    if selected != 1 {
+        bail!("safety scan requires exactly one of --staged, --range, or --file");
+    }
+    let cwd = std::env::current_dir().context("failed to inspect current directory")?;
+    let paths = discover_paths(&cwd)?;
+    let project_identity = paths.project_root.as_os_str().as_encoded_bytes();
+    let blobs = if staged {
+        load_staged_memory_blobs(&paths.project_root)?
+    } else if let Some(range) = range.as_deref() {
+        load_range_memory_blobs(&paths.project_root, range)?
+    } else {
+        vec![load_working_tree_memory_blob(
+            &paths.project_root,
+            file.as_deref().context("--file disappeared")?,
+        )?]
+    };
+
+    let mut reports = Vec::with_capacity(blobs.len());
+    for blob in blobs {
+        let report = if blob.regular_blob {
+            scan_repository_blob(project_identity, &blob.path, &blob.bytes)
+        } else {
+            scan_repository_blob(project_identity, Path::new("../unsupported-git-entry"), b"")
+        };
+        reports.push((blob.path, report));
+    }
+    let allowed = reports.iter().all(|(_, report)| report.allowed);
+    if as_json {
+        print_json(&json!({
+            "schema": "memzoi/repository-safety-scan-v1",
+            "allowed": allowed,
+            "files": reports.iter().map(|(path, report)| json!({
+                "path": path,
+                "report": report,
+            })).collect::<Vec<_>>(),
+        }))?;
+    } else if allowed {
+        println!("repository safety scan allowed {} blob(s)", reports.len());
+    } else {
+        println!("repository safety scan blocked");
+        for (path, report) in &reports {
+            for finding in &report.findings {
+                println!(
+                    "{}: {} at {} ({})",
+                    path.display(),
+                    finding.code.as_str(),
+                    finding.field.0,
+                    finding.fingerprint
+                );
+            }
+        }
+    }
+    if !allowed {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+struct SafetyScanBlob {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    regular_blob: bool,
+}
+
+fn load_working_tree_memory_blob(project_root: &Path, path: &Path) -> Result<SafetyScanBlob> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    };
+    let relative = absolute
+        .strip_prefix(project_root)
+        .context("safety scan file must be inside the current repository")?
+        .to_path_buf();
+    require_memory_scan_path(&relative)?;
+    let metadata = fs::symlink_metadata(&absolute)
+        .with_context(|| format!("failed to inspect safety scan file {}", relative.display()))?;
+    let regular_blob = metadata.is_file() && !metadata.file_type().is_symlink();
+    let bytes = if regular_blob {
+        fs::read(&absolute)
+            .with_context(|| format!("failed to read safety scan file {}", relative.display()))?
+    } else {
+        Vec::new()
+    };
+    Ok(SafetyScanBlob {
+        path: relative,
+        bytes,
+        regular_blob,
+    })
+}
+
+fn load_staged_memory_blobs(project_root: &Path) -> Result<Vec<SafetyScanBlob>> {
+    let names = git_output(
+        project_root,
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACMR",
+            "--",
+        ],
+    )?;
+    load_git_memory_blobs(project_root, &names, None)
+}
+
+fn load_range_memory_blobs(project_root: &Path, range: &str) -> Result<Vec<SafetyScanBlob>> {
+    let (base, head) = range
+        .split_once("...")
+        .filter(|(base, head)| !base.is_empty() && !head.is_empty() && !head.contains("..."))
+        .context("--range must use BASE...HEAD syntax")?;
+    let normalized = format!("{base}...{head}");
+    let names = git_output(
+        project_root,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACMR",
+            &normalized,
+            "--",
+        ],
+    )?;
+    load_git_memory_blobs(project_root, &names, Some(head))
+}
+
+fn load_git_memory_blobs(
+    project_root: &Path,
+    names: &[u8],
+    tree: Option<&str>,
+) -> Result<Vec<SafetyScanBlob>> {
+    let mut blobs = Vec::new();
+    for raw in names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let path = std::str::from_utf8(raw).context("Git returned a non-UTF-8 repository path")?;
+        let relative = PathBuf::from(path);
+        if !is_memory_scan_path(&relative) {
+            continue;
+        }
+        let (mode_args, object) = match tree {
+            Some(tree) => (vec!["ls-tree", tree, "--", path], format!("{tree}:{path}")),
+            None => (vec!["ls-files", "--stage", "--", path], format!(":{path}")),
+        };
+        let mode = git_output(project_root, &mode_args)?;
+        let regular_blob = mode.starts_with(b"100644 ") || mode.starts_with(b"100755 ");
+        let bytes = if regular_blob {
+            git_output(project_root, &["cat-file", "blob", &object])?
+        } else {
+            Vec::new()
+        };
+        blobs.push(SafetyScanBlob {
+            path: relative,
+            bytes,
+            regular_blob,
+        });
+    }
+    blobs.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(blobs)
+}
+
+fn git_output(project_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(args)
+        .output()
+        .context("failed to run Git for repository safety scan")?;
+    if !output.status.success() {
+        bail!(
+            "Git safety scan command failed with status {}",
+            output.status
+        );
+    }
+    Ok(output.stdout)
+}
+
+fn require_memory_scan_path(path: &Path) -> Result<()> {
+    if !is_memory_scan_path(path) {
+        bail!(
+            "safety scan path is outside managed repository memory: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn is_memory_scan_path(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized.starts_with(".memzoi/records/")
+        || normalized.starts_with(".memzoi/proposals/")
+        || normalized.starts_with(".memzoi/memory/")
+}
 
 pub(crate) fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -284,6 +487,14 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             scope_kind,
             json,
         } => precheck_command(path, action, command, scope_kind, json),
+        Commands::Safety { command } => match command {
+            SafetyCommands::Scan {
+                staged,
+                range,
+                file,
+                json,
+            } => safety_scan_command(staged, range, file, json),
+        },
         Commands::Export {
             format,
             scope_kind,

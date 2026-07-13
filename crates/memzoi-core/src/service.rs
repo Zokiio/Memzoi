@@ -23,9 +23,10 @@ use crate::{
     CaptureWrite, ContextPack, ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult,
     ImportDocument, ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryLane,
     MemoryPath, MemoryPaths, MemoryRecord, MemoryStatus, MemoryType, OkfProposalAction,
-    OkfProposalFile, OkfProposalOutcome, OkfProposalResolution, OkfProposalSource, PrecheckInput,
-    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput,
-    SearchResult, SupersedeResult, ValidationResult, Visibility,
+    OkfProposalFile, OkfProposalOutcome, OkfProposalResolution, OkfProposalSensitivity,
+    OkfProposalSource, PrecheckInput, PrecheckWarning, Proposal, ProposalStatus,
+    ProposalStatusFilter, ScopeKind, SearchInput, SearchResult, SupersedeResult, ValidationResult,
+    Visibility,
 };
 use crate::{
     config::{
@@ -34,7 +35,13 @@ use crate::{
     context, db,
     events::{AppendEvent, append_event, for_each_event as stream_events},
     expiry::{self, Clock, ExpiryDiagnostic, SystemClock},
-    exporters, handoff, okf, precheck, proposals, search,
+    exporters, handoff, okf, precheck, proposals, repository_io,
+    repository_write_safety::{
+        AuthorizationProof, AuthorizedRepositoryWriteBatch, ProvenanceAssessment,
+        RepositoryContentClass, RepositoryProjection, RepositoryScope, RepositoryWriteRequest,
+        RepositoryWriteRoute, SafetyField, SafetyFieldKind, authorize_repository_write,
+    },
+    search,
     session_end::{
         SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument, SessionEndResult,
         SessionEndWrite, repo_sensitivity_block_reason, session_end_proposal_draft,
@@ -223,6 +230,39 @@ struct CanonicalFileWrite {
 }
 
 #[derive(Debug)]
+struct RepositorySafetyValue {
+    location: String,
+    kind: SafetyFieldKind,
+    value: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct OwnedRepositoryProjection {
+    relative_path: PathBuf,
+    bytes: Vec<u8>,
+    target_revision: Option<String>,
+}
+
+impl OwnedRepositoryProjection {
+    fn from_absolute(
+        paths: &MemoryPaths,
+        path: &Path,
+        bytes: &[u8],
+        target_revision: Option<&str>,
+    ) -> Result<Self> {
+        let relative_path = path
+            .strip_prefix(&paths.project_root)
+            .context("repository projection is outside the current project")?
+            .to_path_buf();
+        Ok(Self {
+            relative_path,
+            bytes: bytes.to_vec(),
+            target_revision: target_revision.map(str::to_owned),
+        })
+    }
+}
+
+#[derive(Debug)]
 struct StagedCanonicalFileWrite {
     path: PathBuf,
     temp_path: PathBuf,
@@ -239,9 +279,10 @@ struct PendingFileProposalSnapshot {
     display_path: PathBuf,
 }
 
-const CAPTURE_APPLY_JOURNAL_SCHEMA: &str = "memzoi/capture-apply-journal-v1";
-const CAPTURE_APPLY_COMMIT_SCHEMA: &str = "memzoi/capture-apply-commit-v1";
-const CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v1.json";
+const CAPTURE_APPLY_JOURNAL_SCHEMA: &str = "memzoi/capture-apply-journal-v2";
+const CAPTURE_APPLY_COMMIT_SCHEMA: &str = "memzoi/capture-apply-commit-v2";
+const CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v2.json";
+const LEGACY_CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v1.json";
 const CAPTURE_APPLY_COMMIT_EVENT: &str = "capture.apply_committed";
 const MAX_CAPTURE_APPLY_JOURNAL_BYTES: u64 = 256 * 1024;
 const MAX_CAPTURE_APPLY_JOURNAL_ENTRIES: usize = 128;
@@ -250,6 +291,11 @@ const MAX_CAPTURE_APPLY_JOURNAL_ENTRIES: usize = 128;
 #[serde(deny_unknown_fields)]
 struct CaptureApplyJournal {
     schema: String,
+    safety_contract_version: String,
+    detector_policy_version: String,
+    route: String,
+    authorization_digest: String,
+    project_context_digest: String,
     journal_id: String,
     plan_id: String,
     review_id: String,
@@ -259,6 +305,26 @@ struct CaptureApplyJournal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CaptureApplyJournalEntry {
+    candidate_id: String,
+    proposal_id: String,
+    content_bytes: u64,
+    content_hash: String,
+    projection_digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyCaptureApplyJournal {
+    schema: String,
+    journal_id: String,
+    plan_id: String,
+    review_id: String,
+    entries: Vec<LegacyCaptureApplyJournalEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyCaptureApplyJournalEntry {
     proposal_id: String,
     content_bytes: u64,
     content_hash: String,
@@ -315,7 +381,7 @@ impl MemoryService {
 
         let conn = db::open_database(&paths.db_path)?;
         db::init_database(&conn)?;
-        if capture_apply_journal_exists(&paths)? {
+        if capture_apply_journal_exists(&paths)? || legacy_capture_apply_journal_exists(&paths)? {
             let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
             recover_capture_apply(&paths, &conn)
                 .context("failed to recover an interrupted capture apply")?;
@@ -440,11 +506,41 @@ impl MemoryService {
 
     pub fn apply_proposal(&self, proposal_id: &str, actor: &str) -> Result<MemoryRecord> {
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        let proposal = proposals::load_proposal_public(&self.conn, proposal_id)?;
+        let mut safety_values = memory_draft_safety_values("proposal", &proposal.payload);
+        safety_values.push(safety_value(
+            "proposal.id".to_owned(),
+            SafetyFieldKind::Identifier,
+            proposal_id,
+        ));
+        authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::DatabaseProposalApply,
+            proposal.payload.sensitivity,
+            proposal.payload.scope_kind,
+            proposal.payload.scope_id.as_deref(),
+            proposal.payload.visibility,
+            AuthorizationProof::ApprovedDatabaseProposal { proposal_id },
+            &safety_values,
+            &[],
+        )?;
         let tx = self.conn.unchecked_transaction()?;
         let record = proposals::apply_proposal(&tx, proposal_id, actor)?;
         let write =
             self.prepare_record_file_write_with_conn(&tx, &record, FileWriteMode::CreateNew)?;
-        commit_db_and_canonical_writes(&self.paths, tx, &[write])?;
+        let projections = canonical_write_projections(&self.paths, std::slice::from_ref(&write))?;
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::DatabaseProposalApply,
+            proposal.payload.sensitivity,
+            proposal.payload.scope_kind,
+            proposal.payload.scope_id.as_deref(),
+            proposal.payload.visibility,
+            AuthorizationProof::ApprovedDatabaseProposal { proposal_id },
+            &safety_values,
+            &projections,
+        )?;
+        commit_db_and_canonical_writes(&self.paths, &authorization, tx, &[write])?;
         Ok(record)
     }
 
@@ -509,12 +605,50 @@ impl MemoryService {
             .join("resolved")
             .join("applied")
             .join(format!("{}.md", proposal.file_id));
-        self.prepare_resolution_destination(&resolved_path)?;
-
         let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
+        let mut projections = canonical_write_projections(&self.paths, &plan.writes)?;
+        projections.push(OwnedRepositoryProjection::from_absolute(
+            &self.paths,
+            &resolved_path,
+            resolved_markdown.as_bytes(),
+            None,
+        )?);
+        let mut safety_values = okf_proposal_safety_values("proposal", &proposal);
+        safety_values.push(safety_value(
+            "resolution.resolved_by".to_owned(),
+            SafetyFieldKind::Identifier,
+            actor,
+        ));
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::FileProposalApply,
+            proposal.sensitivity,
+            proposal.scope_kind,
+            proposal.scope_id.as_deref(),
+            Visibility::Repo,
+            AuthorizationProof::ExplicitCommand {
+                operation: "file_proposal_apply",
+            },
+            &safety_values,
+            &projections,
+        )?;
+        self.prepare_resolution_destination(&resolved_path)?;
         let nonce = Uuid::now_v7().to_string();
-        let mut staged_writes = stage_canonical_writes(&plan.writes, &nonce)?;
-        let resolved_temp = match stage_file(&resolved_path, &resolved_markdown, &nonce) {
+        let mut staged_writes = stage_canonical_writes(
+            &self.paths,
+            &authorization,
+            &projections,
+            &plan.writes,
+            &nonce,
+        )?;
+        let resolved_temp = match stage_authorized_file(
+            &self.paths,
+            &authorization,
+            &projections,
+            &resolved_path,
+            &resolved_markdown,
+            &nonce,
+        ) {
             Ok(path) => path,
             Err(error) => {
                 return attach_cleanup_error(
@@ -1251,7 +1385,33 @@ impl MemoryService {
         }
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let snapshot = self.load_pending_file_proposal_snapshot(proposal_path)?;
-        let proposal = snapshot.proposal.clone();
+        let mut proposal = snapshot.proposal.clone();
+        let original_values = okf_proposal_safety_values("proposal", &proposal);
+        if authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::FileProposalRejectReceipt,
+            proposal.sensitivity,
+            proposal.scope_kind,
+            proposal.scope_id.as_deref(),
+            Visibility::Repo,
+            AuthorizationProof::ExplicitCommand {
+                operation: "file_proposal_reject",
+            },
+            &original_values,
+            &[],
+        )
+        .is_err()
+        {
+            let raw = fs::read_to_string(proposal_path)
+                .context("failed to read rejected proposal during redacted preflight")?;
+            proposal = okf::preflight_okf_proposal_markdown(
+                self.paths.proposals_dir().join("pending"),
+                proposal_path,
+                &raw,
+            )?
+            .context("pending proposal was ignored during redacted rejection")?
+            .receipt_proposal;
+        }
         self.validate_fresh_file_proposal_identity(&proposal)?;
         let mut resolution = OkfProposalResolution {
             outcome: OkfProposalOutcome::Rejected,
@@ -1274,12 +1434,49 @@ impl MemoryService {
             .join("resolved")
             .join("rejected")
             .join(format!("{}.md", proposal.file_id));
-        self.prepare_resolution_destination(&resolved_path)?;
         let archived_proposal = proposal.clone();
         let resolved_markdown =
             okf::render_resolved_okf_proposal_markdown(&archived_proposal, &resolution)?;
+        let projections = vec![OwnedRepositoryProjection::from_absolute(
+            &self.paths,
+            &resolved_path,
+            resolved_markdown.as_bytes(),
+            None,
+        )?];
+        let mut safety_values = okf_proposal_safety_values("receipt", &archived_proposal);
+        safety_values.push(safety_value(
+            "resolution.reason".to_owned(),
+            SafetyFieldKind::Reason,
+            reason,
+        ));
+        safety_values.push(safety_value(
+            "resolution.resolved_by".to_owned(),
+            SafetyFieldKind::Identifier,
+            actor,
+        ));
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::FileProposalRejectReceipt,
+            OkfProposalSensitivity::RepoSafe,
+            ScopeKind::Repo,
+            None,
+            Visibility::Repo,
+            AuthorizationProof::ExplicitCommand {
+                operation: "file_proposal_reject",
+            },
+            &safety_values,
+            &projections,
+        )?;
+        self.prepare_resolution_destination(&resolved_path)?;
         let nonce = Uuid::now_v7().to_string();
-        let resolved_temp = stage_file(&resolved_path, &resolved_markdown, &nonce)?;
+        let resolved_temp = stage_authorized_file(
+            &self.paths,
+            &authorization,
+            &projections,
+            &resolved_path,
+            &resolved_markdown,
+            &nonce,
+        )?;
         let pending_backup = sibling_transaction_path(proposal_path, &nonce, "pending");
 
         let display_pending_path = snapshot.display_path.clone();
@@ -1501,6 +1698,37 @@ impl MemoryService {
         BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
     {
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        let target = record_by_id(&self.conn, record_id)?
+            .with_context(|| format!("memory record not found: {record_id}"))?;
+        validate_legacy_canonical_target(&target)?;
+        if target.scope_kind != draft.scope_kind || target.scope_id != draft.scope_id {
+            bail!(
+                "cannot supersede record {record_id} cross-scope: target={}:{}, replacement={}:{}",
+                target.scope_kind.as_str(),
+                target.scope_id.as_deref().unwrap_or("-"),
+                draft.scope_kind.as_str(),
+                draft.scope_id.as_deref().unwrap_or("-")
+            );
+        }
+        let mut safety_values = memory_draft_safety_values("replacement", &draft);
+        safety_values.push(safety_value(
+            "target_record_id".to_owned(),
+            SafetyFieldKind::Identifier,
+            record_id,
+        ));
+        authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::Supersede,
+            draft.sensitivity,
+            draft.scope_kind,
+            draft.scope_id.as_deref(),
+            draft.visibility,
+            AuthorizationProof::LifecycleOperation {
+                target_id: record_id,
+            },
+            &safety_values,
+            &[],
+        )?;
         let tx = self.conn.unchecked_transaction()?;
         let target = record_by_id(&tx, record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -1514,7 +1742,7 @@ impl MemoryService {
                 draft.scope_id.as_deref().unwrap_or("-")
             );
         }
-        let result = proposals::supersede_record(&tx, record_id, actor, draft)?;
+        let result = proposals::supersede_record(&tx, record_id, actor, draft.clone())?;
         let previous_write = self.prepare_record_file_write_with_conn(
             &tx,
             &result.previous,
@@ -1525,10 +1753,26 @@ impl MemoryService {
             &result.replacement,
             FileWriteMode::CreateNew,
         )?;
+        let writes = [previous_write, replacement_write];
+        let projections = canonical_write_projections(&self.paths, &writes)?;
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::Supersede,
+            draft.sensitivity,
+            draft.scope_kind,
+            draft.scope_id.as_deref(),
+            draft.visibility,
+            AuthorizationProof::LifecycleOperation {
+                target_id: record_id,
+            },
+            &safety_values,
+            &projections,
+        )?;
         commit_db_and_canonical_writes_with_hooks(
             &self.paths,
+            &authorization,
             tx,
-            &[previous_write, replacement_write],
+            &writes,
             before_install,
             before_commit,
         )?;
@@ -1542,6 +1786,34 @@ impl MemoryService {
         reason: &str,
     ) -> Result<MemoryRecord> {
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        let target = record_by_id(&self.conn, record_id)?
+            .with_context(|| format!("memory record not found: {record_id}"))?;
+        validate_legacy_canonical_target(&target)?;
+        let safety_values = vec![
+            safety_value(
+                "target_record_id".to_owned(),
+                SafetyFieldKind::Identifier,
+                record_id,
+            ),
+            safety_value(
+                "tombstone.reason".to_owned(),
+                SafetyFieldKind::Reason,
+                reason,
+            ),
+        ];
+        authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::Tombstone,
+            OkfProposalSensitivity::RepoSafe,
+            target.scope_kind,
+            target.scope_id.as_deref(),
+            target.visibility,
+            AuthorizationProof::LifecycleOperation {
+                target_id: record_id,
+            },
+            &safety_values,
+            &[],
+        )?;
         let tx = self.conn.unchecked_transaction()?;
         let target = record_by_id(&tx, record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -1549,7 +1821,21 @@ impl MemoryService {
         let record = proposals::tombstone_record(&tx, record_id, actor, reason)?;
         let write =
             self.prepare_record_file_write_with_conn(&tx, &record, FileWriteMode::Overwrite)?;
-        commit_db_and_canonical_writes(&self.paths, tx, &[write])?;
+        let projections = canonical_write_projections(&self.paths, std::slice::from_ref(&write))?;
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::Tombstone,
+            OkfProposalSensitivity::RepoSafe,
+            target.scope_kind,
+            target.scope_id.as_deref(),
+            target.visibility,
+            AuthorizationProof::LifecycleOperation {
+                target_id: record_id,
+            },
+            &safety_values,
+            &projections,
+        )?;
+        commit_db_and_canonical_writes(&self.paths, &authorization, tx, &[write])?;
         Ok(record)
     }
 
@@ -1670,11 +1956,61 @@ impl MemoryService {
         document: SessionEndDocument,
     ) -> Result<SessionEndResult> {
         validate_session_end_document(&document)?;
-        if document.candidates.iter().any(|candidate| {
-            candidate.destination == MemoryDestination::Repo
-                && candidate.sensitivity != crate::OkfProposalSensitivity::RepoSafe
-        }) {
-            return Ok(blocked_session_end_result(document));
+        let mut unsafe_repo_candidates = BTreeSet::new();
+        for (index, candidate) in document.candidates.iter().enumerate() {
+            if candidate.destination != MemoryDestination::Repo {
+                continue;
+            }
+            let scope = candidate.scope.as_ref();
+            let mut values = vec![
+                safety_value(
+                    format!("candidate[{index}].title"),
+                    SafetyFieldKind::Text,
+                    &candidate.title,
+                ),
+                safety_value(
+                    format!("candidate[{index}].body"),
+                    SafetyFieldKind::Text,
+                    &candidate.body,
+                ),
+            ];
+            if let Some(reason) = candidate.reason.as_deref() {
+                values.push(safety_value(
+                    format!("candidate[{index}].reason"),
+                    SafetyFieldKind::Reason,
+                    reason,
+                ));
+            }
+            for (tag_index, tag) in candidate.tags.iter().enumerate() {
+                values.push(safety_value(
+                    format!("candidate[{index}].tags[{tag_index}]"),
+                    SafetyFieldKind::Text,
+                    tag,
+                ));
+            }
+            if authorize_repository_projection_batch(
+                &self.paths,
+                RepositoryWriteRoute::SessionEndPromotion,
+                candidate.sensitivity,
+                scope.map_or(ScopeKind::Repo, |scope| scope.kind),
+                scope.and_then(|scope| scope.id.as_deref()),
+                Visibility::Repo,
+                AuthorizationProof::ExplicitCommand {
+                    operation: "session_end_assessment",
+                },
+                &values,
+                &[],
+            )
+            .is_err()
+            {
+                unsafe_repo_candidates.insert(index);
+            }
+        }
+        if !unsafe_repo_candidates.is_empty() {
+            return Ok(blocked_session_end_result(
+                document,
+                &unsafe_repo_candidates,
+            ));
         }
         let has_repo_writes = document
             .candidates
@@ -1686,7 +2022,7 @@ impl MemoryService {
         let timestamp = self.now_timestamp()?;
         let pending_root = self.paths.proposals_dir().join("pending");
         let mut reserved_proposal_ids = if has_repo_writes {
-            prepare_pending_proposal_root(&self.paths)?;
+            preflight_pending_proposal_root(&self.paths)?;
             let inventory = scan_file_proposal_inventory(&self.paths)?;
             require_clean_file_proposal_inventory(&inventory)?;
             reserved_proposal_identities(&self.conn, &inventory)?
@@ -1712,6 +2048,50 @@ impl MemoryService {
             }
         }
 
+        let repo_projections = repo_plans
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(|plan| {
+                OwnedRepositoryProjection::from_absolute(
+                    &self.paths,
+                    &plan.path,
+                    plan.markdown.as_bytes(),
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut safety_values = vec![safety_value(
+            "session_end.task".to_owned(),
+            SafetyFieldKind::SourceReference,
+            document.task.as_bytes(),
+        )];
+        for (index, plan) in repo_plans.iter().filter_map(Option::as_ref).enumerate() {
+            safety_values.extend(okf_proposal_safety_values(
+                &format!("candidate[{index}]"),
+                &plan.parsed,
+            ));
+        }
+        let repo_authorization = has_repo_writes
+            .then(|| {
+                authorize_repository_projection_batch(
+                    &self.paths,
+                    RepositoryWriteRoute::SessionEndPromotion,
+                    OkfProposalSensitivity::RepoSafe,
+                    ScopeKind::Repo,
+                    None,
+                    Visibility::Repo,
+                    AuthorizationProof::ExplicitCommand {
+                        operation: "session_end_promotion",
+                    },
+                    &safety_values,
+                    &repo_projections,
+                )
+            })
+            .transpose()?;
+        if has_repo_writes {
+            prepare_pending_proposal_root(&self.paths)?;
+        }
+
         let mut repo_writes = vec![None::<(String, PathBuf)>; document.candidates.len()];
         let mut runtime_writes =
             vec![None::<(String, MemoryDestination)>; document.candidates.len()];
@@ -1726,13 +2106,23 @@ impl MemoryService {
                     repo_plans.iter().filter_map(Option::as_ref),
                 )?;
             }
-            for (index, plan) in repo_plans.iter().enumerate() {
-                let Some(plan) = plan else {
-                    continue;
-                };
-                let path = okf::create_okf_proposal_file(plan)?;
-                created_proposal_files.push(path.clone());
-                repo_writes[index] = Some((plan.proposal_id.clone(), path));
+            if let Some(authorization) = repo_authorization.as_ref() {
+                let created = create_authorized_repository_batch(
+                    &self.paths,
+                    authorization,
+                    &repo_projections,
+                )?;
+                created_proposal_files.extend(created.iter().cloned());
+                let mut created = created.into_iter();
+                for (index, plan) in repo_plans.iter().enumerate() {
+                    let Some(plan) = plan else {
+                        continue;
+                    };
+                    let path = created
+                        .next()
+                        .context("authorized session-end projection count changed")?;
+                    repo_writes[index] = Some((plan.proposal_id.clone(), path));
+                }
             }
             let tx = self.conn.unchecked_transaction()?;
             for (index, candidate) in document.candidates.iter().enumerate() {
@@ -1843,11 +2233,84 @@ impl MemoryService {
             candidates: results,
         })
     }
-    pub fn plan_import(&self, actor: &str, document: ImportDocument) -> Result<ImportPlan> {
+    pub fn plan_import(&self, actor: &str, mut document: ImportDocument) -> Result<ImportPlan> {
         if actor.trim().is_empty() {
             bail!("import actor cannot be empty");
         }
         import::validate_document(&document)?;
+        let mut shared_values = Vec::new();
+        for (index, source) in document.sources.iter().enumerate() {
+            for (name, value) in [
+                ("path", source.path.as_deref()),
+                ("url", source.url.as_deref()),
+                ("ref", source.reference.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    shared_values.push(safety_value(
+                        format!("sources[{index}].{name}"),
+                        SafetyFieldKind::SourceReference,
+                        value,
+                    ));
+                }
+            }
+        }
+        for (index, candidate) in document.candidates.iter_mut().enumerate() {
+            if candidate.destination != MemoryDestination::Repo
+                || candidate.sensitivity != OkfProposalSensitivity::RepoSafe
+            {
+                continue;
+            }
+            let scope = candidate.scope.as_ref();
+            let mut values = shared_values
+                .iter()
+                .map(|value| RepositorySafetyValue {
+                    location: value.location.clone(),
+                    kind: value.kind,
+                    value: value.value.clone(),
+                })
+                .collect::<Vec<_>>();
+            values.extend([
+                safety_value(
+                    format!("candidate[{index}].title"),
+                    SafetyFieldKind::Text,
+                    &candidate.title,
+                ),
+                safety_value(
+                    format!("candidate[{index}].body"),
+                    SafetyFieldKind::Text,
+                    &candidate.body,
+                ),
+                safety_value(
+                    format!("candidate[{index}].reason"),
+                    SafetyFieldKind::Reason,
+                    &candidate.reason,
+                ),
+            ]);
+            for (tag_index, tag) in candidate.tags.iter().enumerate() {
+                values.push(safety_value(
+                    format!("candidate[{index}].tags[{tag_index}]"),
+                    SafetyFieldKind::Text,
+                    tag,
+                ));
+            }
+            if authorize_repository_projection_batch(
+                &self.paths,
+                RepositoryWriteRoute::ImportApply,
+                candidate.sensitivity,
+                scope.map_or(ScopeKind::Repo, |scope| scope.kind),
+                scope.and_then(|scope| scope.id.as_deref()),
+                Visibility::Repo,
+                AuthorizationProof::ExplicitCommand {
+                    operation: "import_plan",
+                },
+                &values,
+                &[],
+            )
+            .is_err()
+            {
+                candidate.sensitivity = OkfProposalSensitivity::Unknown;
+            }
+        }
         let inventory = scan_file_proposal_inventory(&self.paths)?;
         require_clean_file_proposal_inventory(&inventory)?;
         let existing = self.load_import_duplicates(&inventory.pending)?;
@@ -1884,14 +2347,6 @@ impl MemoryService {
                 plan.plan_id
             );
         }
-        if plan.candidates.iter().any(|candidate| {
-            matches!(
-                &candidate.action,
-                import::ImportCandidateAction::CreateProposal { .. }
-            )
-        }) {
-            prepare_pending_proposal_root(&self.paths)?;
-        }
         let timestamp = self.now_timestamp()?;
         let pending_root = self.paths.proposals_dir().join("pending");
         let mut planned = Vec::new();
@@ -1908,6 +2363,59 @@ impl MemoryService {
                 okf::plan_okf_create_proposal(&pending_root, &draft)?,
             ));
         }
+        let repo_projections = planned
+            .iter()
+            .map(|(_, proposal)| {
+                OwnedRepositoryProjection::from_absolute(
+                    &self.paths,
+                    &proposal.path,
+                    proposal.markdown.as_bytes(),
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut safety_values = Vec::new();
+        for (index, source) in plan.sources.iter().enumerate() {
+            for (name, value) in [
+                ("path", source.path.as_deref()),
+                ("url", source.url.as_deref()),
+                ("ref", source.reference.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    safety_values.push(safety_value(
+                        format!("sources[{index}].{name}"),
+                        SafetyFieldKind::SourceReference,
+                        value,
+                    ));
+                }
+            }
+        }
+        for (candidate_index, proposal) in &planned {
+            safety_values.extend(okf_proposal_safety_values(
+                &format!("candidate[{candidate_index}]"),
+                &proposal.parsed,
+            ));
+        }
+        let repo_authorization = (!planned.is_empty())
+            .then(|| {
+                authorize_repository_projection_batch(
+                    &self.paths,
+                    RepositoryWriteRoute::ImportApply,
+                    OkfProposalSensitivity::RepoSafe,
+                    ScopeKind::Repo,
+                    None,
+                    Visibility::Repo,
+                    AuthorizationProof::ImportPlan {
+                        plan_id: &plan.plan_id,
+                    },
+                    &safety_values,
+                    &repo_projections,
+                )
+            })
+            .transpose()?;
+        if !planned.is_empty() {
+            prepare_pending_proposal_root(&self.paths)?;
+        }
         let mut writes = Vec::new();
         let mut created = Vec::new();
         let result = (|| -> Result<()> {
@@ -1920,9 +2428,16 @@ impl MemoryService {
                     planned.iter().map(|(_, proposal)| proposal),
                 )?;
             }
-            for (candidate_index, proposal) in &planned {
-                let path = okf::create_okf_proposal_file(proposal)?;
-                created.push(path.clone());
+            let created_paths = match repo_authorization.as_ref() {
+                Some(authorization) => create_authorized_repository_batch(
+                    &self.paths,
+                    authorization,
+                    &repo_projections,
+                )?,
+                None => Vec::new(),
+            };
+            created.extend(created_paths.iter().cloned());
+            for ((candidate_index, proposal), path) in planned.iter().zip(created_paths) {
                 let candidate_plan = plan
                     .candidates
                     .iter()
@@ -1937,6 +2452,7 @@ impl MemoryService {
                     proposal_id: proposal.proposal_id.clone(),
                     path: display_path,
                 });
+                debug_assert_eq!(path, proposal.path);
             }
 
             let tx = self.conn.unchecked_transaction()?;
@@ -2231,6 +2747,43 @@ impl MemoryService {
             ));
         }
 
+        let repo_projections = planned
+            .iter()
+            .map(|(_, proposal)| {
+                OwnedRepositoryProjection::from_absolute(
+                    &self.paths,
+                    &proposal.path,
+                    proposal.markdown.as_bytes(),
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut repo_safety_values = Vec::new();
+        for (candidate_id, proposal) in &planned {
+            repo_safety_values.extend(okf_proposal_safety_values(
+                &format!("candidate[{candidate_id}]"),
+                &proposal.parsed,
+            ));
+        }
+        let repo_authorization = (!planned.is_empty())
+            .then(|| {
+                authorize_repository_projection_batch(
+                    &self.paths,
+                    RepositoryWriteRoute::CaptureApply,
+                    OkfProposalSensitivity::RepoSafe,
+                    ScopeKind::Repo,
+                    None,
+                    Visibility::Repo,
+                    AuthorizationProof::CaptureReview {
+                        plan_id: &plan.plan_id,
+                        review_id: &review.review_id,
+                    },
+                    &repo_safety_values,
+                    &repo_projections,
+                )
+            })
+            .transpose()?;
+
         let mut writes = Vec::new();
         let result = (|| -> Result<()> {
             let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
@@ -2268,12 +2821,29 @@ impl MemoryService {
                 )?;
             }
 
-            let journal = (!planned.is_empty())
-                .then(|| build_capture_apply_journal(&plan, &review, &planned))
+            let journal = repo_authorization
+                .as_ref()
+                .map(|authorization| {
+                    build_capture_apply_journal(
+                        &self.paths,
+                        &plan,
+                        &review,
+                        &planned,
+                        authorization,
+                    )
+                })
                 .transpose()?;
             if let Some(journal) = journal.as_ref() {
                 write_capture_apply_journal(&self.paths, journal)?;
-                stage_capture_apply_proposals(&self.paths, journal, &planned)?;
+                stage_capture_apply_proposals(
+                    &self.paths,
+                    journal,
+                    &planned,
+                    repo_authorization
+                        .as_ref()
+                        .context("capture repository authorization disappeared")?,
+                    &repo_projections,
+                )?;
                 install_capture_apply_proposals(&self.paths, journal)?;
             }
             for (candidate_id, proposal) in &planned {
@@ -2478,19 +3048,255 @@ impl MemoryService {
     }
 }
 
-fn blocked_session_end_result(document: SessionEndDocument) -> SessionEndResult {
+fn memory_draft_safety_values(prefix: &str, draft: &MemoryDraft) -> Vec<RepositorySafetyValue> {
+    let mut values = vec![
+        safety_value(
+            format!("{prefix}.title"),
+            SafetyFieldKind::Text,
+            &draft.title,
+        ),
+        safety_value(format!("{prefix}.body"), SafetyFieldKind::Text, &draft.body),
+    ];
+    for (index, tag) in draft.tags.iter().enumerate() {
+        values.push(safety_value(
+            format!("{prefix}.tags[{index}]"),
+            SafetyFieldKind::Text,
+            tag,
+        ));
+    }
+    if let Some(scope_id) = draft.scope_id.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.scope_id"),
+            SafetyFieldKind::Identifier,
+            scope_id,
+        ));
+    }
+    if let Some(source_kind) = draft.source_kind.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.source_kind"),
+            SafetyFieldKind::SourceReference,
+            source_kind,
+        ));
+    }
+    if let Some(source_ref) = draft.source_ref.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.source_ref"),
+            SafetyFieldKind::SourceReference,
+            source_ref,
+        ));
+    }
+    values
+}
+
+fn okf_proposal_safety_values(
+    prefix: &str,
+    proposal: &OkfProposalFile,
+) -> Vec<RepositorySafetyValue> {
+    let mut values = vec![
+        safety_value(
+            format!("{prefix}.id"),
+            SafetyFieldKind::Identifier,
+            &proposal.id,
+        ),
+        safety_value(
+            format!("{prefix}.file_id"),
+            SafetyFieldKind::Identifier,
+            &proposal.file_id,
+        ),
+        safety_value(
+            format!("{prefix}.title"),
+            SafetyFieldKind::Text,
+            &proposal.title,
+        ),
+        safety_value(
+            format!("{prefix}.description"),
+            SafetyFieldKind::Text,
+            &proposal.description,
+        ),
+        safety_value(
+            format!("{prefix}.body"),
+            SafetyFieldKind::Text,
+            &proposal.body,
+        ),
+        safety_value(
+            format!("{prefix}.proposed_by"),
+            SafetyFieldKind::Identifier,
+            &proposal.proposal.proposed_by,
+        ),
+    ];
+    if let Some(reason) = proposal.proposal.reason.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.reason"),
+            SafetyFieldKind::Reason,
+            reason,
+        ));
+    }
+    if let Some(target) = proposal.proposal.target.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.target"),
+            SafetyFieldKind::Identifier,
+            target,
+        ));
+    }
+    if let Some(scope_id) = proposal.scope_id.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.scope_id"),
+            SafetyFieldKind::Identifier,
+            scope_id,
+        ));
+    }
+    for (index, path) in proposal.applies_to.iter().enumerate() {
+        values.push(safety_value(
+            format!("{prefix}.applies_to[{index}]"),
+            SafetyFieldKind::Path,
+            path,
+        ));
+    }
+    for (index, tag) in proposal.tags.iter().enumerate() {
+        values.push(safety_value(
+            format!("{prefix}.tags[{index}]"),
+            SafetyFieldKind::Text,
+            tag,
+        ));
+    }
+    for (index, source) in proposal.sources.iter().enumerate() {
+        for (name, value) in [
+            ("path", source.path.as_deref()),
+            ("url", source.url.as_deref()),
+            ("ref", source.reference.as_deref()),
+        ] {
+            if let Some(value) = value {
+                values.push(safety_value(
+                    format!("{prefix}.sources[{index}].{name}"),
+                    SafetyFieldKind::SourceReference,
+                    value,
+                ));
+            }
+        }
+    }
+    values
+}
+
+fn safety_value(
+    location: String,
+    kind: SafetyFieldKind,
+    value: impl AsRef<[u8]>,
+) -> RepositorySafetyValue {
+    RepositorySafetyValue {
+        location,
+        kind,
+        value: value.as_ref().to_vec(),
+    }
+}
+
+fn borrowed_repository_projections(
+    projections: &[OwnedRepositoryProjection],
+) -> Vec<RepositoryProjection<'_>> {
+    projections
+        .iter()
+        .map(|projection| RepositoryProjection {
+            path: &projection.relative_path,
+            bytes: &projection.bytes,
+            target_revision: projection.target_revision.as_deref(),
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authorize_repository_projection_batch(
+    paths: &MemoryPaths,
+    route: RepositoryWriteRoute,
+    sensitivity: OkfProposalSensitivity,
+    scope_kind: ScopeKind,
+    scope_id: Option<&str>,
+    visibility: Visibility,
+    authorization: AuthorizationProof<'_>,
+    values: &[RepositorySafetyValue],
+    projections: &[OwnedRepositoryProjection],
+) -> Result<AuthorizedRepositoryWriteBatch> {
+    let fields = values
+        .iter()
+        .map(|value| SafetyField {
+            location: &value.location,
+            kind: value.kind,
+            value: &value.value,
+        })
+        .collect();
+    let projections = borrowed_repository_projections(projections);
+    let request = RepositoryWriteRequest {
+        route,
+        destination: MemoryDestination::Repo,
+        sensitivity,
+        scope: RepositoryScope {
+            kind: scope_kind,
+            id: scope_id,
+            current_project_identity: paths.project_root.as_os_str().as_encoded_bytes(),
+            configured_project_id: scope_id,
+        },
+        visibility,
+        authorization,
+        freshness: Vec::new(),
+        provenance: ProvenanceAssessment {
+            present: true,
+            evidence_valid: true,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
+            source_identity: Some(route.as_str()),
+        },
+        fields,
+        projections,
+    };
+    authorize_repository_write(&request).map_err(anyhow::Error::new)
+}
+
+fn create_authorized_repository_batch(
+    paths: &MemoryPaths,
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[OwnedRepositoryProjection],
+) -> Result<Vec<PathBuf>> {
+    let borrowed = borrowed_repository_projections(projections);
+    repository_io::create_repository_batch(&paths.project_root, authorization, &borrowed)
+}
+
+fn canonical_write_projections(
+    paths: &MemoryPaths,
+    writes: &[CanonicalFileWrite],
+) -> Result<Vec<OwnedRepositoryProjection>> {
+    writes
+        .iter()
+        .map(|write| {
+            OwnedRepositoryProjection::from_absolute(
+                paths,
+                &write.path,
+                write.markdown.as_bytes(),
+                write.expected_existing_hash.as_deref(),
+            )
+        })
+        .collect()
+}
+
+fn blocked_session_end_result(
+    document: SessionEndDocument,
+    unsafe_repo_candidates: &BTreeSet<usize>,
+) -> SessionEndResult {
     let candidates = document
         .candidates
         .into_iter()
         .enumerate()
         .map(|(index, candidate)| {
-            let non_repo_safe = candidate.destination == MemoryDestination::Repo
-                && candidate.sensitivity != crate::OkfProposalSensitivity::RepoSafe;
-            let (title, status, reason) = if non_repo_safe {
+            let unsafe_repo_candidate = unsafe_repo_candidates.contains(&index);
+            let (title, status, reason) = if unsafe_repo_candidate {
                 (
-                    "Redacted non-repo-safe candidate".to_owned(),
+                    if candidate.sensitivity != OkfProposalSensitivity::RepoSafe {
+                        "Redacted non-repo-safe candidate".to_owned()
+                    } else {
+                        "Redacted unsafe repository candidate".to_owned()
+                    },
                     SessionEndCandidateStatus::Blocked,
-                    Some(repo_sensitivity_block_reason(candidate.sensitivity)),
+                    Some(if candidate.sensitivity != OkfProposalSensitivity::RepoSafe {
+                        repo_sensitivity_block_reason(candidate.sensitivity)
+                    } else {
+                        "repository safety policy blocked this candidate; inspect the hash-only safety report and sanitize the source before retrying".to_owned()
+                    }),
                 )
             } else {
                 let status = match candidate.destination {
@@ -2558,24 +3364,48 @@ impl RepoLifecycleLock {
     }
 }
 
+impl Drop for RepoLifecycleLock {
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
+    }
+}
+
 fn build_capture_apply_journal(
+    paths: &MemoryPaths,
     plan: &CapturePlan,
     review: &CaptureReview,
     planned: &[(String, okf::OkfCreateProposalPlan)],
+    authorization: &AuthorizedRepositoryWriteBatch,
 ) -> Result<CaptureApplyJournal> {
     let journal = CaptureApplyJournal {
         schema: CAPTURE_APPLY_JOURNAL_SCHEMA.to_owned(),
+        safety_contract_version: crate::REPOSITORY_WRITE_SAFETY_VERSION.to_owned(),
+        detector_policy_version: crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.to_owned(),
+        route: RepositoryWriteRoute::CaptureApply.as_str().to_owned(),
+        authorization_digest: authorization.digest(),
+        project_context_digest: blake3::hash(paths.project_root.as_os_str().as_encoded_bytes())
+            .to_hex()
+            .to_string(),
         journal_id: Uuid::now_v7().to_string(),
         plan_id: plan.plan_id.clone(),
         review_id: review.review_id.clone(),
         entries: planned
             .iter()
-            .map(|(_, proposal)| CaptureApplyJournalEntry {
+            .map(|(candidate_id, proposal)| CaptureApplyJournalEntry {
+                candidate_id: candidate_id.clone(),
                 proposal_id: proposal.proposal_id.clone(),
                 content_bytes: proposal.markdown.len() as u64,
                 content_hash: blake3::hash(proposal.markdown.as_bytes())
                     .to_hex()
                     .to_string(),
+                projection_digest: {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(b"memzoi.capture.projection.v1\0");
+                    hasher.update(proposal.path.as_os_str().as_encoded_bytes());
+                    hasher.update(b"\0");
+                    hasher.update(proposal.markdown.as_bytes());
+                    hasher.finalize().to_hex().to_string()
+                },
             })
             .collect(),
     };
@@ -2585,6 +3415,10 @@ fn build_capture_apply_journal(
 
 fn capture_apply_journal_path(paths: &MemoryPaths) -> PathBuf {
     paths.runtime_dir.join(CAPTURE_APPLY_JOURNAL_FILE)
+}
+
+fn legacy_capture_apply_journal_path(paths: &MemoryPaths) -> PathBuf {
+    paths.runtime_dir.join(LEGACY_CAPTURE_APPLY_JOURNAL_FILE)
 }
 
 fn capture_apply_destination_path(
@@ -2631,6 +3465,18 @@ fn validate_capture_apply_journal(journal: &CaptureApplyJournal) -> Result<()> {
     if journal.schema != CAPTURE_APPLY_JOURNAL_SCHEMA {
         bail!("unsupported capture apply journal schema");
     }
+    if journal.safety_contract_version.is_empty()
+        || journal.detector_policy_version.is_empty()
+        || journal.route != RepositoryWriteRoute::CaptureApply.as_str()
+    {
+        bail!("capture apply journal safety decision is stale or unsupported");
+    }
+    for (value, label) in [
+        (&journal.authorization_digest, "authorization digest"),
+        (&journal.project_context_digest, "project context digest"),
+    ] {
+        validate_lower_hex_digest(value, label)?;
+    }
     let journal_id =
         Uuid::parse_str(&journal.journal_id).context("capture apply journal id is invalid")?;
     if journal_id.to_string() != journal.journal_id {
@@ -2643,6 +3489,7 @@ fn validate_capture_apply_journal(journal: &CaptureApplyJournal) -> Result<()> {
     }
     let mut proposal_ids = BTreeSet::new();
     for entry in &journal.entries {
+        validate_capture_apply_journal_token(&entry.candidate_id, "candidate id")?;
         validate_capture_apply_proposal_id(&entry.proposal_id)?;
         if !proposal_ids.insert(entry.proposal_id.as_str()) {
             bail!("capture apply journal contains a duplicate proposal id");
@@ -2658,6 +3505,18 @@ fn validate_capture_apply_journal(journal: &CaptureApplyJournal) -> Result<()> {
         {
             bail!("capture apply journal contains an invalid content hash");
         }
+        validate_lower_hex_digest(&entry.projection_digest, "projection digest")?;
+    }
+    Ok(())
+}
+
+fn validate_lower_hex_digest(value: &str, label: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("capture apply journal contains an invalid {label}");
     }
     Ok(())
 }
@@ -2698,6 +3557,76 @@ fn capture_apply_journal_exists(paths: &MemoryPaths) -> Result<bool> {
     }
 }
 
+fn legacy_capture_apply_journal_exists(paths: &MemoryPaths) -> Result<bool> {
+    let path = legacy_capture_apply_journal_path(paths);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("legacy capture apply journal must be a regular file")
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("failed to inspect legacy capture apply journal"),
+    }
+}
+
+fn recover_legacy_capture_apply(paths: &MemoryPaths) -> Result<bool> {
+    if !legacy_capture_apply_journal_exists(paths)? {
+        return Ok(false);
+    }
+    if capture_apply_journal_exists(paths)? {
+        bail!("current and legacy capture apply journals cannot coexist");
+    }
+    let path = legacy_capture_apply_journal_path(paths);
+    let metadata =
+        fs::symlink_metadata(&path).context("failed to inspect legacy capture apply journal")?;
+    if metadata.len() == 0 || metadata.len() > MAX_CAPTURE_APPLY_JOURNAL_BYTES {
+        bail!("legacy capture apply journal has an invalid size");
+    }
+    let bytes = fs::read(&path).context("failed to read legacy capture apply journal")?;
+    let journal: LegacyCaptureApplyJournal =
+        serde_json::from_slice(&bytes).context("failed to parse legacy capture apply journal")?;
+    if journal.schema != "memzoi/capture-apply-journal-v1"
+        || journal.entries.is_empty()
+        || journal.entries.len() > MAX_CAPTURE_APPLY_JOURNAL_ENTRIES
+    {
+        bail!("legacy capture apply journal is invalid");
+    }
+    validate_capture_apply_journal_token(&journal.journal_id, "legacy journal id")?;
+    validate_capture_apply_journal_token(&journal.plan_id, "legacy plan id")?;
+    validate_capture_apply_journal_token(&journal.review_id, "legacy review id")?;
+    prepare_pending_proposal_root(paths)?;
+    for entry in &journal.entries {
+        validate_capture_apply_proposal_id(&entry.proposal_id)?;
+        validate_lower_hex_digest(&entry.content_hash, "legacy content hash")?;
+        let destination = paths
+            .proposals_dir()
+            .join("pending")
+            .join(format!("{}.md", entry.proposal_id));
+        let staged = sibling_transaction_path(&destination, &journal.journal_id, "write");
+        remove_capture_apply_file_if_matching(
+            &destination,
+            entry.content_bytes,
+            &entry.content_hash,
+            "legacy unverified capture proposal",
+        )?;
+        remove_capture_apply_file_if_matching(
+            &staged,
+            entry.content_bytes,
+            &entry.content_hash,
+            "legacy unverified staged capture proposal",
+        )?;
+    }
+    remove_capture_apply_file_if_matching(
+        &path,
+        bytes.len() as u64,
+        blake3::hash(&bytes).to_hex().as_ref(),
+        "legacy capture apply journal",
+    )?;
+    sync_directory(&paths.proposals_dir().join("pending"))?;
+    sync_directory(&paths.runtime_dir)?;
+    Ok(true)
+}
+
 fn load_capture_apply_journal(paths: &MemoryPaths) -> Result<Option<LoadedCaptureApplyJournal>> {
     if !capture_apply_journal_exists(paths)? {
         return Ok(None);
@@ -2725,7 +3654,7 @@ fn load_capture_apply_journal(paths: &MemoryPaths) -> Result<Option<LoadedCaptur
 fn write_capture_apply_journal(paths: &MemoryPaths, journal: &CaptureApplyJournal) -> Result<()> {
     validate_capture_apply_journal(journal)?;
     fs::create_dir_all(&paths.runtime_dir).context("failed to create capture journal directory")?;
-    if capture_apply_journal_exists(paths)? {
+    if capture_apply_journal_exists(paths)? || legacy_capture_apply_journal_exists(paths)? {
         bail!("an interrupted capture apply must be recovered before starting another one");
     }
     let mut bytes =
@@ -2767,8 +3696,15 @@ fn stage_capture_apply_proposals(
     paths: &MemoryPaths,
     journal: &CaptureApplyJournal,
     planned: &[(String, okf::OkfCreateProposalPlan)],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[OwnedRepositoryProjection],
 ) -> Result<()> {
     validate_capture_apply_journal(journal)?;
+    let borrowed = borrowed_repository_projections(projections);
+    repository_io::verify_repository_batch(&paths.project_root, authorization, &borrowed)?;
+    if journal.authorization_digest != authorization.digest() {
+        bail!("capture apply journal authorization digest does not match the current capability");
+    }
     if journal.entries.len() != planned.len() {
         bail!("capture apply journal does not match the proposal batch");
     }
@@ -2784,7 +3720,21 @@ fn stage_capture_apply_proposals(
         {
             bail!("capture proposal batch changed after journaling");
         }
-        let staged = stage_file(
+        let projection_digest = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"memzoi.capture.projection.v1\0");
+            hasher.update(proposal.path.as_os_str().as_encoded_bytes());
+            hasher.update(b"\0");
+            hasher.update(proposal.markdown.as_bytes());
+            hasher.finalize().to_hex().to_string()
+        };
+        if projection_digest != entry.projection_digest {
+            bail!("capture proposal projection digest changed after authorization");
+        }
+        let staged = stage_authorized_file(
+            paths,
+            authorization,
+            projections,
             &expected_destination,
             &proposal.markdown,
             &journal.journal_id,
@@ -2876,15 +3826,91 @@ fn capture_apply_commit_marker_exists(
     Ok(true)
 }
 
+fn capture_recovery_authorization_is_current(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+) -> Result<bool> {
+    if journal.safety_contract_version != crate::REPOSITORY_WRITE_SAFETY_VERSION
+        || journal.detector_policy_version != crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION
+        || journal.project_context_digest
+            != blake3::hash(paths.project_root.as_os_str().as_encoded_bytes())
+                .to_hex()
+                .to_string()
+    {
+        return Ok(false);
+    }
+    let pending_root = paths.proposals_dir().join("pending");
+    let mut projections = Vec::with_capacity(journal.entries.len());
+    let mut values = Vec::new();
+    for entry in &journal.entries {
+        let destination = capture_apply_destination_path(paths, entry);
+        let staged = capture_apply_stage_path(paths, journal, entry);
+        let source = if capture_apply_file_matches(
+            &staged,
+            entry.content_bytes,
+            &entry.content_hash,
+            "staged capture proposal",
+        )? {
+            staged
+        } else if capture_apply_file_matches(
+            &destination,
+            entry.content_bytes,
+            &entry.content_hash,
+            "installed capture proposal",
+        )? {
+            destination.clone()
+        } else {
+            // Preserve the existing deterministic missing-file recovery diagnostic.
+            return Ok(true);
+        };
+        let bytes = fs::read(&source).context("failed to read capture recovery projection")?;
+        let markdown = std::str::from_utf8(&bytes)
+            .map_err(|_| anyhow!("capture recovery projection has invalid encoding"))?;
+        let proposal = okf::parse_okf_proposal_markdown(&pending_root, &destination, markdown)
+            .map_err(|_| anyhow!("capture recovery projection is malformed"))?
+            .context("capture recovery projection was ignored")?;
+        values.extend(okf_proposal_safety_values(
+            &format!("candidate[{}]", entry.candidate_id),
+            &proposal,
+        ));
+        projections.push(OwnedRepositoryProjection::from_absolute(
+            paths,
+            &destination,
+            &bytes,
+            None,
+        )?);
+    }
+    let authorization = authorize_repository_projection_batch(
+        paths,
+        RepositoryWriteRoute::CaptureApply,
+        OkfProposalSensitivity::RepoSafe,
+        ScopeKind::Repo,
+        None,
+        Visibility::Repo,
+        AuthorizationProof::CaptureReview {
+            plan_id: &journal.plan_id,
+            review_id: &journal.review_id,
+        },
+        &values,
+        &projections,
+    );
+    Ok(authorization
+        .is_ok_and(|authorization| authorization.digest() == journal.authorization_digest))
+}
+
 fn recover_capture_apply(
     paths: &MemoryPaths,
     conn: &Connection,
 ) -> Result<CaptureApplyRecoveryOutcome> {
+    if recover_legacy_capture_apply(paths)? {
+        return Ok(CaptureApplyRecoveryOutcome::RolledBack);
+    }
     let Some(loaded) = load_capture_apply_journal(paths)? else {
         return Ok(CaptureApplyRecoveryOutcome::NoJournal);
     };
     let journal = &loaded.journal;
-    let committed = capture_apply_commit_marker_exists(conn, journal)?;
+    let committed = capture_apply_commit_marker_exists(conn, journal)?
+        && capture_recovery_authorization_is_current(paths, journal)?;
     prepare_pending_proposal_root(paths)?;
 
     if committed {
@@ -3237,13 +4263,23 @@ fn scan_proposal_directory(
                 continue;
             }
         };
-        let non_repo_safe = preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe;
-        let display_path = if non_repo_safe {
+        let relative_path = actual_path
+            .strip_prefix(&paths.project_root)
+            .unwrap_or_else(|_| Path::new("../unsafe-proposal-path"));
+        let content_allowed = crate::scan_repository_blob(
+            paths.project_root.as_os_str().as_encoded_bytes(),
+            relative_path,
+            markdown.as_bytes(),
+        )
+        .allowed;
+        let requires_redaction =
+            preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe || !content_allowed;
+        let display_path = if requires_redaction {
             root.join(format!("{}.md", preflight.receipt_proposal.file_id))
         } else {
             actual_path.clone()
         };
-        let parsed = if non_repo_safe && expected_outcome.is_none() {
+        let parsed = if requires_redaction && expected_outcome.is_none() {
             Some(preflight.receipt_proposal.clone())
         } else {
             match okf::parse_okf_proposal_markdown(root, &actual_path, &markdown) {
@@ -3251,7 +4287,7 @@ fn scan_proposal_directory(
                 Err(error) => {
                     errors.push(FileProposalInventoryError {
                         display_path,
-                        error: if non_repo_safe {
+                        error: if requires_redaction {
                             "invalid redacted resolved proposal packet".to_owned()
                         } else {
                             error.to_string()
@@ -3262,7 +4298,7 @@ fn scan_proposal_directory(
             }
         };
         if let Some(mut proposal) = parsed {
-            if non_repo_safe && expected_outcome.is_some() {
+            if requires_redaction && expected_outcome.is_some() {
                 proposal = redact_resolved_proposal_for_inventory(proposal, preflight);
             }
             let state_error = if proposal.status != expected_status {
@@ -3838,7 +4874,23 @@ fn sibling_transaction_path(path: &Path, nonce: &str, role: &str) -> PathBuf {
     path.with_file_name(format!(".{name}.{nonce}.{role}.tmp"))
 }
 
-fn stage_file(final_path: &Path, contents: &str, nonce: &str) -> Result<PathBuf> {
+fn stage_file(
+    paths: &MemoryPaths,
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[OwnedRepositoryProjection],
+    final_path: &Path,
+    contents: &str,
+    nonce: &str,
+) -> Result<PathBuf> {
+    let borrowed = borrowed_repository_projections(projections);
+    repository_io::verify_repository_batch(&paths.project_root, authorization, &borrowed)?;
+    let expected =
+        OwnedRepositoryProjection::from_absolute(paths, final_path, contents.as_bytes(), None)?;
+    if !projections.iter().any(|projection| {
+        projection.relative_path == expected.relative_path && projection.bytes == expected.bytes
+    }) {
+        bail!("staged repository file is not present in the authorized projection batch");
+    }
     let parent = final_path.parent().context("staged file has no parent")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("failed to create directory {}", parent.display()))?;
@@ -3866,13 +4918,43 @@ fn stage_file(final_path: &Path, contents: &str, nonce: &str) -> Result<PathBuf>
     Ok(temp_path)
 }
 
+fn stage_authorized_file(
+    paths: &MemoryPaths,
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[OwnedRepositoryProjection],
+    final_path: &Path,
+    contents: &str,
+    nonce: &str,
+) -> Result<PathBuf> {
+    stage_file(
+        paths,
+        authorization,
+        projections,
+        final_path,
+        contents,
+        nonce,
+    )
+}
+
 fn stage_canonical_writes(
+    paths: &MemoryPaths,
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[OwnedRepositoryProjection],
     writes: &[CanonicalFileWrite],
     nonce: &str,
 ) -> Result<Vec<StagedCanonicalFileWrite>> {
+    let borrowed = borrowed_repository_projections(projections);
+    repository_io::verify_repository_batch(&paths.project_root, authorization, &borrowed)?;
     let mut staged = Vec::with_capacity(writes.len());
     for write in writes {
-        let temp_path = match stage_file(&write.path, &write.markdown, nonce) {
+        let temp_path = match stage_file(
+            paths,
+            authorization,
+            projections,
+            &write.path,
+            &write.markdown,
+            nonce,
+        ) {
             Ok(path) => path,
             Err(error) => {
                 return attach_cleanup_error(
@@ -3997,14 +5079,23 @@ fn finalize_staged_canonical_writes(writes: &[StagedCanonicalFileWrite]) -> Resu
 
 fn commit_db_and_canonical_writes(
     paths: &MemoryPaths,
+    authorization: &AuthorizedRepositoryWriteBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
 ) -> Result<()> {
-    commit_db_and_canonical_writes_with_hooks(paths, tx, writes, |_| Ok(()), |_| Ok(()))
+    commit_db_and_canonical_writes_with_hooks(
+        paths,
+        authorization,
+        tx,
+        writes,
+        |_| Ok(()),
+        |_| Ok(()),
+    )
 }
 
 fn commit_db_and_canonical_writes_with_hooks<BeforeInstall, BeforeCommit>(
     paths: &MemoryPaths,
+    authorization: &AuthorizedRepositoryWriteBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
     before_install: BeforeInstall,
@@ -4016,6 +5107,7 @@ where
 {
     commit_db_and_canonical_writes_with_backup_hook(
         paths,
+        authorization,
         tx,
         writes,
         before_install,
@@ -4026,6 +5118,7 @@ where
 
 fn commit_db_and_canonical_writes_with_backup_hook<BeforeInstall, AfterBackup, BeforeCommit>(
     paths: &MemoryPaths,
+    authorization: &AuthorizedRepositoryWriteBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
     before_install: BeforeInstall,
@@ -4037,8 +5130,11 @@ where
     AfterBackup: FnMut(usize, &Path) -> Result<()>,
     BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
 {
+    let projections = canonical_write_projections(paths, writes)?;
+    let borrowed = borrowed_repository_projections(&projections);
+    repository_io::verify_repository_batch(&paths.project_root, authorization, &borrowed)?;
     let nonce = Uuid::now_v7().to_string();
-    let mut staged = stage_canonical_writes(writes, &nonce)?;
+    let mut staged = stage_canonical_writes(paths, authorization, &projections, writes, &nonce)?;
     if let Err(error) = install_staged_canonical_writes_with_backup_hook(
         paths,
         &mut staged,
@@ -4948,7 +6044,8 @@ mod tests {
     }
 
     #[test]
-    fn open_completes_committed_capture_install_from_retained_stage() -> anyhow::Result<()> {
+    fn open_rolls_back_committed_capture_stage_without_verifiable_authorization()
+    -> anyhow::Result<()> {
         let (_temp, service) = initialized_service()?;
         let paths = service.paths.clone();
         let contents = b"repo-safe committed proposal\n";
@@ -4969,7 +6066,7 @@ mod tests {
 
         let reopened = MemoryService::open_paths(paths.clone())?;
 
-        assert_eq!(fs::read(&destination)?, contents);
+        assert!(!destination.exists());
         assert!(!staged.exists());
         assert!(!capture_apply_journal_path(&paths).exists());
         assert!(capture_apply_commit_marker_exists(
@@ -5406,9 +6503,26 @@ mod tests {
             "UPDATE memory_record SET status = 'superseded' WHERE id = ?1",
             [&target.id],
         )?;
+        let projections =
+            canonical_write_projections(&service.paths, std::slice::from_ref(&write))?;
+        let values = memory_draft_safety_values("replacement", &write.record_file.draft);
+        let authorization = authorize_repository_projection_batch(
+            &service.paths,
+            RepositoryWriteRoute::Supersede,
+            OkfProposalSensitivity::RepoSafe,
+            write.record_file.draft.scope_kind,
+            write.record_file.draft.scope_id.as_deref(),
+            write.record_file.draft.visibility,
+            AuthorizationProof::LifecycleOperation {
+                target_id: &target.id,
+            },
+            &values,
+            &projections,
+        )?;
 
         let error = commit_db_and_canonical_writes_with_backup_hook(
             &service.paths,
+            &authorization,
             tx,
             &[write],
             |_| Ok(()),
@@ -5966,7 +7080,10 @@ mod tests {
                 ),
             )
             .expect_err("session targets must not be written as canonical supersedes");
-        assert!(session_error.to_string().contains("destination session"));
+        assert!(
+            session_error.to_string().contains("destination session"),
+            "unexpected session-target error: {session_error:#}"
+        );
 
         for record in [&local, &checkpoint] {
             assert!(
@@ -5988,12 +7105,15 @@ mod tests {
     #[test]
     fn legacy_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Result<()> {
         let (_temp, service) = initialized_service()?;
-        let mut private_draft = sample_memory_draft(
+        let private_draft = sample_memory_draft(
             "Private repo target",
             "Private visibility must not be rewritten through a legacy lifecycle route.",
         );
-        private_draft.visibility = Visibility::Private;
         let private = apply_test_record(&service, private_draft)?;
+        service.conn.execute(
+            "UPDATE memory_record SET visibility = 'private' WHERE id = ?1",
+            [&private.id],
+        )?;
         let private_path = service
             .paths
             .records_dir()
@@ -6003,7 +7123,10 @@ mod tests {
         let private_error = service
             .tombstone_record(&private.id, "agent:red-tests", "must stay private")
             .expect_err("private targets must not be rewritten canonically");
-        assert!(private_error.to_string().contains("visibility private"));
+        assert!(
+            private_error.to_string().contains("visibility private"),
+            "unexpected private-target error: {private_error:#}"
+        );
         assert_eq!(fs::read(&private_path)?, private_before);
         assert_eq!(
             service.inspect_expiry(&private.id)?.record.status,
@@ -6064,7 +7187,10 @@ mod tests {
         let error = service
             .supersede_record(&target.id, "agent:red-tests", replacement)
             .expect_err("cross-scope replacements must be rejected");
-        assert!(error.to_string().contains("cross-scope"));
+        assert!(
+            error.to_string().contains("cross-scope"),
+            "unexpected cross-scope error: {error:#}"
+        );
         assert_eq!(fs::read(&target_path)?, target_before);
         assert_eq!(
             service.inspect_expiry(&target.id)?.record.status,
@@ -6285,15 +7411,22 @@ mod tests {
     fn test_capture_apply_journal(proposal_id: &str, contents: &[u8]) -> CaptureApplyJournal {
         CaptureApplyJournal {
             schema: CAPTURE_APPLY_JOURNAL_SCHEMA.to_owned(),
+            safety_contract_version: crate::REPOSITORY_WRITE_SAFETY_VERSION.to_owned(),
+            detector_policy_version: crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.to_owned(),
+            route: RepositoryWriteRoute::CaptureApply.as_str().to_owned(),
+            authorization_digest: "a".repeat(64),
+            project_context_digest: "b".repeat(64),
             journal_id: Uuid::now_v7().to_string(),
             plan_id: "capture_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_owned(),
             review_id: "review_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 .to_owned(),
             entries: vec![CaptureApplyJournalEntry {
+                candidate_id: "candidate_1".to_owned(),
                 proposal_id: proposal_id.to_owned(),
                 content_bytes: contents.len() as u64,
                 content_hash: blake3::hash(contents).to_hex().to_string(),
+                projection_digest: "c".repeat(64),
             }],
         }
     }

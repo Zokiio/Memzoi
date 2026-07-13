@@ -76,6 +76,50 @@ fn update_help_advertises_update_options() {
 }
 
 #[test]
+fn safety_file_scan_uses_stable_exit_codes_and_redacted_json() {
+    let temp = tempfile::tempdir().expect("temp repo");
+    let records = temp.path().join(".memzoi/records");
+    fs::create_dir_all(&records).expect("records directory");
+    let safe = records.join("safe.md");
+    fs::write(&safe, "General repository knowledge.\n").expect("safe record");
+
+    let mut safe_command = memzoi();
+    safe_command
+        .current_dir(temp.path())
+        .args([
+            "safety",
+            "scan",
+            "--file",
+            ".memzoi/records/safe.md",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"allowed\": true"));
+
+    let sentinel = "ghp_SECRET_SENTINEL_0123456789abcdefghijklmnop";
+    let blocked = records.join("blocked.md");
+    fs::write(&blocked, sentinel).expect("blocked record");
+    let mut blocked_command = memzoi();
+    blocked_command
+        .current_dir(temp.path())
+        .args([
+            "safety",
+            "scan",
+            "--file",
+            ".memzoi/records/blocked.md",
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("\"allowed\": false")
+                .and(predicate::str::contains("credential_token"))
+                .and(predicate::str::contains(sentinel).not()),
+        );
+}
+
+#[test]
 fn eval_recall_help_requires_an_explicit_corpus() {
     let mut cmd = memzoi();
 
@@ -4588,6 +4632,44 @@ fn proposal_files_apply_rejects_non_repo_safe_sensitivity() {
 }
 
 #[test]
+fn repo_safe_secret_packet_is_hash_only_in_inventory_and_rejection_receipt() {
+    let repo = initialized_temp_repo();
+    let sentinel = "ghp_REPO_SAFE_SECRET_SENTINEL_0123456789abcdefghijklmnop";
+    let markdown = valid_proposal_markdown().replace("This proposal body is valid.", sentinel);
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", markdown);
+
+    let listed = run_json_command(repo.path(), &["proposal-files", "list", "--json"]);
+    let rendered = serde_json::to_string(&listed).expect("serialize redacted inventory");
+    assert!(!rendered.contains(sentinel), "{rendered}");
+    let proposal = listed["proposals"]
+        .as_array()
+        .and_then(|proposals| proposals.first())
+        .unwrap_or_else(|| panic!("redacted pending proposal missing: {listed}"));
+    assert_json_string_field(proposal, &["title"], "Redacted non-repo-safe proposal");
+    let redacted_id = proposal_id_from_value(proposal).to_owned();
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            &redacted_id,
+            "--reason",
+            "unsafe content removed",
+            "--json",
+        ],
+    );
+    let rendered = serde_json::to_string(&rejected).expect("serialize redacted rejection");
+    assert!(!rendered.contains(sentinel), "{rendered}");
+    assert!(
+        !repo
+            .path()
+            .join(".memzoi/proposals/pending/valid-proposal.md")
+            .exists()
+    );
+}
+
+#[test]
 fn proposal_files_supersede_preserves_target_evidence_and_creates_active_lineage() {
     let repo = initialized_temp_repo();
     write_canonical_record_fixture(
@@ -7860,6 +7942,8 @@ fn create_applied_memory_with_visibility(
     title: &str,
     body: &str,
 ) -> String {
+    let policy_supported =
+        matches!(scope_kind, "repo" | "project") && matches!(visibility, "repo" | "public");
     let applied = run_json_command(
         repo,
         &[
@@ -7868,9 +7952,9 @@ fn create_applied_memory_with_visibility(
             "--type",
             memory_type,
             "--scope-kind",
-            scope_kind,
+            if policy_supported { scope_kind } else { "repo" },
             "--visibility",
-            visibility,
+            if policy_supported { visibility } else { "repo" },
             "--sensitivity",
             "repo-safe",
             "--title",
@@ -7885,7 +7969,17 @@ fn create_applied_memory_with_visibility(
 
     assert_eq!(json_string(&applied, "record_status"), "active");
     assert_eq!(applied.get("applied").and_then(Value::as_bool), Some(true));
-    json_string(&applied, "record_id").to_owned()
+    let record_id = json_string(&applied, "record_id").to_owned();
+    if !policy_supported {
+        let conn = Connection::open(memory_db_path(repo))
+            .expect("open memory db for legacy read-filter fixture");
+        conn.execute(
+            "UPDATE memory_record SET scope_kind = ?1, visibility = ?2 WHERE id = ?3",
+            rusqlite::params![scope_kind, visibility, record_id],
+        )
+        .expect("seed legacy unsupported metadata fixture");
+    }
+    record_id
 }
 
 fn attach_memory_path(repo: &Path, record_id: &str, path: &str) {

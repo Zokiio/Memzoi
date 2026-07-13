@@ -20,6 +20,8 @@ mod recall_development;
 mod recall_eval;
 mod recall_eval_v3;
 mod recall_operational_eval;
+mod repository_io;
+mod repository_write_safety;
 mod schema;
 mod search;
 mod service;
@@ -112,6 +114,15 @@ pub use recall_eval::{
 };
 pub use recall_eval_v3::*;
 pub use recall_operational_eval::*;
+pub use repository_write_safety::{
+    AuthorizationProof, AuthorizedRepositoryWriteBatch, FreshnessCheck, ProvenanceAssessment,
+    REPOSITORY_WRITE_DETECTOR_POLICY_VERSION, REPOSITORY_WRITE_SAFETY_SCHEMA,
+    REPOSITORY_WRITE_SAFETY_VERSION, RepositoryContentClass, RepositoryProjection, RepositoryScope,
+    RepositoryWriteBlocked, RepositoryWriteDecision, RepositoryWriteRequest, RepositoryWriteRoute,
+    RepositoryWriteSafetyAssessment, RepositoryWriteSafetyFinding, RepositoryWriteSafetyReasonCode,
+    RepositoryWriteSafetyReport, SafetyField, SafetyFieldKind, SafetyFieldLocation,
+    assess_repository_candidate, authorize_repository_write, scan_repository_blob,
+};
 pub use search::SearchInput;
 pub use service::{
     CheckpointInput, ExportFormat, ExportInput, ExportResult, FileProposalInventory,

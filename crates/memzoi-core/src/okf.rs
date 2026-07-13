@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeSet,
     fs,
-    fs::OpenOptions,
     path::{Component, Path, PathBuf},
     str::FromStr,
 };
@@ -264,12 +263,14 @@ fn proposal_packet_id_exists(pending_root: &Path, proposal_id: &str) -> Result<b
     Ok(false)
 }
 
+#[cfg(test)]
 pub(crate) fn create_okf_proposal_file(plan: &OkfCreateProposalPlan) -> Result<PathBuf> {
     create_okf_proposal_file_with_writer(&plan.path, |file| {
         std::io::Write::write_all(file, plan.markdown.as_bytes())
     })
 }
 
+#[cfg(test)]
 fn create_okf_proposal_file_with_writer(
     path: &Path,
     write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
@@ -278,7 +279,7 @@ fn create_okf_proposal_file_with_writer(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create proposal directory {}", parent.display()))?;
     }
-    let mut file = OpenOptions::new()
+    let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
