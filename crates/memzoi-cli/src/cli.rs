@@ -43,6 +43,9 @@ pub(crate) enum Commands {
         /// Repo sharing classification. Canonical apply requires repo-safe.
         #[arg(long, default_value = "unknown")]
         sensitivity: String,
+        /// Contextual repository-content classification. Canonical apply requires general repo knowledge.
+        #[arg(long = "content-class", default_value = "general_repo_knowledge")]
+        content_class: String,
         #[arg(long)]
         title: String,
         #[arg(long)]
@@ -160,6 +163,9 @@ pub(crate) enum Commands {
         /// Repo sharing classification. Canonical replacement requires repo-safe.
         #[arg(long, default_value = "unknown")]
         sensitivity: String,
+        /// Contextual repository-content classification. Canonical replacement requires general repo knowledge.
+        #[arg(long = "content-class", default_value = "general_repo_knowledge")]
+        content_class: String,
         #[arg(long)]
         title: String,
         #[arg(long)]
@@ -843,6 +849,7 @@ pub(crate) struct DraftCommand {
     pub(crate) source_kind: Option<String>,
     pub(crate) source_ref: Option<String>,
     pub(crate) sensitivity: String,
+    pub(crate) content_class: String,
     pub(crate) title: String,
     pub(crate) body: String,
 }

@@ -119,6 +119,74 @@ fn safety_file_scan_uses_stable_exit_codes_and_redacted_json() {
         );
 }
 
+#[cfg(unix)]
+#[test]
+fn staged_safety_scan_blocks_non_utf8_git_paths_with_exit_two() {
+    use std::io::Write;
+    use std::process::{Command as StdCommand, Stdio};
+
+    let temp = tempfile::tempdir().expect("temp repo");
+    StdCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(temp.path())
+        .status()
+        .expect("initialize git repository");
+    let records = temp.path().join(".memzoi/records");
+    fs::create_dir_all(&records).expect("records directory");
+    let object = StdCommand::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .expect("hash-object stdin")
+                .write_all(b"General repository knowledge.\n")?;
+            child.wait_with_output()
+        })
+        .expect("write Git blob");
+    assert!(object.status.success());
+    let object_id = String::from_utf8(object.stdout).expect("object ID is UTF-8");
+    let mut index_entry =
+        format!("100644 {}\t.memzoi/records/invalid-", object_id.trim()).into_bytes();
+    index_entry.push(0xff);
+    index_entry.extend_from_slice(b".md\0");
+    let mut update_index = StdCommand::new("git")
+        .args(["update-index", "-z", "--index-info"])
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start update-index");
+    update_index
+        .stdin
+        .take()
+        .expect("update-index stdin")
+        .write_all(&index_entry)
+        .expect("write raw index entry");
+    assert!(
+        update_index
+            .wait()
+            .expect("stage raw index entry")
+            .success()
+    );
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--staged", "--json"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("\"allowed\": false")
+                .and(predicate::str::contains("invalid_encoding"))
+                .and(predicate::str::contains("<non-utf8-git-path>"))
+                .and(predicate::str::contains("invalid-").not()),
+        );
+}
+
 #[test]
 fn eval_recall_help_requires_an_explicit_corpus() {
     let mut cmd = memzoi();

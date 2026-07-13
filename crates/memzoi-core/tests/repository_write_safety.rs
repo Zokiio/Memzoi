@@ -51,6 +51,26 @@ fn safe_request<'a>(
 fn prohibited_content_reports_are_stable_and_redacted() {
     let fixtures: &[(&str, &[u8])] = &[
         ("private_key", b"-----BEGIN PRIVATE KEY-----\nSENTINEL\n"),
+        (
+            "encrypted_pkcs8_private_key",
+            b"-----BEGIN ENCRYPTED PRIVATE KEY-----\nYWJj\n-----END ENCRYPTED PRIVATE KEY-----\n",
+        ),
+        (
+            "rsa_private_key",
+            b"-----BEGIN RSA PRIVATE KEY-----\nYWJj\n-----END RSA PRIVATE KEY-----\n",
+        ),
+        (
+            "ec_private_key",
+            b"-----BEGIN EC PRIVATE KEY-----\nYWJj\n-----END EC PRIVATE KEY-----\n",
+        ),
+        (
+            "openssh_private_key",
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\nYWJj\n-----END OPENSSH PRIVATE KEY-----\n",
+        ),
+        (
+            "dsa_private_key",
+            b"-----BEGIN DSA PRIVATE KEY-----\nYWJj\n-----END DSA PRIVATE KEY-----\n",
+        ),
         ("authorization", b"Authorization: Bearer SECRET-SENTINEL-123456"),
         ("credentialed_url", b"https://user:SECRET-SENTINEL@example.test/path"),
         ("connection", b"postgres://user:SECRET-SENTINEL@db.test/main"),

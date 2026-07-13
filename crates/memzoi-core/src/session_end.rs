@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MemoryDestination, MemoryLane, MemoryType, ScopeKind,
+    MemoryDestination, MemoryLane, MemoryType, RepositoryContentClass, ScopeKind,
     okf::{OkfCreateProposalDraft, OkfProposalSensitivity},
 };
 
@@ -24,12 +24,18 @@ pub struct SessionEndCandidate {
     pub body: String,
     #[serde(default)]
     pub sensitivity: OkfProposalSensitivity,
+    #[serde(default = "default_repository_content_class")]
+    pub content_class: RepositoryContentClass,
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
     pub scope: Option<SessionEndScope>,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+fn default_repository_content_class() -> RepositoryContentClass {
+    RepositoryContentClass::GeneralRepoKnowledge
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -127,6 +133,7 @@ pub(crate) fn session_end_proposal_draft(
         tags: candidate.tags.clone(),
         sources: Vec::new(),
         sensitivity: candidate.sensitivity,
+        content_class: candidate.content_class,
         capture: None,
     })
 }

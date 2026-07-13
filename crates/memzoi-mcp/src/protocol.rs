@@ -763,6 +763,10 @@ fn tools_list_result() -> Value {
                             "type": "string",
                             "enum": ["repo-safe", "local-only", "sensitive", "secret", "raw-transcript", "private-personal-data", "temporary-state", "unknown"]
                         },
+                        "content_class": {
+                            "type": "string",
+                            "enum": ["general_repo_knowledge", "raw_transcript", "private_personal_data", "screen_or_activity_history", "private_endpoint", "undisclosed_vulnerability", "unminimized_private_evidence", "temporary_task_state", "local_only_state", "unknown"]
+                        },
                         "confidence": { "type": "number" },
                         "actor": { "type": "string" },
                         "approval_mode": {
@@ -1088,6 +1092,7 @@ fn memory_draft(arguments: &Value) -> Result<MemoryDraft> {
         source_kind: optional_string(arguments, "source_kind"),
         source_ref: optional_string(arguments, "source_ref"),
         sensitivity: optional_sensitivity(arguments)?.unwrap_or_default(),
+        content_class: optional_content_class(arguments)?.unwrap_or_default(),
         confidence: optional_f64(arguments, "confidence")?.unwrap_or(1.0),
     })
 }
@@ -1132,6 +1137,13 @@ fn optional_visibility(value: &Value) -> Result<Option<Visibility>> {
 
 fn optional_sensitivity(value: &Value) -> Result<Option<OkfProposalSensitivity>> {
     optional_str(value, "sensitivity")
+        .map(str::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)
+}
+
+fn optional_content_class(value: &Value) -> Result<Option<memzoi_core::RepositoryContentClass>> {
+    optional_str(value, "content_class")
         .map(str::parse)
         .transpose()
         .map_err(anyhow::Error::msg)
@@ -1261,6 +1273,7 @@ mod tests {
             source_kind: Some("test".to_owned()),
             source_ref: Some("mcp-smoke".to_owned()),
             sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: memzoi_core::RepositoryContentClass::GeneralRepoKnowledge,
             confidence: 1.0,
         }
     }

@@ -914,6 +914,7 @@ fn memory_draft(title: &str, body: &str, tags: Vec<String>) -> MemoryDraft {
         source_kind: Some("test".to_owned()),
         source_ref: Some("okf-profile-test".to_owned()),
         sensitivity: memzoi_core::OkfProposalSensitivity::RepoSafe,
+        content_class: memzoi_core::RepositoryContentClass::GeneralRepoKnowledge,
         confidence: 0.9,
     }
 }

@@ -6,16 +6,21 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::{AuthorizedRepositoryWriteBatch, RepositoryProjection};
+use crate::{AuthorizedRepositoryWriteBatch, RepositoryProjection, RepositoryWriteRoute};
 
 pub(crate) fn verify_repository_batch(
     project_root: &Path,
+    expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[RepositoryProjection<'_>],
 ) -> Result<()> {
-    if !authorization.authorizes(project_root.as_os_str().as_encoded_bytes(), projections) {
+    if !authorization.authorizes(
+        expected_route,
+        project_root.as_os_str().as_encoded_bytes(),
+        projections,
+    ) {
         bail!(
-            "repository write authorization does not match the exact project, paths, revisions, and bytes"
+            "repository write authorization does not match the exact route, project, paths, revisions, and bytes"
         );
     }
     for projection in projections {
@@ -26,10 +31,11 @@ pub(crate) fn verify_repository_batch(
 
 pub(crate) fn create_repository_batch(
     project_root: &Path,
+    expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[RepositoryProjection<'_>],
 ) -> Result<Vec<PathBuf>> {
-    verify_repository_batch(project_root, authorization, projections)?;
+    verify_repository_batch(project_root, expected_route, authorization, projections)?;
     let mut destinations = Vec::with_capacity(projections.len());
     for projection in projections {
         if projection.target_revision.is_some() {
@@ -171,7 +177,33 @@ mod tests {
             bytes: b"changed repository knowledge",
             target_revision: None,
         }];
-        assert!(verify_repository_batch(temp.path(), &token, &changed).is_err());
-        assert!(verify_repository_batch(temp.path(), &token, &projections).is_ok());
+        assert!(
+            verify_repository_batch(
+                temp.path(),
+                RepositoryWriteRoute::FileProposalCreate,
+                &token,
+                &changed,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_repository_batch(
+                temp.path(),
+                RepositoryWriteRoute::FileProposalCreate,
+                &token,
+                &projections,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_repository_batch(
+                temp.path(),
+                RepositoryWriteRoute::ImportApply,
+                &token,
+                &projections,
+            )
+            .is_err(),
+            "a capability minted for one route must fail at another route's mutation seam"
+        );
     }
 }

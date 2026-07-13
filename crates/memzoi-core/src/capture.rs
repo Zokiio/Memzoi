@@ -421,6 +421,8 @@ pub struct CaptureClassification {
     pub destination_reason: String,
     pub sensitivity: OkfProposalSensitivity,
     pub sensitivity_reason: String,
+    #[serde(default)]
+    pub content_class: crate::RepositoryContentClass,
     pub policy: MemoryDestinationPolicy,
 }
 
@@ -3644,6 +3646,7 @@ fn candidate(
         destination_reason: destination_reason.to_owned(),
         sensitivity,
         sensitivity_reason: sensitivity_reason.to_owned(),
+        content_class: crate::RepositoryContentClass::GeneralRepoKnowledge,
         policy: destination.policy(),
     };
     let action = preliminary_action(&classification);

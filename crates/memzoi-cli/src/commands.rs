@@ -175,7 +175,14 @@ fn load_git_memory_blobs(
         .split(|byte| *byte == 0)
         .filter(|name| !name.is_empty())
     {
-        let path = std::str::from_utf8(raw).context("Git returned a non-UTF-8 repository path")?;
+        let Ok(path) = std::str::from_utf8(raw) else {
+            blobs.push(SafetyScanBlob {
+                path: PathBuf::from(".memzoi/memory/<non-utf8-git-path>"),
+                bytes: raw.to_vec(),
+                regular_blob: true,
+            });
+            continue;
+        };
         let relative = PathBuf::from(path);
         if !is_memory_scan_path(&relative) {
             continue;
@@ -244,6 +251,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             source_kind,
             source_ref,
             sensitivity,
+            content_class,
             title,
             body,
             actor,
@@ -259,6 +267,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 source_kind,
                 source_ref,
                 sensitivity,
+                content_class,
                 title,
                 body,
             },
@@ -416,6 +425,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             source_kind,
             source_ref,
             sensitivity,
+            content_class,
             title,
             body,
             actor,
@@ -429,6 +439,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 source_kind,
                 source_ref,
                 sensitivity,
+                content_class,
                 title,
                 body,
             },
@@ -1849,8 +1860,9 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
             body: sample_body.to_string(),
             tags: Vec::new(),
             source_kind: Some("quickstart".to_string()),
-            source_ref: None,
+            source_ref: Some("quickstart://built-in-sample".to_string()),
             sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: memzoi_core::RepositoryContentClass::GeneralRepoKnowledge,
             confidence: 1.0,
         };
         let proposal = service.propose_memory("quickstart", draft)?;
@@ -1948,6 +1960,7 @@ fn draft_from_args(args: DraftCommand) -> Result<MemoryDraft> {
         source_kind,
         source_ref,
         sensitivity,
+        content_class,
         title,
         body,
     } = args;
@@ -1963,6 +1976,7 @@ fn draft_from_args(args: DraftCommand) -> Result<MemoryDraft> {
         source_kind: normalize_optional_metadata(source_kind, "source-kind")?,
         source_ref: normalize_optional_metadata(source_ref, "source-ref")?,
         sensitivity: sensitivity.parse().map_err(anyhow::Error::msg)?,
+        content_class: content_class.parse().map_err(anyhow::Error::msg)?,
         confidence: 1.0,
     })
 }

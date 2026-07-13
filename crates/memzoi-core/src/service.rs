@@ -521,6 +521,7 @@ impl MemoryService {
             proposal.payload.scope_id.as_deref(),
             proposal.payload.visibility,
             AuthorizationProof::ApprovedDatabaseProposal { proposal_id },
+            explicit_repository_provenance(proposal.payload.content_class, proposal_id),
             &safety_values,
             &[],
         )?;
@@ -537,10 +538,17 @@ impl MemoryService {
             proposal.payload.scope_id.as_deref(),
             proposal.payload.visibility,
             AuthorizationProof::ApprovedDatabaseProposal { proposal_id },
+            explicit_repository_provenance(proposal.payload.content_class, proposal_id),
             &safety_values,
             &projections,
         )?;
-        commit_db_and_canonical_writes(&self.paths, &authorization, tx, &[write])?;
+        commit_db_and_canonical_writes(
+            &self.paths,
+            RepositoryWriteRoute::DatabaseProposalApply,
+            &authorization,
+            tx,
+            &[write],
+        )?;
         Ok(record)
     }
 
@@ -629,6 +637,7 @@ impl MemoryService {
             AuthorizationProof::ExplicitCommand {
                 operation: "file_proposal_apply",
             },
+            explicit_repository_provenance(proposal.content_class, &proposal.id),
             &safety_values,
             &projections,
         )?;
@@ -636,6 +645,7 @@ impl MemoryService {
         let nonce = Uuid::now_v7().to_string();
         let mut staged_writes = stage_canonical_writes(
             &self.paths,
+            RepositoryWriteRoute::FileProposalApply,
             &authorization,
             &projections,
             &plan.writes,
@@ -643,6 +653,7 @@ impl MemoryService {
         )?;
         let resolved_temp = match stage_authorized_file(
             &self.paths,
+            RepositoryWriteRoute::FileProposalApply,
             &authorization,
             &projections,
             &resolved_path,
@@ -1397,6 +1408,7 @@ impl MemoryService {
             AuthorizationProof::ExplicitCommand {
                 operation: "file_proposal_reject",
             },
+            explicit_repository_provenance(proposal.content_class, &proposal.id),
             &original_values,
             &[],
         )
@@ -1464,6 +1476,10 @@ impl MemoryService {
             AuthorizationProof::ExplicitCommand {
                 operation: "file_proposal_reject",
             },
+            explicit_repository_provenance(
+                RepositoryContentClass::GeneralRepoKnowledge,
+                "redacted_file_proposal_rejection_receipt",
+            ),
             &safety_values,
             &projections,
         )?;
@@ -1471,6 +1487,7 @@ impl MemoryService {
         let nonce = Uuid::now_v7().to_string();
         let resolved_temp = stage_authorized_file(
             &self.paths,
+            RepositoryWriteRoute::FileProposalRejectReceipt,
             &authorization,
             &projections,
             &resolved_path,
@@ -1726,6 +1743,7 @@ impl MemoryService {
             AuthorizationProof::LifecycleOperation {
                 target_id: record_id,
             },
+            explicit_repository_provenance(draft.content_class, record_id),
             &safety_values,
             &[],
         )?;
@@ -1765,11 +1783,13 @@ impl MemoryService {
             AuthorizationProof::LifecycleOperation {
                 target_id: record_id,
             },
+            explicit_repository_provenance(draft.content_class, record_id),
             &safety_values,
             &projections,
         )?;
         commit_db_and_canonical_writes_with_hooks(
             &self.paths,
+            RepositoryWriteRoute::Supersede,
             &authorization,
             tx,
             &writes,
@@ -1811,6 +1831,7 @@ impl MemoryService {
             AuthorizationProof::LifecycleOperation {
                 target_id: record_id,
             },
+            explicit_repository_provenance(RepositoryContentClass::GeneralRepoKnowledge, record_id),
             &safety_values,
             &[],
         )?;
@@ -1832,10 +1853,17 @@ impl MemoryService {
             AuthorizationProof::LifecycleOperation {
                 target_id: record_id,
             },
+            explicit_repository_provenance(RepositoryContentClass::GeneralRepoKnowledge, record_id),
             &safety_values,
             &projections,
         )?;
-        commit_db_and_canonical_writes(&self.paths, &authorization, tx, &[write])?;
+        commit_db_and_canonical_writes(
+            &self.paths,
+            RepositoryWriteRoute::Tombstone,
+            &authorization,
+            tx,
+            &[write],
+        )?;
         Ok(record)
     }
 
@@ -1998,6 +2026,7 @@ impl MemoryService {
                 AuthorizationProof::ExplicitCommand {
                     operation: "session_end_assessment",
                 },
+                explicit_repository_provenance(candidate.content_class, &document.task),
                 &values,
                 &[],
             )
@@ -2083,6 +2112,10 @@ impl MemoryService {
                     AuthorizationProof::ExplicitCommand {
                         operation: "session_end_promotion",
                     },
+                    explicit_repository_provenance(
+                        RepositoryContentClass::GeneralRepoKnowledge,
+                        &document.task,
+                    ),
                     &safety_values,
                     &repo_projections,
                 )
@@ -2109,6 +2142,7 @@ impl MemoryService {
             if let Some(authorization) = repo_authorization.as_ref() {
                 let created = create_authorized_repository_batch(
                     &self.paths,
+                    RepositoryWriteRoute::SessionEndPromotion,
                     authorization,
                     &repo_projections,
                 )?;
@@ -2303,6 +2337,7 @@ impl MemoryService {
                 AuthorizationProof::ExplicitCommand {
                     operation: "import_plan",
                 },
+                explicit_repository_provenance(candidate.content_class, actor),
                 &values,
                 &[],
             )
@@ -2408,6 +2443,10 @@ impl MemoryService {
                     AuthorizationProof::ImportPlan {
                         plan_id: &plan.plan_id,
                     },
+                    explicit_repository_provenance(
+                        RepositoryContentClass::GeneralRepoKnowledge,
+                        &plan.plan_id,
+                    ),
                     &safety_values,
                     &repo_projections,
                 )
@@ -2431,6 +2470,7 @@ impl MemoryService {
             let created_paths = match repo_authorization.as_ref() {
                 Some(authorization) => create_authorized_repository_batch(
                     &self.paths,
+                    RepositoryWriteRoute::ImportApply,
                     authorization,
                     &repo_projections,
                 )?,
@@ -2739,6 +2779,7 @@ impl MemoryService {
                     })
                     .collect(),
                 sensitivity: candidate.classification.sensitivity,
+                content_class: candidate.classification.content_class,
                 capture: Some(provenance),
             };
             planned.push((
@@ -2778,6 +2819,10 @@ impl MemoryService {
                         plan_id: &plan.plan_id,
                         review_id: &review.review_id,
                     },
+                    explicit_repository_provenance(
+                        RepositoryContentClass::GeneralRepoKnowledge,
+                        &review.review_id,
+                    ),
                     &repo_safety_values,
                     &repo_projections,
                 )
@@ -3056,6 +3101,11 @@ fn memory_draft_safety_values(prefix: &str, draft: &MemoryDraft) -> Vec<Reposito
             &draft.title,
         ),
         safety_value(format!("{prefix}.body"), SafetyFieldKind::Text, &draft.body),
+        safety_value(
+            format!("{prefix}.content_class"),
+            SafetyFieldKind::Identifier,
+            draft.content_class.as_str(),
+        ),
     ];
     for (index, tag) in draft.tags.iter().enumerate() {
         values.push(safety_value(
@@ -3122,6 +3172,11 @@ fn okf_proposal_safety_values(
             format!("{prefix}.proposed_by"),
             SafetyFieldKind::Identifier,
             &proposal.proposal.proposed_by,
+        ),
+        safety_value(
+            format!("{prefix}.content_class"),
+            SafetyFieldKind::Identifier,
+            proposal.content_class.as_str(),
         ),
     ];
     if let Some(reason) = proposal.proposal.reason.as_deref() {
@@ -3211,6 +3266,7 @@ fn authorize_repository_projection_batch(
     scope_id: Option<&str>,
     visibility: Visibility,
     authorization: AuthorizationProof<'_>,
+    provenance: ProvenanceAssessment<'_>,
     values: &[RepositorySafetyValue],
     projections: &[OwnedRepositoryProjection],
 ) -> Result<AuthorizedRepositoryWriteBatch> {
@@ -3231,17 +3287,12 @@ fn authorize_repository_projection_batch(
             kind: scope_kind,
             id: scope_id,
             current_project_identity: paths.project_root.as_os_str().as_encoded_bytes(),
-            configured_project_id: scope_id,
+            configured_project_id: None,
         },
         visibility,
         authorization,
         freshness: Vec::new(),
-        provenance: ProvenanceAssessment {
-            present: true,
-            evidence_valid: true,
-            content_class: RepositoryContentClass::GeneralRepoKnowledge,
-            source_identity: Some(route.as_str()),
-        },
+        provenance,
         fields,
         projections,
     };
@@ -3250,11 +3301,30 @@ fn authorize_repository_projection_batch(
 
 fn create_authorized_repository_batch(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[OwnedRepositoryProjection],
 ) -> Result<Vec<PathBuf>> {
     let borrowed = borrowed_repository_projections(projections);
-    repository_io::create_repository_batch(&paths.project_root, authorization, &borrowed)
+    repository_io::create_repository_batch(
+        &paths.project_root,
+        expected_route,
+        authorization,
+        &borrowed,
+    )
+}
+
+fn explicit_repository_provenance<'a>(
+    content_class: RepositoryContentClass,
+    source_identity: &'a str,
+) -> ProvenanceAssessment<'a> {
+    let valid = !source_identity.trim().is_empty();
+    ProvenanceAssessment {
+        present: valid,
+        evidence_valid: valid,
+        content_class,
+        source_identity: valid.then_some(source_identity),
+    }
 }
 
 fn canonical_write_projections(
@@ -3701,7 +3771,12 @@ fn stage_capture_apply_proposals(
 ) -> Result<()> {
     validate_capture_apply_journal(journal)?;
     let borrowed = borrowed_repository_projections(projections);
-    repository_io::verify_repository_batch(&paths.project_root, authorization, &borrowed)?;
+    repository_io::verify_repository_batch(
+        &paths.project_root,
+        RepositoryWriteRoute::CaptureApply,
+        authorization,
+        &borrowed,
+    )?;
     if journal.authorization_digest != authorization.digest() {
         bail!("capture apply journal authorization digest does not match the current capability");
     }
@@ -3733,6 +3808,7 @@ fn stage_capture_apply_proposals(
         }
         let staged = stage_authorized_file(
             paths,
+            RepositoryWriteRoute::CaptureApply,
             authorization,
             projections,
             &expected_destination,
@@ -3891,6 +3967,10 @@ fn capture_recovery_authorization_is_current(
             plan_id: &journal.plan_id,
             review_id: &journal.review_id,
         },
+        explicit_repository_provenance(
+            RepositoryContentClass::GeneralRepoKnowledge,
+            &journal.review_id,
+        ),
         &values,
         &projections,
     );
@@ -4876,6 +4956,7 @@ fn sibling_transaction_path(path: &Path, nonce: &str, role: &str) -> PathBuf {
 
 fn stage_file(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[OwnedRepositoryProjection],
     final_path: &Path,
@@ -4883,7 +4964,12 @@ fn stage_file(
     nonce: &str,
 ) -> Result<PathBuf> {
     let borrowed = borrowed_repository_projections(projections);
-    repository_io::verify_repository_batch(&paths.project_root, authorization, &borrowed)?;
+    repository_io::verify_repository_batch(
+        &paths.project_root,
+        expected_route,
+        authorization,
+        &borrowed,
+    )?;
     let expected =
         OwnedRepositoryProjection::from_absolute(paths, final_path, contents.as_bytes(), None)?;
     if !projections.iter().any(|projection| {
@@ -4920,6 +5006,7 @@ fn stage_file(
 
 fn stage_authorized_file(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[OwnedRepositoryProjection],
     final_path: &Path,
@@ -4928,6 +5015,7 @@ fn stage_authorized_file(
 ) -> Result<PathBuf> {
     stage_file(
         paths,
+        expected_route,
         authorization,
         projections,
         final_path,
@@ -4938,17 +5026,24 @@ fn stage_authorized_file(
 
 fn stage_canonical_writes(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[OwnedRepositoryProjection],
     writes: &[CanonicalFileWrite],
     nonce: &str,
 ) -> Result<Vec<StagedCanonicalFileWrite>> {
     let borrowed = borrowed_repository_projections(projections);
-    repository_io::verify_repository_batch(&paths.project_root, authorization, &borrowed)?;
+    repository_io::verify_repository_batch(
+        &paths.project_root,
+        expected_route,
+        authorization,
+        &borrowed,
+    )?;
     let mut staged = Vec::with_capacity(writes.len());
     for write in writes {
         let temp_path = match stage_file(
             paths,
+            expected_route,
             authorization,
             projections,
             &write.path,
@@ -5079,12 +5174,14 @@ fn finalize_staged_canonical_writes(writes: &[StagedCanonicalFileWrite]) -> Resu
 
 fn commit_db_and_canonical_writes(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryWriteBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
 ) -> Result<()> {
     commit_db_and_canonical_writes_with_hooks(
         paths,
+        expected_route,
         authorization,
         tx,
         writes,
@@ -5095,6 +5192,7 @@ fn commit_db_and_canonical_writes(
 
 fn commit_db_and_canonical_writes_with_hooks<BeforeInstall, BeforeCommit>(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryWriteBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
@@ -5107,6 +5205,7 @@ where
 {
     commit_db_and_canonical_writes_with_backup_hook(
         paths,
+        expected_route,
         authorization,
         tx,
         writes,
@@ -5116,8 +5215,10 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_db_and_canonical_writes_with_backup_hook<BeforeInstall, AfterBackup, BeforeCommit>(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryWriteBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
@@ -5132,9 +5233,21 @@ where
 {
     let projections = canonical_write_projections(paths, writes)?;
     let borrowed = borrowed_repository_projections(&projections);
-    repository_io::verify_repository_batch(&paths.project_root, authorization, &borrowed)?;
+    repository_io::verify_repository_batch(
+        &paths.project_root,
+        expected_route,
+        authorization,
+        &borrowed,
+    )?;
     let nonce = Uuid::now_v7().to_string();
-    let mut staged = stage_canonical_writes(paths, authorization, &projections, writes, &nonce)?;
+    let mut staged = stage_canonical_writes(
+        paths,
+        expected_route,
+        authorization,
+        &projections,
+        writes,
+        &nonce,
+    )?;
     if let Err(error) = install_staged_canonical_writes_with_backup_hook(
         paths,
         &mut staged,
@@ -6516,12 +6629,14 @@ mod tests {
             AuthorizationProof::LifecycleOperation {
                 target_id: &target.id,
             },
+            explicit_repository_provenance(write.record_file.draft.content_class, &target.id),
             &values,
             &projections,
         )?;
 
         let error = commit_db_and_canonical_writes_with_backup_hook(
             &service.paths,
+            RepositoryWriteRoute::Supersede,
             &authorization,
             tx,
             &[write],
@@ -6789,6 +6904,120 @@ mod tests {
                 .conn
                 .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
         assert_eq!(record_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn database_apply_route_blocks_every_prohibited_content_class() -> anyhow::Result<()> {
+        use crate::{RepositoryWriteBlocked, RepositoryWriteSafetyReasonCode};
+
+        let cases = [
+            (
+                RepositoryContentClass::RawTranscript,
+                RepositoryWriteSafetyReasonCode::RawTranscript,
+            ),
+            (
+                RepositoryContentClass::PrivatePersonalData,
+                RepositoryWriteSafetyReasonCode::PrivatePersonalData,
+            ),
+            (
+                RepositoryContentClass::ScreenOrActivityHistory,
+                RepositoryWriteSafetyReasonCode::ActivityHistory,
+            ),
+            (
+                RepositoryContentClass::PrivateEndpoint,
+                RepositoryWriteSafetyReasonCode::PrivateEndpoint,
+            ),
+            (
+                RepositoryContentClass::UndisclosedVulnerability,
+                RepositoryWriteSafetyReasonCode::UndisclosedVulnerability,
+            ),
+            (
+                RepositoryContentClass::UnminimizedPrivateEvidence,
+                RepositoryWriteSafetyReasonCode::PrivateEvidenceUnminimized,
+            ),
+            (
+                RepositoryContentClass::TemporaryTaskState,
+                RepositoryWriteSafetyReasonCode::TemporaryTaskState,
+            ),
+            (
+                RepositoryContentClass::LocalOnlyState,
+                RepositoryWriteSafetyReasonCode::LocalOnlyState,
+            ),
+            (
+                RepositoryContentClass::Unknown,
+                RepositoryWriteSafetyReasonCode::UnknownContentClass,
+            ),
+        ];
+
+        for (index, (content_class, expected_code)) in cases.into_iter().enumerate() {
+            let (_temp, service) = initialized_service()?;
+            let mut draft = sample_memory_draft(
+                &format!("Contextual policy case {index}"),
+                "Lexically harmless content must still honor its contextual classification.",
+            );
+            draft.content_class = content_class;
+            let proposal = service.propose_memory("agent:red-tests", draft)?;
+            service.validate_proposal(&proposal.id)?;
+            service.approve_proposal(&proposal.id, "reviewer:human")?;
+
+            let error = service
+                .apply_proposal(&proposal.id, "agent:applier")
+                .expect_err("prohibited contextual class must fail at the production route");
+            let blocked = error
+                .downcast_ref::<RepositoryWriteBlocked>()
+                .expect("apply error should retain the structured safety report");
+            assert!(
+                blocked
+                    .report()
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == expected_code),
+                "missing {expected_code:?} for {content_class:?}: {:?}",
+                blocked.report().findings
+            );
+            let record_count: i64 =
+                service
+                    .conn
+                    .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+            assert_eq!(record_count, 0);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn database_apply_route_fails_closed_for_unconfigured_project_scope() -> anyhow::Result<()> {
+        use crate::{RepositoryWriteBlocked, RepositoryWriteSafetyReasonCode};
+
+        let (_temp, service) = initialized_service()?;
+        let mut draft = sample_memory_draft(
+            "Untrusted project identity",
+            "A candidate cannot attest that its own arbitrary project ID is current.",
+        );
+        draft.scope_kind = ScopeKind::Project;
+        draft.scope_id = Some("candidate-controlled-project".to_owned());
+        let proposal = service.propose_memory("agent:red-tests", draft)?;
+        service.validate_proposal(&proposal.id)?;
+        service.approve_proposal(&proposal.id, "reviewer:human")?;
+
+        let error = service
+            .apply_proposal(&proposal.id, "agent:applier")
+            .expect_err("project scope must fail without an independent configured identity");
+        let blocked = error
+            .downcast_ref::<RepositoryWriteBlocked>()
+            .expect("apply error should retain the structured safety report");
+        assert!(blocked.report().findings.iter().any(|finding| {
+            finding.code == RepositoryWriteSafetyReasonCode::ScopeProjectMismatch
+        }));
+        assert!(
+            !service
+                .paths
+                .records_dir()
+                .join(format!("{}.md", proposal.id))
+                .exists()
+        );
 
         Ok(())
     }
@@ -7488,6 +7717,7 @@ mod tests {
                 body: "The pending packet must remain inside the guarded repository root."
                     .to_owned(),
                 sensitivity: OkfProposalSensitivity::RepoSafe,
+                content_class: RepositoryContentClass::GeneralRepoKnowledge,
                 reason: Some("Lifecycle regression coverage".to_owned()),
                 scope: None,
                 tags: vec!["lifecycle".to_owned()],
@@ -7512,6 +7742,7 @@ mod tests {
                 body: "The imported pending packet must remain inside the guarded repository root."
                     .to_owned(),
                 sensitivity: OkfProposalSensitivity::RepoSafe,
+                content_class: RepositoryContentClass::GeneralRepoKnowledge,
                 scope: None,
                 tags: vec!["lifecycle".to_owned()],
             }],
@@ -7554,6 +7785,7 @@ mod tests {
                 reference: None,
             }],
             sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
             capture: None,
         };
         let plan =
@@ -7636,6 +7868,7 @@ mod tests {
             source_kind: Some("test".to_owned()),
             source_ref: Some("service-proposal-tests".to_owned()),
             sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
             confidence: 0.82,
         }
     }

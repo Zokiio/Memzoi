@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -100,7 +100,7 @@ impl fmt::Debug for RepositoryScope<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryContentClass {
     GeneralRepoKnowledge,
@@ -112,7 +112,53 @@ pub enum RepositoryContentClass {
     UnminimizedPrivateEvidence,
     TemporaryTaskState,
     LocalOnlyState,
+    #[default]
     Unknown,
+}
+
+impl RepositoryContentClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GeneralRepoKnowledge => "general_repo_knowledge",
+            Self::RawTranscript => "raw_transcript",
+            Self::PrivatePersonalData => "private_personal_data",
+            Self::ScreenOrActivityHistory => "screen_or_activity_history",
+            Self::PrivateEndpoint => "private_endpoint",
+            Self::UndisclosedVulnerability => "undisclosed_vulnerability",
+            Self::UnminimizedPrivateEvidence => "unminimized_private_evidence",
+            Self::TemporaryTaskState => "temporary_task_state",
+            Self::LocalOnlyState => "local_only_state",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl FromStr for RepositoryContentClass {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "general_repo_knowledge" | "general-repo-knowledge" => Ok(Self::GeneralRepoKnowledge),
+            "raw_transcript" | "raw-transcript" => Ok(Self::RawTranscript),
+            "private_personal_data" | "private-personal-data" => Ok(Self::PrivatePersonalData),
+            "screen_or_activity_history" | "screen-or-activity-history" => {
+                Ok(Self::ScreenOrActivityHistory)
+            }
+            "private_endpoint" | "private-endpoint" => Ok(Self::PrivateEndpoint),
+            "undisclosed_vulnerability" | "undisclosed-vulnerability" => {
+                Ok(Self::UndisclosedVulnerability)
+            }
+            "unminimized_private_evidence" | "unminimized-private-evidence" => {
+                Ok(Self::UnminimizedPrivateEvidence)
+            }
+            "temporary_task_state" | "temporary-task-state" => Ok(Self::TemporaryTaskState),
+            "local_only_state" | "local-only-state" => Ok(Self::LocalOnlyState),
+            "unknown" => Ok(Self::Unknown),
+            other => Err(format!(
+                "invalid repository content class {other:?}; expected general_repo_knowledge, raw_transcript, private_personal_data, screen_or_activity_history, private_endpoint, undisclosed_vulnerability, unminimized_private_evidence, temporary_task_state, local_only_state, or unknown"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CaptureProvenance, MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus,
-    MemoryType, ScopeKind, Visibility, capture, expiry, proposals::title_to_concept_slug,
+    MemoryType, RepositoryContentClass, ScopeKind, Visibility, capture, expiry,
+    proposals::title_to_concept_slug,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +52,7 @@ pub struct OkfProposalFile {
     pub sources: Vec<OkfProposalSource>,
     pub supersedes: Vec<String>,
     pub sensitivity: OkfProposalSensitivity,
+    pub content_class: RepositoryContentClass,
     pub resolution: Option<OkfProposalResolution>,
     pub capture: Option<CaptureProvenance>,
 }
@@ -111,6 +113,7 @@ pub(crate) struct OkfCreateProposalDraft {
     pub(crate) tags: Vec<String>,
     pub(crate) sources: Vec<OkfProposalSource>,
     pub(crate) sensitivity: OkfProposalSensitivity,
+    pub(crate) content_class: RepositoryContentClass,
     pub(crate) capture: Option<CaptureProvenance>,
 }
 
@@ -190,6 +193,7 @@ pub(crate) fn render_okf_create_proposal_markdown(
             .collect(),
         supersedes: Vec::new(),
         sensitivity: draft.sensitivity,
+        content_class: draft.content_class,
         capture: draft.capture.clone(),
     };
     let yaml =
@@ -615,6 +619,7 @@ pub fn preflight_okf_proposal_markdown(
         sources: Vec::new(),
         supersedes: Vec::new(),
         sensitivity,
+        content_class: RepositoryContentClass::Unknown,
         resolution: None,
         capture: None,
     };
@@ -741,6 +746,7 @@ pub fn parse_okf_record_markdown(
             source_kind,
             source_ref,
             sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
             confidence,
         },
         status,
@@ -821,6 +827,11 @@ pub fn parse_okf_proposal_markdown(
         sources,
         supersedes,
         sensitivity,
+        content_class: parse_optional_enum::<RepositoryContentClass>(
+            frontmatter.content_class,
+            "content_class",
+        )?
+        .unwrap_or(RepositoryContentClass::GeneralRepoKnowledge),
         resolution,
         capture: frontmatter.capture,
     }))
@@ -987,6 +998,7 @@ pub(crate) fn render_resolved_okf_proposal_markdown(
         sources: proposal.sources.clone(),
         supersedes: proposal.supersedes.clone(),
         sensitivity: proposal.sensitivity,
+        content_class: proposal.content_class,
         resolution: resolution.clone(),
         capture: proposal.capture.clone(),
     };
@@ -1116,6 +1128,7 @@ struct OkfCreateProposalFrontmatter {
     sources: Vec<OkfProposalSource>,
     supersedes: Vec<String>,
     sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
     #[serde(skip_serializing_if = "Option::is_none")]
     capture: Option<CaptureProvenance>,
 }
@@ -1191,6 +1204,7 @@ struct OkfProposalFrontmatter {
     sources: Option<Vec<OkfProposalSource>>,
     supersedes: Option<StringList>,
     sensitivity: Option<String>,
+    content_class: Option<String>,
     resolution: Option<OkfProposalResolutionFrontmatter>,
     capture: Option<CaptureProvenance>,
 }
@@ -1231,6 +1245,7 @@ struct OkfResolvedProposalFrontmatter {
     sources: Vec<OkfProposalSource>,
     supersedes: Vec<String>,
     sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
     resolution: OkfProposalResolution,
     #[serde(skip_serializing_if = "Option::is_none")]
     capture: Option<CaptureProvenance>,

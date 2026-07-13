@@ -28,7 +28,7 @@ static PATTERNS: LazyLock<Vec<PatternDetector>> = LazyLock::new(|| {
         (
             "private_key",
             RepositoryWriteSafetyReasonCode::PrivateKey,
-            r"(?i)-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----",
+            r"(?i)-----BEGIN (?:ENCRYPTED |RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----",
         ),
         (
             "authorization_header",

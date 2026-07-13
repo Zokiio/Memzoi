@@ -1812,6 +1812,7 @@ fn evaluate_case(
                     source_kind: Some("eval".to_owned()),
                     source_ref: Some("fixture://write-gate".to_owned()),
                     sensitivity: *sensitivity,
+                    content_class: crate::RepositoryContentClass::GeneralRepoKnowledge,
                     confidence: 1.0,
                 },
                 ProposeOptions {

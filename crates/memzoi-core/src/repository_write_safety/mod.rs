@@ -70,11 +70,13 @@ impl AuthorizedRepositoryWriteBatch {
 
     pub(crate) fn authorizes(
         &self,
+        expected_route: RepositoryWriteRoute,
         project_identity: &[u8],
         projections: &[RepositoryProjection<'_>],
     ) -> bool {
         self.contract_version == REPOSITORY_WRITE_SAFETY_VERSION
             && self.detector_policy_version == REPOSITORY_WRITE_DETECTOR_POLICY_VERSION
+            && self.route == expected_route
             && self.project_digest == projection::project_digest(project_identity)
             && self.projection_digest == projection::projection_digest(projections)
     }
