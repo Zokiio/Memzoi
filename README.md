@@ -48,7 +48,7 @@ Not everything belongs in Git. Personal preferences, working habits, private not
 
 Repository memory and personal memory should work together without becoming the same thing.
 
-### Agent independent
+### Agent-independent
 
 The memory belongs to the developer—not to Claude, Codex, Copilot, Cursor, OpenAI, Anthropic, or any other provider.
 
