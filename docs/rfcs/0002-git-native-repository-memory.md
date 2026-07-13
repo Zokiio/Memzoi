@@ -1,7 +1,7 @@
 # RFC 0002: Git-native repository memory
 
-- Status: Proposed
-- Decision proposed: 2026-07-13
+- Status: Accepted
+- Accepted: 2026-07-13
 - Target: v0.6 — Memory Quality and Lifecycle
 - Tracking issue: [#99](https://github.com/Zokiio/Memzoi/issues/99)
 - Supersedes: Repository-write and canonical-apply portions of
@@ -758,9 +758,9 @@ rather than a claim of collaborator approval.
 
 ## Maintainer decision
 
-**Proposed on 2026-07-13 — awaiting maintainer acceptance.**
+**Accepted on 2026-07-13.**
 
-The maintainer must explicitly ratify:
+The maintainer ratifies:
 
 1. admitted working-tree revisions are locally active;
 2. staging has no Memzoi semantic effect and working-tree bytes win;
@@ -781,5 +781,5 @@ The maintainer must explicitly ratify:
 12. mandatory proposals become a compatibility-only route for normal
     repository memory.
 
-Upon acceptance, #99 may close, #101 implements the shared write gate first,
+With acceptance, #99 may close, #101 implements the shared write gate first,
 and #100 follows with materialization, admission, and projection consistency.
