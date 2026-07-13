@@ -1045,7 +1045,7 @@ fn model_download_status_is_redirect(status: u16) -> Result<bool> {
     if (200..300).contains(&status) {
         return Ok(false);
     }
-    if (300..400).contains(&status) {
+    if matches!(status, 301 | 302 | 303 | 307 | 308) {
         return Ok(true);
     }
     bail!("model download failed with HTTP status {status}")
@@ -1724,8 +1724,17 @@ mod tests {
     fn model_download_statuses_fail_fast_outside_success_and_redirects() {
         assert!(!model_download_status_is_redirect(200).unwrap());
         assert!(!model_download_status_is_redirect(299).unwrap());
-        assert!(model_download_status_is_redirect(300).unwrap());
-        assert!(model_download_status_is_redirect(399).unwrap());
+        for status in [301, 302, 303, 307, 308] {
+            assert!(model_download_status_is_redirect(status).unwrap());
+        }
+        for status in [300, 304, 305, 306, 399] {
+            assert_eq!(
+                model_download_status_is_redirect(status)
+                    .unwrap_err()
+                    .to_string(),
+                format!("model download failed with HTTP status {status}")
+            );
+        }
         assert_eq!(
             model_download_status_is_redirect(404)
                 .unwrap_err()
