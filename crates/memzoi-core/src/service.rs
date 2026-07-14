@@ -7165,7 +7165,7 @@ mod tests {
                 .status,
             MemoryStatus::Superseded
         );
-        assert!(record_by_id(&service.conn, &replacement.id)?.is_some());
+        assert!(record_by_id(&service.conn, &replacement.replacement.id)?.is_some());
         Ok(())
     }
 
