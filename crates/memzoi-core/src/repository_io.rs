@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use crate::{AuthorizedRepositoryWriteBatch, RepositoryProjection, RepositoryWriteRoute};
 
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum InjectedCreateFileFailure {
     Write,
@@ -23,6 +24,7 @@ thread_local! {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn inject_repository_create_failure(failure: InjectedCreateFileFailure) {
     INJECTED_CREATE_FILE_FAILURE.with(|injected| injected.set(Some(failure)));
 }
