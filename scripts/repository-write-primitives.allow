@@ -25,10 +25,10 @@ crates/memzoi-core/src/recall_eval.rs|.write_all|2
 crates/memzoi-core/src/recall_eval_v3.rs|fs::write|1
 crates/memzoi-core/src/recall_eval_v3.rs|fs::copy|1
 crates/memzoi-core/src/repository_io.rs|fs::write|1
-crates/memzoi-core/src/repository_io.rs|.write_all|1
-crates/memzoi-core/src/service.rs|fs::write|20
+crates/memzoi-core/src/repository_io.rs|.write_all|2
+crates/memzoi-core/src/service.rs|fs::write|26
 crates/memzoi-core/src/service.rs|fs::rename|5
-crates/memzoi-core/src/service.rs|fs::hard_link|5
+crates/memzoi-core/src/service.rs|fs::hard_link|4
 crates/memzoi-core/src/service.rs|OpenOptions::new|3
 crates/memzoi-core/src/service.rs|.write_all|2
 crates/memzoi-mcp/src/protocol.rs|fs::write|7

@@ -288,8 +288,16 @@ struct StagedCanonicalFileWrite {
     installed: bool,
 }
 
+#[derive(Clone, Copy)]
+struct RepositoryMutationAuthorization<'a> {
+    route: RepositoryWriteRoute,
+    authorization: &'a AuthorizedRepositoryProjectionBatch,
+    projections: &'a [OwnedRepositoryProjection],
+}
+
 struct FileResolutionRollback<'a> {
     paths: &'a MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'a>,
     pending_path: &'a Path,
     pending_backup: &'a Path,
     pending_hash: &'a str,
@@ -303,6 +311,7 @@ struct FileResolutionRollback<'a> {
 
 struct RejectedFileProposalRollback<'a> {
     paths: &'a MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'a>,
     pending_path: &'a Path,
     pending_backup: &'a Path,
     pending_hash: &'a str,
@@ -696,6 +705,11 @@ impl MemoryService {
             &safety_values,
             &projections,
         )?;
+        let mutation = RepositoryMutationAuthorization {
+            route: RepositoryWriteRoute::FileProposalApply,
+            authorization: &authorization,
+            projections: &projections,
+        };
         self.prepare_resolution_destination(&resolved_path)?;
         let nonce = Uuid::now_v7().to_string();
         let mut staged_writes = stage_canonical_writes(
@@ -782,15 +796,17 @@ impl MemoryService {
             before_pending_revalidation(proposal_path)?;
             backup_repository_file_to_transaction(
                 &self.paths,
+                mutation,
                 proposal_path,
                 &pending_backup,
                 &snapshot.expected_hash,
             )?;
             pending_moved = true;
             self.revalidate_moved_pending_file_proposal(proposal_path, &pending_backup, &snapshot)?;
-            install_staged_canonical_writes(&self.paths, &mut staged_writes, |_| Ok(()))?;
+            install_staged_canonical_writes(&self.paths, mutation, &mut staged_writes, |_| Ok(()))?;
             install_verified_staged_file_no_replace(
                 &self.paths,
+                mutation,
                 &resolved_temp,
                 &resolved_path,
                 &resolved_hash,
@@ -804,6 +820,7 @@ impl MemoryService {
                 error,
                 rollback_file_resolution(FileResolutionRollback {
                     paths: &self.paths,
+                    mutation,
                     pending_path: proposal_path,
                     pending_backup: &pending_backup,
                     pending_hash: &snapshot.expected_hash,
@@ -824,6 +841,7 @@ impl MemoryService {
                     .context("failed to commit proposal-file runtime index update"),
                 rollback_file_resolution(FileResolutionRollback {
                     paths: &self.paths,
+                    mutation,
                     pending_path: proposal_path,
                     pending_backup: &pending_backup,
                     pending_hash: &snapshot.expected_hash,
@@ -1574,6 +1592,11 @@ impl MemoryService {
             &safety_values,
             &projections,
         )?;
+        let mutation = RepositoryMutationAuthorization {
+            route: RepositoryWriteRoute::FileProposalRejectReceipt,
+            authorization: &authorization,
+            projections: &projections,
+        };
         self.prepare_resolution_destination(&resolved_path)?;
         let nonce = Uuid::now_v7().to_string();
         let resolved_temp = stage_authorized_file(
@@ -1600,6 +1623,7 @@ impl MemoryService {
         }
         if let Err(error) = backup_repository_file_to_transaction(
             &self.paths,
+            mutation,
             proposal_path,
             &pending_backup,
             &snapshot.expected_hash,
@@ -1617,6 +1641,7 @@ impl MemoryService {
                 error,
                 rollback_rejected_file_proposal(RejectedFileProposalRollback {
                     paths: &self.paths,
+                    mutation,
                     pending_path: proposal_path,
                     pending_backup: &pending_backup,
                     pending_hash: &snapshot.expected_hash,
@@ -1630,6 +1655,7 @@ impl MemoryService {
         }
         if let Err(error) = install_verified_staged_file_no_replace(
             &self.paths,
+            mutation,
             &resolved_temp,
             &resolved_path,
             &resolved_hash,
@@ -1638,6 +1664,7 @@ impl MemoryService {
                 error,
                 rollback_rejected_file_proposal(RejectedFileProposalRollback {
                     paths: &self.paths,
+                    mutation,
                     pending_path: proposal_path,
                     pending_backup: &pending_backup,
                     pending_hash: &snapshot.expected_hash,
@@ -1656,6 +1683,7 @@ impl MemoryService {
                 error,
                 rollback_rejected_file_proposal(RejectedFileProposalRollback {
                     paths: &self.paths,
+                    mutation,
                     pending_path: proposal_path,
                     pending_backup: &pending_backup,
                     pending_hash: &snapshot.expected_hash,
@@ -1677,6 +1705,7 @@ impl MemoryService {
                 error,
                 rollback_rejected_file_proposal(RejectedFileProposalRollback {
                     paths: &self.paths,
+                    mutation,
                     pending_path: proposal_path,
                     pending_backup: &pending_backup,
                     pending_hash: &snapshot.expected_hash,
@@ -5020,6 +5049,7 @@ fn validate_canonical_write_precondition(
 
 fn install_verified_staged_file_no_replace(
     paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
     staged: &Path,
     destination: &Path,
     expected_hash: &str,
@@ -5027,8 +5057,13 @@ fn install_verified_staged_file_no_replace(
     let relative = destination
         .strip_prefix(&paths.project_root)
         .context("repository install destination is outside the project root")?;
+    let borrowed = borrowed_repository_projections(mutation.projections);
     repository_io::install_transaction_file_no_replace(
         &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
         &repository_transaction_root(paths),
         staged,
         relative,
@@ -5038,6 +5073,7 @@ fn install_verified_staged_file_no_replace(
 
 fn backup_repository_file_to_transaction(
     paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
     source: &Path,
     backup: &Path,
     expected_hash: &str,
@@ -5045,8 +5081,13 @@ fn backup_repository_file_to_transaction(
     let relative = source
         .strip_prefix(&paths.project_root)
         .context("repository backup source is outside the project root")?;
+    let borrowed = borrowed_repository_projections(mutation.projections);
     repository_io::backup_repository_file(
         &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
         relative,
         &repository_transaction_root(paths),
         backup,
@@ -5056,13 +5097,23 @@ fn backup_repository_file_to_transaction(
 
 fn remove_installed_repository_file(
     paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
     path: &Path,
     expected_hash: &str,
 ) -> Result<()> {
     let relative = path
         .strip_prefix(&paths.project_root)
         .context("repository rollback path is outside the project root")?;
-    repository_io::remove_repository_file_if_matching(&paths.project_root, relative, expected_hash)
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    repository_io::remove_repository_file_if_matching(
+        &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+        relative,
+        expected_hash,
+    )
 }
 
 fn repo_record_matches(canonical: &okf::OkfRecordFile, indexed: &MemoryRecord) -> bool {
@@ -5349,17 +5400,25 @@ fn stage_canonical_writes(
 
 fn install_staged_canonical_writes<BeforeInstall>(
     paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
     writes: &mut [StagedCanonicalFileWrite],
     before_install: BeforeInstall,
 ) -> Result<()>
 where
     BeforeInstall: FnMut(usize) -> Result<()>,
 {
-    install_staged_canonical_writes_with_backup_hook(paths, writes, before_install, |_, _| Ok(()))
+    install_staged_canonical_writes_with_backup_hook(
+        paths,
+        mutation,
+        writes,
+        before_install,
+        |_, _| Ok(()),
+    )
 }
 
 fn install_staged_canonical_writes_with_backup_hook<BeforeInstall, AfterBackup>(
     paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
     writes: &mut [StagedCanonicalFileWrite],
     mut before_install: BeforeInstall,
     mut after_backup: AfterBackup,
@@ -5376,6 +5435,7 @@ where
             validate_canonical_write_precondition(paths, write)?;
             backup_repository_file_to_transaction(
                 paths,
+                mutation,
                 &write.path,
                 backup_path,
                 write
@@ -5389,6 +5449,7 @@ where
             FileWriteMode::CreateNew => {
                 install_verified_staged_file_no_replace(
                     paths,
+                    mutation,
                     &write.temp_path,
                     &write.path,
                     &write.expected_staged_hash,
@@ -5397,6 +5458,7 @@ where
             FileWriteMode::Overwrite => {
                 install_verified_staged_file_no_replace(
                     paths,
+                    mutation,
                     &write.temp_path,
                     &write.path,
                     &write.expected_staged_hash,
@@ -5410,6 +5472,7 @@ where
 
 fn rollback_staged_canonical_writes(
     paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
     writes: &mut [StagedCanonicalFileWrite],
 ) -> Result<()> {
     let mut errors = Vec::new();
@@ -5417,7 +5480,12 @@ fn rollback_staged_canonical_writes(
         if write.installed {
             record_cleanup_result(
                 &mut errors,
-                remove_installed_repository_file(paths, &write.path, &write.expected_staged_hash),
+                remove_installed_repository_file(
+                    paths,
+                    mutation,
+                    &write.path,
+                    &write.expected_staged_hash,
+                ),
                 format!("remove installed canonical file {}", write.path.display()),
             );
             write.installed = false;
@@ -5429,6 +5497,7 @@ fn rollback_staged_canonical_writes(
                 &mut errors,
                 install_verified_staged_file_no_replace(
                     paths,
+                    mutation,
                     backup_path,
                     &write.path,
                     write
@@ -5531,6 +5600,11 @@ where
     BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
 {
     let projections = canonical_write_projections(paths, writes)?;
+    let mutation = RepositoryMutationAuthorization {
+        route: expected_route,
+        authorization,
+        projections: &projections,
+    };
     let borrowed = borrowed_repository_projections(&projections);
     repository_io::verify_repository_batch(
         &paths.project_root,
@@ -5550,27 +5624,28 @@ where
     )?;
     if let Err(error) = install_staged_canonical_writes_with_backup_hook(
         paths,
+        mutation,
         &mut staged,
         before_install,
         after_backup,
     ) {
         return attach_cleanup_error(
             error,
-            rollback_staged_canonical_writes(paths, &mut staged),
+            rollback_staged_canonical_writes(paths, mutation, &mut staged),
             "canonical install rollback",
         );
     }
     if let Err(error) = before_commit(&tx) {
         return attach_cleanup_error(
             error,
-            rollback_staged_canonical_writes(paths, &mut staged),
+            rollback_staged_canonical_writes(paths, mutation, &mut staged),
             "canonical pre-commit rollback",
         );
     }
     if let Err(error) = tx.commit() {
         return attach_cleanup_error(
             anyhow::Error::new(error).context("failed to commit memory lifecycle transaction"),
-            rollback_staged_canonical_writes(paths, &mut staged),
+            rollback_staged_canonical_writes(paths, mutation, &mut staged),
             "canonical commit rollback",
         );
     }
@@ -5623,6 +5698,7 @@ fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> Result<()> 
             &mut errors,
             remove_installed_repository_file(
                 rollback.paths,
+                rollback.mutation,
                 rollback.resolved_path,
                 rollback.resolved_hash,
             ),
@@ -5631,7 +5707,7 @@ fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> Result<()> 
     }
     record_cleanup_result(
         &mut errors,
-        rollback_staged_canonical_writes(rollback.paths, rollback.writes),
+        rollback_staged_canonical_writes(rollback.paths, rollback.mutation, rollback.writes),
         "roll back canonical writes".to_owned(),
     );
     if rollback.pending_moved {
@@ -5639,6 +5715,7 @@ fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> Result<()> 
             &mut errors,
             install_verified_staged_file_no_replace(
                 rollback.paths,
+                rollback.mutation,
                 rollback.pending_backup,
                 rollback.pending_path,
                 rollback.pending_hash,
@@ -5658,6 +5735,7 @@ fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> Result<()> 
 fn rollback_rejected_file_proposal(rollback: RejectedFileProposalRollback<'_>) -> Result<()> {
     rollback_file_resolution(FileResolutionRollback {
         paths: rollback.paths,
+        mutation: rollback.mutation,
         pending_path: rollback.pending_path,
         pending_backup: rollback.pending_backup,
         pending_hash: rollback.pending_hash,
@@ -7335,9 +7413,38 @@ mod tests {
         let destination = service.paths.records_dir().join("record.md");
         fs::write(&staged, "new proposal bytes")?;
         fs::write(&destination, "concurrent canonical bytes")?;
+        let projections = vec![OwnedRepositoryProjection::from_absolute(
+            &service.paths,
+            &destination,
+            b"new proposal bytes",
+            None,
+        )?];
+        let authorization = authorize_repository_projection_batch(
+            &service.paths,
+            RepositoryWriteRoute::FileProposalApply,
+            OkfProposalSensitivity::RepoSafe,
+            ScopeKind::Repo,
+            None,
+            Visibility::Repo,
+            AuthorizationProof::ExplicitCommand {
+                operation: "file_proposal_apply",
+            },
+            explicit_repository_provenance(
+                RepositoryContentClass::GeneralRepoKnowledge,
+                "test-no-replace-install",
+            ),
+            &[],
+            &projections,
+        )?;
+        let mutation = RepositoryMutationAuthorization {
+            route: RepositoryWriteRoute::FileProposalApply,
+            authorization: &authorization,
+            projections: &projections,
+        };
 
         let error = install_verified_staged_file_no_replace(
             &service.paths,
+            mutation,
             &staged,
             &destination,
             blake3::hash(b"new proposal bytes").to_hex().as_ref(),

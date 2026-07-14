@@ -118,7 +118,13 @@ fn read_regular_at(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn create_file_at(
+    project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
     directory: &std::os::fd::OwnedFd,
     file_name: &std::ffi::OsStr,
     bytes: &[u8],
@@ -126,6 +132,13 @@ fn create_file_at(
 ) -> Result<fs::File> {
     use rustix::fs::{OFlags, openat};
 
+    verify_repository_batch(
+        project_root,
+        expected_route,
+        expected_policy_context_digest,
+        authorization,
+        projections,
+    )?;
     let file = openat(
         directory,
         file_name,
@@ -162,8 +175,13 @@ fn named_file_still_matches(
     Ok(opened.dev() == named.st_dev as u64 && opened.ino() == named.st_ino as u64)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install_transaction_file_no_replace(
     project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
     transaction_root: &Path,
     staged_path: &Path,
     destination_relative: &Path,
@@ -173,6 +191,10 @@ pub(crate) fn install_transaction_file_no_replace(
     {
         let _ = (
             project_root,
+            expected_route,
+            expected_policy_context_digest,
+            authorization,
+            projections,
             transaction_root,
             staged_path,
             destination_relative,
@@ -195,6 +217,11 @@ pub(crate) fn install_transaction_file_no_replace(
         let (destination_directory, destination_name) =
             open_repository_parent(project_root, destination_relative)?;
         let destination = create_file_at(
+            project_root,
+            expected_route,
+            expected_policy_context_digest,
+            authorization,
+            projections,
             &destination_directory,
             &destination_name,
             &bytes,
@@ -218,8 +245,13 @@ pub(crate) fn install_transaction_file_no_replace(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn backup_repository_file(
     project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
     source_relative: &Path,
     transaction_root: &Path,
     backup_path: &Path,
@@ -229,6 +261,10 @@ pub(crate) fn backup_repository_file(
     {
         let _ = (
             project_root,
+            expected_route,
+            expected_policy_context_digest,
+            authorization,
+            projections,
             source_relative,
             transaction_root,
             backup_path,
@@ -251,6 +287,11 @@ pub(crate) fn backup_repository_file(
         let (backup_directory, backup_name) =
             open_transaction_parent(transaction_root, backup_path)?;
         let backup = create_file_at(
+            project_root,
+            expected_route,
+            expected_policy_context_digest,
+            authorization,
+            projections,
             &backup_directory,
             &backup_name,
             &bytes,
@@ -276,12 +317,31 @@ pub(crate) fn backup_repository_file(
 
 pub(crate) fn remove_repository_file_if_matching(
     project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
     relative: &Path,
     expected_hash: &str,
 ) -> Result<()> {
+    verify_repository_batch(
+        project_root,
+        expected_route,
+        expected_policy_context_digest,
+        authorization,
+        projections,
+    )?;
     #[cfg(not(unix))]
     {
-        let _ = (project_root, relative, expected_hash);
+        let _ = (
+            project_root,
+            expected_route,
+            expected_policy_context_digest,
+            authorization,
+            projections,
+            relative,
+            expected_hash,
+        );
         bail!("secure repository removal is unavailable on this platform");
     }
 
