@@ -204,7 +204,7 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
 ## What Works Now
 
 - File-native canonical memory records under `.memzoi/records/`.
-- Local runtime state under `~/.memzoi/projects/<project-key>/` for derived SQLite indexes, generated exports, and DB-local open proposal state.
+- Repository-shared local runtime state under `~/.memzoi/projects/<repository-key>/`, with a durable `shared.db` for local/session memory and DB-local proposals plus disposable indexes and exports under `worktrees/<worktree-key>/`.
 - Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
 - Evidence-backed capture from explicit Markdown, agent-instruction, ADR, and Git-change sources: deterministic planning, complete human review, exact source replay, and stale-guarded apply. Repo-safe candidates become pending proposal files, private local/session candidates stay in runtime storage, and capture provenance survives later apply and rebuild. See the [capture reference](website/docs/reference.md#evidence-backed-capture).
 - Deterministic planning for explicitly classified `memzoi/import-v1` candidates creates reviewable repo proposal files and private local/session runtime records on guarded apply. See the [import reference](website/docs/reference.md#classified-import).

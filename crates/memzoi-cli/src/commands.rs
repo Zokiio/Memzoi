@@ -373,6 +373,10 @@ fn init_command(force: bool, as_json: bool) -> Result<()> {
             "project_root": paths.project_root,
             "memory_dir": paths.memory_dir,
             "records_dir": paths.records_dir(),
+            "repository_runtime_dir": paths.repository_runtime_dir,
+            "worktree_runtime_dir": paths.worktree_runtime_dir,
+            "shared_db_path": paths.shared_db_path,
+            "index_db_path": paths.index_db_path,
             "runtime_dir": paths.runtime_dir,
             "config_path": paths.config_path,
             "db_path": paths.db_path,
@@ -1319,6 +1323,52 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         "ok",
         paths.project_root.display().to_string(),
     ));
+    let legacy_runtime_dirs = paths
+        .legacy_runtime_dirs
+        .iter()
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    if !legacy_runtime_dirs.is_empty() {
+        if paths
+            .repository_runtime_dir
+            .join("migration-v1.json")
+            .is_file()
+        {
+            checks.push(check(
+                "legacy_worktree_runtime",
+                "ok",
+                format!(
+                    "{} legacy path-keyed runtime director{} retained after verified migration",
+                    legacy_runtime_dirs.len(),
+                    if legacy_runtime_dirs.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                ),
+            ));
+        } else {
+            checks.push(check(
+                "legacy_worktree_runtime",
+                "warning",
+                format!(
+                    "{} fragmented path-keyed runtime director{} detected; the next normal Memzoi open will merge durable state without deleting legacy data",
+                    legacy_runtime_dirs.len(),
+                    if legacy_runtime_dirs.len() == 1 { "y" } else { "ies" }
+                ),
+            ));
+            push_next_step(
+                &mut next_steps,
+                "run memzoi context --task \"verify migrated worktree memory\"",
+            );
+        }
+    } else {
+        checks.push(check(
+            "legacy_worktree_runtime",
+            "ok",
+            "no legacy path-keyed runtime directories detected",
+        ));
+    }
     if paths.records_dir().is_dir() {
         checks.push(check(
             "records",
@@ -1435,6 +1485,20 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
             format!("{} missing", paths.config_path.display()),
         ));
         push_next_step(&mut next_steps, "memzoi init");
+    }
+
+    if paths.shared_db_path.is_file() {
+        checks.push(check(
+            "shared_database",
+            "ok",
+            paths.shared_db_path.display().to_string(),
+        ));
+    } else {
+        checks.push(check(
+            "shared_database",
+            "warning",
+            format!("{} missing", paths.shared_db_path.display()),
+        ));
     }
 
     let schema_is_ready = if paths.db_path.is_file() {

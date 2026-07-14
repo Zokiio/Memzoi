@@ -2819,6 +2819,11 @@ fn declared_apply_delta_matches(
             allowed_file_changes.insert(relative_from(isolated_root, &path));
         }
     }
+    if !expected_runtime_ids.is_empty() {
+        for path in sqlite_artifact_paths(&paths.shared_db_path) {
+            allowed_file_changes.insert(relative_from(isolated_root, &path));
+        }
+    }
     let changed_files = before
         .files
         .keys()

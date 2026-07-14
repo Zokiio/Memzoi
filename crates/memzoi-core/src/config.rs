@@ -7,6 +7,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::git_repository::{discover_git_repository, list_git_worktree_roots};
+
 const MEMORY_DIR_NAME: &str = ".memzoi";
 const RUNTIME_PROJECTS_DIR: &str = "projects";
 
@@ -79,6 +81,11 @@ struct FileWorkflowConfig {
 pub struct MemoryPaths {
     pub project_root: PathBuf,
     pub memory_dir: PathBuf,
+    pub repository_runtime_dir: PathBuf,
+    pub worktree_runtime_dir: PathBuf,
+    pub shared_db_path: PathBuf,
+    pub index_db_path: PathBuf,
+    pub legacy_runtime_dirs: Vec<PathBuf>,
     pub runtime_dir: PathBuf,
     pub db_path: PathBuf,
     pub config_path: PathBuf,
@@ -92,15 +99,36 @@ impl MemoryPaths {
 
     pub fn with_runtime_home(project_root: PathBuf, runtime_home: PathBuf) -> Self {
         let memory_dir = project_root.join(MEMORY_DIR_NAME);
-        let runtime_dir = runtime_home
+        let identity = RuntimeIdentity::discover(&project_root);
+        let repository_runtime_dir = runtime_home
             .join(RUNTIME_PROJECTS_DIR)
-            .join(project_runtime_key(&project_root));
+            .join(identity.repository_key);
+        let worktree_runtime_dir = repository_runtime_dir
+            .join("worktrees")
+            .join(identity.worktree_key);
+        let shared_db_path = repository_runtime_dir.join("shared.db");
+        let index_db_path = worktree_runtime_dir.join("index.db");
+        let legacy_runtime_dirs = identity
+            .legacy_project_roots
+            .iter()
+            .map(|root| {
+                runtime_home
+                    .join(RUNTIME_PROJECTS_DIR)
+                    .join(project_runtime_key(root))
+            })
+            .filter(|path| path != &repository_runtime_dir)
+            .collect();
         Self {
             project_root,
-            db_path: runtime_dir.join("memory.db"),
-            config_path: runtime_dir.join("config.toml"),
-            exports_dir: runtime_dir.join("exports"),
-            runtime_dir,
+            db_path: index_db_path.clone(),
+            config_path: repository_runtime_dir.join("config.toml"),
+            exports_dir: worktree_runtime_dir.join("exports"),
+            runtime_dir: worktree_runtime_dir.clone(),
+            repository_runtime_dir,
+            worktree_runtime_dir,
+            shared_db_path,
+            index_db_path,
+            legacy_runtime_dirs,
             memory_dir,
         }
     }
@@ -120,6 +148,104 @@ impl MemoryPaths {
     pub fn repo_config_path(&self) -> PathBuf {
         self.memory_dir.join("config.toml")
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeIdentity {
+    repository_key: String,
+    worktree_key: String,
+    legacy_project_roots: Vec<PathBuf>,
+}
+
+impl RuntimeIdentity {
+    fn discover(project_root: &Path) -> Self {
+        let project_root = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let Ok(Some(git)) = discover_git_repository(&project_root) else {
+            let key = project_runtime_key(&project_root);
+            return Self {
+                repository_key: key.clone(),
+                worktree_key: key,
+                legacy_project_roots: vec![project_root],
+            };
+        };
+        let relative_project = project_root
+            .strip_prefix(&git.worktree_root)
+            .unwrap_or(Path::new("."));
+        let repository_name = repository_display_name(&git.common_dir, relative_project);
+        let repository_key = runtime_key(
+            &repository_name,
+            &[
+                git.common_dir.as_os_str().as_encoded_bytes(),
+                relative_project.as_os_str().as_encoded_bytes(),
+            ],
+        );
+        let worktree_key = runtime_key(
+            "worktree",
+            &[
+                git.git_dir.as_os_str().as_encoded_bytes(),
+                relative_project.as_os_str().as_encoded_bytes(),
+            ],
+        );
+        let mut legacy_project_roots = list_git_worktree_roots(&git.worktree_root)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|root| root.join(relative_project))
+            .filter_map(|root| root.canonicalize().ok())
+            .collect::<Vec<_>>();
+        if !legacy_project_roots.contains(&project_root) {
+            legacy_project_roots.push(project_root);
+        }
+        legacy_project_roots.sort();
+        legacy_project_roots.dedup();
+        Self {
+            repository_key,
+            worktree_key,
+            legacy_project_roots,
+        }
+    }
+}
+
+fn repository_display_name(common_dir: &Path, relative_project: &Path) -> String {
+    if relative_project != Path::new("") && relative_project != Path::new(".") {
+        if let Some(name) = relative_project
+            .file_name()
+            .and_then(|value| value.to_str())
+        {
+            return name.to_owned();
+        }
+    }
+    if common_dir.file_name().and_then(|value| value.to_str()) == Some(".git") {
+        if let Some(name) = common_dir
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+        {
+            return name.to_owned();
+        }
+    }
+    common_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("repository")
+        .to_owned()
+}
+
+fn runtime_key(prefix: &str, fields: &[&[u8]]) -> String {
+    let mut material = Vec::new();
+    for field in fields {
+        material.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        material.extend_from_slice(field);
+    }
+    let hash = blake3::hash(&material).to_hex();
+    let prefix = sanitize_runtime_segment(prefix);
+    let prefix = if prefix.is_empty() {
+        "project"
+    } else {
+        &prefix
+    };
+    format!("{prefix}-{}", &hash[..16])
 }
 
 pub fn load_effective_config(paths: &MemoryPaths) -> Result<EffectiveConfig> {
@@ -200,7 +326,7 @@ pub fn runtime_home() -> PathBuf {
 
 fn runtime_home_for_paths(paths: &MemoryPaths) -> PathBuf {
     paths
-        .runtime_dir
+        .repository_runtime_dir
         .parent()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
@@ -302,6 +428,7 @@ fn find_ancestor_with(start: &Path, predicate: impl Fn(&Path) -> bool) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn create_dir(path: impl AsRef<Path>) {
@@ -486,5 +613,69 @@ proposal_approval = "sometimes"
             error.to_string().contains("memzoi init"),
             "error should tell users how to initialize a bundle: {error}"
         );
+    }
+
+    #[test]
+    fn linked_worktrees_share_repository_runtime_but_not_index_runtime() -> anyhow::Result<()> {
+        if Command::new("git").arg("--version").output().is_err() {
+            return Ok(());
+        }
+        let temp = TempDir::new()?;
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        let runtime_home = temp.path().join("runtime");
+        create_dir(&main);
+        run_git(&main, &["init", "-q"])?;
+        run_git(&main, &["config", "user.email", "fixture@example.test"])?;
+        run_git(&main, &["config", "user.name", "Fixture"])?;
+        std::fs::write(main.join("README.md"), "fixture\n")?;
+        run_git(&main, &["add", "README.md"])?;
+        run_git(&main, &["commit", "-qm", "base"])?;
+        run_git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "linked",
+                linked
+                    .to_str()
+                    .context("linked worktree path must be UTF-8")?,
+            ],
+        )?;
+
+        let main_paths = MemoryPaths::with_runtime_home(main.canonicalize()?, runtime_home.clone());
+        let linked_paths =
+            MemoryPaths::with_runtime_home(linked.canonicalize()?, runtime_home.clone());
+
+        assert_eq!(
+            main_paths.repository_runtime_dir,
+            linked_paths.repository_runtime_dir
+        );
+        assert_eq!(main_paths.shared_db_path, linked_paths.shared_db_path);
+        assert_eq!(main_paths.config_path, linked_paths.config_path);
+        assert_ne!(
+            main_paths.worktree_runtime_dir,
+            linked_paths.worktree_runtime_dir
+        );
+        assert_ne!(main_paths.index_db_path, linked_paths.index_db_path);
+        assert_ne!(main_paths.exports_dir, linked_paths.exports_dir);
+        assert_eq!(runtime_home_for_paths(&linked_paths), runtime_home);
+        Ok(())
+    }
+
+    fn run_git(directory: &Path, args: &[&str]) -> anyhow::Result<()> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .context("failed to run Git fixture command")?;
+        if !output.status.success() {
+            bail!(
+                "Git fixture command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
     }
 }

@@ -7,6 +7,7 @@ mod error;
 mod events;
 mod expiry;
 mod exporters;
+mod git_repository;
 mod handoff;
 mod import;
 mod memory_policy;

@@ -7,6 +7,8 @@ use std::{
     path::{Component, Path, PathBuf},
     str::FromStr,
     sync::Arc,
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -196,6 +198,7 @@ pub struct FileProposalInventory {
 pub struct MemoryService {
     paths: MemoryPaths,
     conn: Connection,
+    shared_conn: Connection,
     clock: Arc<dyn Clock>,
 }
 
@@ -306,6 +309,7 @@ impl MemoryService {
     }
 
     pub fn open_paths_with_clock(paths: MemoryPaths, clock: impl Clock + 'static) -> Result<Self> {
+        migrate_legacy_runtime_if_needed(&paths)?;
         if !paths.config_path.is_file() {
             bail!(
                 "Memzoi bundle is not initialized at {}; run `memzoi init` first",
@@ -313,8 +317,21 @@ impl MemoryService {
             );
         }
 
-        let conn = db::open_database(&paths.db_path)?;
+        let shared_conn = db::open_database(&paths.shared_db_path)?;
+        db::init_database(&shared_conn)?;
+        let index_init_lock = (!paths.index_db_path.is_file())
+            .then(|| RepoLifecycleLock::acquire(&paths))
+            .transpose()?;
+        let index_was_missing = !paths.index_db_path.is_file();
+        let conn = db::open_database(&paths.index_db_path)?;
         db::init_database(&conn)?;
+        if index_was_missing {
+            rebuild_repo_projection(&paths, &conn)?;
+        } else {
+            sync_proposals_to_shared(&conn, &shared_conn)?;
+        }
+        refresh_shared_mirrors(&shared_conn, &conn)?;
+        drop(index_init_lock);
         if capture_apply_journal_exists(&paths)? {
             let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
             recover_capture_apply(&paths, &conn)
@@ -323,6 +340,7 @@ impl MemoryService {
         Ok(Self {
             paths,
             conn,
+            shared_conn,
             clock: Arc::new(clock),
         })
     }
@@ -342,11 +360,33 @@ impl MemoryService {
     }
 
     pub fn for_each_event(&self, visit: impl FnMut(MemoryEvent) -> Result<()>) -> Result<()> {
-        stream_events(&self.conn, visit)
+        let mut events = BTreeMap::new();
+        stream_events(&self.shared_conn, |event| {
+            events.insert(event.id.clone(), event);
+            Ok(())
+        })?;
+        stream_events(&self.conn, |event| {
+            events.insert(event.id.clone(), event);
+            Ok(())
+        })?;
+        let mut events = events.into_values().collect::<Vec<_>>();
+        events.sort_by(|left, right| {
+            (left.created_at.as_str(), left.id.as_str())
+                .cmp(&(right.created_at.as_str(), right.id.as_str()))
+        });
+        let mut visit = visit;
+        for event in events {
+            visit(event)?;
+        }
+        Ok(())
     }
 
     pub fn propose_memory(&self, actor: &str, draft: MemoryDraft) -> Result<Proposal> {
-        proposals::propose_memory(&self.conn, actor, draft)
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
+        let proposal = proposals::propose_memory(&self.conn, actor, draft)?;
+        sync_proposals_to_shared(&self.conn, &self.shared_conn)?;
+        Ok(proposal)
     }
 
     pub fn propose_memory_with_options(
@@ -355,6 +395,8 @@ impl MemoryService {
         draft: MemoryDraft,
         options: ProposeOptions,
     ) -> Result<ProposeResult> {
+        let lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
         let mut policy = load_effective_config(&self.paths)?
             .workflow
             .proposal_approval;
@@ -371,6 +413,7 @@ impl MemoryService {
         }
 
         let proposal = proposals::propose_memory(&self.conn, actor, draft)?;
+        sync_proposals_to_shared(&self.conn, &self.shared_conn)?;
         if policy == ProposalApprovalPolicy::Manual {
             return Ok(ProposeResult {
                 proposal,
@@ -381,6 +424,7 @@ impl MemoryService {
         }
 
         let validation = proposals::validate_proposal(&self.conn, &proposal.id)?;
+        sync_proposals_to_shared(&self.conn, &self.shared_conn)?;
         if !validation.is_valid {
             return Ok(ProposeResult {
                 proposal: proposals::load_proposal_public(&self.conn, &proposal.id)?,
@@ -391,6 +435,7 @@ impl MemoryService {
         }
 
         let approved = proposals::approve_proposal(&self.conn, &proposal.id, actor)?;
+        sync_proposals_to_shared(&self.conn, &self.shared_conn)?;
         if !options.apply {
             return Ok(ProposeResult {
                 proposal: approved,
@@ -400,6 +445,7 @@ impl MemoryService {
             });
         }
 
+        drop(lifecycle_lock);
         let record = self.apply_proposal(&proposal.id, actor)?;
         Ok(ProposeResult {
             proposal: proposals::load_proposal_public(&self.conn, &proposal.id)?,
@@ -410,19 +456,23 @@ impl MemoryService {
     }
 
     pub fn list_proposals(&self, filter: ProposalStatusFilter) -> Result<Vec<Proposal>> {
-        proposals::list_proposals(&self.conn, filter)
+        proposals::list_proposals(&self.shared_conn, filter)
     }
 
     pub fn show_proposal(&self, proposal_id: &str) -> Result<Proposal> {
-        proposals::load_proposal_public(&self.conn, proposal_id)
+        proposals::load_proposal_public(&self.shared_conn, proposal_id)
     }
 
     pub fn open_proposal_counts(&self) -> Result<BTreeMap<ProposalStatus, usize>> {
-        proposals::open_proposal_counts(&self.conn)
+        proposals::open_proposal_counts(&self.shared_conn)
     }
 
     pub fn approve_proposal(&self, proposal_id: &str, actor: &str) -> Result<Proposal> {
-        proposals::approve_proposal(&self.conn, proposal_id, actor)
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
+        let proposal = proposals::approve_proposal(&self.conn, proposal_id, actor)?;
+        sync_proposals_to_shared(&self.conn, &self.shared_conn)?;
+        Ok(proposal)
     }
 
     pub fn reject_proposal(
@@ -431,20 +481,30 @@ impl MemoryService {
         actor: &str,
         reason: &str,
     ) -> Result<Proposal> {
-        proposals::reject_proposal(&self.conn, proposal_id, actor, reason)
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
+        let proposal = proposals::reject_proposal(&self.conn, proposal_id, actor, reason)?;
+        sync_proposals_to_shared(&self.conn, &self.shared_conn)?;
+        Ok(proposal)
     }
 
     pub fn validate_proposal(&self, proposal_id: &str) -> Result<ValidationResult> {
-        proposals::validate_proposal(&self.conn, proposal_id)
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
+        let validation = proposals::validate_proposal(&self.conn, proposal_id)?;
+        sync_proposals_to_shared(&self.conn, &self.shared_conn)?;
+        Ok(validation)
     }
 
     pub fn apply_proposal(&self, proposal_id: &str, actor: &str) -> Result<MemoryRecord> {
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
         let tx = self.conn.unchecked_transaction()?;
         let record = proposals::apply_proposal(&tx, proposal_id, actor)?;
         let write =
             self.prepare_record_file_write_with_conn(&tx, &record, FileWriteMode::CreateNew)?;
         commit_db_and_canonical_writes(&self.paths, tx, &[write])?;
+        sync_proposals_to_shared(&self.conn, &self.shared_conn)?;
         Ok(record)
     }
 
@@ -797,10 +857,9 @@ impl MemoryService {
             bail!("pending proposal identity token {token} is already resolved");
         }
         let proposal_tokens = okf::proposal_identity_tokens(proposal);
-        if let Some(token) = db_proposal_identity_tokens(&self.conn)?
-            .intersection(&proposal_tokens)
-            .next()
-        {
+        let mut db_tokens = db_proposal_identity_tokens(&self.shared_conn)?;
+        db_tokens.extend(db_proposal_identity_tokens(&self.conn)?);
+        if let Some(token) = db_tokens.intersection(&proposal_tokens).next() {
             bail!("file proposal identity token {token} conflicts with a database proposal");
         }
         Ok(())
@@ -1568,6 +1627,7 @@ impl MemoryService {
     }
 
     pub fn search_memory(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
         search::search_memory_at(&self.conn, input, self.now())
     }
 
@@ -1628,17 +1688,20 @@ impl MemoryService {
         actor: &str,
         input: LocalMemoryInput,
     ) -> Result<MemoryRecord> {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let now = self.now_timestamp()?;
-        create_local_memory_with_conn(&self.conn, actor, &input, &now)
+        let record = create_local_memory_with_conn(&self.shared_conn, actor, &input, &now)?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
+        Ok(record)
     }
 
     pub fn list_local_memory(&self) -> Result<Vec<MemoryRecord>> {
-        active_records_for_destination(&self.conn, MemoryDestination::Local, self.now())
+        active_records_for_destination(&self.shared_conn, MemoryDestination::Local, self.now())
     }
 
     pub fn search_local_memory(&self, query: String, limit: usize) -> Result<Vec<SearchResult>> {
         search::search_memory_at(
-            &self.conn,
+            &self.shared_conn,
             SearchInput {
                 query,
                 destination: Some(MemoryDestination::Local),
@@ -1651,16 +1714,19 @@ impl MemoryService {
     }
 
     pub fn create_checkpoint(&self, actor: &str, input: CheckpointInput) -> Result<MemoryRecord> {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let now = self.now_timestamp()?;
-        create_checkpoint_with_conn(&self.conn, actor, &input, &now)
+        let record = create_checkpoint_with_conn(&self.shared_conn, actor, &input, &now)?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
+        Ok(record)
     }
 
     pub fn list_checkpoints(&self) -> Result<Vec<MemoryRecord>> {
-        active_checkpoint_records(&self.conn, self.now())
+        active_checkpoint_records(&self.shared_conn, self.now())
     }
 
     pub fn show_checkpoint(&self, record_id: &str) -> Result<MemoryRecord> {
-        checkpoint_record(&self.conn, record_id, self.now())?
+        checkpoint_record(&self.shared_conn, record_id, self.now())?
             .with_context(|| format!("checkpoint not found: {record_id}"))
     }
 
@@ -1680,9 +1746,16 @@ impl MemoryService {
             .candidates
             .iter()
             .any(|candidate| candidate.destination == MemoryDestination::Repo);
-        let _lifecycle_lock = has_repo_writes
+        let has_runtime_writes = document.candidates.iter().any(|candidate| {
+            matches!(
+                candidate.destination,
+                MemoryDestination::Local | MemoryDestination::Session
+            )
+        });
+        let _lifecycle_lock = (has_repo_writes || has_runtime_writes)
             .then(|| RepoLifecycleLock::acquire(&self.paths))
             .transpose()?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
         let timestamp = self.now_timestamp()?;
         let pending_root = self.paths.proposals_dir().join("pending");
         let mut reserved_proposal_ids = if has_repo_writes {
@@ -1777,6 +1850,7 @@ impl MemoryService {
             }
             return Err(error);
         }
+        sync_runtime_records_to_shared(&self.conn, &self.shared_conn)?;
 
         let mut results = Vec::with_capacity(document.candidates.len());
         for (index, candidate) in document.candidates.into_iter().enumerate() {
@@ -1848,6 +1922,7 @@ impl MemoryService {
             bail!("import actor cannot be empty");
         }
         import::validate_document(&document)?;
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
         let inventory = scan_file_proposal_inventory(&self.paths)?;
         require_clean_file_proposal_inventory(&inventory)?;
         let existing = self.load_import_duplicates(&inventory.pending)?;
@@ -1871,7 +1946,13 @@ impl MemoryService {
             .candidates
             .iter()
             .any(|candidate| candidate.destination == MemoryDestination::Repo);
-        let _lifecycle_lock = has_repo_candidates
+        let has_runtime_candidates = document.candidates.iter().any(|candidate| {
+            matches!(
+                candidate.destination,
+                MemoryDestination::Local | MemoryDestination::Session
+            )
+        });
+        let _lifecycle_lock = (has_repo_candidates || has_runtime_candidates)
             .then(|| RepoLifecycleLock::acquire(&self.paths))
             .transpose()?;
         if has_repo_candidates {
@@ -1984,6 +2065,7 @@ impl MemoryService {
             }
             return Err(error);
         }
+        sync_runtime_records_to_shared(&self.conn, &self.shared_conn)?;
         writes.sort_by_key(|write| match write {
             crate::ImportWrite::ProposalFile { index, .. }
             | crate::ImportWrite::RuntimeRecord { index, .. } => *index,
@@ -2331,6 +2413,7 @@ impl MemoryService {
                 }
             }
         }
+        sync_runtime_records_to_shared(&self.conn, &self.shared_conn)?;
 
         Ok(CaptureApplyResult {
             schema: crate::CAPTURE_APPLY_RESULT_SCHEMA.to_owned(),
@@ -2391,14 +2474,17 @@ impl MemoryService {
     }
 
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
         context::build_context_pack_at(&self.conn, input, self.now())
     }
 
     pub fn build_handoff_pack(&self, input: HandoffInput) -> Result<HandoffPack> {
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
         handoff::build_handoff_pack_at(&self.conn, input, self.now())
     }
 
     pub fn precheck(&self, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
+        refresh_shared_mirrors(&self.shared_conn, &self.conn)?;
         precheck::precheck_at(&self.conn, input, self.now())
     }
 
@@ -2459,23 +2545,171 @@ impl MemoryService {
             "canonical record root",
         )?;
         let records = okf::read_okf_record_files(&records_root)?;
-        guard_no_open_proposals(&paths.db_path)?;
-        let runtime_records = load_runtime_records_for_rebuild(&paths.db_path)?;
+        if paths.index_db_path.is_file() {
+            let shared = db::open_database(&paths.shared_db_path).with_context(|| {
+                format!(
+                    "rebuild refused because local/session runtime memory could not be preserved from {}",
+                    paths.shared_db_path.display()
+                )
+            })?;
+            db::init_database(&shared)?;
+            let index = db::open_database(&paths.index_db_path)?;
+            db::init_database(&index)?;
+            sync_proposals_to_shared(&index, &shared)?;
+        }
+        guard_no_open_proposals(&paths.shared_db_path)?;
+        let runtime_records = load_runtime_records_for_rebuild(&paths.shared_db_path)?;
         guard_no_runtime_record_id_collisions(&records, &runtime_records)?;
-        remove_database_files(&paths.db_path)?;
-        let conn = db::open_database(&paths.db_path)?;
+        remove_database_files(&paths.index_db_path)?;
+        let conn = db::open_database(&paths.index_db_path)?;
         db::init_database(&conn)?;
         okf::import_okf_records(&conn, &records)?;
         restore_runtime_records_after_rebuild(&conn, &runtime_records)?;
         Ok(RebuildResult {
             records_root,
-            db_path: paths.db_path,
+            db_path: paths.index_db_path,
             record_ids: records
                 .into_iter()
                 .map(|record| record.concept_id)
                 .collect(),
         })
     }
+}
+
+fn rebuild_repo_projection(paths: &MemoryPaths, conn: &Connection) -> Result<()> {
+    ensure_safe_directory(
+        &paths.project_root,
+        &paths.records_dir(),
+        false,
+        "canonical record root",
+    )?;
+    let records = okf::read_okf_record_files(paths.records_dir())?;
+    conn.execute("DELETE FROM memory_record WHERE destination = 'repo'", [])?;
+    okf::import_okf_records(conn, &records)?;
+    rebuild_fts_content_index(conn)
+}
+
+fn refresh_shared_mirrors(shared: &Connection, index: &Connection) -> Result<()> {
+    let index_proposals = read_legacy_proposals(index)?;
+    let mut shared_proposals = read_legacy_proposals(shared)?;
+    if index_proposals != shared_proposals {
+        copy_proposals(index, shared, false)?;
+        shared_proposals = read_legacy_proposals(shared)?;
+    }
+    let runtime_records = runtime_records_for_rebuild_preservation(shared)?;
+    let indexed_runtime_records = runtime_records_for_rebuild_preservation(index)?;
+    let repo_ids = indexed_active_records_for_destination(index, MemoryDestination::Repo)?
+        .into_iter()
+        .map(|record| record.id)
+        .collect::<BTreeSet<_>>();
+    let collisions = runtime_records
+        .iter()
+        .filter(|snapshot| repo_ids.contains(&snapshot.record.id))
+        .map(|snapshot| snapshot.record.id.as_str())
+        .collect::<Vec<_>>();
+    if !collisions.is_empty() {
+        bail!(
+            "worktree index refused shared local/session record id collision{}: {}",
+            if collisions.len() == 1 { "" } else { "s" },
+            collisions.join(", ")
+        );
+    }
+    if runtime_records != indexed_runtime_records
+        || shared_proposals != read_legacy_proposals(index)?
+    {
+        let tx = index.unchecked_transaction()?;
+        if runtime_records != indexed_runtime_records {
+            tx.execute(
+                "DELETE FROM memory_record WHERE destination IN ('local', 'session')",
+                [],
+            )?;
+            restore_runtime_records_after_rebuild(&tx, &runtime_records)?;
+        }
+        if shared_proposals != read_legacy_proposals(&tx)? {
+            copy_proposals(shared, &tx, true)?;
+        }
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn sync_runtime_records_to_shared(index: &Connection, shared: &Connection) -> Result<()> {
+    let runtime_records = runtime_records_for_rebuild_preservation(index)?;
+    let tx = shared.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM memory_record WHERE destination IN ('local', 'session')",
+        [],
+    )?;
+    restore_runtime_records_after_rebuild(&tx, &runtime_records)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn sync_proposals_to_shared(index: &Connection, shared: &Connection) -> Result<()> {
+    let tx = shared.unchecked_transaction()?;
+    copy_proposals(index, &tx, false)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn copy_proposals(source: &Connection, destination: &Connection, replace_all: bool) -> Result<()> {
+    if replace_all {
+        destination.execute("DELETE FROM proposal", [])?;
+    }
+    let mut statement = source.prepare(
+        "SELECT id, operation, payload_json, status, actor, validation_json, created_at, updated_at
+         FROM proposal
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, operation, payload, status, actor, validation, created_at, updated_at) = row?;
+        destination.execute(
+            "INSERT INTO proposal (
+               id, operation, payload_json, status, actor, validation_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+               operation = excluded.operation,
+               payload_json = excluded.payload_json,
+               status = excluded.status,
+               actor = excluded.actor,
+               validation_json = excluded.validation_json,
+               created_at = excluded.created_at,
+               updated_at = excluded.updated_at
+             WHERE excluded.updated_at > proposal.updated_at
+                OR (
+                  excluded.updated_at = proposal.updated_at
+                  AND CASE excluded.status
+                    WHEN 'pending' THEN 0
+                    WHEN 'validated' THEN 1
+                    WHEN 'approved' THEN 2
+                    WHEN 'rejected' THEN 3
+                    WHEN 'applied' THEN 4
+                  END > CASE proposal.status
+                    WHEN 'pending' THEN 0
+                    WHEN 'validated' THEN 1
+                    WHEN 'approved' THEN 2
+                    WHEN 'rejected' THEN 3
+                    WHEN 'applied' THEN 4
+                  END
+                )",
+            rusqlite::params![
+                id, operation, payload, status, actor, validation, created_at, updated_at
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn blocked_session_end_result(document: SessionEndDocument) -> SessionEndResult {
@@ -2534,13 +2768,13 @@ fn blocked_session_end_result(document: SessionEndDocument) -> SessionEndResult 
 
 impl RepoLifecycleLock {
     fn acquire(paths: &MemoryPaths) -> Result<Self> {
-        fs::create_dir_all(&paths.runtime_dir).with_context(|| {
+        fs::create_dir_all(&paths.repository_runtime_dir).with_context(|| {
             format!(
                 "failed to create runtime directory {}",
-                paths.runtime_dir.display()
+                paths.repository_runtime_dir.display()
             )
         })?;
-        let lock_path = paths.runtime_dir.join("repo-lifecycle.lock");
+        let lock_path = paths.repository_runtime_dir.join("repo-lifecycle.lock");
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -2548,12 +2782,23 @@ impl RepoLifecycleLock {
             .truncate(false)
             .open(&lock_path)
             .with_context(|| format!("failed to open lifecycle lock {}", lock_path.display()))?;
-        file.try_lock().with_context(|| {
-            format!(
-                "another repo lifecycle operation is in progress; retry after {} is unlocked",
-                lock_path.display()
-            )
-        })?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "another repo lifecycle operation is in progress; retry after {} is unlocked",
+                            lock_path.display()
+                        )
+                    });
+                }
+            }
+        }
         Ok(Self { _file: file })
     }
 }
@@ -4203,10 +4448,16 @@ pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult>
             paths.records_dir().display()
         )
     })?;
-    fs::create_dir_all(&paths.runtime_dir).with_context(|| {
+    fs::create_dir_all(&paths.repository_runtime_dir).with_context(|| {
         format!(
-            "failed to create runtime directory {}",
-            paths.runtime_dir.display()
+            "failed to create repository runtime directory {}",
+            paths.repository_runtime_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&paths.worktree_runtime_dir).with_context(|| {
+        format!(
+            "failed to create worktree runtime directory {}",
+            paths.worktree_runtime_dir.display()
         )
     })?;
     fs::create_dir_all(&paths.exports_dir).with_context(|| {
@@ -4228,8 +4479,12 @@ pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult>
             .with_context(|| format!("failed to write config {}", paths.config_path.display()))?;
     }
 
-    let conn = db::open_database(&paths.db_path)?;
+    let shared_conn = db::open_database(&paths.shared_db_path)?;
+    db::init_database(&shared_conn)?;
+    let conn = db::open_database(&paths.index_db_path)?;
     db::init_database(&conn)?;
+    rebuild_repo_projection(paths, &conn)?;
+    refresh_shared_mirrors(&shared_conn, &conn)?;
 
     Ok(InitBundleResult {
         project_root: paths.project_root.clone(),
@@ -4688,11 +4943,214 @@ fn records_for_runtime_preservation(conn: &Connection) -> Result<Vec<MemoryRecor
     Ok(records)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct RuntimeRecordPreservation {
     record: MemoryRecord,
     tags: Vec<String>,
     paths: Vec<MemoryPath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyProposalRow {
+    id: String,
+    operation: String,
+    payload_json: String,
+    status: String,
+    actor: String,
+    validation_json: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+fn migrate_legacy_runtime_if_needed(paths: &MemoryPaths) -> Result<()> {
+    if paths.repository_runtime_dir.exists() {
+        return Ok(());
+    }
+    let sources = paths
+        .legacy_runtime_dirs
+        .iter()
+        .filter(|path| path.join("config.toml").is_file() || path.join("memory.db").is_file())
+        .cloned()
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return Ok(());
+    }
+
+    let mut config: Option<(PathBuf, Vec<u8>)> = None;
+    let mut runtime_records = BTreeMap::<String, (PathBuf, RuntimeRecordPreservation)>::new();
+    let mut proposals = BTreeMap::<String, (PathBuf, LegacyProposalRow)>::new();
+    for source in &sources {
+        let config_path = source.join("config.toml");
+        if config_path.is_file() {
+            let bytes = fs::read(&config_path).with_context(|| {
+                format!(
+                    "failed to read legacy runtime config {}",
+                    config_path.display()
+                )
+            })?;
+            if let Some((existing_path, existing)) = &config {
+                if existing != &bytes {
+                    bail!(
+                        "legacy runtime migration found conflicting configs at {} and {}; no runtime directories were changed",
+                        existing_path.display(),
+                        config_path.display()
+                    );
+                }
+            } else {
+                config = Some((config_path, bytes));
+            }
+        }
+        let db_path = source.join("memory.db");
+        if !db_path.is_file() {
+            continue;
+        }
+        let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| {
+                format!(
+                    "failed to open legacy runtime database {}",
+                    db_path.display()
+                )
+            })?;
+        for snapshot in runtime_records_for_rebuild_preservation(&conn).with_context(|| {
+            format!(
+                "failed to read durable runtime memory from {}",
+                db_path.display()
+            )
+        })? {
+            if let Some((existing_source, existing)) = runtime_records.get(&snapshot.record.id) {
+                if existing != &snapshot {
+                    bail!(
+                        "legacy runtime migration found conflicting local/session record {} in {} and {}; no runtime directories were changed",
+                        snapshot.record.id,
+                        existing_source.display(),
+                        db_path.display()
+                    );
+                }
+            } else {
+                runtime_records.insert(snapshot.record.id.clone(), (db_path.clone(), snapshot));
+            }
+        }
+        for proposal in read_legacy_proposals(&conn)
+            .with_context(|| format!("failed to read proposals from {}", db_path.display()))?
+        {
+            if let Some((existing_source, existing)) = proposals.get(&proposal.id) {
+                if existing != &proposal {
+                    bail!(
+                        "legacy runtime migration found conflicting proposal {} in {} and {}; no runtime directories were changed",
+                        proposal.id,
+                        existing_source.display(),
+                        db_path.display()
+                    );
+                }
+            } else {
+                proposals.insert(proposal.id.clone(), (db_path.clone(), proposal));
+            }
+        }
+    }
+
+    let parent = paths
+        .repository_runtime_dir
+        .parent()
+        .context("repository runtime directory has no projects parent")?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create runtime projects directory {}",
+            parent.display()
+        )
+    })?;
+    let staging = parent.join(format!(".memzoi-migration-{}", Uuid::now_v7()));
+    let migration_result = (|| -> Result<()> {
+        fs::create_dir_all(&staging)?;
+        fs::write(
+            staging.join("config.toml"),
+            config
+                .as_ref()
+                .map(|(_, bytes)| bytes.as_slice())
+                .unwrap_or_else(|| default_config().as_bytes()),
+        )?;
+        let shared_path = staging.join("shared.db");
+        let shared = db::open_database(&shared_path)?;
+        db::init_database(&shared)?;
+        restore_runtime_records_after_rebuild(
+            &shared,
+            &runtime_records
+                .values()
+                .map(|(_, snapshot)| snapshot.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        for (_, proposal) in proposals.values() {
+            insert_legacy_proposal(&shared, proposal)?;
+        }
+        let receipt = json!({
+            "schema": "memzoi/runtime-migration-v1",
+            "legacy_sources": sources,
+            "runtime_record_count": runtime_records.len(),
+            "proposal_count": proposals.len(),
+            "legacy_directories_retained": true,
+        });
+        fs::write(
+            staging.join("migration-v1.json"),
+            serde_json::to_vec_pretty(&receipt)?,
+        )?;
+        fs::rename(&staging, &paths.repository_runtime_dir).with_context(|| {
+            format!(
+                "failed to install migrated repository runtime {}",
+                paths.repository_runtime_dir.display()
+            )
+        })?;
+        Ok(())
+    })();
+    if migration_result.is_err() && staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    migration_result
+}
+
+fn read_legacy_proposals(conn: &Connection) -> Result<Vec<LegacyProposalRow>> {
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'proposal')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_table {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn.prepare(
+        "SELECT id, operation, payload_json, status, actor, validation_json, created_at, updated_at
+         FROM proposal ORDER BY id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(LegacyProposalRow {
+            id: row.get(0)?,
+            operation: row.get(1)?,
+            payload_json: row.get(2)?,
+            status: row.get(3)?,
+            actor: row.get(4)?,
+            validation_json: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn insert_legacy_proposal(conn: &Connection, proposal: &LegacyProposalRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO proposal (
+           id, operation, payload_json, status, actor, validation_json, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            proposal.id,
+            proposal.operation,
+            proposal.payload_json,
+            proposal.status,
+            proposal.actor,
+            proposal.validation_json,
+            proposal.created_at,
+            proposal.updated_at,
+        ],
+    )?;
+    Ok(())
 }
 
 fn runtime_records_for_rebuild_preservation(
@@ -4891,6 +5349,7 @@ claude_md = "exports/CLAUDE.memory.md"
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::process::Command;
 
     use super::*;
     use crate::{
@@ -4898,6 +5357,69 @@ mod tests {
         OkfProposalSource, ProposalStatus, ScopeKind, SessionEndCandidate, Visibility,
     };
     use tempfile::TempDir;
+
+    #[test]
+    fn open_migrates_legacy_path_runtime_without_deleting_it() -> anyhow::Result<()> {
+        if Command::new("git").arg("--version").output().is_err() {
+            return Ok(());
+        }
+        let temp = TempDir::new()?;
+        let project = temp.path().join("project");
+        fs::create_dir_all(project.join(".memzoi/records"))?;
+        run_test_git(&project, &["init", "-q"])?;
+        run_test_git(&project, &["config", "user.email", "fixture@example.test"])?;
+        run_test_git(&project, &["config", "user.name", "Fixture"])?;
+        fs::write(project.join(".memzoi/records/.gitkeep"), "")?;
+        run_test_git(&project, &["add", ".memzoi"])?;
+        run_test_git(&project, &["commit", "-qm", "base"])?;
+
+        let paths =
+            MemoryPaths::with_runtime_home(project.canonicalize()?, temp.path().join("runtime"));
+        let legacy = paths
+            .legacy_runtime_dirs
+            .first()
+            .context("real Git project should expose its legacy path runtime")?
+            .clone();
+        fs::create_dir_all(&legacy)?;
+        fs::write(legacy.join("config.toml"), default_config())?;
+        let legacy_db = db::open_database(&legacy.join("memory.db"))?;
+        db::init_database(&legacy_db)?;
+        let local = create_local_memory_with_conn(
+            &legacy_db,
+            "agent:migration-test",
+            &LocalMemoryInput {
+                memory_type: MemoryType::Preference,
+                lane: MemoryLane::Semantic,
+                title: "Migrated local memory".to_owned(),
+                body: "This local memory must survive worktree runtime migration.".to_owned(),
+            },
+            "2026-07-14T12:00:00Z",
+        )?;
+        let proposal = proposals::propose_memory(
+            &legacy_db,
+            "agent:migration-test",
+            sample_memory_draft("Migrated proposal", "Migration preserves proposal status"),
+        )?;
+        drop(legacy_db);
+
+        let service = MemoryService::open_paths(paths.clone())?;
+
+        assert!(legacy.is_dir(), "legacy runtime must be retained");
+        assert!(
+            paths
+                .repository_runtime_dir
+                .join("migration-v1.json")
+                .is_file()
+        );
+        assert!(paths.shared_db_path.is_file());
+        assert!(paths.index_db_path.is_file());
+        assert_eq!(service.list_local_memory()?[0].id, local.id);
+        assert_eq!(
+            service.show_proposal(&proposal.id)?.status,
+            ProposalStatus::Pending
+        );
+        Ok(())
+    }
 
     #[test]
     fn repo_lifecycle_lock_refuses_concurrent_mutation() -> anyhow::Result<()> {
@@ -6280,6 +6802,20 @@ mod tests {
         MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
         let service = MemoryService::open_paths(paths)?;
         Ok((temp, service))
+    }
+
+    fn run_test_git(directory: &Path, args: &[&str]) -> anyhow::Result<()> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "Git test command {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
     }
 
     fn test_capture_apply_journal(proposal_id: &str, contents: &[u8]) -> CaptureApplyJournal {

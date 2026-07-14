@@ -2131,6 +2131,176 @@ fn init_json_creates_memory_bundle_and_second_init_fails_without_force() {
 }
 
 #[test]
+fn linked_worktrees_share_durable_runtime_and_isolate_repo_indexes() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("worktree fixture root");
+    let main = temp.path().join("main");
+    let linked = temp.path().join("linked");
+    let home = temp.path().join("runtime");
+    fs::create_dir_all(&main).expect("create main worktree");
+    run_git_fixture(&main, &["init", "-q"]);
+    run_git_fixture(&main, &["config", "user.email", "fixture@example.test"]);
+    run_git_fixture(&main, &["config", "user.name", "Fixture"]);
+    fs::write(main.join("README.md"), "fixture\n").expect("write fixture README");
+    run_git_fixture(&main, &["add", "README.md"]);
+    run_git_fixture(&main, &["commit", "-qm", "base"]);
+
+    run_json_command_with_home(&main, &["init", "--json"], &home);
+    fs::write(main.join(".memzoi/index.md"), "# Memory\n").expect("write tracked memory marker");
+    fs::write(main.join(".memzoi/records/.gitkeep"), "").expect("write tracked records marker");
+    run_git_fixture(&main, &["add", ".memzoi"]);
+    run_git_fixture(&main, &["commit", "-qm", "initialize memory"]);
+
+    let local = run_json_command_with_home(
+        &main,
+        &[
+            "local",
+            "add",
+            "--type",
+            "preference",
+            "--title",
+            "Shared worktree preference",
+            "--body",
+            "Linked worktrees must share this local runtime memory.",
+            "--json",
+        ],
+        &home,
+    );
+    let local_id = json_string(&local, "record_id").to_owned();
+    let main_proposal = run_json_command_with_home(
+        &main,
+        &[
+            "propose",
+            "--manual",
+            "--type",
+            "decision",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--sensitivity",
+            "repo-safe",
+            "--title",
+            "Shared worktree proposal",
+            "--body",
+            "Database proposals must be visible from every linked worktree.",
+            "--json",
+        ],
+        &home,
+    );
+    let main_proposal_id = json_string(&main_proposal, "proposal_id").to_owned();
+
+    run_git_fixture(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "linked",
+            linked.to_str().expect("linked path UTF-8"),
+        ],
+    );
+
+    let linked_local = run_json_command_with_home(&linked, &["local", "list", "--json"], &home);
+    assert!(record_ids_from_json(&linked_local).contains(&local_id.as_str()));
+    let linked_context = run_json_command_with_home(
+        &linked,
+        &[
+            "context",
+            "--task",
+            "shared worktree preference",
+            "--include-local",
+            "--json",
+        ],
+        &home,
+    );
+    assert!(record_ids_from_json(&linked_context).contains(&local_id.as_str()));
+    run_json_command_with_home(
+        &linked,
+        &["precheck", "--path", "README.md", "--json"],
+        &home,
+    );
+    let linked_proposals = run_json_command_with_home(
+        &linked,
+        &["proposals", "list", "--status", "open", "--json"],
+        &home,
+    );
+    assert!(
+        proposals_from_json(&linked_proposals)
+            .iter()
+            .any(|proposal| json_string(proposal, "id") == main_proposal_id)
+    );
+
+    let linked_proposal = run_json_command_with_home(
+        &linked,
+        &[
+            "propose",
+            "--manual",
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--sensitivity",
+            "repo-safe",
+            "--title",
+            "Linked proposal visibility",
+            "--body",
+            "The main worktree must see proposals created in a linked worktree.",
+            "--json",
+        ],
+        &home,
+    );
+    let linked_proposal_id = json_string(&linked_proposal, "proposal_id").to_owned();
+    let main_proposals = run_json_command_with_home(
+        &main,
+        &["proposals", "list", "--status", "open", "--json"],
+        &home,
+    );
+    assert!(
+        proposals_from_json(&main_proposals)
+            .iter()
+            .any(|proposal| json_string(proposal, "id") == linked_proposal_id)
+    );
+
+    run_json_command_with_home(
+        &main,
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--sensitivity",
+            "repo-safe",
+            "--title",
+            "Main branch only zircon",
+            "--body",
+            "This zircon record exists only in the main worktree.",
+            "--json",
+        ],
+        &home,
+    );
+    let main_search = run_json_command_with_home(&main, &["search", "zircon", "--json"], &home);
+    assert!(!record_ids_from_json(&main_search).is_empty());
+    let linked_search = run_json_command_with_home(&linked, &["search", "zircon", "--json"], &home);
+    assert!(
+        record_ids_from_json(&linked_search).is_empty(),
+        "linked worktree index must not contain main-only canonical records: {linked_search}"
+    );
+}
+
+#[test]
 fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow() {
     let repo = initialized_temp_repo();
 
@@ -5382,11 +5552,15 @@ fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
         ],
     );
     let inactive_id = json_string(&inactive, "record_id").to_owned();
-    conn.execute(
-        "UPDATE memory_record SET status = 'tombstoned' WHERE id = ?1",
-        [&inactive_id],
-    )
-    .expect("mark local row inactive");
+    let shared_conn =
+        Connection::open(shared_memory_db_path(repo)).expect("open shared runtime db");
+    shared_conn
+        .execute(
+            "UPDATE memory_record SET status = 'tombstoned' WHERE id = ?1",
+            [&inactive_id],
+        )
+        .expect("mark local row inactive");
+    drop(shared_conn);
     drop(conn);
 
     fs::create_dir_all(test_paths(repo).records_dir()).expect("create records dir");
@@ -5556,7 +5730,7 @@ fn checkpoint_commands_create_list_and_stay_out_of_repo_outputs() {
     );
     let local_id = json_string(&local, "record_id").to_owned();
 
-    let conn = Connection::open(memory_db_path(repo)).expect("open runtime db");
+    let conn = Connection::open(shared_memory_db_path(repo)).expect("open shared runtime db");
     for (record_id, created_at) in [
         (first_id.as_str(), "2026-07-08T00:00:00Z"),
         (duplicate_id.as_str(), "2026-07-08T00:01:00Z"),
@@ -6295,7 +6469,7 @@ fn rebuild_refuses_to_delete_unreadable_runtime_db() {
         repo.canonicalize().expect("canonical repo path"),
         isolated_home.path().to_path_buf(),
     )
-    .db_path;
+    .shared_db_path;
     let original_bytes = b"not a sqlite database with local runtime memory";
     fs::write(&db_path, original_bytes).expect("corrupt runtime db");
 
@@ -7565,6 +7739,26 @@ fn run_json_command(repo: &Path, args: &[&str]) -> Value {
     json_from_stdout(&assert.get_output().stdout)
 }
 
+fn run_json_command_with_home(repo: &Path, args: &[&str], home: &Path) -> Value {
+    let mut cmd = memzoi_with_home(home);
+    let assert = cmd.args(args).current_dir(repo).assert().success();
+    json_from_stdout(&assert.get_output().stdout)
+}
+
+fn run_git_fixture(directory: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(directory)
+        .output()
+        .expect("run Git fixture command");
+    assert!(
+        output.status.success(),
+        "Git fixture command {args:?} failed with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn run_json_command_failure(repo: &Path, args: &[&str]) -> Value {
     let mut cmd = memzoi();
     let assert = cmd.args(args).current_dir(repo).assert().failure();
@@ -7909,6 +8103,10 @@ fn update_record_source_ref(repo: &Path, record_id: &str, source_ref: &str) {
 
 fn memory_db_path(repo: &Path) -> std::path::PathBuf {
     test_paths(repo).db_path
+}
+
+fn shared_memory_db_path(repo: &Path) -> std::path::PathBuf {
+    test_paths(repo).shared_db_path
 }
 
 fn record_ids_from_json(json: &Value) -> Vec<&str> {

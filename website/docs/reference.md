@@ -870,7 +870,7 @@ memzoi local list
 memzoi local search <query>
 ```
 
-Local records are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output.
+Local records are stored in the repository-shared runtime database under `${MEMZOI_HOME:-~/.memzoi}/projects/<repository-key>/shared.db`. They are visible from every linked worktree and are marked as `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output.
 
 Local records are not written to `.memzoi/records/**`, are not returned by global `memzoi search`, and are not exported into repo-shared agent files. `memzoi context` is repo-only by default and includes local records only with `--include-local`. Use later proposal workflows to promote local memory into repo-shared memory.
 
@@ -884,7 +884,7 @@ memzoi checkpoint add --task "..." --from-file notes.md
 memzoi checkpoint list
 ```
 
-Checkpoints are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output.
+Checkpoints are stored in the repository-shared runtime database under `${MEMZOI_HOME:-~/.memzoi}/projects/<repository-key>/shared.db`. They are visible from every linked worktree and are marked as `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output.
 
 Checkpoints store only explicit `--note` or `--from-file` content. They are not written to `.memzoi/records/**`, are not returned by global `memzoi search`, and are not exported into repo-shared agent files. `memzoi context` is repo-only by default and includes checkpoints only with `--include-session`. Use later session-end proposal workflows to promote durable findings into repo memory.
 
