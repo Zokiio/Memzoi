@@ -43,7 +43,7 @@ The local Memzoi home can contain user-global workflow policy and generated proj
   projects/<repository-key>/
     config.toml      # runtime project config, not workflow policy
     shared.db
-    repository.lock
+    repo-lifecycle.lock
     worktrees/<worktree-key>/
       index.db
       exports/

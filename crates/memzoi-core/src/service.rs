@@ -4936,14 +4936,14 @@ fn records_for_runtime_preservation(conn: &Connection) -> Result<Vec<MemoryRecor
     Ok(records)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeRecordPreservation {
     record: MemoryRecord,
     tags: Vec<String>,
     paths: Vec<MemoryPath>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct LegacyProposalRow {
     id: String,
     operation: String,
@@ -5074,8 +5074,30 @@ fn migrate_legacy_runtime_if_needed(paths: &MemoryPaths) -> Result<()> {
         for (_, proposal) in proposals.values() {
             insert_legacy_proposal(&shared, proposal)?;
         }
+        let migration_input = json!({
+            "config_blake3": blake3::hash(
+                config
+                    .as_ref()
+                    .map(|(_, bytes)| bytes.as_slice())
+                    .unwrap_or_else(|| default_config().as_bytes()),
+            )
+            .to_hex()
+            .to_string(),
+            "runtime_records": runtime_records
+                .values()
+                .map(|(_, snapshot)| snapshot)
+                .collect::<Vec<_>>(),
+            "proposals": proposals
+                .values()
+                .map(|(_, proposal)| proposal)
+                .collect::<Vec<_>>(),
+        });
+        let input_digest = blake3::hash(&serde_json::to_vec(&migration_input)?)
+            .to_hex()
+            .to_string();
         let receipt = json!({
             "schema": "memzoi/runtime-migration-v1",
+            "input_digest": format!("blake3:{input_digest}"),
             "legacy_sources": sources,
             "runtime_record_count": runtime_records.len(),
             "proposal_count": proposals.len(),
@@ -5085,18 +5107,70 @@ fn migrate_legacy_runtime_if_needed(paths: &MemoryPaths) -> Result<()> {
             staging.join("migration-v1.json"),
             serde_json::to_vec_pretty(&receipt)?,
         )?;
-        fs::rename(&staging, &paths.repository_runtime_dir).with_context(|| {
-            format!(
-                "failed to install migrated repository runtime {}",
-                paths.repository_runtime_dir.display()
-            )
-        })?;
+        install_staged_migration(&staging, &paths.repository_runtime_dir, &receipt)?;
         Ok(())
     })();
     if migration_result.is_err() && staging.exists() {
         let _ = fs::remove_dir_all(&staging);
     }
     migration_result
+}
+
+fn install_staged_migration(
+    staging: &Path,
+    repository_runtime_dir: &Path,
+    expected_receipt: &serde_json::Value,
+) -> Result<()> {
+    match fs::rename(staging, repository_runtime_dir) {
+        Ok(()) => Ok(()),
+        Err(_error) if installed_migration_matches(repository_runtime_dir, expected_receipt)? => {
+            fs::remove_dir_all(staging).with_context(|| {
+                format!(
+                    "failed to remove redundant migration staging directory {}",
+                    staging.display()
+                )
+            })?;
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to install migrated repository runtime {}",
+                repository_runtime_dir.display()
+            )
+        }),
+    }
+}
+
+fn installed_migration_matches(
+    repository_runtime_dir: &Path,
+    expected_receipt: &serde_json::Value,
+) -> Result<bool> {
+    if !repository_runtime_dir.join("config.toml").is_file()
+        || !repository_runtime_dir.join("shared.db").is_file()
+    {
+        return Ok(false);
+    }
+    let receipt_path = repository_runtime_dir.join("migration-v1.json");
+    let bytes = match fs::read(&receipt_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to read concurrently installed migration receipt {}",
+                    receipt_path.display()
+                )
+            });
+        }
+    };
+    let installed_receipt =
+        serde_json::from_slice::<serde_json::Value>(&bytes).with_context(|| {
+            format!(
+                "failed to parse concurrently installed migration receipt {}",
+                receipt_path.display()
+            )
+        })?;
+    Ok(installed_receipt == *expected_receipt)
 }
 
 fn read_legacy_proposals(conn: &Connection) -> Result<Vec<LegacyProposalRow>> {
@@ -5411,6 +5485,50 @@ mod tests {
             service.show_proposal(&proposal.id)?.status,
             ProposalStatus::Pending
         );
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_migration_accepts_only_a_matching_complete_install() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let installed = temp.path().join("installed-runtime");
+        fs::create_dir_all(&installed)?;
+        fs::write(installed.join("config.toml"), default_config())?;
+        fs::write(installed.join("shared.db"), b"installed")?;
+        let receipt = json!({
+            "schema": "memzoi/runtime-migration-v1",
+            "input_digest": "blake3:matching",
+            "legacy_sources": ["/legacy/worktree"],
+            "runtime_record_count": 1,
+            "proposal_count": 1,
+            "legacy_directories_retained": true,
+        });
+        fs::write(
+            installed.join("migration-v1.json"),
+            serde_json::to_vec_pretty(&receipt)?,
+        )?;
+
+        let redundant_staging = temp.path().join("redundant-staging");
+        fs::create_dir_all(&redundant_staging)?;
+        fs::write(redundant_staging.join("marker"), "redundant")?;
+        install_staged_migration(&redundant_staging, &installed, &receipt)?;
+        assert!(!redundant_staging.exists());
+
+        let conflicting_staging = temp.path().join("conflicting-staging");
+        fs::create_dir_all(&conflicting_staging)?;
+        let conflicting_receipt = json!({
+            "schema": "memzoi/runtime-migration-v1",
+            "input_digest": "blake3:conflicting",
+            "legacy_sources": ["/legacy/worktree"],
+            "runtime_record_count": 2,
+            "proposal_count": 1,
+            "legacy_directories_retained": true,
+        });
+        let error =
+            install_staged_migration(&conflicting_staging, &installed, &conflicting_receipt)
+                .expect_err("a different migration receipt must not be accepted");
+        assert!(error.to_string().contains("failed to install migrated"));
+        assert!(conflicting_staging.is_dir());
         Ok(())
     }
 
