@@ -35,13 +35,13 @@ fn checked_capture_corpus_passes_quality_safety_and_review_burden_gates() -> any
     assert!(report.observations.cost.is_none());
     assert!(report.hard_gates.passed());
     assert_eq!(report.metrics.review_burden.proposed, 25);
-    assert_eq!(report.metrics.review_burden.accepted, 11);
+    assert_eq!(report.metrics.review_burden.accepted, 6);
     assert_eq!(report.metrics.review_burden.rejected, 9);
-    assert_eq!(report.metrics.review_burden.edited, 1);
+    assert_eq!(report.metrics.review_burden.edited, 6);
     assert_eq!(report.metrics.review_burden.deferred, 4);
     assert_eq!(report.metrics.review_burden.duplicates, 5);
     assert_eq!(report.metrics.review_burden.conflicts, 4);
-    assert_eq!(report.metrics.review_burden.needs_review, 8);
+    assert_eq!(report.metrics.review_burden.needs_review, 14);
     assert_eq!(report.hard_gates.review_workflow_violations, 0);
     assert_eq!(report.hard_gates.provenance_violations, 0);
     assert_eq!(report.hard_gates.unnamed_source_reads, 0);

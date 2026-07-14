@@ -1893,7 +1893,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_tool_matches_core_plan_and_leaves_managed_state_unchanged() {
+    fn capture_tool_withholds_unclassified_typed_markdown_without_mutation() {
         let (_temp, state) = capture_test_state();
         let source_path = "notes.md";
         fs::write(
@@ -1904,7 +1904,16 @@ mod tests {
         let arguments = capture_arguments(source_path);
         let before = managed_state_snapshot(&state);
 
-        let response = capture_response(&state, "capture-parity", arguments.clone());
+        let request = serde_json::from_value::<CaptureRequest>(arguments.clone()).unwrap();
+        let expected = plan_capture(&state.paths, request).unwrap();
+        assert_eq!(expected.data_class, CaptureDataClass::Private);
+        assert_eq!(expected.candidates.len(), 1);
+        assert_eq!(
+            expected.candidates[0].classification.destination,
+            memzoi_core::MemoryDestination::NeedsReview
+        );
+
+        let response = capture_response(&state, "capture-parity", arguments);
 
         let after = managed_state_snapshot(&state);
         assert_managed_state_unchanged(&before, &after, "MCP capture planning mutated state");
@@ -1912,40 +1921,16 @@ mod tests {
             state.service.get().is_none(),
             "capture planning must not open the mutable MemoryService"
         );
-        let result = &response["result"];
-        assert_eq!(result["isError"], false);
-        let structured = &result["structuredContent"];
-        assert_eq!(structured["schema"], "memzoi/capture-plan-v1");
-        assert_eq!(structured["status"], "ready");
-        assert_eq!(structured["data_class"], "repo_safe");
-        assert!(
-            structured["plan_id"]
-                .as_str()
-                .is_some_and(|plan_id| plan_id.starts_with("capture_"))
-        );
-        assert_eq!(structured["candidates"][0]["memory"]["type"], "decision");
+        assert_eq!(response["result"]["isError"], true);
         assert_eq!(
-            structured["candidates"][0]["evidence"][0]["locator"]["kind"],
-            "project_path"
+            response["result"]["content"][0]["text"],
+            PRIVATE_CAPTURE_DENIED
         );
-        assert_eq!(
-            structured["candidates"][0]["classification"]["sensitivity"],
-            "repo-safe"
-        );
-        assert_eq!(structured["summary"]["duplicates"], 0);
-        assert_eq!(structured["summary"]["conflicts"], 0);
-        assert!(structured["safeguards"].is_object());
-
-        let request = serde_json::from_value::<CaptureRequest>(arguments).unwrap();
-        let expected = plan_capture(&state.paths, request).unwrap();
-        assert_eq!(structured, &serde_json::to_value(expected).unwrap());
-        let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
-            .expect("MCP capture text should encode the versioned plan");
-        assert_eq!(text, *structured);
+        assert!(response["result"].get("structuredContent").is_none());
     }
 
     #[test]
-    fn maximum_candidate_plan_fits_the_bounded_mcp_response_without_duplication() {
+    fn maximum_candidate_private_plan_is_withheld_with_a_bounded_response() {
         let (_temp, state) = capture_test_state();
         let source_path = "large-plan.md";
         let mut markdown = String::new();
@@ -1966,17 +1951,13 @@ mod tests {
         assert!(encoded.len() <= MAX_JSONRPC_MESSAGE_BYTES + 1);
         let decoded: Value = serde_json::from_slice(&encoded).unwrap();
         assert!(decoded.get("error").is_none(), "{decoded}");
+        assert_eq!(decoded["result"]["isError"], true);
         assert_eq!(
-            decoded["result"]["structuredContent"]["candidates"]
-                .as_array()
-                .map(Vec::len),
-            Some(100)
+            decoded["result"]["content"][0]["text"],
+            PRIVATE_CAPTURE_DENIED
         );
-        assert!(
-            decoded["result"]["content"][0]["text"]
-                .as_str()
-                .is_some_and(|text| text.len() < 1024)
-        );
+        assert!(decoded["result"].get("structuredContent").is_none());
+        assert!(encoded.len() < 1024);
         let after = managed_state_snapshot(&state);
         assert_managed_state_unchanged(&before, &after, "large MCP capture mutated state");
         assert!(state.service.get().is_none());

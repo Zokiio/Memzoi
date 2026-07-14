@@ -71,6 +71,10 @@ fn prohibited_content_reports_are_stable_and_redacted() {
             "dsa_private_key",
             b"-----BEGIN DSA PRIVATE KEY-----\nYWJj\n-----END DSA PRIVATE KEY-----\n",
         ),
+        (
+            "openpgp_private_key_block",
+            b"-----BEGIN PGP PRIVATE KEY BLOCK-----\nx\n-----END PGP PRIVATE KEY BLOCK-----\n",
+        ),
         ("authorization", b"Authorization: Bearer SECRET-SENTINEL-123456"),
         ("credentialed_url", b"https://user:SECRET-SENTINEL@example.test/path"),
         ("connection", b"postgres://user:SECRET-SENTINEL@db.test/main"),
@@ -103,6 +107,26 @@ fn prohibited_content_reports_are_stable_and_redacted() {
 }
 
 #[test]
+fn short_openpgp_private_key_block_is_blocked_lexically() {
+    let bytes = b"-----BEGIN PGP PRIVATE KEY BLOCK-----\nx\n-----END PGP PRIVATE KEY BLOCK-----\n";
+    let markdown = canonical_record_markdown(
+        std::str::from_utf8(bytes).unwrap(),
+        Some("general_repo_knowledge"),
+    );
+    let report = scan_repository_blob(
+        b"project",
+        Path::new(".memzoi/records/candidate.md"),
+        markdown.as_bytes(),
+    );
+    assert!(report.findings.iter().any(|finding| {
+        finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::PrivateKey
+    }));
+    assert!(!report.findings.iter().any(|finding| {
+        finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::HighEntropyValue
+    }));
+}
+
+#[test]
 fn managed_blob_classification_is_parsed_and_fails_closed() {
     let path = Path::new(".memzoi/records/candidate.md");
     let safe = canonical_record_markdown(
@@ -112,13 +136,28 @@ fn managed_blob_classification_is_parsed_and_fails_closed() {
     assert!(scan_managed_repository_blob(b"project", path, safe.as_bytes()).allowed);
 
     let team_scoped = safe.replace("scope: repo", "scope: team\nscope_id: platform");
-    assert!(scan_managed_repository_blob(b"project", path, team_scoped.as_bytes()).allowed);
+    let team_scoped_report = scan_managed_repository_blob(b"project", path, team_scoped.as_bytes());
+    assert!(!team_scoped_report.allowed);
+    assert!(team_scoped_report.findings.iter().any(|finding| {
+        finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::ScopeNotRepository
+    }));
     let team_without_id = safe.replace("scope: repo", "scope: team");
     let team_without_id_report =
         scan_managed_repository_blob(b"project", path, team_without_id.as_bytes());
     assert!(!team_without_id_report.allowed);
     assert!(team_without_id_report.findings.iter().any(|finding| {
         finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::ScopeNotRepository
+    }));
+
+    let project_scoped = safe.replace(
+        "scope: repo",
+        "scope: project\nscope_id: candidate-controlled-project",
+    );
+    let project_scoped_report =
+        scan_managed_repository_blob(b"project", path, project_scoped.as_bytes());
+    assert!(!project_scoped_report.allowed);
+    assert!(project_scoped_report.findings.iter().any(|finding| {
+        finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::ScopeProjectMismatch
     }));
 
     let missing = canonical_record_markdown("Unclassified repository knowledge.", None);

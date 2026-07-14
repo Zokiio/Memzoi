@@ -236,6 +236,112 @@ fn staged_and_range_scans_block_contextually_prohibited_records() {
         );
 }
 
+#[cfg(unix)]
+#[test]
+fn staged_and_range_scans_block_managed_git_type_changes() {
+    use std::{os::unix::fs::symlink, process::Command as StdCommand};
+
+    for entry_kind in ["symlink", "gitlink"] {
+        let temp = tempfile::tempdir().expect("temp repo");
+        for args in [
+            &["init", "--quiet"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "Memzoi Test"][..],
+        ] {
+            assert!(
+                StdCommand::new("git")
+                    .args(args)
+                    .current_dir(temp.path())
+                    .status()
+                    .expect("run git setup")
+                    .success()
+            );
+        }
+        let relative = ".memzoi/records/type-change.md";
+        let path = temp.path().join(relative);
+        fs::create_dir_all(path.parent().expect("record parent")).expect("records directory");
+        fs::write(
+            &path,
+            safety_record_markdown("Safe baseline.", Some("general_repo_knowledge")),
+        )
+        .expect("baseline record");
+        assert!(
+            StdCommand::new("git")
+                .args(["add", relative])
+                .current_dir(temp.path())
+                .status()
+                .expect("stage baseline")
+                .success()
+        );
+        assert!(
+            StdCommand::new("git")
+                .args(["commit", "--quiet", "-m", "baseline"])
+                .current_dir(temp.path())
+                .status()
+                .expect("commit baseline")
+                .success()
+        );
+
+        if entry_kind == "symlink" {
+            fs::remove_file(&path).expect("remove regular record");
+            symlink("outside-target", &path).expect("replace record with symlink");
+            assert!(
+                StdCommand::new("git")
+                    .args(["add", relative])
+                    .current_dir(temp.path())
+                    .status()
+                    .expect("stage symlink")
+                    .success()
+            );
+        } else {
+            let head = StdCommand::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(temp.path())
+                .output()
+                .expect("read baseline commit");
+            assert!(head.status.success());
+            let oid = String::from_utf8(head.stdout).expect("commit ID is UTF-8");
+            assert!(
+                StdCommand::new("git")
+                    .args([
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("160000,{},{}", oid.trim(), relative),
+                    ])
+                    .current_dir(temp.path())
+                    .status()
+                    .expect("stage gitlink")
+                    .success()
+            );
+        }
+
+        let mut staged = memzoi();
+        staged
+            .current_dir(temp.path())
+            .args(["safety", "scan", "--staged", "--json"])
+            .assert()
+            .code(2)
+            .stdout(predicate::str::contains("\"allowed\": false"));
+
+        assert!(
+            StdCommand::new("git")
+                .args(["commit", "--quiet", "-m", entry_kind])
+                .current_dir(temp.path())
+                .status()
+                .expect("commit type change")
+                .success()
+        );
+        let mut range = memzoi();
+        range
+            .current_dir(temp.path())
+            .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+            .assert()
+            .code(2)
+            .stdout(predicate::str::contains("\"allowed\": false"));
+    }
+}
+
 #[test]
 fn range_scan_rejects_unsafe_revision_tokens_before_invoking_git() {
     for range in ["-p...HEAD", "HEAD...-p", "HEAD ^...HEAD", "HEAD...HEAD\n"] {
@@ -550,7 +656,7 @@ fn capture_plan_requires_exactly_one_explicit_source_argument() {
 }
 
 #[test]
-fn capture_plan_rejects_an_absent_reserved_memory_root_as_output() {
+fn capture_plan_does_not_create_an_absent_reserved_memory_root_for_private_output() {
     let repo = tempfile::tempdir().expect("temp repo");
     fs::create_dir(repo.path().join(".git")).expect("create git marker");
     fs::write(
@@ -571,7 +677,7 @@ fn capture_plan_rejects_an_absent_reserved_memory_root_as_output() {
             forbidden.to_str().expect("reserved path utf-8"),
         ],
     );
-    assert!(error.contains("Memzoi-managed state"), "{error}");
+    assert!(error.contains("private runtime directory"), "{error}");
     assert!(!forbidden.exists());
 }
 
@@ -601,7 +707,7 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
     assert_eq!(planned, repeated, "capture planning must be deterministic");
     assert_json_string_field(&planned, &["schema"], "memzoi/capture-plan-v1");
     assert_json_string_field(&planned, &["status"], "ready");
-    assert_json_string_field(&planned, &["data_class"], "repo_safe");
+    assert_json_string_field(&planned, &["data_class"], "private");
     assert!(json_string(&planned, "plan_id").starts_with("capture_"));
     let candidates = planned["candidates"]
         .as_array()
@@ -615,8 +721,12 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
         assert!(json_string(candidate, "claim_id").starts_with("claim_"));
         assert!(json_string(candidate, "candidate_id").starts_with("candidate_"));
         assert!(candidate["confidence"].is_string() || candidate["confidence"].is_number());
-        assert_json_string_field(&candidate["classification"], &["destination"], "repo");
-        assert_json_string_field(&candidate["classification"], &["sensitivity"], "repo-safe");
+        assert_json_string_field(
+            &candidate["classification"],
+            &["destination"],
+            "needs_review",
+        );
+        assert_json_string_field(&candidate["classification"], &["sensitivity"], "unknown");
         assert!(
             candidate["classification"]["destination_reason"]
                 .as_str()
@@ -656,7 +766,12 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
         );
     }
 
-    let artifact = repo.path().join("capture-plan.json");
+    assert_eq!(
+        managed_state_snapshot(&paths),
+        before,
+        "stdout-only planning must not mutate memory state"
+    );
+    let artifact = paths.runtime_dir.join("capture-plan.json");
     let emitted = run_json_command(
         repo.path(),
         &[
@@ -673,11 +788,6 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
         .expect("parse plan artifact");
     assert_eq!(emitted, planned);
     assert_eq!(saved, planned);
-    assert_eq!(
-        managed_state_snapshot(&paths),
-        before,
-        "planning must not mutate memory state"
-    );
 
     let saved_before = fs::read(&artifact).expect("read immutable plan artifact");
     let error = run_command_failure_stderr(
@@ -703,7 +813,6 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
             .proposals_dir()
             .join("pending")
             .join("capture-plan.json"),
-        paths.runtime_dir.join("capture-plan.json"),
         paths.exports_dir.join("capture-plan.json"),
     ] {
         let error = run_command_failure_stderr(
@@ -717,14 +826,14 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
                 forbidden.to_str().expect("managed path utf-8"),
             ],
         );
-        assert!(error.contains("Memzoi-managed state"), "{error}");
+        assert!(
+            error.contains("Memzoi-managed state")
+                || error.contains("private runtime directory")
+                || error.contains("generated exports"),
+            "{error}"
+        );
         assert!(!forbidden.exists());
     }
-    assert_eq!(
-        managed_state_snapshot(&paths),
-        before,
-        "explicit artifacts must not mutate managed state"
-    );
 }
 
 #[test]
@@ -829,7 +938,7 @@ fn capture_review_binds_every_decision_without_mutating_memory_state() {
     assert!(review_path.is_file());
     assert_json_string_field(&review, &["schema"], "memzoi/capture-review-v1");
     assert_json_string_field(&review, &["plan_id"], json_string(&plan, "plan_id"));
-    assert_json_string_field(&review, &["data_class"], "repo_safe");
+    assert_json_string_field(&review, &["data_class"], "private");
     assert!(json_string(&review, "review_id").starts_with("review_"));
     assert_eq!(
         review["decisions"].as_array().map(Vec::len),
@@ -841,7 +950,7 @@ fn capture_review_binds_every_decision_without_mutating_memory_state() {
     assert_eq!(saved, review);
     assert_eq!(managed_state_snapshot(&paths), before);
 
-    let decisions_path = repo.path().join("capture-decisions.json");
+    let decisions_path = paths.runtime_dir.join("capture-decisions.json");
     let human = run_command_stdout(
         repo.path(),
         &[
@@ -878,7 +987,7 @@ fn capture_review_binds_every_decision_without_mutating_memory_state() {
             forbidden.to_str().expect("managed review path utf-8"),
         ],
     );
-    assert!(error.contains("Memzoi-managed state"), "{error}");
+    assert!(error.contains("private runtime directory"), "{error}");
     assert!(!forbidden.exists());
     assert_eq!(managed_state_snapshot(&paths), before);
 }
@@ -5393,22 +5502,6 @@ fn proposal_files_validate_rejects_invalid_target_shapes_and_states_before_mutat
             "is inactive",
         ),
         (
-            "cross-scope",
-            Some((
-                "project",
-                Some("other-project"),
-                "active",
-                "2026-07-01T00:00:00Z",
-            )),
-            proposal_markdown_with(
-                "semantic",
-                "supersede",
-                "supersedes:\n  - lifecycle-target",
-                "",
-            ),
-            "cross-scope",
-        ),
-        (
             "stale",
             Some(("repo", None, "active", "2026-07-07T00:00:00Z")),
             proposal_markdown_with(
@@ -8097,7 +8190,8 @@ fn capture_markdown_fixture() -> &'static str {
 fn capture_plan_review_fixture(repo: &Path) -> (PathBuf, PathBuf, PathBuf, Value, Value) {
     let source = repo.join("capture-source.md");
     fs::write(&source, capture_markdown_fixture()).expect("write capture source");
-    let plan_path = repo.join("capture-plan.json");
+    let runtime_dir = test_paths(repo).runtime_dir;
+    let plan_path = runtime_dir.join("capture-plan.json");
     let plan = run_json_command(
         repo,
         &[
@@ -8117,11 +8211,15 @@ fn capture_plan_review_fixture(repo: &Path) -> (PathBuf, PathBuf, PathBuf, Value
         .map(|candidate| {
             serde_json::json!({
                 "candidate_id": json_string(candidate, "candidate_id"),
-                "outcome": "accept",
+                "outcome": "edit",
+                "reason_code": "explicit-contextual-classification",
+                "memory": candidate["memory"].clone(),
+                "requested_destination": "repo",
+                "content_class": "general_repo_knowledge",
             })
         })
         .collect::<Vec<_>>();
-    let decisions_path = repo.join("capture-decisions.json");
+    let decisions_path = runtime_dir.join("capture-decisions.json");
     fs::write(
         &decisions_path,
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -8132,7 +8230,7 @@ fn capture_plan_review_fixture(repo: &Path) -> (PathBuf, PathBuf, PathBuf, Value
         .expect("serialize capture decisions"),
     )
     .expect("write capture decisions");
-    let review_path = repo.join("capture-review.json");
+    let review_path = runtime_dir.join("capture-review.json");
     let review = run_json_command(
         repo,
         &[

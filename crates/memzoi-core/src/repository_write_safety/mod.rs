@@ -189,9 +189,10 @@ fn scan_repository_blob_with_policy(
             kind: policy.scope_kind,
             id: policy.scope_id.as_deref(),
             current_project_identity: project_identity,
-            configured_project_id: (policy.scope_kind == crate::ScopeKind::Project)
-                .then_some(policy.scope_id.as_deref())
-                .flatten(),
+            // Managed files are candidate-controlled input. Until the repository
+            // supplies an independently configured project identity, project
+            // scopes must fail closed rather than authorize themselves.
+            configured_project_id: None,
         },
         visibility: policy.visibility,
         authorization: AuthorizationProof::ExplicitCommand {

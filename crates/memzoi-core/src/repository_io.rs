@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -20,6 +20,288 @@ fn repository_file_mode() -> rustix::fs::Mode {
     use rustix::fs::Mode;
 
     Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH
+}
+
+#[cfg(unix)]
+fn directory_flags() -> rustix::fs::OFlags {
+    use rustix::fs::OFlags;
+
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+}
+
+#[cfg(unix)]
+fn open_repository_parent(
+    project_root: &Path,
+    relative: &Path,
+) -> Result<(std::os::fd::OwnedFd, std::ffi::OsString)> {
+    use rustix::fs::{CWD, Mode, openat};
+
+    if !crate::repository_write_safety::projection_path_is_safe(relative) {
+        bail!("unsafe repository-relative output path");
+    }
+    let root = project_root
+        .canonicalize()
+        .context("failed to resolve repository root for secure mutation")?;
+    let mut directory = openat(CWD, &root, directory_flags(), Mode::empty())
+        .context("failed to pin repository root without following symlinks")?;
+    let mut components = relative.components().peekable();
+    let mut file_name = None;
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(component) = component else {
+            bail!("unsafe repository-relative output path");
+        };
+        if components.peek().is_none() {
+            file_name = Some(component.to_os_string());
+            break;
+        }
+        directory = openat(&directory, component, directory_flags(), Mode::empty())
+            .context("failed to pin repository output parent without following symlinks")?;
+    }
+    Ok((
+        directory,
+        file_name.context("repository destination has no file name")?,
+    ))
+}
+
+#[cfg(unix)]
+fn open_transaction_parent(
+    transaction_root: &Path,
+    path: &Path,
+) -> Result<(std::os::fd::OwnedFd, std::ffi::OsString)> {
+    use rustix::fs::{CWD, Mode, openat};
+
+    let relative = path
+        .strip_prefix(transaction_root)
+        .context("transaction file is outside the transaction root")?;
+    let mut components = relative.components();
+    let Some(std::path::Component::Normal(file_name)) = components.next() else {
+        bail!("transaction file has an unsafe name");
+    };
+    if components.next().is_some() {
+        bail!("transaction file must be a direct child of the transaction root");
+    }
+    let root = transaction_root
+        .canonicalize()
+        .context("failed to resolve repository transaction root")?;
+    let directory = openat(CWD, &root, directory_flags(), Mode::empty())
+        .context("failed to pin repository transaction root without following symlinks")?;
+    Ok((directory, file_name.to_os_string()))
+}
+
+#[cfg(unix)]
+fn read_regular_at(
+    directory: &std::os::fd::OwnedFd,
+    file_name: &std::ffi::OsStr,
+    label: &str,
+) -> Result<(fs::File, Vec<u8>)> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let file = openat(
+        directory,
+        file_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("failed to open {label} without following symlinks"))?;
+    let mut file = fs::File::from(file);
+    if !file
+        .metadata()
+        .with_context(|| format!("failed to inspect {label}"))?
+        .is_file()
+    {
+        bail!("{label} must be a regular file");
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {label}"))?;
+    Ok((file, bytes))
+}
+
+#[cfg(unix)]
+fn create_file_at(
+    directory: &std::os::fd::OwnedFd,
+    file_name: &std::ffi::OsStr,
+    bytes: &[u8],
+    label: &str,
+) -> Result<fs::File> {
+    use rustix::fs::{OFlags, openat};
+
+    let file = openat(
+        directory,
+        file_name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        repository_file_mode(),
+    )
+    .with_context(|| format!("failed to create {label} without replacement"))?;
+    let mut file = fs::File::from(file);
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .with_context(|| format!("failed to persist {label}"))?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn named_file_still_matches(
+    directory: &std::os::fd::OwnedFd,
+    file_name: &std::ffi::OsStr,
+    opened: &fs::File,
+) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    use rustix::{
+        fs::{AtFlags, statat},
+        io::Errno,
+    };
+
+    let opened = opened.metadata().context("failed to inspect pinned file")?;
+    let named = match statat(directory, file_name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(named) => named,
+        Err(Errno::NOENT) => return Ok(false),
+        Err(error) => return Err(error).context("failed to revalidate pinned file name"),
+    };
+    Ok(opened.dev() == named.st_dev as u64 && opened.ino() == named.st_ino as u64)
+}
+
+pub(crate) fn install_transaction_file_no_replace(
+    project_root: &Path,
+    transaction_root: &Path,
+    staged_path: &Path,
+    destination_relative: &Path,
+    expected_hash: &str,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            project_root,
+            transaction_root,
+            staged_path,
+            destination_relative,
+            expected_hash,
+        );
+        bail!("secure staged repository installation is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{AtFlags, fsync, unlinkat};
+
+        let (source_directory, source_name) =
+            open_transaction_parent(transaction_root, staged_path)?;
+        let (source, bytes) =
+            read_regular_at(&source_directory, &source_name, "staged repository file")?;
+        if blake3::hash(&bytes).to_hex().as_str() != expected_hash {
+            bail!("staged repository bytes changed after authorization");
+        }
+        let (destination_directory, destination_name) =
+            open_repository_parent(project_root, destination_relative)?;
+        let destination = create_file_at(
+            &destination_directory,
+            &destination_name,
+            &bytes,
+            "authorized repository destination",
+        )?;
+        if !named_file_still_matches(&source_directory, &source_name, &source)? {
+            if named_file_still_matches(&destination_directory, &destination_name, &destination)? {
+                let _ = unlinkat(&destination_directory, &destination_name, AtFlags::empty());
+            }
+            bail!("staged repository file changed during installation");
+        }
+        if let Err(error) = unlinkat(&source_directory, &source_name, AtFlags::empty()) {
+            if named_file_still_matches(&destination_directory, &destination_name, &destination)? {
+                let _ = unlinkat(&destination_directory, &destination_name, AtFlags::empty());
+            }
+            return Err(error).context("failed to remove installed transaction source");
+        }
+        fsync(&source_directory).context("failed to sync repository transaction root")?;
+        fsync(&destination_directory).context("failed to sync repository destination parent")?;
+        Ok(())
+    }
+}
+
+pub(crate) fn backup_repository_file(
+    project_root: &Path,
+    source_relative: &Path,
+    transaction_root: &Path,
+    backup_path: &Path,
+    expected_hash: &str,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            project_root,
+            source_relative,
+            transaction_root,
+            backup_path,
+            expected_hash,
+        );
+        bail!("secure repository backup is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{AtFlags, fsync, unlinkat};
+
+        let (source_directory, source_name) =
+            open_repository_parent(project_root, source_relative)?;
+        let (source, bytes) =
+            read_regular_at(&source_directory, &source_name, "repository source")?;
+        if blake3::hash(&bytes).to_hex().as_str() != expected_hash {
+            bail!("repository source changed after validation");
+        }
+        let (backup_directory, backup_name) =
+            open_transaction_parent(transaction_root, backup_path)?;
+        let backup = create_file_at(
+            &backup_directory,
+            &backup_name,
+            &bytes,
+            "repository transaction backup",
+        )?;
+        if !named_file_still_matches(&source_directory, &source_name, &source)? {
+            if named_file_still_matches(&backup_directory, &backup_name, &backup)? {
+                let _ = unlinkat(&backup_directory, &backup_name, AtFlags::empty());
+            }
+            bail!("repository source changed during secure backup");
+        }
+        if let Err(error) = unlinkat(&source_directory, &source_name, AtFlags::empty()) {
+            if named_file_still_matches(&backup_directory, &backup_name, &backup)? {
+                let _ = unlinkat(&backup_directory, &backup_name, AtFlags::empty());
+            }
+            return Err(error).context("failed to remove securely backed-up repository source");
+        }
+        fsync(&source_directory).context("failed to sync repository source parent")?;
+        fsync(&backup_directory).context("failed to sync repository transaction root")?;
+        Ok(())
+    }
+}
+
+pub(crate) fn remove_repository_file_if_matching(
+    project_root: &Path,
+    relative: &Path,
+    expected_hash: &str,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (project_root, relative, expected_hash);
+        bail!("secure repository removal is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{AtFlags, fsync, unlinkat};
+
+        let (directory, file_name) = open_repository_parent(project_root, relative)?;
+        let (file, bytes) = read_regular_at(&directory, &file_name, "repository rollback file")?;
+        if blake3::hash(&bytes).to_hex().as_str() != expected_hash {
+            bail!("repository rollback file changed after installation");
+        }
+        if !named_file_still_matches(&directory, &file_name, &file)? {
+            bail!("repository rollback file changed before removal");
+        }
+        unlinkat(&directory, &file_name, AtFlags::empty())
+            .context("failed to remove repository rollback file")?;
+        fsync(&directory).context("failed to sync repository rollback parent")?;
+        Ok(())
+    }
 }
 
 pub(crate) fn verify_repository_batch(

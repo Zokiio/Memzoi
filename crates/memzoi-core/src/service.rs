@@ -288,6 +288,30 @@ struct StagedCanonicalFileWrite {
     installed: bool,
 }
 
+struct FileResolutionRollback<'a> {
+    paths: &'a MemoryPaths,
+    pending_path: &'a Path,
+    pending_backup: &'a Path,
+    pending_hash: &'a str,
+    pending_moved: bool,
+    writes: &'a mut [StagedCanonicalFileWrite],
+    resolved_path: &'a Path,
+    resolved_hash: &'a str,
+    resolved_installed: bool,
+    resolved_temp: &'a Path,
+}
+
+struct RejectedFileProposalRollback<'a> {
+    paths: &'a MemoryPaths,
+    pending_path: &'a Path,
+    pending_backup: &'a Path,
+    pending_hash: &'a str,
+    resolved_path: &'a Path,
+    resolved_hash: &'a str,
+    resolved_installed: bool,
+    resolved_temp: &'a Path,
+}
+
 #[derive(Debug)]
 struct PendingFileProposalSnapshot {
     proposal: OkfProposalFile,
@@ -702,6 +726,9 @@ impl MemoryService {
         };
         let pending_backup =
             repository_transaction_path(&self.paths, proposal_path, &nonce, "pending");
+        let resolved_hash = blake3::hash(resolved_markdown.as_bytes())
+            .to_hex()
+            .to_string();
 
         let tx = match self.conn.unchecked_transaction() {
             Ok(tx) => tx,
@@ -753,19 +780,20 @@ impl MemoryService {
                 validate_canonical_write_precondition(&self.paths, write)?;
             }
             before_pending_revalidation(proposal_path)?;
-            fs::rename(proposal_path, &pending_backup).with_context(|| {
-                format!(
-                    "failed to stage pending proposal {} for resolution",
-                    proposal_path.display()
-                )
-            })?;
+            backup_repository_file_to_transaction(
+                &self.paths,
+                proposal_path,
+                &pending_backup,
+                &snapshot.expected_hash,
+            )?;
             pending_moved = true;
             self.revalidate_moved_pending_file_proposal(proposal_path, &pending_backup, &snapshot)?;
             install_staged_canonical_writes(&self.paths, &mut staged_writes, |_| Ok(()))?;
             install_verified_staged_file_no_replace(
+                &self.paths,
                 &resolved_temp,
                 &resolved_path,
-                blake3::hash(resolved_markdown.as_bytes()).to_hex().as_ref(),
+                &resolved_hash,
             )?;
             resolved_installed = true;
             Ok(())
@@ -774,15 +802,18 @@ impl MemoryService {
         if let Err(error) = install_result {
             return attach_cleanup_error(
                 error,
-                rollback_file_resolution(
-                    proposal_path,
-                    &pending_backup,
+                rollback_file_resolution(FileResolutionRollback {
+                    paths: &self.paths,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
                     pending_moved,
-                    &mut staged_writes,
-                    &resolved_path,
+                    writes: &mut staged_writes,
+                    resolved_path: &resolved_path,
+                    resolved_hash: &resolved_hash,
                     resolved_installed,
-                    &resolved_temp,
-                ),
+                    resolved_temp: &resolved_temp,
+                }),
                 "proposal-file install rollback",
             );
         }
@@ -791,15 +822,18 @@ impl MemoryService {
             return attach_cleanup_error(
                 anyhow::Error::new(error)
                     .context("failed to commit proposal-file runtime index update"),
-                rollback_file_resolution(
-                    proposal_path,
-                    &pending_backup,
+                rollback_file_resolution(FileResolutionRollback {
+                    paths: &self.paths,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
                     pending_moved,
-                    &mut staged_writes,
-                    &resolved_path,
+                    writes: &mut staged_writes,
+                    resolved_path: &resolved_path,
+                    resolved_hash: &resolved_hash,
                     resolved_installed,
-                    &resolved_temp,
-                ),
+                    resolved_temp: &resolved_temp,
+                }),
                 "proposal-file commit rollback",
             );
         }
@@ -1553,8 +1587,10 @@ impl MemoryService {
         )?;
         let pending_backup =
             repository_transaction_path(&self.paths, proposal_path, &nonce, "pending");
+        let resolved_hash = blake3::hash(resolved_markdown.as_bytes())
+            .to_hex()
+            .to_string();
 
-        let display_pending_path = snapshot.display_path.clone();
         if let Err(error) = before_pending_revalidation(proposal_path) {
             return attach_cleanup_error(
                 error,
@@ -1562,12 +1598,12 @@ impl MemoryService {
                 "rejection staging cleanup",
             );
         }
-        if let Err(error) = fs::rename(proposal_path, &pending_backup).with_context(|| {
-            format!(
-                "failed to stage pending proposal {} for rejection",
-                display_pending_path.display()
-            )
-        }) {
+        if let Err(error) = backup_repository_file_to_transaction(
+            &self.paths,
+            proposal_path,
+            &pending_backup,
+            &snapshot.expected_hash,
+        ) {
             return attach_cleanup_error(
                 error,
                 remove_staged_file(&resolved_temp),
@@ -1579,30 +1615,37 @@ impl MemoryService {
         {
             return attach_cleanup_error(
                 error,
-                rollback_rejected_file_proposal(
-                    proposal_path,
-                    &pending_backup,
-                    &resolved_path,
-                    false,
-                    &resolved_temp,
-                ),
+                rollback_rejected_file_proposal(RejectedFileProposalRollback {
+                    paths: &self.paths,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
+                    resolved_path: &resolved_path,
+                    resolved_hash: &resolved_hash,
+                    resolved_installed: false,
+                    resolved_temp: &resolved_temp,
+                }),
                 "rejection captured-byte rollback",
             );
         }
         if let Err(error) = install_verified_staged_file_no_replace(
+            &self.paths,
             &resolved_temp,
             &resolved_path,
-            blake3::hash(resolved_markdown.as_bytes()).to_hex().as_ref(),
+            &resolved_hash,
         ) {
             return attach_cleanup_error(
                 error,
-                rollback_rejected_file_proposal(
-                    proposal_path,
-                    &pending_backup,
-                    &resolved_path,
-                    false,
-                    &resolved_temp,
-                ),
+                rollback_rejected_file_proposal(RejectedFileProposalRollback {
+                    paths: &self.paths,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
+                    resolved_path: &resolved_path,
+                    resolved_hash: &resolved_hash,
+                    resolved_installed: false,
+                    resolved_temp: &resolved_temp,
+                }),
                 "rejection install rollback",
             );
         }
@@ -1611,13 +1654,16 @@ impl MemoryService {
         {
             return attach_cleanup_error(
                 error,
-                rollback_rejected_file_proposal(
-                    proposal_path,
-                    &pending_backup,
-                    &resolved_path,
-                    true,
-                    &resolved_temp,
-                ),
+                rollback_rejected_file_proposal(RejectedFileProposalRollback {
+                    paths: &self.paths,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
+                    resolved_path: &resolved_path,
+                    resolved_hash: &resolved_hash,
+                    resolved_installed: true,
+                    resolved_temp: &resolved_temp,
+                }),
                 "rejection finalization rollback",
             );
         }
@@ -1629,13 +1675,16 @@ impl MemoryService {
         }) {
             return attach_cleanup_error(
                 error,
-                rollback_rejected_file_proposal(
-                    proposal_path,
-                    &pending_backup,
-                    &resolved_path,
-                    true,
-                    &resolved_temp,
-                ),
+                rollback_rejected_file_proposal(RejectedFileProposalRollback {
+                    paths: &self.paths,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
+                    resolved_path: &resolved_path,
+                    resolved_hash: &resolved_hash,
+                    resolved_installed: true,
+                    resolved_temp: &resolved_temp,
+                }),
                 "rejection cleanup rollback",
             );
         }
@@ -3140,6 +3189,28 @@ impl MemoryService {
     }
 
     pub fn rebuild_paths(paths: MemoryPaths) -> Result<RebuildResult> {
+        Self::rebuild_paths_impl(paths, || Ok(()), true)
+    }
+
+    #[cfg(test)]
+    fn rebuild_paths_with_snapshot_hook(
+        paths: MemoryPaths,
+        after_snapshot: impl FnOnce() -> Result<()>,
+    ) -> Result<RebuildResult> {
+        Self::rebuild_paths_impl(paths, after_snapshot, true)
+    }
+
+    pub(crate) fn rebuild_paths_for_trusted_recall_eval(
+        paths: MemoryPaths,
+    ) -> Result<RebuildResult> {
+        Self::rebuild_paths_impl(paths, || Ok(()), false)
+    }
+
+    fn rebuild_paths_impl(
+        paths: MemoryPaths,
+        after_snapshot: impl FnOnce() -> Result<()>,
+        validate_repository_safety: bool,
+    ) -> Result<RebuildResult> {
         let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
         let records_root = paths.records_dir();
         ensure_safe_directory(
@@ -3148,8 +3219,15 @@ impl MemoryService {
             false,
             "canonical record root",
         )?;
-        let records = okf::read_okf_record_files(&records_root)?;
-        validate_canonical_record_blobs_for_rebuild(&paths, &records_root)?;
+        let snapshots = okf::read_okf_record_snapshots(&records_root)?;
+        after_snapshot()?;
+        if validate_repository_safety {
+            validate_canonical_record_snapshots_for_rebuild(&paths, &snapshots)?;
+        }
+        let records = snapshots
+            .into_iter()
+            .map(|snapshot| snapshot.record)
+            .collect::<Vec<_>>();
         guard_no_open_proposals(&paths.db_path)?;
         let runtime_records = load_runtime_records_for_rebuild(&paths.db_path)?;
         guard_no_runtime_record_id_collisions(&records, &runtime_records)?;
@@ -3169,18 +3247,19 @@ impl MemoryService {
     }
 }
 
-fn validate_canonical_record_blobs_for_rebuild(
+fn validate_canonical_record_snapshots_for_rebuild(
     paths: &MemoryPaths,
-    records_root: &Path,
+    snapshots: &[okf::OkfRecordSnapshot],
 ) -> Result<()> {
-    for (path, bytes) in okf::read_okf_record_blobs(records_root)? {
-        let relative = path
+    for snapshot in snapshots {
+        let relative = snapshot
+            .path
             .strip_prefix(&paths.project_root)
             .context("canonical record escaped the project root during rebuild")?;
         let report = crate::scan_managed_repository_blob(
             paths.project_root.as_os_str().as_encoded_bytes(),
             relative,
-            &bytes,
+            &snapshot.bytes,
         );
         if !report.allowed {
             let findings = report
@@ -4939,44 +5018,51 @@ fn validate_canonical_write_precondition(
     }
 }
 
-fn install_staged_file_no_replace(staged: &Path, destination: &Path) -> Result<()> {
-    fs::hard_link(staged, destination).with_context(|| {
-        format!(
-            "failed to install {} without replacing an existing file",
-            destination.display()
-        )
-    })?;
-    if let Err(error) = fs::remove_file(staged) {
-        let install_error = anyhow::Error::new(error).context(format!(
-            "failed to finalize no-replace install {}",
-            destination.display()
-        ));
-        return match remove_staged_file(destination) {
-            Ok(()) => Err(install_error),
-            Err(rollback_error) => Err(install_error).context(format!(
-                "additionally failed to roll back {}: {rollback_error:#}",
-                destination.display()
-            )),
-        };
-    }
-    Ok(())
-}
-
 fn install_verified_staged_file_no_replace(
+    paths: &MemoryPaths,
     staged: &Path,
     destination: &Path,
     expected_hash: &str,
 ) -> Result<()> {
-    verify_staged_file_contents(staged, expected_hash)?;
-    install_staged_file_no_replace(staged, destination)?;
-    if let Err(error) = verify_staged_file_contents(destination, expected_hash) {
-        return attach_cleanup_error(
-            error,
-            remove_staged_file(destination),
-            "unauthorized staged-byte install rollback",
-        );
-    }
-    Ok(())
+    let relative = destination
+        .strip_prefix(&paths.project_root)
+        .context("repository install destination is outside the project root")?;
+    repository_io::install_transaction_file_no_replace(
+        &paths.project_root,
+        &repository_transaction_root(paths),
+        staged,
+        relative,
+        expected_hash,
+    )
+}
+
+fn backup_repository_file_to_transaction(
+    paths: &MemoryPaths,
+    source: &Path,
+    backup: &Path,
+    expected_hash: &str,
+) -> Result<()> {
+    let relative = source
+        .strip_prefix(&paths.project_root)
+        .context("repository backup source is outside the project root")?;
+    repository_io::backup_repository_file(
+        &paths.project_root,
+        relative,
+        &repository_transaction_root(paths),
+        backup,
+        expected_hash,
+    )
+}
+
+fn remove_installed_repository_file(
+    paths: &MemoryPaths,
+    path: &Path,
+    expected_hash: &str,
+) -> Result<()> {
+    let relative = path
+        .strip_prefix(&paths.project_root)
+        .context("repository rollback path is outside the project root")?;
+    repository_io::remove_repository_file_if_matching(&paths.project_root, relative, expected_hash)
 }
 
 fn repo_record_matches(canonical: &okf::OkfRecordFile, indexed: &MemoryRecord) -> bool {
@@ -5288,17 +5374,21 @@ where
         validate_canonical_write_precondition(paths, write)?;
         if let Some(backup_path) = &write.backup_path {
             validate_canonical_write_precondition(paths, write)?;
-            fs::rename(&write.path, backup_path).with_context(|| {
-                format!(
-                    "failed to stage canonical memory record {}",
-                    write.path.display()
-                )
-            })?;
+            backup_repository_file_to_transaction(
+                paths,
+                &write.path,
+                backup_path,
+                write
+                    .expected_existing_hash
+                    .as_deref()
+                    .context("overwrite write is missing captured canonical hash")?,
+            )?;
             after_backup(index, &write.path)?;
         }
         match write.mode {
             FileWriteMode::CreateNew => {
                 install_verified_staged_file_no_replace(
+                    paths,
                     &write.temp_path,
                     &write.path,
                     &write.expected_staged_hash,
@@ -5306,6 +5396,7 @@ where
             }
             FileWriteMode::Overwrite => {
                 install_verified_staged_file_no_replace(
+                    paths,
                     &write.temp_path,
                     &write.path,
                     &write.expected_staged_hash,
@@ -5317,13 +5408,16 @@ where
     Ok(())
 }
 
-fn rollback_staged_canonical_writes(writes: &mut [StagedCanonicalFileWrite]) -> Result<()> {
+fn rollback_staged_canonical_writes(
+    paths: &MemoryPaths,
+    writes: &mut [StagedCanonicalFileWrite],
+) -> Result<()> {
     let mut errors = Vec::new();
     for write in writes.iter_mut().rev() {
         if write.installed {
             record_cleanup_result(
                 &mut errors,
-                remove_staged_file(&write.path),
+                remove_installed_repository_file(paths, &write.path, &write.expected_staged_hash),
                 format!("remove installed canonical file {}", write.path.display()),
             );
             write.installed = false;
@@ -5333,7 +5427,15 @@ fn rollback_staged_canonical_writes(writes: &mut [StagedCanonicalFileWrite]) -> 
         {
             record_cleanup_result(
                 &mut errors,
-                install_staged_file_no_replace(backup_path, &write.path),
+                install_verified_staged_file_no_replace(
+                    paths,
+                    backup_path,
+                    &write.path,
+                    write
+                        .expected_existing_hash
+                        .as_deref()
+                        .unwrap_or("<missing-canonical-backup-hash>"),
+                ),
                 format!(
                     "restore canonical backup {} to {}",
                     backup_path.display(),
@@ -5454,21 +5556,21 @@ where
     ) {
         return attach_cleanup_error(
             error,
-            rollback_staged_canonical_writes(&mut staged),
+            rollback_staged_canonical_writes(paths, &mut staged),
             "canonical install rollback",
         );
     }
     if let Err(error) = before_commit(&tx) {
         return attach_cleanup_error(
             error,
-            rollback_staged_canonical_writes(&mut staged),
+            rollback_staged_canonical_writes(paths, &mut staged),
             "canonical pre-commit rollback",
         );
     }
     if let Err(error) = tx.commit() {
         return attach_cleanup_error(
             anyhow::Error::new(error).context("failed to commit memory lifecycle transaction"),
-            rollback_staged_canonical_writes(&mut staged),
+            rollback_staged_canonical_writes(paths, &mut staged),
             "canonical commit rollback",
         );
     }
@@ -5514,60 +5616,58 @@ fn cleanup_staged_file_resolution(
     finish_cleanup("proposal-file staging cleanup", errors)
 }
 
-fn rollback_file_resolution(
-    pending_path: &Path,
-    pending_backup: &Path,
-    pending_moved: bool,
-    writes: &mut [StagedCanonicalFileWrite],
-    resolved_path: &Path,
-    resolved_installed: bool,
-    resolved_temp: &Path,
-) -> Result<()> {
+fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> Result<()> {
     let mut errors = Vec::new();
-    if resolved_installed {
+    if rollback.resolved_installed {
         record_cleanup_result(
             &mut errors,
-            remove_staged_file(resolved_path),
+            remove_installed_repository_file(
+                rollback.paths,
+                rollback.resolved_path,
+                rollback.resolved_hash,
+            ),
             "remove resolved packet".to_owned(),
         );
     }
     record_cleanup_result(
         &mut errors,
-        rollback_staged_canonical_writes(writes),
+        rollback_staged_canonical_writes(rollback.paths, rollback.writes),
         "roll back canonical writes".to_owned(),
     );
-    if pending_moved {
+    if rollback.pending_moved {
         record_cleanup_result(
             &mut errors,
-            install_staged_file_no_replace(pending_backup, pending_path)
-                .map_err(|_| anyhow!("failed to restore pending proposal without replacing it")),
+            install_verified_staged_file_no_replace(
+                rollback.paths,
+                rollback.pending_backup,
+                rollback.pending_path,
+                rollback.pending_hash,
+            )
+            .map_err(|_| anyhow!("failed to restore pending proposal without replacing it")),
             "restore pending packet".to_owned(),
         );
     }
     record_cleanup_result(
         &mut errors,
-        remove_staged_file(resolved_temp),
+        remove_staged_file(rollback.resolved_temp),
         "remove staged resolved packet".to_owned(),
     );
     finish_cleanup("proposal-file rollback", errors)
 }
 
-fn rollback_rejected_file_proposal(
-    pending_path: &Path,
-    pending_backup: &Path,
-    resolved_path: &Path,
-    resolved_installed: bool,
-    resolved_temp: &Path,
-) -> Result<()> {
-    rollback_file_resolution(
-        pending_path,
-        pending_backup,
-        true,
-        &mut [],
-        resolved_path,
-        resolved_installed,
-        resolved_temp,
-    )
+fn rollback_rejected_file_proposal(rollback: RejectedFileProposalRollback<'_>) -> Result<()> {
+    rollback_file_resolution(FileResolutionRollback {
+        paths: rollback.paths,
+        pending_path: rollback.pending_path,
+        pending_backup: rollback.pending_backup,
+        pending_hash: rollback.pending_hash,
+        pending_moved: true,
+        writes: &mut [],
+        resolved_path: rollback.resolved_path,
+        resolved_hash: rollback.resolved_hash,
+        resolved_installed: rollback.resolved_installed,
+        resolved_temp: rollback.resolved_temp,
+    })
 }
 
 fn attach_cleanup_error<T>(
@@ -6747,6 +6847,49 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn file_apply_rejects_pending_parent_symlink_swap_without_redirecting_bytes()
+    -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let (temp, service) = initialized_service()?;
+        let pending = write_test_pending_proposal(
+            &service,
+            "Apply parent swap",
+            OkfProposalSensitivity::RepoSafe,
+        )?;
+        let pending_parent = pending.parent().context("pending parent")?.to_path_buf();
+        let held_parent = service.paths.proposals_dir().join("pending-held");
+        let outside = temp.path().join("outside-apply");
+        fs::create_dir(&outside)?;
+        let outside_file = outside.join(pending.file_name().context("pending file name")?);
+        fs::write(&outside_file, "outside apply sentinel")?;
+
+        let error = service
+            .apply_file_proposal_with_hooks(
+                &pending,
+                "agent:applier",
+                |_| {
+                    fs::rename(&pending_parent, &held_parent)?;
+                    symlink(&outside, &pending_parent)?;
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .expect_err("a swapped pending parent must fail closed");
+        assert!(format!("{error:#}").contains("without following symlinks"));
+        assert_eq!(fs::read_to_string(outside_file)?, "outside apply sentinel");
+        assert!(
+            !service
+                .paths
+                .records_dir()
+                .join("apply-parent-swap.md")
+                .exists()
+        );
+        Ok(())
+    }
+
     #[test]
     fn unsafe_reject_revalidates_pending_bytes_without_leaking_raw_identity() -> anyhow::Result<()>
     {
@@ -6793,6 +6936,43 @@ mod tests {
         }
         assert_eq!(fs::read(&raw_file)?, mutated);
         assert!(lifecycle_transaction_artifacts(&service.paths)?.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_reject_rejects_pending_parent_symlink_swap_without_redirecting_bytes()
+    -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let (temp, service) = initialized_service()?;
+        let pending = write_test_pending_proposal(
+            &service,
+            "Reject parent swap",
+            OkfProposalSensitivity::RepoSafe,
+        )?;
+        let pending_parent = pending.parent().context("pending parent")?.to_path_buf();
+        let held_parent = service.paths.proposals_dir().join("pending-held");
+        let outside = temp.path().join("outside-reject");
+        fs::create_dir(&outside)?;
+        let outside_file = outside.join(pending.file_name().context("pending file name")?);
+        fs::write(&outside_file, "outside reject sentinel")?;
+
+        let error = service
+            .reject_file_proposal_with_hooks(
+                &pending,
+                "reviewer:human",
+                "Reject swapped parent",
+                |_| {
+                    fs::rename(&pending_parent, &held_parent)?;
+                    symlink(&outside, &pending_parent)?;
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .expect_err("a swapped pending parent must fail closed");
+        assert!(format!("{error:#}").contains("without following symlinks"));
+        assert_eq!(fs::read_to_string(outside_file)?, "outside reject sentinel");
         Ok(())
     }
 
@@ -6849,7 +7029,7 @@ mod tests {
             |_| Ok(()),
         )
         .expect_err("no-replace overwrite must refuse the recreated target");
-        assert!(format!("{error:#}").contains("without replacing"));
+        assert!(format!("{error:#}").contains("without replacement"));
         assert_eq!(fs::read_to_string(&target_path)?, "fresh editor bytes");
         assert_eq!(
             record_by_id(&service.conn, &target.id)?
@@ -6870,6 +7050,122 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.ends_with(".canonical.tmp"))
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_rejects_records_parent_symlink_swap_without_redirecting_bytes()
+    -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let (temp, service) = initialized_service()?;
+        let target = apply_test_record(
+            &service,
+            sample_memory_draft("Overwrite parent swap", "Original canonical body."),
+        )?;
+        let records = service.paths.records_dir();
+        let held_records = service.paths.memory_dir.join("records-held");
+        let outside = temp.path().join("outside-records");
+        fs::create_dir(&outside)?;
+        let outside_target = outside.join(format!("{}.md", target.id));
+        fs::write(&outside_target, "outside overwrite sentinel")?;
+
+        let error = service
+            .supersede_record_with_hooks(
+                &target.id,
+                "agent:red-tests",
+                sample_memory_draft(
+                    "Overwrite parent replacement",
+                    "Replacement must not escape the repository.",
+                ),
+                |index| {
+                    if index == 0 {
+                        fs::rename(&records, &held_records)?;
+                        symlink(&outside, &records)?;
+                    }
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .expect_err("a swapped records parent must fail closed");
+        assert!(!format!("{error:#}").is_empty());
+        assert_eq!(
+            fs::read_to_string(outside_target)?,
+            "outside overwrite sentinel"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_reject_and_overwrite_work_across_runtime_filesystems() -> anyhow::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let project_temp = TempDir::new()?;
+        let runtime_temp = match tempfile::Builder::new()
+            .prefix("memzoi-cross-device-")
+            .tempdir_in("/dev/shm")
+        {
+            Ok(temp) => temp,
+            Err(_) => return Ok(()),
+        };
+        if fs::metadata(project_temp.path())?.dev() == fs::metadata(runtime_temp.path())?.dev() {
+            return Ok(());
+        }
+        let project_root = project_temp.path().join("project");
+        fs::create_dir(&project_root)?;
+        let paths = MemoryPaths::with_runtime_home(
+            project_root.canonicalize()?,
+            runtime_temp.path().join("runtime-home"),
+        );
+        MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
+        let service = MemoryService::open_paths(paths)?;
+
+        let apply_pending = write_test_pending_proposal(
+            &service,
+            "Cross device apply",
+            OkfProposalSensitivity::RepoSafe,
+        )?;
+        let applied = service.apply_file_proposal(&apply_pending, "agent:applier")?;
+        assert!(
+            applied
+                .record_path
+                .context("applied record path")?
+                .is_file()
+        );
+
+        let reject_pending = write_test_pending_proposal(
+            &service,
+            "Cross device reject",
+            OkfProposalSensitivity::RepoSafe,
+        )?;
+        let rejected = service.reject_file_proposal(
+            &reject_pending,
+            "reviewer:human",
+            "Cross-device rejection route",
+        )?;
+        assert!(rejected.resolved_path.is_file());
+
+        let target = apply_test_record(
+            &service,
+            sample_memory_draft("Cross device overwrite", "Original overwrite body."),
+        )?;
+        let replacement = service.supersede_record(
+            &target.id,
+            "agent:applier",
+            sample_memory_draft(
+                "Cross device overwrite replacement",
+                "Replacement overwrite body.",
+            ),
+        )?;
+        assert_eq!(
+            record_by_id(&service.conn, &target.id)?
+                .context("superseded target")?
+                .status,
+            MemoryStatus::Superseded
+        );
+        assert!(record_by_id(&service.conn, &replacement.id)?.is_some());
         Ok(())
     }
 
@@ -7034,15 +7330,20 @@ mod tests {
 
     #[test]
     fn create_new_install_never_replaces_a_concurrent_destination() -> anyhow::Result<()> {
-        let temp = TempDir::new()?;
-        let staged = temp.path().join("staged.tmp");
-        let destination = temp.path().join("record.md");
+        let (_temp, service) = initialized_service()?;
+        let staged = repository_transaction_root(&service.paths).join("staged.tmp");
+        let destination = service.paths.records_dir().join("record.md");
         fs::write(&staged, "new proposal bytes")?;
         fs::write(&destination, "concurrent canonical bytes")?;
 
-        let error = install_staged_file_no_replace(&staged, &destination)
-            .expect_err("no-replace install must refuse a concurrent destination");
-        assert!(error.to_string().contains("without replacing"));
+        let error = install_verified_staged_file_no_replace(
+            &service.paths,
+            &staged,
+            &destination,
+            blake3::hash(b"new proposal bytes").to_hex().as_ref(),
+        )
+        .expect_err("no-replace install must refuse a concurrent destination");
+        assert!(error.to_string().contains("without replacement"));
         assert_eq!(
             fs::read_to_string(&destination)?,
             "concurrent canonical bytes"
@@ -7225,6 +7526,41 @@ mod tests {
             .expect("apply error should retain the structured safety report");
         assert!(blocked.report().findings.iter().any(|finding| {
             finding.code == RepositoryWriteSafetyReasonCode::ScopeProjectMismatch
+        }));
+        assert!(
+            !service
+                .paths
+                .records_dir()
+                .join(format!("{}.md", proposal.id))
+                .exists()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn database_apply_route_fails_closed_for_unconfigured_team_scope() -> anyhow::Result<()> {
+        use crate::{RepositoryWriteBlocked, RepositoryWriteSafetyReasonCode};
+
+        let (_temp, service) = initialized_service()?;
+        let mut draft = sample_memory_draft(
+            "Untrusted team identity",
+            "A candidate cannot attest that an arbitrary team ID owns this repository.",
+        );
+        draft.scope_kind = ScopeKind::Team;
+        draft.scope_id = Some("candidate-controlled-team".to_owned());
+        let proposal = service.propose_memory("agent:red-tests", draft)?;
+        service.validate_proposal(&proposal.id)?;
+        service.approve_proposal(&proposal.id, "reviewer:human")?;
+
+        let error = service
+            .apply_proposal(&proposal.id, "agent:applier")
+            .expect_err("team scope must fail without an independent configured identity");
+        let blocked = error
+            .downcast_ref::<RepositoryWriteBlocked>()
+            .expect("apply error should retain the structured safety report");
+        assert!(blocked.report().findings.iter().any(|finding| {
+            finding.code == RepositoryWriteSafetyReasonCode::ScopeNotRepository
         }));
         assert!(
             !service
@@ -7929,6 +8265,84 @@ mod tests {
                 })?
                 .is_empty(),
             "prohibited canonical bytes reached runtime search"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rebuild_scans_the_same_immutable_snapshot_that_it_would_import() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let record = apply_test_record(
+            &service,
+            sample_memory_draft("Immutable rebuild snapshot", "Safe indexed baseline body."),
+        )?;
+        let record_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", record.id));
+        let safe = fs::read_to_string(&record_path)?;
+        let prohibited = safe
+            .replace(
+                "content_class: general_repo_knowledge",
+                "content_class: raw_transcript",
+            )
+            .replace(
+                "Safe indexed baseline body.",
+                "Lexically harmless snapshotracesentinel payload.",
+            );
+        fs::write(&record_path, prohibited)?;
+
+        let error = MemoryService::rebuild_paths_with_snapshot_hook(service.paths.clone(), || {
+            fs::write(&record_path, &safe)?;
+            Ok(())
+        })
+        .expect_err("the prohibited first snapshot must block even after a safe replacement");
+        assert!(format!("{error:#}").contains("raw_transcript"));
+        assert!(
+            service
+                .search_memory(SearchInput {
+                    query: "snapshotracesentinel".to_owned(),
+                    limit: 10,
+                    ..SearchInput::default()
+                })?
+                .is_empty(),
+            "the unscanned first snapshot reached runtime search"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rebuild_rejects_candidate_controlled_project_scope_before_index_mutation()
+    -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let record = apply_test_record(
+            &service,
+            sample_memory_draft("Rebuild scope baseline", "Safe indexed scope baseline."),
+        )?;
+        let record_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", record.id));
+        let edited = fs::read_to_string(&record_path)?.replace(
+            "scope: repo",
+            "scope: project\nscope_id: candidate-controlled-project",
+        );
+        fs::write(&record_path, edited)?;
+        let before_count: i64 =
+            service
+                .conn
+                .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+
+        let error = MemoryService::rebuild_paths(service.paths.clone())
+            .expect_err("candidate-controlled project scope must block rebuild");
+        assert!(format!("{error:#}").contains("scope_project_mismatch"));
+        let after_count: i64 =
+            service
+                .conn
+                .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+        assert_eq!(
+            after_count, before_count,
+            "rebuild mutated the runtime index"
         );
         Ok(())
     }

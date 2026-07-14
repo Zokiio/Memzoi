@@ -157,7 +157,7 @@ fn load_staged_memory_blobs(project_root: &Path) -> Result<Vec<SafetyScanBlob>> 
             "--cached",
             "--name-only",
             "-z",
-            "--diff-filter=ACMR",
+            "--diff-filter=ACMRT",
             "--",
         ],
     )?;
@@ -178,7 +178,7 @@ fn load_range_memory_blobs(project_root: &Path, range: &str) -> Result<Vec<Safet
             "diff",
             "--name-only",
             "-z",
-            "--diff-filter=ACMR",
+            "--diff-filter=ACMRT",
             &normalized,
             "--",
         ],

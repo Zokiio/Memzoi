@@ -1665,14 +1665,25 @@ fn markdown_candidate_policy(candidate: &CaptureCandidate) -> Result<CoreCandida
     let (memory_type, lane, destination, sensitivity) =
         typed_section_policy(section_kind).context("capture Markdown section kind is invalid")?;
     validate_typed_evidence_heading(candidate, section_kind, None)?;
-    Ok((
-        memory_type,
-        lane,
-        destination,
-        sensitivity,
-        "deterministic_typed_markdown_section",
-        "deterministic_typed_markdown_profile",
-    ))
+    if destination == MemoryDestination::Repo {
+        Ok((
+            memory_type,
+            lane,
+            MemoryDestination::NeedsReview,
+            OkfProposalSensitivity::Unknown,
+            "generic_markdown_requires_contextual_review",
+            "generic_markdown_sensitivity_unknown",
+        ))
+    } else {
+        Ok((
+            memory_type,
+            lane,
+            destination,
+            sensitivity,
+            "deterministic_typed_markdown_section",
+            "deterministic_typed_markdown_profile",
+        ))
+    }
 }
 
 fn instruction_candidate_policy(candidate: &CaptureCandidate) -> Result<CoreCandidatePolicy> {
@@ -3290,6 +3301,22 @@ fn extract_candidates(
                 heading_path: &section.heading_path,
             },
         )?;
+        let (destination, sensitivity, destination_reason, sensitivity_reason) =
+            if destination == MemoryDestination::Repo {
+                (
+                    MemoryDestination::NeedsReview,
+                    OkfProposalSensitivity::Unknown,
+                    "generic_markdown_requires_contextual_review",
+                    "generic_markdown_sensitivity_unknown",
+                )
+            } else {
+                (
+                    destination,
+                    sensitivity,
+                    "deterministic_typed_markdown_section",
+                    "deterministic_typed_markdown_profile",
+                )
+            };
         candidates.push(candidate(
             CaptureMemoryDraft {
                 memory_type,
@@ -3304,8 +3331,8 @@ fn extract_candidates(
             destination,
             sensitivity,
             capture_content_class(destination, sensitivity),
-            "deterministic_typed_markdown_section",
-            "deterministic_typed_markdown_profile",
+            destination_reason,
+            sensitivity_reason,
         )?);
     }
     if candidates.is_empty() {

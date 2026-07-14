@@ -363,17 +363,13 @@ pub(crate) fn evaluate(request: &RepositoryWriteRequest<'_>) -> RepositoryWriteS
                 );
             }
         }
-        ScopeKind::Team | ScopeKind::Org => {
-            if request.scope.id.is_none() {
-                push_finding(
-                    &mut findings,
-                    RepositoryWriteSafetyReasonCode::ScopeNotRepository,
-                    "scope",
-                    "metadata",
-                    request.scope.kind.as_str().as_bytes(),
-                );
-            }
-        }
+        ScopeKind::Team | ScopeKind::Org => push_finding(
+            &mut findings,
+            RepositoryWriteSafetyReasonCode::ScopeNotRepository,
+            "scope",
+            "metadata",
+            request.scope.kind.as_str().as_bytes(),
+        ),
         _ => push_finding(
             &mut findings,
             RepositoryWriteSafetyReasonCode::ScopeNotRepository,

@@ -578,7 +578,7 @@ pub fn run_recall_eval(corpus_path: impl AsRef<Path>) -> Result<RecallEvalReport
         &paths.records_dir(),
     )?;
 
-    MemoryService::rebuild_paths(paths.clone())?;
+    MemoryService::rebuild_paths_for_trusted_recall_eval(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)
         .context("invalid recall evaluation evaluated_at")?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
@@ -589,7 +589,8 @@ pub fn run_recall_eval(corpus_path: impl AsRef<Path>) -> Result<RecallEvalReport
         &loaded.corpus.proposal_fixtures,
     )?;
 
-    service.rebuild()?;
+    drop(service);
+    MemoryService::rebuild_paths_for_trusted_recall_eval(paths.clone())?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
     let runtime_records = seed_runtime_fixtures(&service, &loaded.corpus.runtime_fixtures)?;
     let catalog = load_record_catalog(&paths.records_dir(), runtime_records)?;

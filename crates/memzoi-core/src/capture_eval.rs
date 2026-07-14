@@ -1180,7 +1180,7 @@ fn validate_case_coverage(case: &CaptureEvalCase) -> Result<()> {
             .any(|candidate| matches(&candidate.action))
     };
     let has_accepted_route = case.review_outcomes.iter().any(|outcome| {
-        outcome.outcome == CaptureReviewOutcome::Accept
+        (outcome.outcome == CaptureReviewOutcome::Accept
             && case.expected.candidates.iter().any(|candidate| {
                 candidate.id == outcome.candidate
                     && matches!(
@@ -1188,7 +1188,11 @@ fn validate_case_coverage(case: &CaptureEvalCase) -> Result<()> {
                         CaptureEvalActionExpectation::CreateProposal
                             | CaptureEvalActionExpectation::CreateRuntime { .. }
                     )
-            })
+            }))
+            || (outcome.outcome == CaptureReviewOutcome::Edit
+                && outcome.requested_destination == Some(MemoryDestination::Repo)
+                && outcome.content_class
+                    == Some(crate::RepositoryContentClass::GeneralRepoKnowledge))
     });
     for declared in &coverage {
         let valid = match declared {

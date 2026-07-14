@@ -29,6 +29,13 @@ pub struct OkfRecordFile {
     pub capture: Option<CaptureProvenance>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OkfRecordSnapshot {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+    pub record: OkfRecordFile,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OkfProposalFile {
     pub file_id: String,
@@ -495,25 +502,15 @@ impl FromStr for OkfProposalSensitivity {
 }
 
 pub fn read_okf_record_files(bundle_root: impl AsRef<Path>) -> Result<Vec<OkfRecordFile>> {
-    let bundle_root = bundle_root.as_ref();
-    if !bundle_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut files = Vec::new();
-    collect_markdown_files(bundle_root, &mut files)?;
-    let mut records = Vec::new();
-    for file in files {
-        if let Some(record) = parse_okf_record_file(bundle_root, &file)? {
-            records.push(record);
-        }
-    }
-    records.sort_by(|left, right| left.concept_id.cmp(&right.concept_id));
-    Ok(records)
+    Ok(read_okf_record_snapshots(bundle_root)?
+        .into_iter()
+        .map(|snapshot| snapshot.record)
+        .collect())
 }
 
-pub(crate) fn read_okf_record_blobs(
+pub(crate) fn read_okf_record_snapshots(
     bundle_root: impl AsRef<Path>,
-) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+) -> Result<Vec<OkfRecordSnapshot>> {
     let bundle_root = bundle_root.as_ref();
     if !bundle_root.exists() {
         return Ok(Vec::new());
@@ -521,15 +518,25 @@ pub(crate) fn read_okf_record_blobs(
     let mut files = Vec::new();
     collect_markdown_files(bundle_root, &mut files)?;
     files.sort();
-    files
-        .into_iter()
-        .filter(|path| !is_reserved_record_file(path))
-        .map(|path| {
-            let bytes = fs::read(&path)
-                .with_context(|| format!("failed to read OKF record {}", path.display()))?;
-            Ok((path, bytes))
-        })
-        .collect()
+    let mut snapshots = Vec::new();
+    for path in files {
+        if is_reserved_record_file(&path) {
+            continue;
+        }
+        let bytes = fs::read(&path)
+            .with_context(|| format!("failed to read OKF record {}", path.display()))?;
+        let markdown = std::str::from_utf8(&bytes)
+            .with_context(|| format!("OKF record {} is not UTF-8", path.display()))?;
+        if let Some(record) = parse_okf_record_markdown(bundle_root, &path, markdown)? {
+            snapshots.push(OkfRecordSnapshot {
+                path,
+                bytes,
+                record,
+            });
+        }
+    }
+    snapshots.sort_by(|left, right| left.record.concept_id.cmp(&right.record.concept_id));
+    Ok(snapshots)
 }
 
 pub fn read_okf_proposal_files(proposals_root: impl AsRef<Path>) -> Result<Vec<OkfProposalFile>> {
