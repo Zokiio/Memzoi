@@ -2374,6 +2374,7 @@ title: Expired MCP diagnostic
 timestamp: 2026-01-01T00:00:00Z
 status: active
 visibility: repo
+content_class: general_repo_knowledge
 confidence: confirmed
 scope: repo
 source: test

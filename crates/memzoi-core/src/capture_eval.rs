@@ -258,6 +258,8 @@ pub struct CaptureEvalReviewOutcomeExpectation {
     pub memory: Option<CaptureMemoryDraft>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_destination: Option<MemoryDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_class: Option<crate::RepositoryContentClass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1140,7 +1142,9 @@ fn validate_case(case: &CaptureEvalCase) -> Result<()> {
             CaptureReviewOutcome::Accept
             | CaptureReviewOutcome::Reject
             | CaptureReviewOutcome::Defer
-                if decision.memory.is_some() || decision.requested_destination.is_some() =>
+                if decision.memory.is_some()
+                    || decision.requested_destination.is_some()
+                    || decision.content_class.is_some() =>
             {
                 bail!("only capture edit review outcomes may declare edits");
             }
@@ -2662,6 +2666,7 @@ fn build_eval_review_input(
                 reason_code: expected.reason_code.clone(),
                 memory: expected.memory.clone(),
                 requested_destination: expected.requested_destination,
+                content_class: expected.content_class,
             })
         })
         .collect::<Option<Vec<_>>>()?;

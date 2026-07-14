@@ -562,8 +562,10 @@ pub fn run_recall_eval(corpus_path: impl AsRef<Path>) -> Result<RecallEvalReport
     validate_corpus(&loaded.corpus)?;
 
     let temp = TempDir::new().context("failed to create isolated recall evaluation state")?;
-    let project_root = temp
-        .path()
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&project_root)
+        .context("failed to create isolated recall evaluation project")?;
+    let project_root = project_root
         .canonicalize()
         .context("failed to canonicalize isolated recall evaluation root")?;
     let paths =

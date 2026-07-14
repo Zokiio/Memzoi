@@ -527,6 +527,7 @@ fn plan_safeguards_reject_unsafe_files_and_block_secrets_without_echoing_them() 
                 reason_code: Some("blocked".to_owned()),
                 memory: None,
                 requested_destination: None,
+                content_class: None,
             }],
         },
         "capture-reviewer",
@@ -881,6 +882,30 @@ fn reviewer_can_sanitize_unknown_safe_evidence_into_a_repo_proposal() -> anyhow:
     let mut memory = candidate.memory.clone();
     memory.title = "Use deterministic cache keys".to_owned();
     memory.body = "Generated artifacts use deterministic cache keys.".to_owned();
+
+    let error = build_capture_review(
+        &fixture.paths,
+        &plan,
+        review_input(
+            &plan,
+            vec![CaptureReviewDecisionInput {
+                candidate_id: candidate.candidate_id.clone(),
+                outcome: CaptureReviewOutcome::Edit,
+                reason_code: Some("missing-explicit-classification".to_owned()),
+                memory: Some(memory.clone()),
+                requested_destination: Some(MemoryDestination::Repo),
+                content_class: None,
+            }],
+        ),
+        "capture-reviewer",
+        REVIEWED_AT,
+    )
+    .expect_err("repo capture edits require an explicit safe content class");
+    assert!(
+        error
+            .to_string()
+            .contains("require explicit general_repo_knowledge classification")
+    );
 
     let review = build_capture_review(
         &fixture.paths,
@@ -1389,6 +1414,8 @@ fn decision(
         reason_code: reason_code.map(ToOwned::to_owned),
         memory,
         requested_destination,
+        content_class: (requested_destination == Some(MemoryDestination::Repo))
+            .then_some(memzoi_core::RepositoryContentClass::GeneralRepoKnowledge),
     }
 }
 

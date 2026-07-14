@@ -153,12 +153,11 @@ pub fn scan_repository_blob(
     repository_relative_path: &std::path::Path,
     bytes: &[u8],
 ) -> RepositoryWriteSafetyReport {
-    scan_repository_blob_with_class(
+    scan_repository_blob_with_policy(
         project_identity,
         repository_relative_path,
         bytes,
-        RepositoryContentClass::GeneralRepoKnowledge,
-        true,
+        &RepositoryBlobPolicy::repository_safe(),
     )
 }
 
@@ -167,23 +166,15 @@ pub fn scan_managed_repository_blob(
     repository_relative_path: &std::path::Path,
     bytes: &[u8],
 ) -> RepositoryWriteSafetyReport {
-    let (content_class, metadata_valid) =
-        repository_blob_content_class(repository_relative_path, bytes);
-    scan_repository_blob_with_class(
-        project_identity,
-        repository_relative_path,
-        bytes,
-        content_class,
-        metadata_valid,
-    )
+    let policy = repository_blob_policy(repository_relative_path, bytes);
+    scan_repository_blob_with_policy(project_identity, repository_relative_path, bytes, &policy)
 }
 
-fn scan_repository_blob_with_class(
+fn scan_repository_blob_with_policy(
     project_identity: &[u8],
     repository_relative_path: &std::path::Path,
     bytes: &[u8],
-    content_class: RepositoryContentClass,
-    metadata_valid: bool,
+    policy: &RepositoryBlobPolicy,
 ) -> RepositoryWriteSafetyReport {
     let projections = vec![RepositoryProjection {
         path: repository_relative_path,
@@ -193,23 +184,25 @@ fn scan_repository_blob_with_class(
     let request = RepositoryWriteRequest {
         route: RepositoryWriteRoute::Maintenance,
         destination: crate::MemoryDestination::Repo,
-        sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+        sensitivity: policy.sensitivity,
         scope: RepositoryScope {
-            kind: crate::ScopeKind::Repo,
-            id: None,
+            kind: policy.scope_kind,
+            id: policy.scope_id.as_deref(),
             current_project_identity: project_identity,
-            configured_project_id: None,
+            configured_project_id: (policy.scope_kind == crate::ScopeKind::Project)
+                .then_some(policy.scope_id.as_deref())
+                .flatten(),
         },
-        visibility: crate::Visibility::Repo,
+        visibility: policy.visibility,
         authorization: AuthorizationProof::ExplicitCommand {
             operation: "safety_scan",
         },
         freshness: Vec::new(),
         provenance: ProvenanceAssessment {
-            present: metadata_valid,
-            evidence_valid: metadata_valid,
-            content_class,
-            source_identity: metadata_valid.then_some("repository_blob"),
+            present: policy.metadata_valid,
+            evidence_valid: policy.metadata_valid,
+            content_class: policy.content_class,
+            source_identity: policy.metadata_valid.then_some("repository_blob"),
         },
         fields: Vec::new(),
         projections,
@@ -217,12 +210,45 @@ fn scan_repository_blob_with_class(
     policy::evaluate(&request)
 }
 
-fn repository_blob_content_class(
+struct RepositoryBlobPolicy {
+    sensitivity: crate::OkfProposalSensitivity,
+    scope_kind: crate::ScopeKind,
+    scope_id: Option<String>,
+    visibility: crate::Visibility,
+    content_class: RepositoryContentClass,
+    metadata_valid: bool,
+}
+
+impl RepositoryBlobPolicy {
+    fn repository_safe() -> Self {
+        Self {
+            sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+            scope_kind: crate::ScopeKind::Repo,
+            scope_id: None,
+            visibility: crate::Visibility::Repo,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
+            metadata_valid: true,
+        }
+    }
+
+    fn invalid() -> Self {
+        Self {
+            sensitivity: crate::OkfProposalSensitivity::Unknown,
+            scope_kind: crate::ScopeKind::ImportedUntrusted,
+            scope_id: None,
+            visibility: crate::Visibility::Private,
+            content_class: RepositoryContentClass::Unknown,
+            metadata_valid: false,
+        }
+    }
+}
+
+fn repository_blob_policy(
     repository_relative_path: &std::path::Path,
     bytes: &[u8],
-) -> (RepositoryContentClass, bool) {
+) -> RepositoryBlobPolicy {
     let Ok(markdown) = std::str::from_utf8(bytes) else {
-        return (RepositoryContentClass::Unknown, false);
+        return RepositoryBlobPolicy::invalid();
     };
     let proposals_root = std::path::Path::new(".memzoi/proposals");
     if repository_relative_path.starts_with(proposals_root) {
@@ -231,8 +257,15 @@ fn repository_blob_content_class(
             repository_relative_path,
             markdown,
         ) {
-            Ok(Some(proposal)) => (proposal.content_class, true),
-            _ => (RepositoryContentClass::Unknown, false),
+            Ok(Some(proposal)) => RepositoryBlobPolicy {
+                sensitivity: proposal.sensitivity,
+                scope_kind: proposal.scope_kind,
+                scope_id: proposal.scope_id,
+                visibility: crate::Visibility::Repo,
+                content_class: proposal.content_class,
+                metadata_valid: true,
+            },
+            _ => RepositoryBlobPolicy::invalid(),
         };
     }
     for records_root in [
@@ -245,12 +278,19 @@ fn repository_blob_content_class(
                 repository_relative_path,
                 markdown,
             ) {
-                Ok(Some(record)) => (record.draft.content_class, true),
-                _ => (RepositoryContentClass::Unknown, false),
+                Ok(Some(record)) => RepositoryBlobPolicy {
+                    sensitivity: record.draft.sensitivity,
+                    scope_kind: record.draft.scope_kind,
+                    scope_id: record.draft.scope_id,
+                    visibility: record.draft.visibility,
+                    content_class: record.draft.content_class,
+                    metadata_valid: true,
+                },
+                _ => RepositoryBlobPolicy::invalid(),
             };
         }
     }
-    (RepositoryContentClass::Unknown, false)
+    RepositoryBlobPolicy::invalid()
 }
 
 fn hex_digest(bytes: &[u8; 32]) -> String {

@@ -3,7 +3,10 @@ use std::{ops::Range, path::Path};
 use anyhow::{Result, bail};
 
 use super::{line_number_at, source_lines};
-use crate::{MemoryDestination, MemoryLane, MemoryType, OkfProposalSensitivity, ScopeKind};
+use crate::{
+    MemoryDestination, MemoryLane, MemoryType, OkfProposalSensitivity, RepositoryContentClass,
+    ScopeKind,
+};
 
 use super::super::{
     CaptureDiagnostic, CaptureExtraction, CaptureExtractorIdentity, CaptureMemoryDraft,
@@ -97,6 +100,11 @@ pub(super) fn extract(
                 OkfProposalSensitivity::RepoSafe
             },
             if ambiguous {
+                RepositoryContentClass::Unknown
+            } else {
+                RepositoryContentClass::GeneralRepoKnowledge
+            },
+            if ambiguous {
                 "temporary_or_ambiguous_instruction_requires_review"
             } else {
                 "explicit_instruction_file_preamble"
@@ -165,6 +173,11 @@ pub(super) fn extract(
             extractor,
             destination,
             sensitivity,
+            if ambiguous {
+                RepositoryContentClass::Unknown
+            } else {
+                RepositoryContentClass::GeneralRepoKnowledge
+            },
             if ambiguous {
                 "temporary_or_ambiguous_instruction_requires_review"
             } else {

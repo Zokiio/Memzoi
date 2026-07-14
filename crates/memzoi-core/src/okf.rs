@@ -61,6 +61,7 @@ pub struct OkfProposalFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OkfProposalPreflight {
     pub sensitivity: OkfProposalSensitivity,
+    pub content_class: RepositoryContentClass,
     pub receipt_proposal: OkfProposalFile,
 }
 
@@ -510,6 +511,27 @@ pub fn read_okf_record_files(bundle_root: impl AsRef<Path>) -> Result<Vec<OkfRec
     Ok(records)
 }
 
+pub(crate) fn read_okf_record_blobs(
+    bundle_root: impl AsRef<Path>,
+) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+    let bundle_root = bundle_root.as_ref();
+    if !bundle_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    collect_markdown_files(bundle_root, &mut files)?;
+    files.sort();
+    files
+        .into_iter()
+        .filter(|path| !is_reserved_record_file(path))
+        .map(|path| {
+            let bytes = fs::read(&path)
+                .with_context(|| format!("failed to read OKF record {}", path.display()))?;
+            Ok((path, bytes))
+        })
+        .collect()
+}
+
 pub fn read_okf_proposal_files(proposals_root: impl AsRef<Path>) -> Result<Vec<OkfProposalFile>> {
     let proposals_root = proposals_root.as_ref();
     if !proposals_root.exists() {
@@ -577,10 +599,27 @@ pub fn preflight_okf_proposal_markdown(
     let raw_file_id = raw_proposal_file_id(proposals_root, file_path)?;
     let preflight_frontmatter = proposal_preflight_frontmatter(markdown);
     let raw_id = unique_top_level_yaml_scalar(preflight_frontmatter, "id");
-    let sensitivity = unique_top_level_yaml_scalar(preflight_frontmatter, "sensitivity")
+    let sensitivity: OkfProposalSensitivity =
+        unique_top_level_yaml_scalar(preflight_frontmatter, "sensitivity")
+            .as_deref()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_default();
+    let raw_content_class = unique_top_level_yaml_scalar(preflight_frontmatter, "content_class");
+    let content_class = raw_content_class
         .as_deref()
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or_default();
+    let mut classification_hasher = blake3::Hasher::new();
+    classification_hasher.update(b"memzoi.rejected-proposal-classification.v1\0");
+    classification_hasher.update(sensitivity.as_str().as_bytes());
+    classification_hasher.update(b"\0");
+    classification_hasher.update(
+        raw_content_class
+            .as_deref()
+            .unwrap_or("<missing>")
+            .as_bytes(),
+    );
+    let classification_digest = classification_hasher.finalize().to_hex();
     let digest = rejected_proposal_content_hash(raw_id.as_deref(), &raw_file_id, markdown);
     let receipt_id = raw_id
         .as_deref()
@@ -599,7 +638,7 @@ pub fn preflight_okf_proposal_markdown(
         title: "Redacted non-repo-safe proposal".to_owned(),
         description: "Original proposal content and identity redacted before archival.".to_owned(),
         body: format!(
-            "Original non-repo-safe proposal content and identity were redacted before archival.\n\nContent hash (BLAKE3): `{digest}`."
+            "Original non-repo-safe proposal content, identity, and classification were redacted before archival.\n\nContent hash (BLAKE3): `{digest}`.\n\nOriginal classification hash (BLAKE3): `{classification_digest}`."
         ),
         status: OkfProposalStatus::Proposed,
         proposal: OkfProposalMetadata {
@@ -618,13 +657,14 @@ pub fn preflight_okf_proposal_markdown(
         created_by: None,
         sources: Vec::new(),
         supersedes: Vec::new(),
-        sensitivity,
-        content_class: RepositoryContentClass::Unknown,
+        sensitivity: OkfProposalSensitivity::RepoSafe,
+        content_class: RepositoryContentClass::GeneralRepoKnowledge,
         resolution: None,
         capture: None,
     };
     Ok(Some(OkfProposalPreflight {
         sensitivity,
+        content_class,
         receipt_proposal,
     }))
 }
@@ -1069,7 +1109,7 @@ pub(crate) fn render_memory_record_markdown(
     render_memory_record(record, tags, applies_to)
 }
 
-fn repo_apply_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'static str {
+pub(crate) fn repo_apply_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'static str {
     match sensitivity {
         OkfProposalSensitivity::RepoSafe => "repo-safe proposals may be applied after review",
         OkfProposalSensitivity::Secret => "secret proposals must not become repo-shared memory",
@@ -2067,6 +2107,10 @@ mod tests {
             super::preflight_okf_proposal_markdown(root, root.join("secret-file-id.md"), markdown)?
                 .expect("malformed secret packet should still produce a safety receipt");
         assert_eq!(preflight.sensitivity, super::OkfProposalSensitivity::Secret);
+        assert_eq!(
+            preflight.content_class,
+            crate::RepositoryContentClass::Unknown
+        );
         assert!(super::okf_proposal_matches_identity(
             &preflight.receipt_proposal,
             "secret-proposal-id"
@@ -2081,6 +2125,14 @@ mod tests {
                 .receipt_proposal
                 .file_id
                 .contains("secret-file-id")
+        );
+        assert_eq!(
+            preflight.receipt_proposal.sensitivity,
+            super::OkfProposalSensitivity::RepoSafe
+        );
+        assert_eq!(
+            preflight.receipt_proposal.content_class,
+            crate::RepositoryContentClass::GeneralRepoKnowledge
         );
         Ok(())
     }

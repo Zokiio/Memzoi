@@ -111,6 +111,16 @@ fn managed_blob_classification_is_parsed_and_fails_closed() {
     );
     assert!(scan_managed_repository_blob(b"project", path, safe.as_bytes()).allowed);
 
+    let team_scoped = safe.replace("scope: repo", "scope: team\nscope_id: platform");
+    assert!(scan_managed_repository_blob(b"project", path, team_scoped.as_bytes()).allowed);
+    let team_without_id = safe.replace("scope: repo", "scope: team");
+    let team_without_id_report =
+        scan_managed_repository_blob(b"project", path, team_without_id.as_bytes());
+    assert!(!team_without_id_report.allowed);
+    assert!(team_without_id_report.findings.iter().any(|finding| {
+        finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::ScopeNotRepository
+    }));
+
     let missing = canonical_record_markdown("Unclassified repository knowledge.", None);
     let missing_report = scan_managed_repository_blob(b"project", path, missing.as_bytes());
     assert!(!missing_report.allowed);
@@ -124,6 +134,27 @@ fn managed_blob_classification_is_parsed_and_fails_closed() {
     assert!(!prohibited_report.allowed);
     assert!(prohibited_report.findings.iter().any(|finding| {
         finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::RawTranscript
+    }));
+
+    let private_record = safe
+        .replace("scope: repo", "scope: personal")
+        .replace("visibility: repo", "visibility: private");
+    let private_report = scan_managed_repository_blob(b"project", path, private_record.as_bytes());
+    assert!(!private_report.allowed);
+    assert!(private_report.findings.iter().any(|finding| {
+        finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::ScopeNotRepository
+    }));
+    assert!(private_report.findings.iter().any(|finding| {
+        finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::VisibilityNotRepositorySafe
+    }));
+
+    let proposal_path = Path::new(".memzoi/proposals/pending/candidate.md");
+    let secret_proposal = proposal_markdown("secret");
+    let proposal_report =
+        scan_managed_repository_blob(b"project", proposal_path, secret_proposal.as_bytes());
+    assert!(!proposal_report.allowed);
+    assert!(proposal_report.findings.iter().any(|finding| {
+        finding.code == memzoi_core::RepositoryWriteSafetyReasonCode::SensitivityNotRepoSafe
     }));
 }
 
@@ -170,5 +201,11 @@ fn canonical_record_markdown(body: &str, content_class: Option<&str>) -> String 
         .unwrap_or_default();
     format!(
         "---\ntype: fact\ntitle: Candidate\ntimestamp: 2026-07-14T00:00:00Z\nupdated: 2026-07-14T00:00:00Z\nstatus: active\nscope: repo\nvisibility: repo\n{content_class}confidence: 1\n---\n\n# Candidate\n\n{body}\n"
+    )
+}
+
+fn proposal_markdown(sensitivity: &str) -> String {
+    format!(
+        "---\nid: mem_scan_candidate\nkind: proposal\nversion: okf/v0.1\nprofile: memzoi/v0\ntype: fact\nlane: semantic\ntitle: Candidate\ndescription: Candidate description.\nstatus: proposed\nproposal:\n  action: create\n  proposed_by: test\n  proposed_at: 2026-07-14T00:00:00Z\nscope:\n  kind: repo\n  paths: []\ntags: []\ntimestamp: 2026-07-14T00:00:00Z\ncreated_by: test\nsources: []\nsupersedes: []\nsensitivity: {sensitivity}\ncontent_class: general_repo_knowledge\n---\n\n# Candidate\n\nDurable repository knowledge.\n"
     )
 }

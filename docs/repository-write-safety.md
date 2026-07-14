@@ -8,7 +8,11 @@ The deterministic v1 detector registry blocks credential prefixes, private keys,
 
 Blocked diagnostics contain only route and policy versions, logical field locations, stable reason codes, and BLAKE3 fingerprints. They never include the matched text. There is no `--force`, environment variable, or skip-safety bypass.
 
-At the final mutation seam, repository creation pins the project root and every parent directory by file descriptor, refuses symlink traversal, and creates each destination exclusively without following links. Rollback uses the same pinned parent descriptors. Platforms without equivalent directory-relative no-follow primitives fail closed instead of using a path-based fallback.
+At the final mutation seam, repository creation pins the project root and every parent directory by file descriptor, refuses symlink traversal, and creates each destination exclusively without following links. Rollback uses the same pinned parent descriptors. Platforms without equivalent directory-relative no-follow primitives fail closed instead of using a path-based fallback. Candidate-bearing staging and backup files live under the project-scoped local runtime directory, outside the Git worktree; only authorized final projections are installed into the repository.
+
+Capture extractors assign a typed content class from their deterministic evidence policy. Ambiguous candidates remain `unknown`, and a reviewer editing one into the repository route must explicitly classify the reviewed candidate as `general_repo_knowledge`.
+
+`rebuild` validates every canonical record blob with this same managed policy before opening, migrating, deleting, or recreating the runtime index. A prohibited manual edit therefore leaves the existing index untouched.
 
 ## Later-edit scanning
 
@@ -20,7 +24,7 @@ memzoi safety scan --staged --json
 memzoi safety scan --range origin/main...HEAD --json
 ```
 
-Exit codes are `0` for allowed, `2` for blocked, and `1` for operational failure. Staged scans read index blobs; range scans read blobs from the selected head tree. Managed record and proposal metadata is parsed so missing, malformed, or prohibited content classes fail closed. Filenames are scanned as untrusted input and are replaced by a fingerprint in diagnostics when the path itself is blocked. Symlinks, submodules, malformed paths, invalid encoding, and oversized blobs fail closed.
+Exit codes are `0` for allowed, `2` for blocked, and `1` for operational failure. Staged scans read index blobs; range scans read blobs from the selected head tree. Managed record and proposal metadata is parsed so sensitivity, scope, visibility, and content class all pass through the shared policy; missing, malformed, or prohibited values fail closed. Every blocked report replaces its filename with a fingerprint. Non-UTF-8 paths outside managed memory roots are ignored, while malformed managed paths, symlinks, submodules, invalid encoding, and oversized blobs fail closed.
 
 Example pre-commit hook:
 

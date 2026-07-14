@@ -129,6 +129,7 @@ fn instruction_profile_is_explicit_nested_feedback_safe_reviewed_and_cited() -> 
                 reason_code,
                 memory: None,
                 requested_destination: None,
+                content_class: None,
             }
         })
         .collect();
@@ -297,6 +298,7 @@ fn instruction_heading_markers_force_review_routing() -> anyhow::Result<()> {
             reason_code: Some("review-routing-regression".to_owned()),
             memory: None,
             requested_destination: None,
+            content_class: None,
         })
         .collect();
     let review = build_capture_review(
@@ -501,6 +503,7 @@ fn adr_directory_classifies_statuses_preserves_exact_lifecycle_evidence_and_cite
                 .then(|| "adr-not-active-authority".to_owned()),
             memory: None,
             requested_destination: None,
+            content_class: None,
         })
         .collect::<Vec<_>>();
 
@@ -669,6 +672,7 @@ fn supplied_diff_replay_is_exact_and_routes_only_reviewed_nonduplicate_candidate
                 .then(|| "not-selected-from-diff".to_owned()),
             memory: None,
             requested_destination: None,
+            content_class: None,
         })
         .collect::<Vec<_>>();
 
@@ -901,6 +905,7 @@ fn git_range_is_pinned_read_only_reviewed_and_cited_with_delete_provenance() -> 
                 .then(|| "not-selected-from-range".to_owned()),
             memory: None,
             requested_destination: None,
+            content_class: None,
         })
         .collect();
     let review = build_capture_review(
@@ -1289,6 +1294,7 @@ fn accept_all(plan: &CapturePlan) -> CaptureReviewInput {
                 reason_code: None,
                 memory: None,
                 requested_destination: None,
+                content_class: None,
             })
             .collect(),
     )
@@ -1305,6 +1311,7 @@ fn reject_all(plan: &CapturePlan) -> CaptureReviewInput {
                 reason_code: Some("test-rejection".to_owned()),
                 memory: None,
                 requested_destination: None,
+                content_class: None,
             })
             .collect(),
     )

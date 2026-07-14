@@ -191,8 +191,9 @@ fn staged_and_range_scans_block_contextually_prohibited_records() {
         .status()
         .expect("create base commit");
 
-    let relative = ".memzoi/records/raw-transcript.md";
-    let path = temp.path().join(relative);
+    let path_sentinel = "private-context-filename-sentinel";
+    let relative = format!(".memzoi/records/{path_sentinel}.md");
+    let path = temp.path().join(&relative);
     fs::create_dir_all(path.parent().expect("record parent")).expect("records directory");
     fs::write(
         &path,
@@ -200,7 +201,7 @@ fn staged_and_range_scans_block_contextually_prohibited_records() {
     )
     .expect("raw transcript record");
     StdCommand::new("git")
-        .args(["add", relative])
+        .args(["add", &relative])
         .current_dir(temp.path())
         .status()
         .expect("stage contextual fixture");
@@ -211,7 +212,11 @@ fn staged_and_range_scans_block_contextually_prohibited_records() {
         .args(["safety", "scan", "--staged", "--json"])
         .assert()
         .code(2)
-        .stdout(predicate::str::contains("raw_transcript"));
+        .stdout(
+            predicate::str::contains("raw_transcript")
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains(path_sentinel).not()),
+        );
 
     StdCommand::new("git")
         .args(["commit", "--quiet", "-m", "contextual fixture"])
@@ -224,7 +229,11 @@ fn staged_and_range_scans_block_contextually_prohibited_records() {
         .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
         .assert()
         .code(2)
-        .stdout(predicate::str::contains("raw_transcript"));
+        .stdout(
+            predicate::str::contains("raw_transcript")
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains(path_sentinel).not()),
+        );
 }
 
 #[test]
@@ -289,6 +298,39 @@ fn staged_safety_scan_blocks_non_utf8_git_paths_with_exit_two() {
         .expect("write Git blob");
     assert!(object.status.success());
     let object_id = String::from_utf8(object.stdout).expect("object ID is UTF-8");
+    let mut unrelated_entry = format!("100644 {}\tassets/invalid-", object_id.trim()).into_bytes();
+    unrelated_entry.push(0xff);
+    unrelated_entry.extend_from_slice(b".bin\0");
+    let mut update_unrelated = StdCommand::new("git")
+        .args(["update-index", "-z", "--index-info"])
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start unrelated update-index");
+    update_unrelated
+        .stdin
+        .take()
+        .expect("unrelated update-index stdin")
+        .write_all(&unrelated_entry)
+        .expect("write unrelated raw index entry");
+    assert!(
+        update_unrelated
+            .wait()
+            .expect("stage unrelated raw index entry")
+            .success()
+    );
+
+    let mut unrelated_scan = memzoi();
+    unrelated_scan
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--staged", "--json"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"allowed\": true")
+                .and(predicate::str::contains("<non-utf8-git-path>").not()),
+        );
+
     let mut index_entry =
         format!("100644 {}\t.memzoi/records/invalid-", object_id.trim()).into_bytes();
     index_entry.push(0xff);
@@ -3579,8 +3621,40 @@ fn proposal_files_apply_repo_safe_create_resolves_packet_and_updates_runtime_ind
 
 #[test]
 fn proposal_files_reject_archives_reason_without_creating_canonical_memory() {
+    use std::process::Command as StdCommand;
+
     let repo = initialized_temp_repo();
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.com"][..],
+        &["config", "user.name", "Memzoi Test"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("prepare rejection range repository")
+                .success()
+        );
+    }
     write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    assert!(
+        StdCommand::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo.path())
+            .status()
+            .expect("stage pending proposal")
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["commit", "--quiet", "-m", "pending proposal"])
+            .current_dir(repo.path())
+            .status()
+            .expect("commit pending proposal")
+            .success()
+    );
 
     let rejected = run_json_command(
         repo.path(),
@@ -3629,6 +3703,28 @@ fn proposal_files_reject_archives_reason_without_creating_canonical_memory() {
         rendered.contains("reason: Reviewer found the evidence too weak."),
         "{rendered}"
     );
+    assert!(
+        StdCommand::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo.path())
+            .status()
+            .expect("stage rejected receipt")
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["commit", "--quiet", "-m", "rejected receipt"])
+            .current_dir(repo.path())
+            .status()
+            .expect("commit rejected receipt")
+            .success()
+    );
+    let mut scan = memzoi();
+    scan.current_dir(repo.path())
+        .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"allowed\": true"));
 
     let repeated = run_json_command(
         repo.path(),
@@ -3660,6 +3756,92 @@ fn proposal_files_reject_archives_reason_without_creating_canonical_memory() {
     );
     let search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
     assert!(search["records"].as_array().is_some_and(Vec::is_empty));
+}
+
+#[test]
+fn redacted_prohibited_class_rejection_receipt_passes_range_scan() {
+    use std::process::Command as StdCommand;
+
+    let repo = initialized_temp_repo();
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.com"][..],
+        &["config", "user.name", "Memzoi Test"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("prepare redacted receipt repository")
+                .success()
+        );
+    }
+    let prohibited = proposal_markdown_with_options(
+        "semantic",
+        "create",
+        "proposed",
+        "supersedes: []",
+        "",
+        "repo-safe",
+    )
+    .replace(
+        "content_class: general_repo_knowledge",
+        "content_class: raw_transcript",
+    );
+    write_pending_proposal_file(repo.path(), "prohibited-proposal.md", prohibited);
+    for args in [
+        &["add", "-A"][..],
+        &["commit", "--quiet", "-m", "prohibited pending proposal"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("commit prohibited pending proposal")
+                .success()
+        );
+    }
+
+    let apply_error =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        apply_error.contains("repository write blocked") && apply_error.contains("raw_transcript"),
+        "prohibited source classification was lost behind its safe receipt: {apply_error}"
+    );
+
+    run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Rejected at the repository trust boundary.",
+            "--json",
+        ],
+    );
+    for args in [
+        &["add", "-A"][..],
+        &["commit", "--quiet", "-m", "redacted rejection receipt"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("commit redacted rejection receipt")
+                .success()
+        );
+    }
+
+    let mut scan = memzoi();
+    scan.current_dir(repo.path())
+        .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"allowed\": true"));
 }
 
 #[test]
@@ -5343,6 +5525,7 @@ updated: 2026-07-01T00:00:00Z
 status: active
 scope: repo
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 1
 source: human
 source_ref: evidence://outside
@@ -5831,6 +6014,7 @@ description: Canonical repo memory imported during rebuild.
 timestamp: 2026-07-08T00:00:00Z
 status: active
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 1
 source: test
 source_ref: test://repo-zircon
@@ -7419,6 +7603,7 @@ description: Restores context packs from canonical records.
 timestamp: 2026-07-05T00:00:00Z
 status: active
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 0.93
 source: test
 source_ref: test://rebuild-decision
@@ -7441,6 +7626,7 @@ description: Restores precheck warnings from canonical records.
 timestamp: 2026-07-05T00:00:00Z
 status: active
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 0.97
 source: test
 source_ref: test://rebuild-risk
@@ -8153,6 +8339,7 @@ updated: {updated}
 status: {status}
 scope: {scope}
 {scope_id}visibility: repo
+content_class: general_repo_knowledge
 confidence: 1
 source: reviewed-source
 source_ref: evidence://legacy-auth

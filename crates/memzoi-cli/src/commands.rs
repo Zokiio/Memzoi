@@ -107,12 +107,7 @@ fn safety_scan_report_path(
     report: &memzoi_core::RepositoryWriteSafetyReport,
 ) -> String {
     let display = path.to_string_lossy();
-    if display.contains("<non-utf8-git-path>")
-        || !report
-            .findings
-            .iter()
-            .any(|finding| finding.field.0.ends_with(".path"))
-    {
+    if report.allowed || display.contains("<non-utf8-git-path>") {
         return display.into_owned();
     }
     format!(
@@ -211,6 +206,9 @@ fn load_git_memory_blobs(
         .split(|byte| *byte == 0)
         .filter(|name| !name.is_empty())
     {
+        if !is_raw_memory_scan_path(raw) {
+            continue;
+        }
         let Ok(path) = std::str::from_utf8(raw) else {
             blobs.push(SafetyScanBlob {
                 path: PathBuf::from(".memzoi/memory/<non-utf8-git-path>"),
@@ -242,6 +240,12 @@ fn load_git_memory_blobs(
     }
     blobs.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(blobs)
+}
+
+fn is_raw_memory_scan_path(path: &[u8]) -> bool {
+    path.starts_with(b".memzoi/records/")
+        || path.starts_with(b".memzoi/proposals/")
+        || path.starts_with(b".memzoi/memory/")
 }
 
 fn git_output(project_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
@@ -1663,14 +1667,14 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                 "lifecycle_transactions",
                 "warning",
                 format!(
-                    "{} hidden lifecycle transaction artifact{} require inspection under the Memzoi records/proposals roots",
+                    "{} hidden lifecycle transaction artifact{} require inspection in local runtime storage or the legacy records/proposals roots",
                     count,
                     if count == 1 { "" } else { "s" },
                 ),
             ));
             push_next_step(
                 &mut next_steps,
-                "inspect hidden .memzoi lifecycle transaction artifacts before retrying",
+                "inspect local Memzoi repository transaction artifacts before retrying",
             );
         }
         Err(error) => checks.push(check(

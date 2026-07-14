@@ -934,9 +934,11 @@ fn attach_memory_path(
 }
 
 fn initialized_service(temp: &TempDir) -> anyhow::Result<MemoryService> {
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&project_root)?;
     let paths = MemoryPaths::with_runtime_home(
-        temp.path().canonicalize()?,
-        temp.path().join(".memzoi-runtime"),
+        project_root.canonicalize()?,
+        temp.path().join("runtime-home"),
     );
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
     MemoryService::open_paths(paths)

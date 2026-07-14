@@ -184,6 +184,8 @@ pub struct FileProposalResolutionResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileProposalInventoryEntry {
     pub proposal: OkfProposalFile,
+    pub source_sensitivity: crate::OkfProposalSensitivity,
+    pub source_content_class: RepositoryContentClass,
     pub display_path: PathBuf,
     actual_path: PathBuf,
 }
@@ -289,6 +291,8 @@ struct StagedCanonicalFileWrite {
 #[derive(Debug)]
 struct PendingFileProposalSnapshot {
     proposal: OkfProposalFile,
+    source_sensitivity: crate::OkfProposalSensitivity,
+    source_content_class: RepositoryContentClass,
     expected_hash: String,
     display_path: PathBuf,
 }
@@ -609,6 +613,19 @@ impl MemoryService {
         validate_resolution_actor(actor)?;
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let snapshot = self.load_pending_file_proposal_snapshot(proposal_path)?;
+        if snapshot.source_sensitivity != crate::OkfProposalSensitivity::RepoSafe {
+            bail!(
+                "OKF proposal sensitivity {} cannot be applied into repo records; {}",
+                snapshot.source_sensitivity.as_str(),
+                okf::repo_apply_sensitivity_guidance(snapshot.source_sensitivity)
+            );
+        }
+        if snapshot.source_content_class != RepositoryContentClass::GeneralRepoKnowledge {
+            bail!(
+                "repository write blocked: OKF proposal content class {} cannot be applied into repo records; classify or sanitize it as general_repo_knowledge first",
+                snapshot.source_content_class.as_str()
+            );
+        }
         let proposal = snapshot.proposal.clone();
         self.validate_fresh_file_proposal_identity(&proposal)?;
         let resolved_at = expiry::format_timestamp(self.now())?;
@@ -683,7 +700,8 @@ impl MemoryService {
                 );
             }
         };
-        let pending_backup = sibling_transaction_path(proposal_path, &nonce, "pending");
+        let pending_backup =
+            repository_transaction_path(&self.paths, proposal_path, &nonce, "pending");
 
         let tx = match self.conn.unchecked_transaction() {
             Ok(tx) => tx,
@@ -824,6 +842,27 @@ impl MemoryService {
                 .iter()
                 .any(|error| error.display_path == entry.display_path)
             {
+                continue;
+            }
+            if entry.source_sensitivity != crate::OkfProposalSensitivity::RepoSafe {
+                inventory.errors.push(FileProposalInventoryError {
+                    display_path: entry.display_path,
+                    error: format!(
+                        "OKF proposal sensitivity {} cannot be applied into repo records; {}",
+                        entry.source_sensitivity.as_str(),
+                        okf::repo_apply_sensitivity_guidance(entry.source_sensitivity)
+                    ),
+                });
+                continue;
+            }
+            if entry.source_content_class != RepositoryContentClass::GeneralRepoKnowledge {
+                inventory.errors.push(FileProposalInventoryError {
+                    display_path: entry.display_path,
+                    error: format!(
+                        "repository write blocked: OKF proposal content class {} cannot be applied into repo records; classify or sanitize it as general_repo_knowledge first",
+                        entry.source_content_class.as_str()
+                    ),
+                });
                 continue;
             }
             match self.build_file_proposal_apply_plan(&entry.proposal, &resolved_at) {
@@ -1512,7 +1551,8 @@ impl MemoryService {
             &resolved_markdown,
             &nonce,
         )?;
-        let pending_backup = sibling_transaction_path(proposal_path, &nonce, "pending");
+        let pending_backup =
+            repository_transaction_path(&self.paths, proposal_path, &nonce, "pending");
 
         let display_pending_path = snapshot.display_path.clone();
         if let Err(error) = before_pending_revalidation(proposal_path) {
@@ -1600,8 +1640,10 @@ impl MemoryService {
             );
         }
 
+        let mut reported_proposal = archived_proposal;
+        reported_proposal.sensitivity = snapshot.source_sensitivity;
         Ok(FileProposalResolutionResult {
-            proposal: archived_proposal,
+            proposal: reported_proposal,
             resolution,
             resolved_path,
             record: None,
@@ -1646,7 +1688,8 @@ impl MemoryService {
                     )
                 })?
                 .context("pending proposal was ignored")?;
-        let non_repo_safe = preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe;
+        let non_repo_safe = preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe
+            || preflight.content_class != RepositoryContentClass::GeneralRepoKnowledge;
         let display_path = if non_repo_safe {
             pending_root.join(format!("{}.md", preflight.receipt_proposal.file_id))
         } else {
@@ -1666,6 +1709,8 @@ impl MemoryService {
         }
         Ok(PendingFileProposalSnapshot {
             proposal,
+            source_sensitivity: preflight.sensitivity,
+            source_content_class: preflight.content_class,
             expected_hash,
             display_path,
         })
@@ -1677,10 +1722,10 @@ impl MemoryService {
         pending_backup: &Path,
         snapshot: &PendingFileProposalSnapshot,
     ) -> Result<()> {
-        let pending_root = self.paths.proposals_dir().join("pending");
+        let transaction_root = repository_transaction_root(&self.paths);
         ensure_safe_existing_file(
-            &self.paths.project_root,
-            &pending_root,
+            &self.paths.runtime_dir,
+            &transaction_root,
             pending_backup,
             "captured pending proposal",
         )
@@ -2709,6 +2754,14 @@ impl MemoryService {
                                 .map(|c| c.classification.destination)
                         })
                         .flatten(),
+                    content_class: (decision.outcome == CaptureReviewOutcome::Edit)
+                        .then(|| {
+                            decision
+                                .reviewed_candidate
+                                .as_ref()
+                                .map(|c| c.classification.content_class)
+                        })
+                        .flatten(),
                 })
                 .collect(),
         };
@@ -3096,6 +3149,7 @@ impl MemoryService {
             "canonical record root",
         )?;
         let records = okf::read_okf_record_files(&records_root)?;
+        validate_canonical_record_blobs_for_rebuild(&paths, &records_root)?;
         guard_no_open_proposals(&paths.db_path)?;
         let runtime_records = load_runtime_records_for_rebuild(&paths.db_path)?;
         guard_no_runtime_record_id_collisions(&records, &runtime_records)?;
@@ -3113,6 +3167,34 @@ impl MemoryService {
                 .collect(),
         })
     }
+}
+
+fn validate_canonical_record_blobs_for_rebuild(
+    paths: &MemoryPaths,
+    records_root: &Path,
+) -> Result<()> {
+    for (path, bytes) in okf::read_okf_record_blobs(records_root)? {
+        let relative = path
+            .strip_prefix(&paths.project_root)
+            .context("canonical record escaped the project root during rebuild")?;
+        let report = crate::scan_managed_repository_blob(
+            paths.project_root.as_os_str().as_encoded_bytes(),
+            relative,
+            &bytes,
+        );
+        if !report.allowed {
+            let findings = report
+                .findings
+                .iter()
+                .map(|finding| format!("{}:{}", finding.code.as_str(), finding.fingerprint))
+                .collect::<Vec<_>>()
+                .join(",");
+            bail!(
+                "rebuild refused because a canonical record failed repository safety validation ({findings})"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn memory_draft_safety_values(prefix: &str, draft: &MemoryDraft) -> Vec<RepositorySafetyValue> {
@@ -3534,7 +3616,8 @@ fn capture_apply_stage_path(
     journal: &CaptureApplyJournal,
     entry: &CaptureApplyJournalEntry,
 ) -> PathBuf {
-    sibling_transaction_path(
+    repository_transaction_path(
+        paths,
         &capture_apply_destination_path(paths, entry),
         &journal.journal_id,
         "write",
@@ -3700,7 +3783,7 @@ fn recover_legacy_capture_apply(paths: &MemoryPaths) -> Result<bool> {
             .proposals_dir()
             .join("pending")
             .join(format!("{}.md", entry.proposal_id));
-        let staged = sibling_transaction_path(&destination, &journal.journal_id, "write");
+        let staged = repository_transaction_path(paths, &destination, &journal.journal_id, "write");
         remove_capture_apply_file_if_matching(
             &destination,
             entry.content_bytes,
@@ -4263,8 +4346,15 @@ fn lifecycle_transaction_artifacts(paths: &MemoryPaths) -> Result<Vec<PathBuf>> 
     for (root, label) in [
         (paths.records_dir(), "canonical record root"),
         (paths.proposals_dir(), "proposal root"),
+        (
+            repository_transaction_root(paths),
+            "local repository transaction root",
+        ),
     ] {
         match fs::symlink_metadata(&root) {
+            Ok(_) if root.starts_with(&paths.runtime_dir) => {
+                ensure_safe_directory(&paths.runtime_dir, &root, false, label)?
+            }
             Ok(_) => ensure_safe_directory(&paths.project_root, &root, false, label)?,
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => {
@@ -4372,6 +4462,8 @@ fn scan_proposal_directory(
                 continue;
             }
         };
+        let source_sensitivity = preflight.sensitivity;
+        let source_content_class = preflight.content_class;
         let relative_path = actual_path
             .strip_prefix(&paths.project_root)
             .unwrap_or_else(|_| Path::new("../unsafe-proposal-path"));
@@ -4381,8 +4473,9 @@ fn scan_proposal_directory(
             markdown.as_bytes(),
         )
         .allowed;
-        let requires_redaction =
-            preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe || !content_allowed;
+        let requires_redaction = preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe
+            || preflight.content_class != RepositoryContentClass::GeneralRepoKnowledge
+            || !content_allowed;
         let display_path = if requires_redaction {
             root.join(format!("{}.md", preflight.receipt_proposal.file_id))
         } else {
@@ -4443,6 +4536,8 @@ fn scan_proposal_directory(
             } else {
                 entries.push(FileProposalInventoryEntry {
                     proposal,
+                    source_sensitivity,
+                    source_content_class,
                     display_path,
                     actual_path,
                 });
@@ -5000,12 +5095,28 @@ fn ensure_regular_file(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn sibling_transaction_path(path: &Path, nonce: &str, role: &str) -> PathBuf {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("memzoi");
-    path.with_file_name(format!(".{name}.{nonce}.{role}.tmp"))
+fn repository_transaction_root(paths: &MemoryPaths) -> PathBuf {
+    paths.runtime_dir.join("repository-transactions")
+}
+
+fn repository_transaction_path(
+    paths: &MemoryPaths,
+    repository_path: &Path,
+    nonce: &str,
+    role: &str,
+) -> PathBuf {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"memzoi.repository-transaction-path.v1\0");
+    hasher.update(repository_path.as_os_str().as_encoded_bytes());
+    hasher.update(b"\0");
+    hasher.update(nonce.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(role.as_bytes());
+    repository_transaction_root(paths).join(format!(
+        ".{nonce}.{}.{}.tmp",
+        hasher.finalize().to_hex(),
+        role
+    ))
 }
 
 fn stage_file(
@@ -5032,10 +5143,29 @@ fn stage_file(
     }) {
         bail!("staged repository file is not present in the authorized projection batch");
     }
-    let parent = final_path.parent().context("staged file has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    let temp_path = sibling_transaction_path(final_path, nonce, "write");
+    let temp_path = repository_transaction_path(paths, final_path, nonce, "write");
+    let parent = temp_path.parent().context("staged file has no parent")?;
+    if parent.starts_with(&paths.project_root) {
+        bail!("local repository transaction storage must be outside the project worktree");
+    }
+    ensure_safe_directory(
+        &paths.runtime_dir,
+        parent,
+        true,
+        "local repository transaction root",
+    )?;
+    if parent
+        .canonicalize()
+        .context("failed to resolve local repository transaction root")?
+        .starts_with(
+            paths
+                .project_root
+                .canonicalize()
+                .context("failed to resolve project root for repository staging")?,
+        )
+    {
+        bail!("local repository transaction storage must be outside the project worktree");
+    }
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -5056,6 +5186,7 @@ fn stage_file(
             )),
         };
     }
+    sync_directory(parent).context("failed to sync local repository transaction root")?;
     Ok(temp_path)
 }
 
@@ -5116,7 +5247,7 @@ fn stage_canonical_writes(
             }
         };
         let backup_path = (write.mode == FileWriteMode::Overwrite)
-            .then(|| sibling_transaction_path(&write.path, nonce, "canonical"));
+            .then(|| repository_transaction_path(paths, &write.path, nonce, "canonical"));
         staged.push(StagedCanonicalFileWrite {
             path: write.path.clone(),
             temp_path,
@@ -5483,6 +5614,12 @@ pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult>
         format!(
             "failed to create runtime directory {}",
             paths.runtime_dir.display()
+        )
+    })?;
+    fs::create_dir_all(repository_transaction_root(paths)).with_context(|| {
+        format!(
+            "failed to create repository transaction directory {}",
+            repository_transaction_root(paths).display()
         )
     })?;
     fs::create_dir_all(&paths.exports_dir).with_context(|| {
@@ -6723,6 +6860,11 @@ mod tests {
         let artifacts = lifecycle_transaction_artifacts(&service.paths)?;
         assert_eq!(artifacts.len(), 1, "{artifacts:?}");
         assert!(
+            artifacts[0].starts_with(repository_transaction_root(&service.paths)),
+            "repository transaction artifacts must stay outside the worktree: {artifacts:?}"
+        );
+        assert!(!artifacts[0].starts_with(&service.paths.project_root));
+        assert!(
             artifacts[0]
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -6848,6 +6990,11 @@ mod tests {
         );
         let artifacts = lifecycle_transaction_artifacts(&service.paths)?;
         assert_eq!(artifacts.len(), 1, "unexpected artifacts: {artifacts:?}");
+        assert!(
+            artifacts[0].starts_with(repository_transaction_root(&service.paths)),
+            "repository transaction artifacts must stay outside the worktree: {artifacts:?}"
+        );
+        assert!(!artifacts[0].starts_with(&service.paths.project_root));
         assert!(
             artifacts[0]
                 .file_name()
@@ -7564,7 +7711,7 @@ mod tests {
             .records_dir()
             .join(format!("{}.md", target.id));
         let target_before = fs::read(&target_path)?;
-        let records_dir = service.paths.records_dir();
+        let transaction_root = repository_transaction_root(&service.paths);
 
         let error = service
             .supersede_record_with_hooks(
@@ -7576,7 +7723,7 @@ mod tests {
                 ),
                 move |index| {
                     if index == 0 {
-                        for entry in fs::read_dir(&records_dir)? {
+                        for entry in fs::read_dir(&transaction_root)? {
                             let path = entry?.path();
                             if path
                                 .file_name()
@@ -7736,6 +7883,57 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_rejects_contextually_prohibited_canonical_edits_before_index_mutation()
+    -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let record = apply_test_record(
+            &service,
+            sample_memory_draft("Rebuild safety baseline", "Safe indexed baseline body."),
+        )?;
+        let record_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", record.id));
+        let edited = fs::read_to_string(&record_path)?
+            .replace(
+                "content_class: general_repo_knowledge",
+                "content_class: raw_transcript",
+            )
+            .replace(
+                "Safe indexed baseline body.",
+                "Lexically harmless forbiddenrebuildsentinel payload.",
+            );
+        fs::write(&record_path, edited)?;
+        let before_count: i64 =
+            service
+                .conn
+                .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+
+        let error = MemoryService::rebuild_paths(service.paths.clone())
+            .expect_err("contextually prohibited canonical edits must block rebuild");
+        assert!(format!("{error:#}").contains("raw_transcript"));
+        let after_count: i64 =
+            service
+                .conn
+                .query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+        assert_eq!(
+            after_count, before_count,
+            "rebuild mutated the runtime index"
+        );
+        assert!(
+            service
+                .search_memory(SearchInput {
+                    query: "forbiddenrebuildsentinel".to_owned(),
+                    limit: 10,
+                    ..SearchInput::default()
+                })?
+                .is_empty(),
+            "prohibited canonical bytes reached runtime search"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn show_proposal_reports_missing_ids() -> anyhow::Result<()> {
         let (_temp, service) = initialized_service()?;
 
@@ -7755,9 +7953,11 @@ mod tests {
 
     fn initialized_service() -> anyhow::Result<(TempDir, MemoryService)> {
         let temp = TempDir::new()?;
+        let project_root = temp.path().join("project");
+        fs::create_dir(&project_root)?;
         let paths = MemoryPaths::with_runtime_home(
-            temp.path().canonicalize()?,
-            temp.path().join(".memzoi-runtime"),
+            project_root.canonicalize()?,
+            temp.path().join("runtime-home"),
         );
         MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
         let service = MemoryService::open_paths(paths)?;

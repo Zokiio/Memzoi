@@ -124,11 +124,11 @@ pub(super) fn apply(proposal_id: &str, actor: &str, as_json: bool) -> Result<()>
 
     let entry = optional_proposal_file_entry(&scan, proposal_id)?;
     if let Some(entry) = entry
-        && entry.proposal.sensitivity != OkfProposalSensitivity::RepoSafe
+        && entry.source_sensitivity != OkfProposalSensitivity::RepoSafe
     {
         return blocked_repo_sensitivity_error(
             "proposal_files_apply",
-            entry.proposal.sensitivity,
+            entry.source_sensitivity,
             as_json,
         );
     }
@@ -228,7 +228,7 @@ fn print_proposal_file_summary(entry: &ProposalFileEntry) {
         entry.proposal.proposal.action.as_str(),
         entry.proposal.lane.as_str(),
         entry.proposal.memory_type.as_str(),
-        entry.proposal.sensitivity.as_str(),
+        entry.source_sensitivity.as_str(),
         entry.proposal.title,
     );
 }
@@ -297,7 +297,8 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     if !entry.proposal.supersedes.is_empty() {
         println!("supersedes:\t{}", entry.proposal.supersedes.join(", "));
     }
-    println!("sensitivity:\t{}", entry.proposal.sensitivity.as_str());
+    println!("sensitivity:\t{}", entry.source_sensitivity.as_str());
+    println!("content_class:\t{}", entry.source_content_class.as_str());
     println!("title:\t{}", entry.proposal.title);
     println!("description:\t{}", entry.proposal.description);
     println!("body:\t{}", entry.proposal.body);
@@ -377,7 +378,8 @@ fn proposal_file_json(entry: &ProposalFileEntry, include_body: bool) -> serde_js
             })
         }).collect::<Vec<_>>(),
         "supersedes": &proposal.supersedes,
-        "sensitivity": proposal.sensitivity.as_str(),
+        "sensitivity": entry.source_sensitivity.as_str(),
+        "content_class": entry.source_content_class.as_str(),
         "resolution": &proposal.resolution,
     });
     if include_body {
