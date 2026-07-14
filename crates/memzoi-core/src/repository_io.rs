@@ -8,6 +8,20 @@ use anyhow::{Context, Result, bail};
 
 use crate::{AuthorizedRepositoryWriteBatch, RepositoryProjection, RepositoryWriteRoute};
 
+#[cfg(unix)]
+fn repository_directory_mode() -> rustix::fs::Mode {
+    use rustix::fs::Mode;
+
+    Mode::RUSR | Mode::WUSR | Mode::XUSR | Mode::RGRP | Mode::XGRP | Mode::ROTH | Mode::XOTH
+}
+
+#[cfg(unix)]
+fn repository_file_mode() -> rustix::fs::Mode {
+    use rustix::fs::Mode;
+
+    Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH
+}
+
 pub(crate) fn verify_repository_batch(
     project_root: &Path,
     expected_route: RepositoryWriteRoute,
@@ -72,16 +86,8 @@ pub(crate) fn create_repository_batch(
             .context("failed to resolve repository root for secure creation")?;
         let directory_flags =
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let directory_mode = Mode::RUSR
-            | Mode::WUSR
-            | Mode::XUSR
-            | Mode::RGRP
-            | Mode::WGRP
-            | Mode::XGRP
-            | Mode::ROTH
-            | Mode::WOTH
-            | Mode::XOTH;
-        let file_mode = Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::WGRP | Mode::ROTH | Mode::WOTH;
+        let directory_mode = repository_directory_mode();
+        let file_mode = repository_file_mode();
         let mut destinations = Vec::with_capacity(projections.len());
         let mut created = Vec::<(OwnedFd, OsString)>::with_capacity(projections.len());
 
@@ -420,5 +426,45 @@ mod tests {
             .is_err()
         );
         assert_eq!(fs::read_to_string(target).unwrap(), "outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_creation_modes_never_request_group_or_world_write_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use rustix::fs::Mode;
+
+        let writable_by_others = Mode::WGRP | Mode::WOTH;
+        assert!(!repository_directory_mode().intersects(writable_by_others));
+        assert!(!repository_file_mode().intersects(writable_by_others));
+
+        let temp = tempfile::tempdir().unwrap();
+        let relative = Path::new(".memzoi/records/nested/safe.md");
+        let projections = [RepositoryProjection {
+            path: relative,
+            bytes: b"safe repository knowledge",
+            target_revision: None,
+        }];
+        let (context_digest, token) = authorize_create(temp.path(), &projections);
+        create_repository_batch(
+            temp.path(),
+            RepositoryWriteRoute::FileProposalCreate,
+            &context_digest,
+            &token,
+            &projections,
+        )
+        .unwrap();
+
+        let file_mode = fs::metadata(temp.path().join(relative))
+            .unwrap()
+            .permissions()
+            .mode();
+        let directory_mode = fs::metadata(temp.path().join(".memzoi/records/nested"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(file_mode & 0o022, 0);
+        assert_eq!(directory_mode & 0o022, 0);
     }
 }
