@@ -260,7 +260,6 @@ where
         before_install(index)?;
         validate_canonical_write_precondition(paths, write)?;
         if let Some(backup_path) = &write.backup_path {
-            validate_canonical_write_precondition(paths, write)?;
             std::fs::rename(&write.path, backup_path).with_context(|| {
                 format!(
                     "failed to stage canonical memory record {}",
