@@ -38,9 +38,9 @@ use crate::{
     exporters, handoff, okf, precheck, proposals, repository_io,
     repository_write_safety::{
         AuthorizationProof, AuthorizedRepositoryWriteBatch, ProvenanceAssessment,
-        RepositoryContentClass, RepositoryProjection, RepositoryScope, RepositoryWriteRequest,
-        RepositoryWriteRoute, SafetyField, SafetyFieldKind, authorize_repository_write,
-        repository_write_policy_context_digest,
+        RepositoryContentClass, RepositoryProjection, RepositoryProjectionPurpose, RepositoryScope,
+        RepositoryWriteRequest, RepositoryWriteRoute, SafetyField, SafetyFieldKind,
+        authorize_repository_write, repository_write_policy_context_digest,
     },
     search,
     session_end::{
@@ -244,6 +244,7 @@ struct OwnedRepositoryProjection {
     relative_path: PathBuf,
     bytes: Vec<u8>,
     target_revision: Option<String>,
+    purpose: RepositoryProjectionPurpose,
 }
 
 #[derive(Debug)]
@@ -273,7 +274,22 @@ impl OwnedRepositoryProjection {
             relative_path,
             bytes: bytes.to_vec(),
             target_revision: target_revision.map(str::to_owned),
+            purpose: RepositoryProjectionPurpose::Write,
         })
+    }
+
+    fn existing_from_absolute(
+        paths: &MemoryPaths,
+        path: &Path,
+        bytes: &[u8],
+        target_revision: &str,
+    ) -> Result<Self> {
+        let mut projection = Self::from_absolute(paths, path, bytes, Some(target_revision))?;
+        if blake3::hash(bytes).to_hex().as_str() != target_revision {
+            bail!("existing repository projection revision does not match its bytes");
+        }
+        projection.purpose = RepositoryProjectionPurpose::Existing;
+        Ok(projection)
     }
 }
 
@@ -326,6 +342,7 @@ struct PendingFileProposalSnapshot {
     proposal: OkfProposalFile,
     source_sensitivity: crate::OkfProposalSensitivity,
     source_content_class: RepositoryContentClass,
+    bytes: Vec<u8>,
     expected_hash: String,
     display_path: PathBuf,
 }
@@ -685,6 +702,12 @@ impl MemoryService {
             resolved_markdown.as_bytes(),
             None,
         )?);
+        projections.push(OwnedRepositoryProjection::existing_from_absolute(
+            &self.paths,
+            proposal_path,
+            &snapshot.bytes,
+            &snapshot.expected_hash,
+        )?);
         let mut safety_values = okf_proposal_safety_values("proposal", &proposal);
         safety_values.push(safety_value(
             "resolution.resolved_by".to_owned(),
@@ -862,6 +885,8 @@ impl MemoryService {
             .context("proposal-file apply committed but pending backup cleanup failed")?;
         finalize_staged_canonical_writes(&staged_writes)
             .context("proposal-file apply committed but canonical cleanup failed")?;
+        remove_staged_file(&resolved_temp)
+            .context("proposal-file apply committed but resolved staging cleanup failed")?;
         Ok(FileProposalResolutionResult {
             proposal,
             resolution,
@@ -1558,12 +1583,20 @@ impl MemoryService {
         let archived_proposal = proposal.clone();
         let resolved_markdown =
             okf::render_resolved_okf_proposal_markdown(&archived_proposal, &resolution)?;
-        let projections = vec![OwnedRepositoryProjection::from_absolute(
-            &self.paths,
-            &resolved_path,
-            resolved_markdown.as_bytes(),
-            None,
-        )?];
+        let projections = vec![
+            OwnedRepositoryProjection::from_absolute(
+                &self.paths,
+                &resolved_path,
+                resolved_markdown.as_bytes(),
+                None,
+            )?,
+            OwnedRepositoryProjection::existing_from_absolute(
+                &self.paths,
+                proposal_path,
+                &snapshot.bytes,
+                &snapshot.expected_hash,
+            )?,
+        ];
         let mut safety_values = okf_proposal_safety_values("receipt", &archived_proposal);
         safety_values.push(safety_value(
             "resolution.reason".to_owned(),
@@ -1717,6 +1750,8 @@ impl MemoryService {
                 "rejection cleanup rollback",
             );
         }
+        remove_staged_file(&resolved_temp)
+            .context("proposal-file rejection completed but resolved staging cleanup failed")?;
 
         let mut reported_proposal = archived_proposal;
         reported_proposal.sensitivity = snapshot.source_sensitivity;
@@ -1789,6 +1824,7 @@ impl MemoryService {
             proposal,
             source_sensitivity: preflight.sensitivity,
             source_content_class: preflight.content_class,
+            bytes: markdown.into_bytes(),
             expected_hash,
             display_path,
         })
@@ -3465,6 +3501,7 @@ fn borrowed_repository_projections(
             path: &projection.relative_path,
             bytes: &projection.bytes,
             target_revision: projection.target_revision.as_deref(),
+            purpose: projection.purpose,
         })
         .collect()
 }
@@ -3549,17 +3586,26 @@ fn canonical_write_projections(
     paths: &MemoryPaths,
     writes: &[CanonicalFileWrite],
 ) -> Result<Vec<OwnedRepositoryProjection>> {
-    writes
-        .iter()
-        .map(|write| {
-            OwnedRepositoryProjection::from_absolute(
+    let mut projections = Vec::with_capacity(writes.len() * 2);
+    for write in writes {
+        projections.push(OwnedRepositoryProjection::from_absolute(
+            paths,
+            &write.path,
+            write.markdown.as_bytes(),
+            write.expected_existing_hash.as_deref(),
+        )?);
+        if let Some(expected_revision) = write.expected_existing_hash.as_deref() {
+            let existing_bytes = fs::read(&write.path)
+                .context("failed to snapshot existing repository projection bytes")?;
+            projections.push(OwnedRepositoryProjection::existing_from_absolute(
                 paths,
                 &write.path,
-                write.markdown.as_bytes(),
-                write.expected_existing_hash.as_deref(),
-            )
-        })
-        .collect()
+                &existing_bytes,
+                expected_revision,
+            )?);
+        }
+    }
+    Ok(projections)
 }
 
 fn blocked_session_end_result(
@@ -5057,6 +5103,19 @@ fn install_verified_staged_file_no_replace(
     let relative = destination
         .strip_prefix(&paths.project_root)
         .context("repository install destination is outside the project root")?;
+    let matches = mutation
+        .projections
+        .iter()
+        .enumerate()
+        .filter(|(_, projection)| {
+            projection.relative_path == relative
+                && blake3::hash(&projection.bytes).to_hex().as_str() == expected_hash
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [projection_index] = matches.as_slice() else {
+        bail!("repository install must select exactly one authorized path and byte projection");
+    };
     let borrowed = borrowed_repository_projections(mutation.projections);
     repository_io::install_transaction_file_no_replace(
         &paths.project_root,
@@ -5064,11 +5123,26 @@ fn install_verified_staged_file_no_replace(
         &mutation.authorization.policy_context_digest,
         &mutation.authorization.capability,
         &borrowed,
+        *projection_index,
         &repository_transaction_root(paths),
         staged,
-        relative,
-        expected_hash,
     )
+}
+
+fn restore_verified_staged_file_no_replace(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    staged: &Path,
+    destination: &Path,
+    expected_hash: &str,
+) -> Result<()> {
+    install_verified_staged_file_no_replace(paths, mutation, staged, destination, expected_hash)?;
+    remove_staged_file(staged).with_context(|| {
+        format!(
+            "failed to remove restored transaction source {}",
+            staged.display()
+        )
+    })
 }
 
 fn backup_repository_file_to_transaction(
@@ -5081,6 +5155,20 @@ fn backup_repository_file_to_transaction(
     let relative = source
         .strip_prefix(&paths.project_root)
         .context("repository backup source is outside the project root")?;
+    let matches = mutation
+        .projections
+        .iter()
+        .enumerate()
+        .filter(|(_, projection)| {
+            projection.purpose == RepositoryProjectionPurpose::Existing
+                && projection.relative_path == relative
+                && projection.target_revision.as_deref() == Some(expected_hash)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [projection_index] = matches.as_slice() else {
+        bail!("repository backup must select exactly one authorized target revision");
+    };
     let borrowed = borrowed_repository_projections(mutation.projections);
     repository_io::backup_repository_file(
         &paths.project_root,
@@ -5088,10 +5176,9 @@ fn backup_repository_file_to_transaction(
         &mutation.authorization.policy_context_digest,
         &mutation.authorization.capability,
         &borrowed,
-        relative,
+        *projection_index,
         &repository_transaction_root(paths),
         backup,
-        expected_hash,
     )
 }
 
@@ -5104,6 +5191,20 @@ fn remove_installed_repository_file(
     let relative = path
         .strip_prefix(&paths.project_root)
         .context("repository rollback path is outside the project root")?;
+    let matches = mutation
+        .projections
+        .iter()
+        .enumerate()
+        .filter(|(_, projection)| {
+            projection.purpose == RepositoryProjectionPurpose::Write
+                && projection.relative_path == relative
+                && blake3::hash(&projection.bytes).to_hex().as_str() == expected_hash
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [projection_index] = matches.as_slice() else {
+        bail!("repository removal must select exactly one authorized path and byte projection");
+    };
     let borrowed = borrowed_repository_projections(mutation.projections);
     repository_io::remove_repository_file_if_matching(
         &paths.project_root,
@@ -5111,8 +5212,7 @@ fn remove_installed_repository_file(
         &mutation.authorization.policy_context_digest,
         &mutation.authorization.capability,
         &borrowed,
-        relative,
-        expected_hash,
+        *projection_index,
     )
 }
 
@@ -5276,7 +5376,9 @@ fn stage_file(
     let expected =
         OwnedRepositoryProjection::from_absolute(paths, final_path, contents.as_bytes(), None)?;
     if !projections.iter().any(|projection| {
-        projection.relative_path == expected.relative_path && projection.bytes == expected.bytes
+        projection.purpose == RepositoryProjectionPurpose::Write
+            && projection.relative_path == expected.relative_path
+            && projection.bytes == expected.bytes
     }) {
         bail!("staged repository file is not present in the authorized projection batch");
     }
@@ -5495,7 +5597,7 @@ fn rollback_staged_canonical_writes(
         {
             record_cleanup_result(
                 &mut errors,
-                install_verified_staged_file_no_replace(
+                restore_verified_staged_file_no_replace(
                     paths,
                     mutation,
                     backup_path,
@@ -5713,7 +5815,7 @@ fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> Result<()> 
     if rollback.pending_moved {
         record_cleanup_result(
             &mut errors,
-            install_verified_staged_file_no_replace(
+            restore_verified_staged_file_no_replace(
                 rollback.paths,
                 rollback.mutation,
                 rollback.pending_backup,
@@ -6956,7 +7058,12 @@ mod tests {
                 |_| Ok(()),
             )
             .expect_err("a swapped pending parent must fail closed");
-        assert!(format!("{error:#}").contains("without following symlinks"));
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("without following symlinks")
+                || rendered.contains("not a safe directory"),
+            "{rendered}"
+        );
         assert_eq!(fs::read_to_string(outside_file)?, "outside apply sentinel");
         assert!(
             !service
@@ -7049,7 +7156,12 @@ mod tests {
                 |_| Ok(()),
             )
             .expect_err("a swapped pending parent must fail closed");
-        assert!(format!("{error:#}").contains("without following symlinks"));
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("without following symlinks")
+                || rendered.contains("not a safe directory"),
+            "{rendered}"
+        );
         assert_eq!(fs::read_to_string(outside_file)?, "outside reject sentinel");
         Ok(())
     }
@@ -7363,17 +7475,35 @@ mod tests {
                 .is_file()
         );
         let artifacts = lifecycle_transaction_artifacts(&service.paths)?;
-        assert_eq!(artifacts.len(), 1, "unexpected artifacts: {artifacts:?}");
+        assert_eq!(artifacts.len(), 3, "unexpected artifacts: {artifacts:?}");
         assert!(
-            artifacts[0].starts_with(repository_transaction_root(&service.paths)),
+            artifacts
+                .iter()
+                .all(|artifact| artifact.starts_with(repository_transaction_root(&service.paths)))
+        );
+        assert!(
+            artifacts
+                .iter()
+                .all(|artifact| !artifact.starts_with(&service.paths.project_root)),
             "repository transaction artifacts must stay outside the worktree: {artifacts:?}"
         );
-        assert!(!artifacts[0].starts_with(&service.paths.project_root));
-        assert!(
-            artifacts[0]
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".pending.tmp"))
+        let names = artifacts
+            .iter()
+            .filter_map(|artifact| artifact.file_name()?.to_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.ends_with(".pending.tmp"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.ends_with(".write.tmp"))
+                .count(),
+            2
         );
         Ok(())
     }
@@ -7456,6 +7586,90 @@ mod tests {
             "concurrent canonical bytes"
         );
         assert_eq!(fs::read_to_string(&staged)?, "new proposal bytes");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_only_write_and_sync_failures_leave_no_partial_repository_file() -> anyhow::Result<()>
+    {
+        for failure in [
+            repository_io::InjectedCreateFileFailure::Write,
+            repository_io::InjectedCreateFileFailure::Sync,
+        ] {
+            let (_temp, service) = initialized_service()?;
+            let token = format!("createfailure{}", Uuid::now_v7());
+            repository_io::inject_repository_create_failure(failure);
+
+            let error = service
+                .propose_memory_with_options(
+                    "agent:failure-test",
+                    sample_memory_draft("Injected create failure", &token),
+                    ProposeOptions {
+                        approval_override: None,
+                        apply: true,
+                    },
+                )
+                .expect_err("injected create persistence failure must abort the write");
+
+            assert!(format!("{error:#}").contains("injected repository"));
+            assert!(okf::read_okf_record_files(service.paths.records_dir())?.is_empty());
+            assert!(
+                service
+                    .search_memory(SearchInput {
+                        query: token,
+                        ..SearchInput::default()
+                    })?
+                    .is_empty()
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_write_and_sync_failures_restore_the_original_repository_file() -> anyhow::Result<()>
+    {
+        for failure in [
+            repository_io::InjectedCreateFileFailure::Write,
+            repository_io::InjectedCreateFileFailure::Sync,
+        ] {
+            let (_temp, service) = initialized_service()?;
+            let target = apply_test_record(
+                &service,
+                sample_memory_draft("Injected overwrite target", "Original durable body."),
+            )?;
+            let target_path = service
+                .paths
+                .records_dir()
+                .join(format!("{}.md", target.id));
+            let original_markdown = fs::read(&target_path)?;
+            repository_io::inject_repository_create_failure(failure);
+
+            let error = service
+                .supersede_record(
+                    &target.id,
+                    "agent:failure-test",
+                    sample_memory_draft(
+                        "Injected overwrite replacement",
+                        "Replacement durable body.",
+                    ),
+                )
+                .expect_err("injected overwrite persistence failure must abort the write");
+
+            assert!(format!("{error:#}").contains("injected repository"));
+            assert_eq!(fs::read(&target_path)?, original_markdown);
+            assert_eq!(
+                record_by_id(&service.conn, &target.id)?
+                    .context("original record must remain indexed")?
+                    .status,
+                MemoryStatus::Active
+            );
+            let records = okf::read_okf_record_files(service.paths.records_dir())?;
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].concept_id, target.id);
+            assert_eq!(records[0].status, MemoryStatus::Active);
+        }
         Ok(())
     }
 

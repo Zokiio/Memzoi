@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{MemoryDestination, OkfProposalSensitivity, ScopeKind, Visibility};
 
 use super::{
-    RepositoryProjection,
+    RepositoryProjection, RepositoryProjectionPurpose,
     detectors::{MAX_AGGREGATE_BYTES, MAX_FIELD_BYTES, scan_value},
     diagnostics::{
         RepositoryWriteSafetyFinding, RepositoryWriteSafetyReasonCode, RepositoryWriteSafetyReport,
@@ -505,12 +505,14 @@ pub(crate) fn evaluate(request: &RepositoryWriteRequest<'_>) -> RepositoryWriteS
                 path_bytes,
             );
         }
-        scan_value(
-            &format!("{location}.path"),
-            SafetyFieldKind::Path,
-            path_bytes,
-            &mut findings,
-        );
+        if projection.purpose == RepositoryProjectionPurpose::Write {
+            scan_value(
+                &format!("{location}.path"),
+                SafetyFieldKind::Path,
+                path_bytes,
+                &mut findings,
+            );
+        }
         if projection.bytes.len() > MAX_FIELD_BYTES {
             push_finding(
                 &mut findings,
@@ -519,7 +521,7 @@ pub(crate) fn evaluate(request: &RepositoryWriteRequest<'_>) -> RepositoryWriteS
                 "size_limit",
                 &projection.bytes.len().to_le_bytes(),
             );
-        } else {
+        } else if projection.purpose == RepositoryProjectionPurpose::Write {
             scan_value(
                 &format!("{location}.bytes"),
                 SafetyFieldKind::RenderedProjection,

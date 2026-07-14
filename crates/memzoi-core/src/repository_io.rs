@@ -8,6 +8,30 @@ use anyhow::{Context, Result, bail};
 
 use crate::{AuthorizedRepositoryWriteBatch, RepositoryProjection, RepositoryWriteRoute};
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InjectedCreateFileFailure {
+    Write,
+    Sync,
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED_CREATE_FILE_FAILURE: std::cell::Cell<Option<InjectedCreateFileFailure>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_repository_create_failure(failure: InjectedCreateFileFailure) {
+    INJECTED_CREATE_FILE_FAILURE.with(|injected| injected.set(Some(failure)));
+}
+
+#[cfg(test)]
+fn take_repository_create_failure() -> Option<InjectedCreateFileFailure> {
+    INJECTED_CREATE_FILE_FAILURE.with(std::cell::Cell::take)
+}
+
 #[cfg(unix)]
 fn repository_directory_mode() -> rustix::fs::Mode {
     use rustix::fs::Mode;
@@ -119,17 +143,15 @@ fn read_regular_at(
 
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-fn create_file_at(
+fn create_authorized_repository_projection(
     project_root: &Path,
     expected_route: RepositoryWriteRoute,
     expected_policy_context_digest: &[u8; 32],
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[RepositoryProjection<'_>],
-    directory: &std::os::fd::OwnedFd,
-    file_name: &std::ffi::OsStr,
-    bytes: &[u8],
+    projection_index: usize,
     label: &str,
-) -> Result<fs::File> {
+) -> Result<(std::os::fd::OwnedFd, std::ffi::OsString, fs::File)> {
     use rustix::fs::{OFlags, openat};
 
     verify_repository_batch(
@@ -139,18 +161,56 @@ fn create_file_at(
         authorization,
         projections,
     )?;
+    let projection = projections
+        .get(projection_index)
+        .context("authorized repository projection index is out of bounds")?;
+    let (directory, file_name) = open_repository_parent(project_root, projection.path)?;
     let file = openat(
-        directory,
-        file_name,
+        &directory,
+        &file_name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         repository_file_mode(),
     )
     .with_context(|| format!("failed to create {label} without replacement"))?;
     let mut file = fs::File::from(file);
-    file.write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .with_context(|| format!("failed to persist {label}"))?;
-    Ok(file)
+    #[cfg(test)]
+    let injected_failure = take_repository_create_failure();
+
+    #[cfg(test)]
+    let persist_result = match injected_failure {
+        Some(InjectedCreateFileFailure::Write) => {
+            let partial_len = projection.bytes.len().min(1);
+            file.write_all(&projection.bytes[..partial_len])
+                .and_then(|_| Err(std::io::Error::other("injected repository write failure")))
+        }
+        Some(InjectedCreateFileFailure::Sync) => file
+            .write_all(projection.bytes)
+            .and_then(|_| Err(std::io::Error::other("injected repository sync failure"))),
+        None => file
+            .write_all(projection.bytes)
+            .and_then(|_| file.sync_all()),
+    };
+    #[cfg(not(test))]
+    let persist_result = file
+        .write_all(projection.bytes)
+        .and_then(|_| file.sync_all());
+
+    if let Err(error) = persist_result {
+        let persistence_error =
+            anyhow::Error::new(error).context(format!("failed to persist {label}"));
+        return match cleanup_created_file(
+            &directory,
+            &file_name,
+            &file,
+            "incomplete repository destination",
+        ) {
+            Ok(()) => Err(persistence_error),
+            Err(cleanup_error) => Err(persistence_error).context(format!(
+                "additionally failed to clean incomplete repository destination: {cleanup_error:#}"
+            )),
+        };
+    }
+    Ok((directory, file_name, file))
 }
 
 #[cfg(unix)]
@@ -175,6 +235,39 @@ fn named_file_still_matches(
     Ok(opened.dev() == named.st_dev as u64 && opened.ino() == named.st_ino as u64)
 }
 
+#[cfg(unix)]
+fn cleanup_created_file(
+    directory: &std::os::fd::OwnedFd,
+    file_name: &std::ffi::OsStr,
+    opened: &fs::File,
+    label: &str,
+) -> Result<()> {
+    use rustix::fs::{AtFlags, fsync, unlinkat};
+
+    let unlink_result = match named_file_still_matches(directory, file_name, opened) {
+        Ok(true) => unlinkat(directory, file_name, AtFlags::empty())
+            .with_context(|| format!("failed to unlink {label}")),
+        Ok(false) => Err(anyhow::anyhow!(
+            "{label} name no longer identifies the created file"
+        )),
+        Err(error) => Err(error).with_context(|| format!("failed to identify {label}")),
+    };
+    let sync_result = fsync(directory).with_context(|| format!("failed to sync parent of {label}"));
+    match (unlink_result, sync_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (unlink, sync) => {
+            let mut errors = Vec::new();
+            if let Err(error) = unlink {
+                errors.push(format!("unlink: {error:#}"));
+            }
+            if let Err(error) = sync {
+                errors.push(format!("directory sync: {error:#}"));
+            }
+            bail!("{}", errors.join("; "))
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install_transaction_file_no_replace(
     project_root: &Path,
@@ -182,10 +275,9 @@ pub(crate) fn install_transaction_file_no_replace(
     expected_policy_context_digest: &[u8; 32],
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[RepositoryProjection<'_>],
+    projection_index: usize,
     transaction_root: &Path,
     staged_path: &Path,
-    destination_relative: &Path,
-    expected_hash: &str,
 ) -> Result<()> {
     #[cfg(not(unix))]
     {
@@ -195,52 +287,79 @@ pub(crate) fn install_transaction_file_no_replace(
             expected_policy_context_digest,
             authorization,
             projections,
+            projection_index,
             transaction_root,
             staged_path,
-            destination_relative,
-            expected_hash,
         );
         bail!("secure staged repository installation is unavailable on this platform");
     }
 
     #[cfg(unix)]
     {
-        use rustix::fs::{AtFlags, fsync, unlinkat};
+        use rustix::fs::fsync;
 
         let (source_directory, source_name) =
             open_transaction_parent(transaction_root, staged_path)?;
         let (source, bytes) =
             read_regular_at(&source_directory, &source_name, "staged repository file")?;
-        if blake3::hash(&bytes).to_hex().as_str() != expected_hash {
-            bail!("staged repository bytes changed after authorization");
-        }
-        let (destination_directory, destination_name) =
-            open_repository_parent(project_root, destination_relative)?;
-        let destination = create_file_at(
+        verify_repository_batch(
             project_root,
             expected_route,
             expected_policy_context_digest,
             authorization,
             projections,
-            &destination_directory,
-            &destination_name,
-            &bytes,
-            "authorized repository destination",
         )?;
-        if !named_file_still_matches(&source_directory, &source_name, &source)? {
-            if named_file_still_matches(&destination_directory, &destination_name, &destination)? {
-                let _ = unlinkat(&destination_directory, &destination_name, AtFlags::empty());
-            }
-            bail!("staged repository file changed during installation");
+        let projection = projections
+            .get(projection_index)
+            .context("authorized repository projection index is out of bounds")?;
+        if bytes != projection.bytes {
+            bail!("staged repository bytes do not match the authorized projection");
         }
-        if let Err(error) = unlinkat(&source_directory, &source_name, AtFlags::empty()) {
-            if named_file_still_matches(&destination_directory, &destination_name, &destination)? {
-                let _ = unlinkat(&destination_directory, &destination_name, AtFlags::empty());
-            }
-            return Err(error).context("failed to remove installed transaction source");
+        let (destination_directory, destination_name, destination) =
+            create_authorized_repository_projection(
+                project_root,
+                expected_route,
+                expected_policy_context_digest,
+                authorization,
+                projections,
+                projection_index,
+                "authorized repository destination",
+            )?;
+        let source_matches = named_file_still_matches(&source_directory, &source_name, &source)
+            .context("failed to revalidate staged repository file during installation");
+        if !matches!(source_matches, Ok(true)) {
+            let install_error = match source_matches {
+                Ok(false) => anyhow::anyhow!("staged repository file changed during installation"),
+                Err(error) => error,
+                Ok(true) => unreachable!(),
+            };
+            return match cleanup_created_file(
+                &destination_directory,
+                &destination_name,
+                &destination,
+                "repository destination after staged-source revalidation failure",
+            ) {
+                Ok(()) => Err(install_error),
+                Err(cleanup_error) => Err(install_error).context(format!(
+                    "additionally failed to clean repository destination: {cleanup_error:#}"
+                )),
+            };
         }
-        fsync(&source_directory).context("failed to sync repository transaction root")?;
-        fsync(&destination_directory).context("failed to sync repository destination parent")?;
+        if let Err(error) = fsync(&destination_directory) {
+            let sync_error =
+                anyhow::Error::new(error).context("failed to sync repository destination parent");
+            return match cleanup_created_file(
+                &destination_directory,
+                &destination_name,
+                &destination,
+                "repository destination after directory-sync failure",
+            ) {
+                Ok(()) => Err(sync_error),
+                Err(cleanup_error) => Err(sync_error).context(format!(
+                    "additionally failed to clean repository destination: {cleanup_error:#}"
+                )),
+            };
+        }
         Ok(())
     }
 }
@@ -252,10 +371,9 @@ pub(crate) fn backup_repository_file(
     expected_policy_context_digest: &[u8; 32],
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[RepositoryProjection<'_>],
-    source_relative: &Path,
+    projection_index: usize,
     transaction_root: &Path,
     backup_path: &Path,
-    expected_hash: &str,
 ) -> Result<()> {
     #[cfg(not(unix))]
     {
@@ -265,38 +383,72 @@ pub(crate) fn backup_repository_file(
             expected_policy_context_digest,
             authorization,
             projections,
-            source_relative,
+            projection_index,
             transaction_root,
             backup_path,
-            expected_hash,
         );
         bail!("secure repository backup is unavailable on this platform");
     }
 
     #[cfg(unix)]
     {
-        use rustix::fs::{AtFlags, fsync, unlinkat};
+        use rustix::fs::{AtFlags, OFlags, fsync, openat, unlinkat};
 
-        let (source_directory, source_name) =
-            open_repository_parent(project_root, source_relative)?;
-        let (source, bytes) =
-            read_regular_at(&source_directory, &source_name, "repository source")?;
-        if blake3::hash(&bytes).to_hex().as_str() != expected_hash {
-            bail!("repository source changed after validation");
-        }
-        let (backup_directory, backup_name) =
-            open_transaction_parent(transaction_root, backup_path)?;
-        let backup = create_file_at(
+        verify_repository_batch(
             project_root,
             expected_route,
             expected_policy_context_digest,
             authorization,
             projections,
+        )?;
+        let projection = projections
+            .get(projection_index)
+            .context("authorized repository projection index is out of bounds")?;
+        if projection.purpose != crate::RepositoryProjectionPurpose::Existing {
+            bail!("repository backup requires an authorized existing-state projection");
+        }
+        let expected_revision = projection
+            .target_revision
+            .context("repository backup projection is missing its target revision")?;
+        let (source_directory, source_name) =
+            open_repository_parent(project_root, projection.path)?;
+        let (source, bytes) =
+            read_regular_at(&source_directory, &source_name, "repository source")?;
+        if blake3::hash(&bytes).to_hex().as_str() != expected_revision {
+            bail!(
+                "repository source changed after validation and no longer matches the authorized target revision"
+            );
+        }
+        if bytes != projection.bytes {
+            bail!(
+                "repository source changed after validation and no longer matches the authorized projection bytes"
+            );
+        }
+        let (backup_directory, backup_name) =
+            open_transaction_parent(transaction_root, backup_path)?;
+        let backup = openat(
             &backup_directory,
             &backup_name,
-            &bytes,
-            "repository transaction backup",
-        )?;
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            repository_file_mode(),
+        )
+        .context("failed to create repository transaction backup without replacement")?;
+        let mut backup = fs::File::from(backup);
+        if let Err(error) = backup.write_all(&bytes).and_then(|_| backup.sync_all()) {
+            let backup_error = anyhow::Error::new(error)
+                .context("failed to persist repository transaction backup");
+            return match cleanup_created_file(
+                &backup_directory,
+                &backup_name,
+                &backup,
+                "incomplete repository transaction backup",
+            ) {
+                Ok(()) => Err(backup_error),
+                Err(cleanup_error) => Err(backup_error).context(format!(
+                    "additionally failed to clean incomplete transaction backup: {cleanup_error:#}"
+                )),
+            };
+        }
         if !named_file_still_matches(&source_directory, &source_name, &source)? {
             if named_file_still_matches(&backup_directory, &backup_name, &backup)? {
                 let _ = unlinkat(&backup_directory, &backup_name, AtFlags::empty());
@@ -321,8 +473,7 @@ pub(crate) fn remove_repository_file_if_matching(
     expected_policy_context_digest: &[u8; 32],
     authorization: &AuthorizedRepositoryWriteBatch,
     projections: &[RepositoryProjection<'_>],
-    relative: &Path,
-    expected_hash: &str,
+    projection_index: usize,
 ) -> Result<()> {
     verify_repository_batch(
         project_root,
@@ -339,8 +490,7 @@ pub(crate) fn remove_repository_file_if_matching(
             expected_policy_context_digest,
             authorization,
             projections,
-            relative,
-            expected_hash,
+            projection_index,
         );
         bail!("secure repository removal is unavailable on this platform");
     }
@@ -349,10 +499,16 @@ pub(crate) fn remove_repository_file_if_matching(
     {
         use rustix::fs::{AtFlags, fsync, unlinkat};
 
-        let (directory, file_name) = open_repository_parent(project_root, relative)?;
+        let projection = projections
+            .get(projection_index)
+            .context("authorized repository projection index is out of bounds")?;
+        if projection.purpose != crate::RepositoryProjectionPurpose::Write {
+            bail!("repository removal requires an authorized write projection");
+        }
+        let (directory, file_name) = open_repository_parent(project_root, projection.path)?;
         let (file, bytes) = read_regular_at(&directory, &file_name, "repository rollback file")?;
-        if blake3::hash(&bytes).to_hex().as_str() != expected_hash {
-            bail!("repository rollback file changed after installation");
+        if bytes != projection.bytes {
+            bail!("repository rollback file does not match the authorized projection bytes");
         }
         if !named_file_still_matches(&directory, &file_name, &file)? {
             bail!("repository rollback file changed before removal");
@@ -638,6 +794,7 @@ mod tests {
             path: relative,
             bytes,
             target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
         }];
         let fields = [SafetyField {
             location: "candidate.body",
@@ -672,6 +829,7 @@ mod tests {
             path: relative,
             bytes: b"changed repository knowledge",
             target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
         }];
         assert!(
             verify_repository_batch(
@@ -739,6 +897,68 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn staged_install_cannot_reuse_a_capability_for_other_path_or_bytes() {
+        let project = tempfile::tempdir().unwrap();
+        let transactions = tempfile::tempdir().unwrap();
+        let authorized_relative = Path::new(".memzoi/records/authorized.md");
+        let unauthorized_relative = Path::new(".memzoi/records/unauthorized.md");
+        let authorized_bytes = b"authorized repository knowledge";
+        let projections = [RepositoryProjection {
+            path: authorized_relative,
+            bytes: authorized_bytes,
+            target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
+        }];
+        let (context_digest, token) = authorize_create(project.path(), &projections);
+        fs::create_dir_all(project.path().join(".memzoi/records")).unwrap();
+        let staged = transactions.path().join("staged.tmp");
+        fs::write(&staged, b"different bytes for a different path").unwrap();
+
+        let error = install_transaction_file_no_replace(
+            project.path(),
+            RepositoryWriteRoute::FileProposalCreate,
+            &context_digest,
+            &token,
+            &projections,
+            0,
+            transactions.path(),
+            &staged,
+        )
+        .expect_err("staged bytes outside the selected projection must fail closed");
+
+        assert!(error.to_string().contains("authorized projection"));
+        assert!(!project.path().join(authorized_relative).exists());
+        assert!(!project.path().join(unauthorized_relative).exists());
+        assert_eq!(
+            fs::read(&staged).unwrap(),
+            b"different bytes for a different path"
+        );
+
+        fs::write(&staged, authorized_bytes).unwrap();
+        let unauthorized_projections = [RepositoryProjection {
+            path: unauthorized_relative,
+            bytes: authorized_bytes,
+            target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
+        }];
+        let error = install_transaction_file_no_replace(
+            project.path(),
+            RepositoryWriteRoute::FileProposalCreate,
+            &context_digest,
+            &token,
+            &unauthorized_projections,
+            0,
+            transactions.path(),
+            &staged,
+        )
+        .expect_err("an authorized capability must not be reusable for another path");
+        assert!(error.to_string().contains("exact route, project, paths"));
+        assert!(!project.path().join(authorized_relative).exists());
+        assert!(!project.path().join(unauthorized_relative).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn final_destination_symlink_is_rejected() {
         use std::os::unix::fs::symlink;
 
@@ -751,6 +971,7 @@ mod tests {
             path: relative,
             bytes,
             target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
         }];
         let (context_digest, token) = authorize_create(temp.path(), &projections);
         let destination = temp.path().join(relative);
@@ -787,6 +1008,7 @@ mod tests {
             path: relative,
             bytes: b"safe repository knowledge",
             target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
         }];
         let (context_digest, token) = authorize_create(temp.path(), &projections);
         create_repository_batch(

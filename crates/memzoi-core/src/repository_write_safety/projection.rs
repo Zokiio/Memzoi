@@ -7,11 +7,27 @@ use super::{
     RepositoryWriteRequest,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryProjectionPurpose {
+    Write,
+    Existing,
+}
+
+impl RepositoryProjectionPurpose {
+    pub(crate) fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Write => b"write",
+            Self::Existing => b"existing",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct RepositoryProjection<'a> {
     pub path: &'a Path,
     pub bytes: &'a [u8],
     pub target_revision: Option<&'a str>,
+    pub purpose: RepositoryProjectionPurpose,
 }
 
 impl std::fmt::Debug for RepositoryProjection<'_> {
@@ -24,6 +40,7 @@ impl std::fmt::Debug for RepositoryProjection<'_> {
                 &format_args!("<redacted:{} bytes>", self.bytes.len()),
             )
             .field("target_revision", &self.target_revision)
+            .field("purpose", &self.purpose)
             .finish()
     }
 }
@@ -40,6 +57,7 @@ pub(crate) fn projection_digest(projections: &[RepositoryProjection<'_>]) -> [u8
         put_bytes(&mut hasher, projection.path.as_os_str().as_encoded_bytes());
         put_bytes(&mut hasher, projection.bytes);
         put_optional(&mut hasher, projection.target_revision.map(str::as_bytes));
+        put_bytes(&mut hasher, projection.purpose.as_bytes());
     }
     *hasher.finalize().as_bytes()
 }
@@ -114,6 +132,7 @@ pub(crate) fn candidate_fingerprint(request: &RepositoryWriteRequest<'_>) -> Str
         put_bytes(&mut hasher, projection.path.as_os_str().as_encoded_bytes());
         put_bytes(&mut hasher, projection.bytes);
         put_optional(&mut hasher, projection.target_revision.map(str::as_bytes));
+        put_bytes(&mut hasher, projection.purpose.as_bytes());
     }
     hasher.finalize().to_hex().to_string()
 }

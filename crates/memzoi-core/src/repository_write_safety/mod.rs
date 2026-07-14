@@ -11,7 +11,7 @@ pub use policy::{
     AuthorizationProof, FreshnessCheck, ProvenanceAssessment, RepositoryContentClass,
     RepositoryScope, RepositoryWriteRequest, RepositoryWriteRoute, SafetyField, SafetyFieldKind,
 };
-pub use projection::RepositoryProjection;
+pub use projection::{RepositoryProjection, RepositoryProjectionPurpose};
 
 use std::fmt;
 
@@ -180,6 +180,7 @@ fn scan_repository_blob_with_policy(
         path: repository_relative_path,
         bytes,
         target_revision: None,
+        purpose: RepositoryProjectionPurpose::Write,
     }];
     let request = RepositoryWriteRequest {
         route: RepositoryWriteRoute::Maintenance,

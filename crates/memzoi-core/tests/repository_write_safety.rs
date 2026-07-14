@@ -3,9 +3,9 @@ use std::path::Path;
 use memzoi_core::{
     AuthorizationProof, MemoryDestination, OkfProposalSensitivity, ProvenanceAssessment,
     REPOSITORY_WRITE_DETECTOR_POLICY_VERSION, REPOSITORY_WRITE_SAFETY_SCHEMA,
-    RepositoryContentClass, RepositoryProjection, RepositoryScope, RepositoryWriteRequest,
-    RepositoryWriteRoute, SafetyField, SafetyFieldKind, ScopeKind, Visibility,
-    authorize_repository_write, scan_managed_repository_blob, scan_repository_blob,
+    RepositoryContentClass, RepositoryProjection, RepositoryProjectionPurpose, RepositoryScope,
+    RepositoryWriteRequest, RepositoryWriteRoute, SafetyField, SafetyFieldKind, ScopeKind,
+    Visibility, authorize_repository_write, scan_managed_repository_blob, scan_repository_blob,
 };
 
 fn safe_request<'a>(
@@ -43,6 +43,7 @@ fn safe_request<'a>(
             path,
             bytes: value,
             target_revision: None,
+            purpose: RepositoryProjectionPurpose::Write,
         }],
     }
 }
@@ -217,6 +218,18 @@ fn capability_changes_when_any_output_byte_changes() {
     let changed = safe_request(b"project", b"safe knowledge changed", path);
     let second = authorize_repository_write(&changed).unwrap();
     assert_ne!(first.digest(), second.digest());
+}
+
+#[test]
+fn capability_changes_when_projection_purpose_changes() {
+    let path = Path::new(".memzoi/records/candidate.md");
+    let write = safe_request(b"project", b"safe knowledge", path);
+    let write_capability = authorize_repository_write(&write).unwrap();
+    let mut existing = safe_request(b"project", b"safe knowledge", path);
+    existing.projections[0].purpose = RepositoryProjectionPurpose::Existing;
+    existing.projections[0].target_revision = Some("existing-revision");
+    let existing_capability = authorize_repository_write(&existing).unwrap();
+    assert_ne!(write_capability.digest(), existing_capability.digest());
 }
 
 #[test]
