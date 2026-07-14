@@ -42,6 +42,23 @@ use crate::{
     },
 };
 
+mod canonical_write;
+mod safe_files;
+
+use self::canonical_write::{
+    CanonicalFileWrite, CanonicalWriteSession, FileWriteMode, StagedCanonicalFileWrite,
+    cleanup_staged_canonical_writes, finalize_staged_canonical_writes,
+    install_staged_canonical_writes, prepare_canonical_file_write,
+    rollback_staged_canonical_writes, stage_canonical_writes,
+    validate_canonical_write_precondition,
+};
+use self::safe_files::{
+    RepoLifecycleLock, ensure_path_absent, ensure_regular_file, ensure_safe_directory,
+    ensure_safe_existing_file, ensure_safe_path_parent, install_staged_file_no_replace,
+    lifecycle_transaction_artifacts, remove_staged_file, sibling_transaction_path, stage_file,
+    sync_directory,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InitRequest {
     pub force: bool,
@@ -199,37 +216,12 @@ pub struct MemoryService {
     clock: Arc<dyn Clock>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FileWriteMode {
-    CreateNew,
-    Overwrite,
-}
-
 #[derive(Debug)]
 struct FileProposalApplyPlan {
     writes: Vec<CanonicalFileWrite>,
     record: MemoryRecord,
     record_path: PathBuf,
     target_id: Option<String>,
-}
-
-#[derive(Debug)]
-struct CanonicalFileWrite {
-    record_file: okf::OkfRecordFile,
-    path: PathBuf,
-    markdown: String,
-    mode: FileWriteMode,
-    expected_existing_hash: Option<String>,
-}
-
-#[derive(Debug)]
-struct StagedCanonicalFileWrite {
-    path: PathBuf,
-    temp_path: PathBuf,
-    backup_path: Option<PathBuf>,
-    mode: FileWriteMode,
-    expected_existing_hash: Option<String>,
-    installed: bool,
 }
 
 #[derive(Debug)]
@@ -285,10 +277,6 @@ struct LoadedCaptureApplyJournal {
     journal: CaptureApplyJournal,
     content_bytes: u64,
     content_hash: String,
-}
-
-struct RepoLifecycleLock {
-    _file: fs::File,
 }
 
 impl MemoryService {
@@ -439,12 +427,16 @@ impl MemoryService {
     }
 
     pub fn apply_proposal(&self, proposal_id: &str, actor: &str) -> Result<MemoryRecord> {
-        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        let session = CanonicalWriteSession::begin(&self.paths)?;
         let tx = self.conn.unchecked_transaction()?;
         let record = proposals::apply_proposal(&tx, proposal_id, actor)?;
-        let write =
-            self.prepare_record_file_write_with_conn(&tx, &record, FileWriteMode::CreateNew)?;
-        commit_db_and_canonical_writes(&self.paths, tx, &[write])?;
+        let write = self.prepare_record_file_write_with_conn(
+            &session,
+            &tx,
+            &record,
+            FileWriteMode::CreateNew,
+        )?;
+        session.commit(tx, &[write])?;
         Ok(record)
     }
 
@@ -1019,7 +1011,8 @@ impl MemoryService {
                     bail!("OKF create proposals cannot name a target or supersedes record");
                 }
                 let record = okf::project_okf_create_proposal(proposal)?;
-                let write = self.prepare_canonical_file_write(
+                let write = prepare_canonical_file_write(
+                    &self.paths,
                     record.clone(),
                     proposal.tags.clone(),
                     proposal.applies_to.clone(),
@@ -1051,13 +1044,15 @@ impl MemoryService {
                         replacement.id
                     );
                 }
-                let previous_write = self.prepare_canonical_file_write(
+                let previous_write = prepare_canonical_file_write(
+                    &self.paths,
                     previous,
                     target.draft.tags.clone(),
                     target.applies_to.clone(),
                     FileWriteMode::Overwrite,
                 )?;
-                let replacement_write = self.prepare_canonical_file_write(
+                let replacement_write = prepare_canonical_file_write(
+                    &self.paths,
                     replacement.clone(),
                     proposal.tags.clone(),
                     proposal.applies_to.clone(),
@@ -1085,7 +1080,8 @@ impl MemoryService {
                 let mut tombstoned = okf::project_okf_record(&target);
                 tombstoned.status = MemoryStatus::Tombstoned;
                 tombstoned.updated_at = resolved_at.to_owned();
-                let write = self.prepare_canonical_file_write(
+                let write = prepare_canonical_file_write(
+                    &self.paths,
                     tombstoned.clone(),
                     target.draft.tags.clone(),
                     target.applies_to.clone(),
@@ -1099,48 +1095,6 @@ impl MemoryService {
                 })
             }
         }
-    }
-
-    fn prepare_canonical_file_write(
-        &self,
-        record: MemoryRecord,
-        tags: Vec<String>,
-        applies_to: Vec<String>,
-        mode: FileWriteMode,
-    ) -> Result<CanonicalFileWrite> {
-        let records_root = self.paths.records_dir();
-        let path = records_root.join(format!("{}.md", record.id));
-        ensure_safe_path_parent(
-            &self.paths.project_root,
-            &records_root,
-            &path,
-            false,
-            "canonical memory record",
-        )
-        .with_context(|| {
-            format!(
-                "failed to inspect canonical memory record {}",
-                path.display()
-            )
-        })?;
-        match mode {
-            FileWriteMode::CreateNew => ensure_path_absent(&path, "canonical memory record")?,
-            FileWriteMode::Overwrite => ensure_regular_file(&path, "canonical memory record")?,
-        }
-        let expected_existing_hash = match mode {
-            FileWriteMode::CreateNew => None,
-            FileWriteMode::Overwrite => Some(file_content_hash(&path)?),
-        };
-        let markdown = okf::render_memory_record_markdown(&record, &tags, &applies_to);
-        let record_file = okf::parse_okf_record_markdown(&records_root, &path, &markdown)?
-            .context("projected canonical record was ignored")?;
-        Ok(CanonicalFileWrite {
-            record_file,
-            path,
-            markdown,
-            mode,
-            expected_existing_hash,
-        })
     }
 
     fn load_file_proposal_target(
@@ -1500,7 +1454,7 @@ impl MemoryService {
         BeforeInstall: FnMut(usize) -> Result<()>,
         BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
     {
-        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        let session = CanonicalWriteSession::begin(&self.paths)?;
         let tx = self.conn.unchecked_transaction()?;
         let target = record_by_id(&tx, record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -1516,17 +1470,18 @@ impl MemoryService {
         }
         let result = proposals::supersede_record(&tx, record_id, actor, draft)?;
         let previous_write = self.prepare_record_file_write_with_conn(
+            &session,
             &tx,
             &result.previous,
             FileWriteMode::Overwrite,
         )?;
         let replacement_write = self.prepare_record_file_write_with_conn(
+            &session,
             &tx,
             &result.replacement,
             FileWriteMode::CreateNew,
         )?;
-        commit_db_and_canonical_writes_with_hooks(
-            &self.paths,
+        session.commit_with_hooks(
             tx,
             &[previous_write, replacement_write],
             before_install,
@@ -1541,20 +1496,25 @@ impl MemoryService {
         actor: &str,
         reason: &str,
     ) -> Result<MemoryRecord> {
-        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        let session = CanonicalWriteSession::begin(&self.paths)?;
         let tx = self.conn.unchecked_transaction()?;
         let target = record_by_id(&tx, record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
         validate_legacy_canonical_target(&target)?;
         let record = proposals::tombstone_record(&tx, record_id, actor, reason)?;
-        let write =
-            self.prepare_record_file_write_with_conn(&tx, &record, FileWriteMode::Overwrite)?;
-        commit_db_and_canonical_writes(&self.paths, tx, &[write])?;
+        let write = self.prepare_record_file_write_with_conn(
+            &session,
+            &tx,
+            &record,
+            FileWriteMode::Overwrite,
+        )?;
+        session.commit(tx, &[write])?;
         Ok(record)
     }
 
     fn prepare_record_file_write_with_conn(
         &self,
+        session: &CanonicalWriteSession<'_>,
         conn: &Connection,
         record: &MemoryRecord,
         mode: FileWriteMode,
@@ -1564,7 +1524,10 @@ impl MemoryService {
             .into_iter()
             .map(|path| path.path)
             .collect::<Vec<_>>();
-        self.prepare_canonical_file_write(record.clone(), tags, applies_to, mode)
+        match mode {
+            FileWriteMode::CreateNew => session.prepare_create(record.clone(), tags, applies_to),
+            FileWriteMode::Overwrite => session.prepare_replace(record.clone(), tags, applies_to),
+        }
     }
 
     pub fn search_memory(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
@@ -2532,32 +2495,6 @@ fn blocked_session_end_result(document: SessionEndDocument) -> SessionEndResult 
     }
 }
 
-impl RepoLifecycleLock {
-    fn acquire(paths: &MemoryPaths) -> Result<Self> {
-        fs::create_dir_all(&paths.runtime_dir).with_context(|| {
-            format!(
-                "failed to create runtime directory {}",
-                paths.runtime_dir.display()
-            )
-        })?;
-        let lock_path = paths.runtime_dir.join("repo-lifecycle.lock");
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| format!("failed to open lifecycle lock {}", lock_path.display()))?;
-        file.try_lock().with_context(|| {
-            format!(
-                "another repo lifecycle operation is in progress; retry after {} is unlocked",
-                lock_path.display()
-            )
-        })?;
-        Ok(Self { _file: file })
-    }
-}
-
 fn build_capture_apply_journal(
     plan: &CapturePlan,
     review: &CaptureReview,
@@ -3005,18 +2942,6 @@ fn remove_capture_apply_file_if_matching(
     Ok(())
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<()> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .with_context(|| format!("failed to sync directory {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
 pub fn scan_file_proposal_inventory(paths: &MemoryPaths) -> Result<FileProposalInventory> {
     let mut inventory = FileProposalInventory::default();
     let proposals_root = paths.proposals_dir();
@@ -3121,55 +3046,6 @@ pub fn scan_file_proposal_inventory(paths: &MemoryPaths) -> Result<FileProposalI
 
 pub fn lifecycle_transaction_artifact_count(paths: &MemoryPaths) -> Result<usize> {
     Ok(lifecycle_transaction_artifacts(paths)?.len())
-}
-
-fn lifecycle_transaction_artifacts(paths: &MemoryPaths) -> Result<Vec<PathBuf>> {
-    let mut artifacts = Vec::new();
-    for (root, label) in [
-        (paths.records_dir(), "canonical record root"),
-        (paths.proposals_dir(), "proposal root"),
-    ] {
-        match fs::symlink_metadata(&root) {
-            Ok(_) => ensure_safe_directory(&paths.project_root, &root, false, label)?,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to inspect {label} {}", root.display()));
-            }
-        }
-        collect_lifecycle_transaction_artifacts(&root, &mut artifacts)?;
-    }
-    artifacts.sort();
-    Ok(artifacts)
-}
-
-fn collect_lifecycle_transaction_artifacts(
-    directory: &Path,
-    artifacts: &mut Vec<PathBuf>,
-) -> Result<()> {
-    for entry in fs::read_dir(directory)
-        .with_context(|| format!("failed to read {}", directory.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_lifecycle_transaction_artifacts(&path, artifacts)?;
-        } else if file_type.is_file()
-            && entry.file_name().to_str().is_some_and(|name| {
-                name.starts_with('.')
-                    && [".write.tmp", ".canonical.tmp", ".pending.tmp"]
-                        .iter()
-                        .any(|suffix| name.ends_with(suffix))
-            })
-        {
-            artifacts.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn scan_proposal_directory(
@@ -3535,185 +3411,6 @@ fn ensure_expected_canonical_bytes(
     Ok(())
 }
 
-fn ensure_safe_directory(
-    project_root: &Path,
-    directory: &Path,
-    create_missing: bool,
-    label: &str,
-) -> Result<()> {
-    ensure_directory_chain(project_root, directory, create_missing, label)?;
-    let canonical_project = fs::canonicalize(project_root).with_context(|| {
-        format!(
-            "failed to canonicalize project root {}",
-            project_root.display()
-        )
-    })?;
-    let canonical_directory = fs::canonicalize(directory)
-        .with_context(|| format!("failed to canonicalize {label} {}", directory.display()))?;
-    if !canonical_directory.starts_with(&canonical_project) {
-        bail!("{label} escapes project root: {}", directory.display());
-    }
-    Ok(())
-}
-
-fn ensure_directory_chain(
-    root: &Path,
-    directory: &Path,
-    create_missing: bool,
-    label: &str,
-) -> Result<()> {
-    let relative = directory.strip_prefix(root).with_context(|| {
-        format!(
-            "{label} {} is not under trusted root {}",
-            directory.display(),
-            root.display()
-        )
-    })?;
-    let root_metadata = fs::symlink_metadata(root)
-        .with_context(|| format!("failed to inspect trusted root {}", root.display()))?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        bail!("trusted root must be a real directory: {}", root.display());
-    }
-
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(component) = component else {
-            bail!("{label} path contains traversal or an unsafe component");
-        };
-        current.push(component);
-        let metadata = match fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == ErrorKind::NotFound && create_missing => {
-                fs::create_dir(&current).with_context(|| {
-                    format!("failed to create {label} directory {}", current.display())
-                })?;
-                fs::symlink_metadata(&current)?
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to inspect {label} {}", current.display()));
-            }
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            bail!(
-                "{label} ancestor must be a real directory: {}",
-                current.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn ensure_safe_path_parent(
-    project_root: &Path,
-    trusted_root: &Path,
-    path: &Path,
-    create_missing_parent: bool,
-    label: &str,
-) -> Result<()> {
-    ensure_safe_directory(project_root, trusted_root, false, label)?;
-    let relative = path.strip_prefix(trusted_root).with_context(|| {
-        format!(
-            "{label} {} is not under trusted root {}",
-            path.display(),
-            trusted_root.display()
-        )
-    })?;
-    if relative
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        bail!("{label} path contains traversal or an unsafe component");
-    }
-    let parent = path.parent().context("safe destination has no parent")?;
-    ensure_directory_chain(trusted_root, parent, create_missing_parent, label)?;
-    let canonical_root = fs::canonicalize(trusted_root).with_context(|| {
-        format!(
-            "failed to canonicalize trusted root {}",
-            trusted_root.display()
-        )
-    })?;
-    let canonical_parent = fs::canonicalize(parent)
-        .with_context(|| format!("failed to canonicalize {label} parent {}", parent.display()))?;
-    if !canonical_parent.starts_with(&canonical_root) {
-        bail!(
-            "{label} destination escapes trusted root: {}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-fn ensure_safe_existing_file(
-    project_root: &Path,
-    trusted_root: &Path,
-    path: &Path,
-    label: &str,
-) -> Result<()> {
-    ensure_safe_path_parent(project_root, trusted_root, path, false, label)?;
-    ensure_regular_file(path, label)
-}
-
-fn file_content_hash(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
-}
-
-fn validate_canonical_write_precondition(
-    paths: &MemoryPaths,
-    write: &StagedCanonicalFileWrite,
-) -> Result<()> {
-    let records_root = paths.records_dir();
-    ensure_safe_path_parent(
-        &paths.project_root,
-        &records_root,
-        &write.path,
-        false,
-        "canonical memory record",
-    )?;
-    match write.mode {
-        FileWriteMode::CreateNew => ensure_path_absent(&write.path, "canonical memory record"),
-        FileWriteMode::Overwrite => {
-            ensure_regular_file(&write.path, "canonical memory record")?;
-            let expected = write
-                .expected_existing_hash
-                .as_deref()
-                .context("overwrite write is missing captured canonical hash")?;
-            let actual = file_content_hash(&write.path)?;
-            if actual != expected {
-                bail!(
-                    "canonical target changed after validation: {}",
-                    write.path.display()
-                );
-            }
-            Ok(())
-        }
-    }
-}
-
-fn install_staged_file_no_replace(staged: &Path, destination: &Path) -> Result<()> {
-    fs::hard_link(staged, destination).with_context(|| {
-        format!(
-            "failed to install {} without replacing an existing file",
-            destination.display()
-        )
-    })?;
-    if let Err(error) = fs::remove_file(staged) {
-        let install_error = anyhow::Error::new(error).context(format!(
-            "failed to finalize no-replace install {}",
-            destination.display()
-        ));
-        return match remove_staged_file(destination) {
-            Ok(()) => Err(install_error),
-            Err(rollback_error) => Err(install_error).context(format!(
-                "additionally failed to roll back {}: {rollback_error:#}",
-                destination.display()
-            )),
-        };
-    }
-    Ok(())
-}
-
 fn repo_record_matches(canonical: &okf::OkfRecordFile, indexed: &MemoryRecord) -> bool {
     let draft = &canonical.draft;
     indexed.memory_type == draft.memory_type
@@ -3809,284 +3506,6 @@ fn validate_legacy_canonical_target(target: &MemoryRecord) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn ensure_path_absent(path: &Path, label: &str) -> Result<()> {
-    if path
-        .try_exists()
-        .with_context(|| format!("failed to inspect {label} {}", path.display()))?
-    {
-        bail!("{label} already exists: {}", path.display());
-    }
-    Ok(())
-}
-
-fn ensure_regular_file(path: &Path, label: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect {label} {}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("{label} must be a regular file: {}", path.display());
-    }
-    Ok(())
-}
-
-fn sibling_transaction_path(path: &Path, nonce: &str, role: &str) -> PathBuf {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("memzoi");
-    path.with_file_name(format!(".{name}.{nonce}.{role}.tmp"))
-}
-
-fn stage_file(final_path: &Path, contents: &str, nonce: &str) -> Result<PathBuf> {
-    let parent = final_path.parent().context("staged file has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    let temp_path = sibling_transaction_path(final_path, nonce, "write");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)
-        .with_context(|| format!("failed to stage file {}", final_path.display()))?;
-    if let Err(error) = file
-        .write_all(contents.as_bytes())
-        .and_then(|_| file.sync_all())
-    {
-        drop(file);
-        let stage_error = anyhow::Error::new(error)
-            .context(format!("failed to stage file {}", final_path.display()));
-        return match remove_staged_file(&temp_path) {
-            Ok(()) => Err(stage_error),
-            Err(cleanup_error) => Err(stage_error).context(format!(
-                "additionally failed to remove incomplete staged file {}: {cleanup_error:#}",
-                temp_path.display()
-            )),
-        };
-    }
-    Ok(temp_path)
-}
-
-fn stage_canonical_writes(
-    writes: &[CanonicalFileWrite],
-    nonce: &str,
-) -> Result<Vec<StagedCanonicalFileWrite>> {
-    let mut staged = Vec::with_capacity(writes.len());
-    for write in writes {
-        let temp_path = match stage_file(&write.path, &write.markdown, nonce) {
-            Ok(path) => path,
-            Err(error) => {
-                return attach_cleanup_error(
-                    error,
-                    cleanup_staged_canonical_writes(&staged),
-                    "partial canonical staging cleanup",
-                );
-            }
-        };
-        let backup_path = (write.mode == FileWriteMode::Overwrite)
-            .then(|| sibling_transaction_path(&write.path, nonce, "canonical"));
-        staged.push(StagedCanonicalFileWrite {
-            path: write.path.clone(),
-            temp_path,
-            backup_path,
-            mode: write.mode,
-            expected_existing_hash: write.expected_existing_hash.clone(),
-            installed: false,
-        });
-    }
-    Ok(staged)
-}
-
-fn install_staged_canonical_writes<BeforeInstall>(
-    paths: &MemoryPaths,
-    writes: &mut [StagedCanonicalFileWrite],
-    before_install: BeforeInstall,
-) -> Result<()>
-where
-    BeforeInstall: FnMut(usize) -> Result<()>,
-{
-    install_staged_canonical_writes_with_backup_hook(paths, writes, before_install, |_, _| Ok(()))
-}
-
-fn install_staged_canonical_writes_with_backup_hook<BeforeInstall, AfterBackup>(
-    paths: &MemoryPaths,
-    writes: &mut [StagedCanonicalFileWrite],
-    mut before_install: BeforeInstall,
-    mut after_backup: AfterBackup,
-) -> Result<()>
-where
-    BeforeInstall: FnMut(usize) -> Result<()>,
-    AfterBackup: FnMut(usize, &Path) -> Result<()>,
-{
-    for (index, write) in writes.iter_mut().enumerate() {
-        before_install(index)?;
-        validate_canonical_write_precondition(paths, write)?;
-        if let Some(backup_path) = &write.backup_path {
-            validate_canonical_write_precondition(paths, write)?;
-            fs::rename(&write.path, backup_path).with_context(|| {
-                format!(
-                    "failed to stage canonical memory record {}",
-                    write.path.display()
-                )
-            })?;
-            after_backup(index, &write.path)?;
-        }
-        match write.mode {
-            FileWriteMode::CreateNew => {
-                install_staged_file_no_replace(&write.temp_path, &write.path)?;
-            }
-            FileWriteMode::Overwrite => {
-                install_staged_file_no_replace(&write.temp_path, &write.path)?;
-            }
-        }
-        write.installed = true;
-    }
-    Ok(())
-}
-
-fn rollback_staged_canonical_writes(writes: &mut [StagedCanonicalFileWrite]) -> Result<()> {
-    let mut errors = Vec::new();
-    for write in writes.iter_mut().rev() {
-        if write.installed {
-            record_cleanup_result(
-                &mut errors,
-                remove_staged_file(&write.path),
-                format!("remove installed canonical file {}", write.path.display()),
-            );
-            write.installed = false;
-        }
-        if let Some(backup_path) = &write.backup_path
-            && backup_path.exists()
-        {
-            record_cleanup_result(
-                &mut errors,
-                install_staged_file_no_replace(backup_path, &write.path),
-                format!(
-                    "restore canonical backup {} to {}",
-                    backup_path.display(),
-                    write.path.display()
-                ),
-            );
-        }
-        record_cleanup_result(
-            &mut errors,
-            remove_staged_file(&write.temp_path),
-            format!("remove staged canonical file {}", write.temp_path.display()),
-        );
-    }
-    finish_cleanup("canonical rollback", errors)
-}
-
-fn finalize_staged_canonical_writes(writes: &[StagedCanonicalFileWrite]) -> Result<()> {
-    let mut errors = Vec::new();
-    for write in writes {
-        if let Some(backup_path) = &write.backup_path {
-            record_cleanup_result(
-                &mut errors,
-                remove_staged_file(backup_path),
-                format!("remove canonical backup {}", backup_path.display()),
-            );
-        }
-        record_cleanup_result(
-            &mut errors,
-            remove_staged_file(&write.temp_path),
-            format!("remove staged canonical file {}", write.temp_path.display()),
-        );
-    }
-    finish_cleanup("canonical finalization", errors)
-}
-
-fn commit_db_and_canonical_writes(
-    paths: &MemoryPaths,
-    tx: Transaction<'_>,
-    writes: &[CanonicalFileWrite],
-) -> Result<()> {
-    commit_db_and_canonical_writes_with_hooks(paths, tx, writes, |_| Ok(()), |_| Ok(()))
-}
-
-fn commit_db_and_canonical_writes_with_hooks<BeforeInstall, BeforeCommit>(
-    paths: &MemoryPaths,
-    tx: Transaction<'_>,
-    writes: &[CanonicalFileWrite],
-    before_install: BeforeInstall,
-    before_commit: BeforeCommit,
-) -> Result<()>
-where
-    BeforeInstall: FnMut(usize) -> Result<()>,
-    BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
-{
-    commit_db_and_canonical_writes_with_backup_hook(
-        paths,
-        tx,
-        writes,
-        before_install,
-        |_, _| Ok(()),
-        before_commit,
-    )
-}
-
-fn commit_db_and_canonical_writes_with_backup_hook<BeforeInstall, AfterBackup, BeforeCommit>(
-    paths: &MemoryPaths,
-    tx: Transaction<'_>,
-    writes: &[CanonicalFileWrite],
-    before_install: BeforeInstall,
-    after_backup: AfterBackup,
-    before_commit: BeforeCommit,
-) -> Result<()>
-where
-    BeforeInstall: FnMut(usize) -> Result<()>,
-    AfterBackup: FnMut(usize, &Path) -> Result<()>,
-    BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
-{
-    let nonce = Uuid::now_v7().to_string();
-    let mut staged = stage_canonical_writes(writes, &nonce)?;
-    if let Err(error) = install_staged_canonical_writes_with_backup_hook(
-        paths,
-        &mut staged,
-        before_install,
-        after_backup,
-    ) {
-        return attach_cleanup_error(
-            error,
-            rollback_staged_canonical_writes(&mut staged),
-            "canonical install rollback",
-        );
-    }
-    if let Err(error) = before_commit(&tx) {
-        return attach_cleanup_error(
-            error,
-            rollback_staged_canonical_writes(&mut staged),
-            "canonical pre-commit rollback",
-        );
-    }
-    if let Err(error) = tx.commit() {
-        return attach_cleanup_error(
-            anyhow::Error::new(error).context("failed to commit memory lifecycle transaction"),
-            rollback_staged_canonical_writes(&mut staged),
-            "canonical commit rollback",
-        );
-    }
-    finalize_staged_canonical_writes(&staged)
-        .context("memory lifecycle committed but canonical cleanup failed")
-}
-
-fn remove_staged_file(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("failed to remove lifecycle transaction file"),
-    }
-}
-
-fn cleanup_staged_canonical_writes(writes: &[StagedCanonicalFileWrite]) -> Result<()> {
-    let mut errors = Vec::new();
-    for write in writes {
-        record_cleanup_result(
-            &mut errors,
-            remove_staged_file(&write.temp_path),
-            format!("remove staged canonical file {}", write.temp_path.display()),
-        );
-    }
-    finish_cleanup("staged canonical cleanup", errors)
 }
 
 fn cleanup_staged_file_resolution(
@@ -4900,22 +4319,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn repo_lifecycle_lock_refuses_concurrent_mutation() -> anyhow::Result<()> {
-        let (_temp, service) = initialized_service()?;
-        let _first = RepoLifecycleLock::acquire(&service.paths)?;
-        let error = RepoLifecycleLock::acquire(&service.paths)
-            .err()
-            .context("second lifecycle lock should be refused")?;
-        assert!(
-            error
-                .to_string()
-                .contains("another repo lifecycle operation is in progress"),
-            "unexpected lock contention error: {error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn open_rolls_back_uncommitted_capture_proposal_files_from_journal() -> anyhow::Result<()> {
         let (_temp, service) = initialized_service()?;
         let paths = service.paths.clone();
@@ -5396,7 +4799,9 @@ mod tests {
         let mut replacement = target.clone();
         replacement.status = MemoryStatus::Superseded;
         replacement.updated_at = "2026-07-10T12:00:00Z".to_owned();
+        let session = CanonicalWriteSession::begin(&service.paths)?;
         let write = service.prepare_record_file_write_with_conn(
+            &session,
             &service.conn,
             &replacement,
             FileWriteMode::Overwrite,
@@ -5407,15 +4812,15 @@ mod tests {
             [&target.id],
         )?;
 
-        let error = commit_db_and_canonical_writes_with_backup_hook(
-            &service.paths,
-            tx,
-            &[write],
-            |_| Ok(()),
-            |_, path| fs::write(path, "fresh editor bytes").map_err(Into::into),
-            |_| Ok(()),
-        )
-        .expect_err("no-replace overwrite must refuse the recreated target");
+        let error = session
+            .commit_with_backup_hook(
+                tx,
+                &[write],
+                |_| Ok(()),
+                |_, path| fs::write(path, "fresh editor bytes").map_err(Into::into),
+                |_| Ok(()),
+            )
+            .expect_err("no-replace overwrite must refuse the recreated target");
         assert!(format!("{error:#}").contains("without replacing"));
         assert_eq!(fs::read_to_string(&target_path)?, "fresh editor bytes");
         assert_eq!(
@@ -5558,52 +4963,6 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.ends_with(".pending.tmp"))
         );
-        Ok(())
-    }
-
-    #[test]
-    fn changed_canonical_target_fails_captured_hash_revalidation() -> anyhow::Result<()> {
-        let (_temp, service) = initialized_service()?;
-        let path = service.paths.records_dir().join("captured-target.md");
-        fs::write(&path, "original canonical bytes")?;
-        let staged = path.with_file_name(".captured-target.write.tmp");
-        fs::write(&staged, "replacement bytes")?;
-        let write = StagedCanonicalFileWrite {
-            path: path.clone(),
-            temp_path: staged,
-            backup_path: Some(path.with_file_name(".captured-target.backup.tmp")),
-            mode: FileWriteMode::Overwrite,
-            expected_existing_hash: Some(file_content_hash(&path)?),
-            installed: false,
-        };
-        fs::write(&path, "concurrent human edit")?;
-
-        let error = validate_canonical_write_precondition(&service.paths, &write)
-            .expect_err("changed target must fail before install");
-        assert!(
-            error.to_string().contains("changed after validation"),
-            "unexpected changed-target error: {error:#}"
-        );
-        assert_eq!(fs::read_to_string(&path)?, "concurrent human edit");
-        Ok(())
-    }
-
-    #[test]
-    fn create_new_install_never_replaces_a_concurrent_destination() -> anyhow::Result<()> {
-        let temp = TempDir::new()?;
-        let staged = temp.path().join("staged.tmp");
-        let destination = temp.path().join("record.md");
-        fs::write(&staged, "new proposal bytes")?;
-        fs::write(&destination, "concurrent canonical bytes")?;
-
-        let error = install_staged_file_no_replace(&staged, &destination)
-            .expect_err("no-replace install must refuse a concurrent destination");
-        assert!(error.to_string().contains("without replacing"));
-        assert_eq!(
-            fs::read_to_string(&destination)?,
-            "concurrent canonical bytes"
-        );
-        assert_eq!(fs::read_to_string(&staged)?, "new proposal bytes");
         Ok(())
     }
 
