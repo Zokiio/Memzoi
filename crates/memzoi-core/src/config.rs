@@ -208,22 +208,21 @@ impl RuntimeIdentity {
 }
 
 fn repository_display_name(common_dir: &Path, relative_project: &Path) -> String {
-    if relative_project != Path::new("") && relative_project != Path::new(".") {
-        if let Some(name) = relative_project
+    if relative_project != Path::new("")
+        && relative_project != Path::new(".")
+        && let Some(name) = relative_project
             .file_name()
             .and_then(|value| value.to_str())
-        {
-            return name.to_owned();
-        }
+    {
+        return name.to_owned();
     }
-    if common_dir.file_name().and_then(|value| value.to_str()) == Some(".git") {
-        if let Some(name) = common_dir
+    if common_dir.file_name().and_then(|value| value.to_str()) == Some(".git")
+        && let Some(name) = common_dir
             .parent()
             .and_then(Path::file_name)
             .and_then(|value| value.to_str())
-        {
-            return name.to_owned();
-        }
+    {
+        return name.to_owned();
     }
     common_dir
         .file_name()

@@ -327,8 +327,6 @@ impl MemoryService {
         db::init_database(&conn)?;
         if index_was_missing {
             rebuild_repo_projection(&paths, &conn)?;
-        } else {
-            sync_proposals_to_shared(&conn, &shared_conn)?;
         }
         refresh_shared_mirrors(&shared_conn, &conn)?;
         drop(index_init_lock);
@@ -2590,12 +2588,7 @@ fn rebuild_repo_projection(paths: &MemoryPaths, conn: &Connection) -> Result<()>
 }
 
 fn refresh_shared_mirrors(shared: &Connection, index: &Connection) -> Result<()> {
-    let index_proposals = read_legacy_proposals(index)?;
-    let mut shared_proposals = read_legacy_proposals(shared)?;
-    if index_proposals != shared_proposals {
-        copy_proposals(index, shared, false)?;
-        shared_proposals = read_legacy_proposals(shared)?;
-    }
+    let shared_proposals = read_legacy_proposals(shared)?;
     let runtime_records = runtime_records_for_rebuild_preservation(shared)?;
     let indexed_runtime_records = runtime_records_for_rebuild_preservation(index)?;
     let repo_ids = indexed_active_records_for_destination(index, MemoryDestination::Repo)?
@@ -5422,6 +5415,46 @@ mod tests {
     }
 
     #[test]
+    fn shared_proposals_are_authoritative_during_reads_and_open() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let read_only_proposal = proposals::propose_memory(
+            &service.conn,
+            "agent:index-fixture",
+            sample_memory_draft("Index-only proposal", "Disposable index state"),
+        )?;
+
+        service.search_memory(SearchInput {
+            query: "unrelated".to_owned(),
+            ..SearchInput::default()
+        })?;
+
+        assert!(
+            proposals::load_proposal_public(&service.shared_conn, &read_only_proposal.id).is_err(),
+            "a read path must not promote an index-only proposal into shared state"
+        );
+        assert!(
+            proposals::load_proposal_public(&service.conn, &read_only_proposal.id).is_err(),
+            "shared state must overwrite stale disposable proposal mirrors"
+        );
+
+        let startup_proposal = proposals::propose_memory(
+            &service.conn,
+            "agent:index-fixture",
+            sample_memory_draft("Startup index-only proposal", "Disposable startup state"),
+        )?;
+        let paths = service.paths.clone();
+        drop(service);
+
+        let reopened = MemoryService::open_paths(paths)?;
+        assert!(reopened.show_proposal(&startup_proposal.id).is_err());
+        assert!(
+            proposals::load_proposal_public(&reopened.conn, &startup_proposal.id).is_err(),
+            "opening must refresh from shared state without copying index proposals back"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn repo_lifecycle_lock_refuses_concurrent_mutation() -> anyhow::Result<()> {
         let (_temp, service) = initialized_service()?;
         let _first = RepoLifecycleLock::acquire(&service.paths)?;
@@ -5709,7 +5742,7 @@ mod tests {
                 if proposal_id == "mem_session_hash-reserved-2"
         ));
 
-        service.conn.execute(
+        service.shared_conn.execute(
             "INSERT INTO proposal (id, operation, payload_json, status, actor)
              VALUES ('mem_import_db-reserved', 'create', '{}', 'pending', 'agent:red-tests')",
             [],
@@ -6723,7 +6756,7 @@ mod tests {
                 apply: false,
             },
         )?;
-        service.conn.execute(
+        service.shared_conn.execute(
             "UPDATE proposal SET status = 'validated' WHERE id = ?1",
             [validated.proposal.id.as_str()],
         )?;

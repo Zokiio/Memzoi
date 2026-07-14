@@ -58,10 +58,7 @@ pub(crate) fn list_git_worktree_roots(start: &Path) -> Result<Vec<PathBuf>> {
 
 fn git_path(start: &Path, argument: &str) -> Result<Option<PathBuf>> {
     let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(start)
-        .args(["rev-parse", "--path-format=absolute", argument]);
+    command.arg("-C").arg(start).args(["rev-parse", argument]);
     configure_discovery_command(&mut command);
     let output = match command.output() {
         Ok(output) => output,
