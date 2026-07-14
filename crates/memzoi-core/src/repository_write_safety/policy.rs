@@ -488,15 +488,22 @@ pub(crate) fn evaluate(request: &RepositoryWriteRequest<'_>) -> RepositoryWriteS
     }
     for (index, projection) in request.projections.iter().enumerate() {
         let location = format!("projection[{index}]");
+        let path_bytes = projection.path.as_os_str().as_encoded_bytes();
         if !super::projection_path_is_safe(projection.path) {
             push_finding(
                 &mut findings,
                 RepositoryWriteSafetyReasonCode::UnsafeOutputPath,
                 &format!("{location}.path"),
                 "path_policy",
-                projection.path.as_os_str().as_encoded_bytes(),
+                path_bytes,
             );
         }
+        scan_value(
+            &format!("{location}.path"),
+            SafetyFieldKind::Path,
+            path_bytes,
+            &mut findings,
+        );
         if projection.bytes.len() > MAX_FIELD_BYTES {
             push_finding(
                 &mut findings,

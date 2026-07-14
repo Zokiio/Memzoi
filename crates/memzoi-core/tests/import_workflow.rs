@@ -18,6 +18,7 @@ candidates:
     title: Repository convention
     body: The repository uses explicit review before durable memory changes.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
     scope:
       kind: repo
     tags: [workflow]
@@ -287,6 +288,7 @@ candidates:
     title: Safe repository candidate
     body: This repo-safe candidate may become a reviewed proposal.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
 "#;
     let document = parse_import_document(repo_unsafe)?;
     let plan = service.plan_import("test", document.clone())?;
@@ -333,6 +335,34 @@ candidates:
 }
 
 #[test]
+fn omitted_repo_content_class_is_blocked_before_import_writes() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let service = initialized_service(&temp)?;
+    let document = parse_import_document(
+        r#"
+version: memzoi/import-v1
+sources:
+  - ref: issue://101#classification
+candidates:
+  - destination: repo
+    reason: missing contextual classification
+    type: fact
+    title: Unclassified import candidate
+    body: This lexically harmless candidate must fail closed.
+    sensitivity: repo-safe
+"#,
+    )?;
+
+    let plan = serde_json::to_value(service.plan_import("test", document)?)?;
+    assert_eq!(action_kind(candidate(&plan, 0)), "blocked");
+    assert!(
+        file_names(&service.paths().proposals_dir().join("pending"))?.is_empty(),
+        "planning an unclassified import must not write proposal files"
+    );
+    Ok(())
+}
+
+#[test]
 fn mixed_unsafe_repo_manifest_omits_sources_but_keeps_local_and_session_writes()
 -> anyhow::Result<()> {
     let temp = tempdir()?;
@@ -354,6 +384,7 @@ candidates:
     title: Safe repository candidate
     body: This candidate must wait for a split manifest.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
   - destination: local
     reason: private local continuity
     type: preference

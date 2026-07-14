@@ -75,13 +75,29 @@ fn update_help_advertises_update_options() {
     );
 }
 
+fn safety_record_markdown(body: &str, content_class: Option<&str>) -> String {
+    let content_class = content_class
+        .map(|value| format!("content_class: {value}\n"))
+        .unwrap_or_default();
+    format!(
+        "---\ntype: fact\ntitle: Safety fixture\ntimestamp: 2026-07-14T00:00:00Z\nupdated: 2026-07-14T00:00:00Z\nstatus: active\nscope: repo\nvisibility: repo\n{content_class}confidence: 1\n---\n\n# Safety fixture\n\n{body}\n"
+    )
+}
+
 #[test]
 fn safety_file_scan_uses_stable_exit_codes_and_redacted_json() {
     let temp = tempfile::tempdir().expect("temp repo");
     let records = temp.path().join(".memzoi/records");
     fs::create_dir_all(&records).expect("records directory");
     let safe = records.join("safe.md");
-    fs::write(&safe, "General repository knowledge.\n").expect("safe record");
+    fs::write(
+        &safe,
+        safety_record_markdown(
+            "General repository knowledge.",
+            Some("general_repo_knowledge"),
+        ),
+    )
+    .expect("safe record");
 
     let mut safe_command = memzoi();
     safe_command
@@ -99,7 +115,11 @@ fn safety_file_scan_uses_stable_exit_codes_and_redacted_json() {
 
     let sentinel = "ghp_SECRET_SENTINEL_0123456789abcdefghijklmnop";
     let blocked = records.join("blocked.md");
-    fs::write(&blocked, sentinel).expect("blocked record");
+    fs::write(
+        &blocked,
+        safety_record_markdown(sentinel, Some("general_repo_knowledge")),
+    )
+    .expect("blocked record");
     let mut blocked_command = memzoi();
     blocked_command
         .current_dir(temp.path())
@@ -117,6 +137,111 @@ fn safety_file_scan_uses_stable_exit_codes_and_redacted_json() {
                 .and(predicate::str::contains("credential_token"))
                 .and(predicate::str::contains(sentinel).not()),
         );
+}
+
+#[test]
+fn safety_scan_redacts_a_blocked_repository_path() {
+    let temp = tempfile::tempdir().expect("temp repo");
+    let records = temp.path().join(".memzoi/records");
+    fs::create_dir_all(&records).expect("records directory");
+    let sentinel = "ghp_PathSecretSentinel0123456789abcdef";
+    let relative = format!(".memzoi/records/{sentinel}.md");
+    fs::write(
+        temp.path().join(&relative),
+        safety_record_markdown("Safe body.", Some("general_repo_knowledge")),
+    )
+    .expect("path fixture");
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--file", &relative, "--json"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("credential_token")
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains(sentinel).not()),
+        );
+}
+
+#[test]
+fn staged_and_range_scans_block_contextually_prohibited_records() {
+    use std::process::Command as StdCommand;
+
+    let temp = tempfile::tempdir().expect("temp repo");
+    StdCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(temp.path())
+        .status()
+        .expect("initialize git repository");
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(temp.path())
+        .status()
+        .expect("configure git email");
+    StdCommand::new("git")
+        .args(["config", "user.name", "Memzoi Test"])
+        .current_dir(temp.path())
+        .status()
+        .expect("configure git name");
+    StdCommand::new("git")
+        .args(["commit", "--allow-empty", "--quiet", "-m", "base"])
+        .current_dir(temp.path())
+        .status()
+        .expect("create base commit");
+
+    let relative = ".memzoi/records/raw-transcript.md";
+    let path = temp.path().join(relative);
+    fs::create_dir_all(path.parent().expect("record parent")).expect("records directory");
+    fs::write(
+        &path,
+        safety_record_markdown("Lexically harmless transcript.", Some("raw_transcript")),
+    )
+    .expect("raw transcript record");
+    StdCommand::new("git")
+        .args(["add", relative])
+        .current_dir(temp.path())
+        .status()
+        .expect("stage contextual fixture");
+
+    let mut staged = memzoi();
+    staged
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--staged", "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("raw_transcript"));
+
+    StdCommand::new("git")
+        .args(["commit", "--quiet", "-m", "contextual fixture"])
+        .current_dir(temp.path())
+        .status()
+        .expect("commit contextual fixture");
+    let mut range = memzoi();
+    range
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("raw_transcript"));
+}
+
+#[test]
+fn repository_content_class_cli_defaults_fail_closed() {
+    let mut propose = memzoi();
+    propose
+        .args(["propose", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[default: unknown]"));
+
+    let mut supersede = memzoi();
+    supersede
+        .args(["supersede", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[default: unknown]"));
 }
 
 #[cfg(unix)]
@@ -1458,6 +1583,8 @@ fn doctor_json_warns_about_open_proposals_and_prints_next_steps() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Doctor should surface pending proposals",
             "--body",
@@ -1814,6 +1941,7 @@ candidates:
     title: Human review candidate
     body: Preserve this candidate body in human output.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
     scope:
       kind: repo
     tags: [review]
@@ -2259,6 +2387,8 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "CLI proposals produce JSON",
             "--body",
@@ -2328,6 +2458,8 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "CLI supersede writes replacement",
             "--body",
@@ -2384,6 +2516,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Default proposal is approved",
             "--body",
@@ -2408,6 +2542,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Manual proposal stays pending",
             "--body",
@@ -2432,6 +2568,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Apply approved proposal immediately",
             "--body",
@@ -2522,6 +2660,74 @@ fn propose_omitted_sensitivity_is_explicit_unknown_and_cannot_apply() {
 }
 
 #[test]
+fn propose_and_supersede_omitted_content_class_fail_closed() {
+    let repo = initialized_temp_repo();
+    let propose_sentinel = "OMITTED-CONTENT-CLASS-PROPOSE-SENTINEL";
+    let proposed = run_command_failure_stderr(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--sensitivity",
+            "repo-safe",
+            "--title",
+            "Unclassified repository proposal",
+            "--body",
+            propose_sentinel,
+        ],
+    );
+    assert!(proposed.contains("repository write blocked"), "{proposed}");
+    assert!(!proposed.contains(propose_sentinel), "{proposed}");
+    assert!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("records directory")
+            .next()
+            .is_none()
+    );
+
+    let target = create_applied_memory(
+        repo.path(),
+        "fact",
+        "repo",
+        "Classified target",
+        "The target remains active when its replacement is unclassified.",
+    );
+    let supersede_sentinel = "OMITTED-CONTENT-CLASS-SUPERSEDE-SENTINEL";
+    let superseded = run_command_failure_stderr(
+        repo.path(),
+        &[
+            "supersede",
+            &target,
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--sensitivity",
+            "repo-safe",
+            "--title",
+            "Unclassified replacement",
+            "--body",
+            supersede_sentinel,
+        ],
+    );
+    assert!(
+        superseded.contains("repository write blocked"),
+        "{superseded}"
+    );
+    assert!(!superseded.contains(supersede_sentinel), "{superseded}");
+    assert_eq!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("records directory")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn supersede_json_blocks_every_non_repo_safe_sensitivity_without_echoing_body() {
     for sensitivity in [
         "local-only",
@@ -2542,6 +2748,8 @@ fn supersede_json_blocks_every_non_repo_safe_sensitivity_without_echoing_body() 
                 "fact",
                 "--sensitivity",
                 "repo-safe",
+                "--content-class",
+                "general_repo_knowledge",
                 "--title",
                 "Supersede sensitivity target",
                 "--body",
@@ -2602,6 +2810,8 @@ fn cli_proposal_evidence_survives_apply_rebuild_and_recall_separately_from_linea
             "decision",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--source-kind",
             "issue",
             "--source-ref",
@@ -2648,6 +2858,8 @@ fn cli_source_reference_does_not_fabricate_an_evidence_kind() {
             "fact",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--source-ref",
             "issue://42#reference-only",
             "--title",
@@ -2690,6 +2902,8 @@ fn cli_multiline_evidence_round_trips_without_index_drift() {
             "fact",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--source-ref",
             source_ref,
             "--title",
@@ -2733,6 +2947,8 @@ fn propose_apply_implies_auto_approval_when_repo_policy_is_manual() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Apply overrides manual policy",
             "--body",
@@ -2774,6 +2990,8 @@ fn propose_policy_flags_reject_conflicting_combinations() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Conflicting policies",
             "--body",
@@ -2801,6 +3019,8 @@ fn propose_policy_flags_reject_conflicting_combinations() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Manual apply conflict",
             "--body",
@@ -2830,6 +3050,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Human reviews risky memory",
             "--body",
@@ -2853,6 +3075,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Bulk apply first approved proposal",
             "--body",
@@ -2876,6 +3100,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Bulk apply second approved proposal",
             "--body",
@@ -3034,7 +3260,8 @@ fn proposal_files_list_show_and_validate_valid_pending_files() {
     assert_eq!(validated.get("valid").and_then(Value::as_bool), Some(true));
     assert_eq!(
         validated.get("valid_count").and_then(Value::as_u64),
-        Some(1)
+        Some(1),
+        "{validated}"
     );
     assert_eq!(
         validated.get("invalid_count").and_then(Value::as_u64),
@@ -3078,12 +3305,14 @@ fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() 
     write_pending_proposal_file(
         repo.path(),
         "invalid-lane.md",
-        proposal_markdown_with("mystery", "create", "supersedes: []", ""),
+        proposal_markdown_with("mystery", "create", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_invalid_lane"),
     );
     write_pending_proposal_file(
         repo.path(),
         "invalid-action.md",
-        proposal_markdown_with("semantic", "update", "supersedes: []", ""),
+        proposal_markdown_with("semantic", "update", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_invalid_action"),
     );
     write_pending_proposal_file(
         repo.path(),
@@ -3103,7 +3332,8 @@ fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() 
     assert_eq!(validated.get("valid").and_then(Value::as_bool), Some(false));
     assert_eq!(
         validated.get("valid_count").and_then(Value::as_u64),
-        Some(1)
+        Some(1),
+        "mixed validation result: {validated}"
     );
     assert_eq!(
         validated.get("invalid_count").and_then(Value::as_u64),
@@ -3582,6 +3812,37 @@ fn legacy_file_proposal_shapes_remain_showable_and_rejectable() {
         ],
     );
     assert_json_string_field(&rejected, &["outcome"], "rejected");
+}
+
+#[test]
+fn legacy_file_proposal_without_content_class_cannot_apply() {
+    let repo = initialized_temp_repo();
+    let legacy = proposal_markdown_with_options(
+        "semantic",
+        "create",
+        "proposed",
+        "supersedes: []",
+        "",
+        "repo-safe",
+    )
+    .replace("content_class: general_repo_knowledge\n", "");
+    write_pending_proposal_file(repo.path(), "legacy-unclassified.md", legacy);
+
+    let error =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        error.contains("unknown_content_class") || error.contains("repository write blocked"),
+        "unexpected unclassified proposal error: {error}"
+    );
+    assert!(
+        test_paths(repo.path()).records_dir().read_dir().is_err()
+            || test_paths(repo.path())
+                .records_dir()
+                .read_dir()
+                .expect("read records directory")
+                .next()
+                .is_none()
+    );
 }
 
 #[test]
@@ -4083,6 +4344,7 @@ candidates:
     title: Repository convention
     body: The repository uses explicit review before durable memory changes.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
     scope:
       kind: repo
     tags: [workflow]
@@ -4424,6 +4686,7 @@ candidates:
     title: Safe imported fact
     body: This repo-safe candidate may become a reviewed proposal.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
 "#,
     )
     .expect("write blocked import manifest");
@@ -5241,7 +5504,8 @@ fn proposal_files_apply_fails_cleanly_for_invalid_or_missing_proposals() {
     write_pending_proposal_file(
         invalid_pending.path(),
         "invalid-lane.md",
-        proposal_markdown_with("mystery", "create", "supersedes: []", ""),
+        proposal_markdown_with("mystery", "create", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_invalid_lane"),
     );
     let invalid = run_json_command_failure(
         invalid_pending.path(),
@@ -5274,6 +5538,8 @@ fn reject_json_prevents_apply_from_creating_active_record() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Rejected memories do not apply",
             "--body",
@@ -5871,6 +6137,7 @@ candidates:
     title: Session-end repo zircon decision
     body: Repo session-end zircon durable decision should become a proposal.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
     reason: Learned while implementing tests.
     scope:
       kind: repo
@@ -6096,6 +6363,37 @@ candidates:
 }
 
 #[test]
+fn session_end_omitted_content_class_fails_closed() {
+    let repo = initialized_temp_repo();
+    let input_path = repo.path().join("unclassified-session-end.yml");
+    fs::write(
+        &input_path,
+        "task: Unclassified session end\ncandidates:\n  - destination: repo\n    type: fact\n    lane: semantic\n    title: Unclassified candidate\n    body: Lexically harmless repository knowledge.\n    sensitivity: repo-safe\n",
+    )
+    .expect("write unclassified session-end input");
+
+    let result = run_json_command(
+        repo.path(),
+        &[
+            "session-end",
+            "--from-file",
+            input_path.to_str().expect("session-end path utf-8"),
+            "--json",
+        ],
+    );
+    assert_json_string_field(&result["candidates"][0], &["status"], "blocked");
+    assert!(result["candidates"][0]["write"].is_null(), "{result}");
+    let pending = test_paths(repo.path()).proposals_dir().join("pending");
+    assert!(
+        !pending.exists()
+            || fs::read_dir(pending)
+                .expect("read pending proposals")
+                .next()
+                .is_none()
+    );
+}
+
+#[test]
 fn session_end_blocks_every_non_repo_safe_repo_candidate() {
     for sensitivity in [
         "local-only",
@@ -6170,6 +6468,7 @@ candidates:
     title: Proposal cannot be written
     body: This repo proposal cannot be written because pending is a file.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
 "#,
     )
     .expect("write session-end input");
@@ -6211,12 +6510,14 @@ candidates:
     title: Duplicate session-end zircon
     body: First duplicate body.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
   - destination: repo
     type: decision
     lane: semantic
     title: Duplicate session-end zircon
     body: Second duplicate body.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
 "#,
     )
     .expect("write duplicate session-end input");
@@ -6265,6 +6566,7 @@ candidates:
     title: Checkpoint session-end zircon decision
     body: Checkpoint body is the explicit structured source.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
 "#;
     let checkpoint = run_json_command(
         repo,
@@ -6344,6 +6646,7 @@ fn session_end_accepts_markdown_frontmatter_with_crlf_newlines() {
             "    title: CRLF session-end zircon decision\r\n",
             "    body: CRLF Markdown frontmatter should parse as structured input.\r\n",
             "    sensitivity: repo-safe\r\n",
+            "    content_class: general_repo_knowledge\r\n",
             "---\r\n",
             "\r\n",
             "This Markdown body is not used for extraction.\r\n",
@@ -7220,6 +7523,8 @@ fn rebuild_refuses_to_discard_open_proposals_with_ids_statuses_and_next_steps() 
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Pending rebuild protection",
             "--body",
@@ -7243,6 +7548,8 @@ fn rebuild_refuses_to_discard_open_proposals_with_ids_statuses_and_next_steps() 
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Approved rebuild protection",
             "--body",
@@ -7883,6 +8190,7 @@ sources:
   - path: src/lib.rs
 supersedes: []
 sensitivity: repo-safe
+content_class: general_repo_knowledge
 ---
 
 # {title}
@@ -7945,6 +8253,7 @@ sources:
   - path: src/lib.rs
 {supersedes_yaml}
 sensitivity: {sensitivity}
+content_class: general_repo_knowledge
 ---
 
 # Valid proposal
@@ -8025,6 +8334,8 @@ fn create_applied_memory_with_visibility(
             if policy_supported { visibility } else { "repo" },
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             title,
             "--body",

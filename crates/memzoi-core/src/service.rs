@@ -40,6 +40,7 @@ use crate::{
         AuthorizationProof, AuthorizedRepositoryWriteBatch, ProvenanceAssessment,
         RepositoryContentClass, RepositoryProjection, RepositoryScope, RepositoryWriteRequest,
         RepositoryWriteRoute, SafetyField, SafetyFieldKind, authorize_repository_write,
+        repository_write_policy_context_digest,
     },
     search,
     session_end::{
@@ -243,6 +244,18 @@ struct OwnedRepositoryProjection {
     target_revision: Option<String>,
 }
 
+#[derive(Debug)]
+struct AuthorizedRepositoryProjectionBatch {
+    capability: AuthorizedRepositoryWriteBatch,
+    policy_context_digest: [u8; 32],
+}
+
+impl AuthorizedRepositoryProjectionBatch {
+    fn digest(&self) -> String {
+        self.capability.digest()
+    }
+}
+
 impl OwnedRepositoryProjection {
     fn from_absolute(
         paths: &MemoryPaths,
@@ -269,6 +282,7 @@ struct StagedCanonicalFileWrite {
     backup_path: Option<PathBuf>,
     mode: FileWriteMode,
     expected_existing_hash: Option<String>,
+    expected_staged_hash: String,
     installed: bool,
 }
 
@@ -730,7 +744,11 @@ impl MemoryService {
             pending_moved = true;
             self.revalidate_moved_pending_file_proposal(proposal_path, &pending_backup, &snapshot)?;
             install_staged_canonical_writes(&self.paths, &mut staged_writes, |_| Ok(()))?;
-            install_staged_file_no_replace(&resolved_temp, &resolved_path)?;
+            install_verified_staged_file_no_replace(
+                &resolved_temp,
+                &resolved_path,
+                blake3::hash(resolved_markdown.as_bytes()).to_hex().as_ref(),
+            )?;
             resolved_installed = true;
             Ok(())
         })();
@@ -1531,7 +1549,11 @@ impl MemoryService {
                 "rejection captured-byte rollback",
             );
         }
-        if let Err(error) = install_staged_file_no_replace(&resolved_temp, &resolved_path) {
+        if let Err(error) = install_verified_staged_file_no_replace(
+            &resolved_temp,
+            &resolved_path,
+            blake3::hash(resolved_markdown.as_bytes()).to_hex().as_ref(),
+        ) {
             return attach_cleanup_error(
                 error,
                 rollback_rejected_file_proposal(
@@ -3269,7 +3291,7 @@ fn authorize_repository_projection_batch(
     provenance: ProvenanceAssessment<'_>,
     values: &[RepositorySafetyValue],
     projections: &[OwnedRepositoryProjection],
-) -> Result<AuthorizedRepositoryWriteBatch> {
+) -> Result<AuthorizedRepositoryProjectionBatch> {
     let fields = values
         .iter()
         .map(|value| SafetyField {
@@ -3296,20 +3318,26 @@ fn authorize_repository_projection_batch(
         fields,
         projections,
     };
-    authorize_repository_write(&request).map_err(anyhow::Error::new)
+    let policy_context_digest = repository_write_policy_context_digest(&request);
+    let capability = authorize_repository_write(&request).map_err(anyhow::Error::new)?;
+    Ok(AuthorizedRepositoryProjectionBatch {
+        capability,
+        policy_context_digest,
+    })
 }
 
 fn create_authorized_repository_batch(
     paths: &MemoryPaths,
     expected_route: RepositoryWriteRoute,
-    authorization: &AuthorizedRepositoryWriteBatch,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     projections: &[OwnedRepositoryProjection],
 ) -> Result<Vec<PathBuf>> {
     let borrowed = borrowed_repository_projections(projections);
     repository_io::create_repository_batch(
         &paths.project_root,
         expected_route,
-        authorization,
+        &authorization.policy_context_digest,
+        &authorization.capability,
         &borrowed,
     )
 }
@@ -3445,7 +3473,7 @@ fn build_capture_apply_journal(
     plan: &CapturePlan,
     review: &CaptureReview,
     planned: &[(String, okf::OkfCreateProposalPlan)],
-    authorization: &AuthorizedRepositoryWriteBatch,
+    authorization: &AuthorizedRepositoryProjectionBatch,
 ) -> Result<CaptureApplyJournal> {
     let journal = CaptureApplyJournal {
         schema: CAPTURE_APPLY_JOURNAL_SCHEMA.to_owned(),
@@ -3766,7 +3794,7 @@ fn stage_capture_apply_proposals(
     paths: &MemoryPaths,
     journal: &CaptureApplyJournal,
     planned: &[(String, okf::OkfCreateProposalPlan)],
-    authorization: &AuthorizedRepositoryWriteBatch,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     projections: &[OwnedRepositoryProjection],
 ) -> Result<()> {
     validate_capture_apply_journal(journal)?;
@@ -3774,7 +3802,8 @@ fn stage_capture_apply_proposals(
     repository_io::verify_repository_batch(
         &paths.project_root,
         RepositoryWriteRoute::CaptureApply,
-        authorization,
+        &authorization.policy_context_digest,
+        &authorization.capability,
         &borrowed,
     )?;
     if journal.authorization_digest != authorization.digest() {
@@ -4775,6 +4804,14 @@ fn file_content_hash(path: &Path) -> Result<String> {
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
+fn verify_staged_file_contents(path: &Path, expected_hash: &str) -> Result<()> {
+    ensure_regular_file(path, "staged repository file")?;
+    if file_content_hash(path)? != expected_hash {
+        bail!("staged repository bytes changed after authorization");
+    }
+    Ok(())
+}
+
 fn validate_canonical_write_precondition(
     paths: &MemoryPaths,
     write: &StagedCanonicalFileWrite,
@@ -4826,6 +4863,23 @@ fn install_staged_file_no_replace(staged: &Path, destination: &Path) -> Result<(
                 destination.display()
             )),
         };
+    }
+    Ok(())
+}
+
+fn install_verified_staged_file_no_replace(
+    staged: &Path,
+    destination: &Path,
+    expected_hash: &str,
+) -> Result<()> {
+    verify_staged_file_contents(staged, expected_hash)?;
+    install_staged_file_no_replace(staged, destination)?;
+    if let Err(error) = verify_staged_file_contents(destination, expected_hash) {
+        return attach_cleanup_error(
+            error,
+            remove_staged_file(destination),
+            "unauthorized staged-byte install rollback",
+        );
     }
     Ok(())
 }
@@ -4957,7 +5011,7 @@ fn sibling_transaction_path(path: &Path, nonce: &str, role: &str) -> PathBuf {
 fn stage_file(
     paths: &MemoryPaths,
     expected_route: RepositoryWriteRoute,
-    authorization: &AuthorizedRepositoryWriteBatch,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     projections: &[OwnedRepositoryProjection],
     final_path: &Path,
     contents: &str,
@@ -4967,7 +5021,8 @@ fn stage_file(
     repository_io::verify_repository_batch(
         &paths.project_root,
         expected_route,
-        authorization,
+        &authorization.policy_context_digest,
+        &authorization.capability,
         &borrowed,
     )?;
     let expected =
@@ -5007,7 +5062,7 @@ fn stage_file(
 fn stage_authorized_file(
     paths: &MemoryPaths,
     expected_route: RepositoryWriteRoute,
-    authorization: &AuthorizedRepositoryWriteBatch,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     projections: &[OwnedRepositoryProjection],
     final_path: &Path,
     contents: &str,
@@ -5027,7 +5082,7 @@ fn stage_authorized_file(
 fn stage_canonical_writes(
     paths: &MemoryPaths,
     expected_route: RepositoryWriteRoute,
-    authorization: &AuthorizedRepositoryWriteBatch,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     projections: &[OwnedRepositoryProjection],
     writes: &[CanonicalFileWrite],
     nonce: &str,
@@ -5036,7 +5091,8 @@ fn stage_canonical_writes(
     repository_io::verify_repository_batch(
         &paths.project_root,
         expected_route,
-        authorization,
+        &authorization.policy_context_digest,
+        &authorization.capability,
         &borrowed,
     )?;
     let mut staged = Vec::with_capacity(writes.len());
@@ -5067,6 +5123,7 @@ fn stage_canonical_writes(
             backup_path,
             mode: write.mode,
             expected_existing_hash: write.expected_existing_hash.clone(),
+            expected_staged_hash: blake3::hash(write.markdown.as_bytes()).to_hex().to_string(),
             installed: false,
         });
     }
@@ -5096,6 +5153,7 @@ where
 {
     for (index, write) in writes.iter_mut().enumerate() {
         before_install(index)?;
+        verify_staged_file_contents(&write.temp_path, &write.expected_staged_hash)?;
         validate_canonical_write_precondition(paths, write)?;
         if let Some(backup_path) = &write.backup_path {
             validate_canonical_write_precondition(paths, write)?;
@@ -5109,10 +5167,18 @@ where
         }
         match write.mode {
             FileWriteMode::CreateNew => {
-                install_staged_file_no_replace(&write.temp_path, &write.path)?;
+                install_verified_staged_file_no_replace(
+                    &write.temp_path,
+                    &write.path,
+                    &write.expected_staged_hash,
+                )?;
             }
             FileWriteMode::Overwrite => {
-                install_staged_file_no_replace(&write.temp_path, &write.path)?;
+                install_verified_staged_file_no_replace(
+                    &write.temp_path,
+                    &write.path,
+                    &write.expected_staged_hash,
+                )?;
             }
         }
         write.installed = true;
@@ -5175,7 +5241,7 @@ fn finalize_staged_canonical_writes(writes: &[StagedCanonicalFileWrite]) -> Resu
 fn commit_db_and_canonical_writes(
     paths: &MemoryPaths,
     expected_route: RepositoryWriteRoute,
-    authorization: &AuthorizedRepositoryWriteBatch,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
 ) -> Result<()> {
@@ -5193,7 +5259,7 @@ fn commit_db_and_canonical_writes(
 fn commit_db_and_canonical_writes_with_hooks<BeforeInstall, BeforeCommit>(
     paths: &MemoryPaths,
     expected_route: RepositoryWriteRoute,
-    authorization: &AuthorizedRepositoryWriteBatch,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
     before_install: BeforeInstall,
@@ -5219,7 +5285,7 @@ where
 fn commit_db_and_canonical_writes_with_backup_hook<BeforeInstall, AfterBackup, BeforeCommit>(
     paths: &MemoryPaths,
     expected_route: RepositoryWriteRoute,
-    authorization: &AuthorizedRepositoryWriteBatch,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
     before_install: BeforeInstall,
@@ -5236,7 +5302,8 @@ where
     repository_io::verify_repository_batch(
         &paths.project_root,
         expected_route,
-        authorization,
+        &authorization.policy_context_digest,
+        &authorization.capability,
         &borrowed,
     )?;
     let nonce = Uuid::now_v7().to_string();
@@ -6803,6 +6870,7 @@ mod tests {
             backup_path: Some(path.with_file_name(".captured-target.backup.tmp")),
             mode: FileWriteMode::Overwrite,
             expected_existing_hash: Some(file_content_hash(&path)?),
+            expected_staged_hash: blake3::hash(b"replacement bytes").to_hex().to_string(),
             installed: false,
         };
         fs::write(&path, "concurrent human edit")?;
@@ -7477,6 +7545,65 @@ mod tests {
             &target_path,
             &target_before,
             "second-write-rollback-replacement",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_supersede_revalidates_staged_bytes_at_install() -> anyhow::Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let target = apply_test_record(
+            &service,
+            sample_memory_draft(
+                "Staged-byte target",
+                "The original canonical body must survive staged-byte tampering.",
+            ),
+        )?;
+        let target_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", target.id));
+        let target_before = fs::read(&target_path)?;
+        let records_dir = service.paths.records_dir();
+
+        let error = service
+            .supersede_record_with_hooks(
+                &target.id,
+                "agent:red-tests",
+                sample_memory_draft(
+                    "Staged-byte replacement",
+                    "These authorized bytes must never be replaced by tampered staging bytes.",
+                ),
+                move |index| {
+                    if index == 0 {
+                        for entry in fs::read_dir(&records_dir)? {
+                            let path = entry?.path();
+                            if path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| name.ends_with(".write.tmp"))
+                            {
+                                fs::write(path, "tampered staged bytes")?;
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .expect_err("tampered staged bytes must abort the lifecycle transaction");
+        assert!(
+            error
+                .to_string()
+                .contains("staged repository bytes changed after authorization"),
+            "unexpected staged-byte error: {error:#}"
+        );
+        assert_legacy_supersede_unchanged(
+            &service,
+            &target,
+            &target_path,
+            &target_before,
+            "staged-byte-replacement",
         )?;
         Ok(())
     }

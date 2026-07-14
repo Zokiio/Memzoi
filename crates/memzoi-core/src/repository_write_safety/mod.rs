@@ -43,6 +43,7 @@ pub struct AuthorizedRepositoryWriteBatch {
     detector_policy_version: &'static str,
     route: RepositoryWriteRoute,
     project_digest: [u8; 32],
+    policy_context_digest: [u8; 32],
     authorization_digest: [u8; 32],
     projection_digest: [u8; 32],
 }
@@ -72,13 +73,21 @@ impl AuthorizedRepositoryWriteBatch {
         &self,
         expected_route: RepositoryWriteRoute,
         project_identity: &[u8],
+        expected_policy_context_digest: &[u8; 32],
         projections: &[RepositoryProjection<'_>],
     ) -> bool {
         self.contract_version == REPOSITORY_WRITE_SAFETY_VERSION
             && self.detector_policy_version == REPOSITORY_WRITE_DETECTOR_POLICY_VERSION
             && self.route == expected_route
             && self.project_digest == projection::project_digest(project_identity)
+            && self.policy_context_digest == *expected_policy_context_digest
             && self.projection_digest == projection::projection_digest(projections)
+            && self.authorization_digest
+                == projection::authorization_digest(
+                    &self.project_digest,
+                    &self.policy_context_digest,
+                    &self.projection_digest,
+                )
     }
 }
 
@@ -116,22 +125,65 @@ pub fn authorize_repository_write(
     }
     let projection_digest = projection::projection_digest(&request.projections);
     let project_digest = projection::project_digest(request.scope.current_project_identity);
-    let authorization_digest =
-        projection::authorization_digest(request, &project_digest, &projection_digest);
+    let policy_context_digest = projection::policy_context_digest(request);
+    let authorization_digest = projection::authorization_digest(
+        &project_digest,
+        &policy_context_digest,
+        &projection_digest,
+    );
     Ok(AuthorizedRepositoryWriteBatch {
         contract_version: REPOSITORY_WRITE_SAFETY_VERSION,
         detector_policy_version: REPOSITORY_WRITE_DETECTOR_POLICY_VERSION,
         route: request.route,
         project_digest,
+        policy_context_digest,
         authorization_digest,
         projection_digest,
     })
+}
+
+pub(crate) fn repository_write_policy_context_digest(
+    request: &RepositoryWriteRequest<'_>,
+) -> [u8; 32] {
+    projection::policy_context_digest(request)
 }
 
 pub fn scan_repository_blob(
     project_identity: &[u8],
     repository_relative_path: &std::path::Path,
     bytes: &[u8],
+) -> RepositoryWriteSafetyReport {
+    scan_repository_blob_with_class(
+        project_identity,
+        repository_relative_path,
+        bytes,
+        RepositoryContentClass::GeneralRepoKnowledge,
+        true,
+    )
+}
+
+pub fn scan_managed_repository_blob(
+    project_identity: &[u8],
+    repository_relative_path: &std::path::Path,
+    bytes: &[u8],
+) -> RepositoryWriteSafetyReport {
+    let (content_class, metadata_valid) =
+        repository_blob_content_class(repository_relative_path, bytes);
+    scan_repository_blob_with_class(
+        project_identity,
+        repository_relative_path,
+        bytes,
+        content_class,
+        metadata_valid,
+    )
+}
+
+fn scan_repository_blob_with_class(
+    project_identity: &[u8],
+    repository_relative_path: &std::path::Path,
+    bytes: &[u8],
+    content_class: RepositoryContentClass,
+    metadata_valid: bool,
 ) -> RepositoryWriteSafetyReport {
     let projections = vec![RepositoryProjection {
         path: repository_relative_path,
@@ -154,15 +206,51 @@ pub fn scan_repository_blob(
         },
         freshness: Vec::new(),
         provenance: ProvenanceAssessment {
-            present: true,
-            evidence_valid: true,
-            content_class: RepositoryContentClass::GeneralRepoKnowledge,
-            source_identity: Some("repository_blob"),
+            present: metadata_valid,
+            evidence_valid: metadata_valid,
+            content_class,
+            source_identity: metadata_valid.then_some("repository_blob"),
         },
         fields: Vec::new(),
         projections,
     };
     policy::evaluate(&request)
+}
+
+fn repository_blob_content_class(
+    repository_relative_path: &std::path::Path,
+    bytes: &[u8],
+) -> (RepositoryContentClass, bool) {
+    let Ok(markdown) = std::str::from_utf8(bytes) else {
+        return (RepositoryContentClass::Unknown, false);
+    };
+    let proposals_root = std::path::Path::new(".memzoi/proposals");
+    if repository_relative_path.starts_with(proposals_root) {
+        return match crate::okf::parse_okf_proposal_markdown(
+            proposals_root,
+            repository_relative_path,
+            markdown,
+        ) {
+            Ok(Some(proposal)) => (proposal.content_class, true),
+            _ => (RepositoryContentClass::Unknown, false),
+        };
+    }
+    for records_root in [
+        std::path::Path::new(".memzoi/records"),
+        std::path::Path::new(".memzoi/memory"),
+    ] {
+        if repository_relative_path.starts_with(records_root) {
+            return match crate::okf::parse_okf_record_markdown(
+                records_root,
+                repository_relative_path,
+                markdown,
+            ) {
+                Ok(Some(record)) => (record.draft.content_class, true),
+                _ => (RepositoryContentClass::Unknown, false),
+            };
+        }
+    }
+    (RepositoryContentClass::Unknown, false)
 }
 
 fn hex_digest(bytes: &[u8; 32]) -> String {

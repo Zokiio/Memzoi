@@ -41,7 +41,7 @@ pub struct ImportCandidateInput {
 }
 
 fn default_repository_content_class() -> RepositoryContentClass {
-    RepositoryContentClass::GeneralRepoKnowledge
+    RepositoryContentClass::Unknown
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

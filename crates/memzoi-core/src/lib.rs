@@ -121,7 +121,8 @@ pub use repository_write_safety::{
     RepositoryWriteBlocked, RepositoryWriteDecision, RepositoryWriteRequest, RepositoryWriteRoute,
     RepositoryWriteSafetyAssessment, RepositoryWriteSafetyFinding, RepositoryWriteSafetyReasonCode,
     RepositoryWriteSafetyReport, SafetyField, SafetyFieldKind, SafetyFieldLocation,
-    assess_repository_candidate, authorize_repository_write, scan_repository_blob,
+    assess_repository_candidate, authorize_repository_write, scan_managed_repository_blob,
+    scan_repository_blob,
 };
 pub use search::SearchInput;
 pub use service::{

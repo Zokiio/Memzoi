@@ -44,7 +44,7 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "unknown")]
         sensitivity: String,
         /// Contextual repository-content classification. Canonical apply requires general repo knowledge.
-        #[arg(long = "content-class", default_value = "general_repo_knowledge")]
+        #[arg(long = "content-class", default_value = "unknown")]
         content_class: String,
         #[arg(long)]
         title: String,
@@ -164,7 +164,7 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "unknown")]
         sensitivity: String,
         /// Contextual repository-content classification. Canonical replacement requires general repo knowledge.
-        #[arg(long = "content-class", default_value = "general_repo_knowledge")]
+        #[arg(long = "content-class", default_value = "unknown")]
         content_class: String,
         #[arg(long)]
         title: String,

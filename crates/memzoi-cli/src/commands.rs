@@ -13,7 +13,7 @@ use memzoi_core::{
     ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult,
     SessionEndWrite, Visibility, discover_paths, lifecycle_transaction_artifact_count,
     parse_import_document, parse_session_end_document, scan_file_proposal_inventory,
-    scan_repository_blob,
+    scan_managed_repository_blob,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -59,9 +59,13 @@ fn safety_scan_command(
     let mut reports = Vec::with_capacity(blobs.len());
     for blob in blobs {
         let report = if blob.regular_blob {
-            scan_repository_blob(project_identity, &blob.path, &blob.bytes)
+            scan_managed_repository_blob(project_identity, &blob.path, &blob.bytes)
         } else {
-            scan_repository_blob(project_identity, Path::new("../unsupported-git-entry"), b"")
+            scan_managed_repository_blob(
+                project_identity,
+                Path::new("../unsupported-git-entry"),
+                b"",
+            )
         };
         reports.push((blob.path, report));
     }
@@ -71,7 +75,7 @@ fn safety_scan_command(
             "schema": "memzoi/repository-safety-scan-v1",
             "allowed": allowed,
             "files": reports.iter().map(|(path, report)| json!({
-                "path": path,
+                "path": safety_scan_report_path(path, report),
                 "report": report,
             })).collect::<Vec<_>>(),
         }))?;
@@ -80,10 +84,11 @@ fn safety_scan_command(
     } else {
         println!("repository safety scan blocked");
         for (path, report) in &reports {
+            let display_path = safety_scan_report_path(path, report);
             for finding in &report.findings {
                 println!(
                     "{}: {} at {} ({})",
-                    path.display(),
+                    display_path,
                     finding.code.as_str(),
                     finding.field.0,
                     finding.fingerprint
@@ -95,6 +100,25 @@ fn safety_scan_command(
         std::process::exit(2);
     }
     Ok(())
+}
+
+fn safety_scan_report_path(
+    path: &Path,
+    report: &memzoi_core::RepositoryWriteSafetyReport,
+) -> String {
+    let display = path.to_string_lossy();
+    if display.contains("<non-utf8-git-path>")
+        || !report
+            .findings
+            .iter()
+            .any(|finding| finding.field.0.ends_with(".path"))
+    {
+        return display.into_owned();
+    }
+    format!(
+        "<redacted-path:{}>",
+        blake3::hash(path.as_os_str().as_encoded_bytes()).to_hex()
+    )
 }
 
 struct SafetyScanBlob {

@@ -58,7 +58,7 @@ static PATTERNS: LazyLock<Vec<PatternDetector>> = LazyLock::new(|| {
         (
             "environment_secret",
             RepositoryWriteSafetyReasonCode::EnvironmentSecret,
-            r"(?im)^\s*(?:export\s+)?[A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*\s*=\s*\S+",
+            r"(?im)^\s*(?:export\s+)?(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|[A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*)\s*=\s*\S+",
         ),
         (
             "cloud_service_account",

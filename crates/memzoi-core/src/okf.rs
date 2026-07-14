@@ -685,6 +685,9 @@ pub fn parse_okf_record_markdown(
     )?)?;
     let scope_id = optional_string(frontmatter.scope_id, "scope_id")?;
     let visibility = parse_required_enum::<Visibility>(frontmatter.visibility, "visibility")?;
+    let content_class =
+        parse_optional_enum::<RepositoryContentClass>(frontmatter.content_class, "content_class")?
+            .unwrap_or(RepositoryContentClass::Unknown);
     let status = parse_status(required_string(frontmatter.status, "status")?)?;
     let confidence = parse_confidence(frontmatter.confidence)?;
     let source_kind = coalesce_string_aliases(
@@ -746,7 +749,7 @@ pub fn parse_okf_record_markdown(
             source_kind,
             source_ref,
             sensitivity: OkfProposalSensitivity::RepoSafe,
-            content_class: RepositoryContentClass::GeneralRepoKnowledge,
+            content_class,
             confidence,
         },
         status,
@@ -831,7 +834,7 @@ pub fn parse_okf_proposal_markdown(
             frontmatter.content_class,
             "content_class",
         )?
-        .unwrap_or(RepositoryContentClass::GeneralRepoKnowledge),
+        .unwrap_or(RepositoryContentClass::Unknown),
         resolution,
         capture: frontmatter.capture,
     }))
@@ -1161,6 +1164,7 @@ struct OkfFrontmatter {
     scope_kind: Option<String>,
     scope_id: Option<String>,
     visibility: Option<String>,
+    content_class: Option<String>,
     status: Option<String>,
     confidence: Option<ConfidenceValue>,
     source: Option<String>,
@@ -1440,6 +1444,11 @@ fn render_memory_record(record: &MemoryRecord, tags: &[String], applies_to: &[St
         push_yaml_string(&mut output, "scope_id", scope_id);
     }
     push_yaml_string(&mut output, "visibility", record.visibility.as_str());
+    push_yaml_string(
+        &mut output,
+        "content_class",
+        RepositoryContentClass::GeneralRepoKnowledge.as_str(),
+    );
     output.push_str(&format!("confidence: {}\n", record.confidence));
     if let Some(source_kind) = &record.source_kind {
         push_yaml_string(&mut output, "source", source_kind);

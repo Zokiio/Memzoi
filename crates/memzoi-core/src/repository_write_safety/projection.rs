@@ -45,8 +45,8 @@ pub(crate) fn projection_digest(projections: &[RepositoryProjection<'_>]) -> [u8
 }
 
 pub(crate) fn authorization_digest(
-    request: &RepositoryWriteRequest<'_>,
     project_digest: &[u8; 32],
+    policy_context_digest: &[u8; 32],
     projection_digest: &[u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Hasher::new();
@@ -56,8 +56,26 @@ pub(crate) fn authorization_digest(
         &mut hasher,
         REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.as_bytes(),
     );
-    put_bytes(&mut hasher, request.route.as_str().as_bytes());
     put_bytes(&mut hasher, project_digest);
+    put_bytes(&mut hasher, policy_context_digest);
+    put_bytes(&mut hasher, projection_digest);
+    *hasher.finalize().as_bytes()
+}
+
+pub(crate) fn policy_context_digest(request: &RepositoryWriteRequest<'_>) -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(b"memzoi.repository-write.policy-context.v1\0");
+    put_bytes(&mut hasher, request.route.as_str().as_bytes());
+    put_bytes(&mut hasher, request.destination.as_str().as_bytes());
+    put_bytes(&mut hasher, request.sensitivity.as_str().as_bytes());
+    put_bytes(&mut hasher, request.scope.kind.as_str().as_bytes());
+    put_optional(&mut hasher, request.scope.id.map(str::as_bytes));
+    put_bytes(&mut hasher, request.scope.current_project_identity);
+    put_optional(
+        &mut hasher,
+        request.scope.configured_project_id.map(str::as_bytes),
+    );
+    put_bytes(&mut hasher, request.visibility.as_str().as_bytes());
     put_bytes(&mut hasher, request.authorization.stable_bytes().as_bytes());
     put_usize(&mut hasher, request.freshness.len());
     for freshness in &request.freshness {
@@ -65,13 +83,22 @@ pub(crate) fn authorization_digest(
         put_bytes(&mut hasher, freshness.expected.as_bytes());
         put_bytes(&mut hasher, freshness.current.as_bytes());
     }
+    hasher.update(&[u8::from(request.provenance.present)]);
+    hasher.update(&[u8::from(request.provenance.evidence_valid)]);
+    put_bytes(
+        &mut hasher,
+        request.provenance.content_class.as_str().as_bytes(),
+    );
+    put_optional(
+        &mut hasher,
+        request.provenance.source_identity.map(str::as_bytes),
+    );
     put_usize(&mut hasher, request.fields.len());
     for field in &request.fields {
         put_bytes(&mut hasher, field.location.as_bytes());
         put_bytes(&mut hasher, field.kind.as_str().as_bytes());
         put_bytes(&mut hasher, field.value);
     }
-    put_bytes(&mut hasher, projection_digest);
     *hasher.finalize().as_bytes()
 }
 
@@ -86,6 +113,7 @@ pub(crate) fn candidate_fingerprint(request: &RepositoryWriteRequest<'_>) -> Str
     for projection in &request.projections {
         put_bytes(&mut hasher, projection.path.as_os_str().as_encoded_bytes());
         put_bytes(&mut hasher, projection.bytes);
+        put_optional(&mut hasher, projection.target_revision.map(str::as_bytes));
     }
     hasher.finalize().to_hex().to_string()
 }
