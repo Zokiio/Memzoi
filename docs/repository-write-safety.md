@@ -8,6 +8,8 @@ The deterministic v1 detector registry blocks credential prefixes, private keys,
 
 Blocked diagnostics contain only route and policy versions, logical field locations, stable reason codes, and BLAKE3 fingerprints. They never include the matched text. There is no `--force`, environment variable, or skip-safety bypass.
 
+At the final mutation seam, repository creation pins the project root and every parent directory by file descriptor, refuses symlink traversal, and creates each destination exclusively without following links. Rollback uses the same pinned parent descriptors. Platforms without equivalent directory-relative no-follow primitives fail closed instead of using a path-based fallback.
+
 ## Later-edit scanning
 
 The scanner reads complete resulting blobs and never mutates Git:

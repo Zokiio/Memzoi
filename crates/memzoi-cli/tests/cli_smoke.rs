@@ -228,6 +228,20 @@ fn staged_and_range_scans_block_contextually_prohibited_records() {
 }
 
 #[test]
+fn range_scan_rejects_unsafe_revision_tokens_before_invoking_git() {
+    for range in ["-p...HEAD", "HEAD...-p", "HEAD ^...HEAD", "HEAD...HEAD\n"] {
+        let mut command = memzoi();
+        command
+            .args(["safety", "scan", &format!("--range={range}"), "--json"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "--range contains an unsafe Git revision token",
+            ));
+    }
+}
+
+#[test]
 fn repository_content_class_cli_defaults_fail_closed() {
     let mut propose = memzoi();
     propose

@@ -174,6 +174,8 @@ fn load_range_memory_blobs(project_root: &Path, range: &str) -> Result<Vec<Safet
         .split_once("...")
         .filter(|(base, head)| !base.is_empty() && !head.is_empty() && !head.contains("..."))
         .context("--range must use BASE...HEAD syntax")?;
+    validate_git_revision(base)?;
+    validate_git_revision(head)?;
     let normalized = format!("{base}...{head}");
     let names = git_output(
         project_root,
@@ -187,6 +189,16 @@ fn load_range_memory_blobs(project_root: &Path, range: &str) -> Result<Vec<Safet
         ],
     )?;
     load_git_memory_blobs(project_root, &names, Some(head))
+}
+
+fn validate_git_revision(revision: &str) -> Result<()> {
+    if revision.starts_with('-')
+        || revision.contains('\0')
+        || revision.chars().any(char::is_whitespace)
+    {
+        bail!("--range contains an unsafe Git revision token");
+    }
+    Ok(())
 }
 
 fn load_git_memory_blobs(

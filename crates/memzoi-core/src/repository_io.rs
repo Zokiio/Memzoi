@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -45,63 +45,151 @@ pub(crate) fn create_repository_batch(
         authorization,
         projections,
     )?;
-    let mut destinations = Vec::with_capacity(projections.len());
     for projection in projections {
         if projection.target_revision.is_some() {
             bail!("create-only repository batch cannot contain overwrite projections");
         }
-        let destination = project_root.join(projection.path);
-        if destination.try_exists().with_context(|| {
-            format!(
-                "failed to inspect repository destination {}",
-                destination.display()
-            )
-        })? {
-            bail!(
-                "repository destination already exists: {}",
-                destination.display()
-            );
-        }
     }
 
-    for projection in projections {
-        let destination = project_root.join(projection.path);
-        let result = (|| -> Result<()> {
-            let parent = destination
-                .parent()
-                .context("repository destination has no parent")?;
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create repository directory {}", parent.display())
-            })?;
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&destination)
-                .with_context(|| {
-                    format!(
-                        "failed to create authorized repository file {}",
-                        destination.display()
-                    )
-                })?;
-            file.write_all(projection.bytes)
-                .and_then(|_| file.sync_all())
-                .with_context(|| {
-                    format!(
-                        "failed to write authorized repository file {}",
-                        destination.display()
-                    )
-                })
-        })();
-        if let Err(error) = result {
-            let _ = fs::remove_file(&destination);
-            for created in destinations.iter().rev() {
-                let _ = fs::remove_file(created);
-            }
-            return Err(error);
-        }
-        destinations.push(destination);
+    #[cfg(not(unix))]
+    {
+        bail!(
+            "secure repository file creation is unavailable on this platform; write fails closed"
+        );
     }
-    Ok(destinations)
+
+    #[cfg(unix)]
+    {
+        use std::{ffi::OsString, os::fd::OwnedFd};
+
+        use rustix::{
+            fs::{AtFlags, CWD, Mode, OFlags, fsync, mkdirat, openat, unlinkat},
+            io::Errno,
+        };
+
+        let root = project_root
+            .canonicalize()
+            .context("failed to resolve repository root for secure creation")?;
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let directory_mode = Mode::RUSR
+            | Mode::WUSR
+            | Mode::XUSR
+            | Mode::RGRP
+            | Mode::WGRP
+            | Mode::XGRP
+            | Mode::ROTH
+            | Mode::WOTH
+            | Mode::XOTH;
+        let file_mode = Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::WGRP | Mode::ROTH | Mode::WOTH;
+        let mut destinations = Vec::with_capacity(projections.len());
+        let mut created = Vec::<(OwnedFd, OsString)>::with_capacity(projections.len());
+
+        for projection in projections {
+            let destination = root.join(projection.path);
+            let result = (|| -> Result<(OwnedFd, OsString)> {
+                let mut directory = openat(CWD, &root, directory_flags, Mode::empty())
+                    .context("failed to open repository root without following symlinks")?;
+                let mut components = projection.path.components().peekable();
+                let mut file_name = None;
+                while let Some(component) = components.next() {
+                    let std::path::Component::Normal(component) = component else {
+                        bail!("unsafe repository-relative output path");
+                    };
+                    if components.peek().is_none() {
+                        file_name = Some(component.to_os_string());
+                        break;
+                    }
+                    let next_directory = match openat(
+                        &directory,
+                        component,
+                        directory_flags,
+                        Mode::empty(),
+                    ) {
+                        Ok(directory) => directory,
+                        Err(Errno::NOENT) => {
+                            match mkdirat(&directory, component, directory_mode) {
+                                Ok(()) | Err(Errno::EXIST) => {}
+                                Err(error) => {
+                                    return Err(error).context(
+                                        "failed to create authorized repository directory",
+                                    );
+                                }
+                            }
+                            openat(&directory, component, directory_flags, Mode::empty()).context(
+                                "failed to open authorized repository directory without following symlinks",
+                            )?
+                        }
+                        Err(error) => {
+                            return Err(error).context(
+                                "failed to open authorized repository directory without following symlinks",
+                            );
+                        }
+                    };
+                    directory = next_directory;
+                }
+                let file_name = file_name.context("repository destination has no file name")?;
+                let file = match openat(
+                    &directory,
+                    &file_name,
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    file_mode,
+                ) {
+                    Ok(file) => file,
+                    Err(Errno::EXIST) => {
+                        bail!(
+                            "repository destination already exists: {}",
+                            destination.display()
+                        )
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "failed to create authorized repository file {}",
+                                destination.display()
+                            )
+                        });
+                    }
+                };
+                let mut file = fs::File::from(file);
+                if let Err(error) = file
+                    .write_all(projection.bytes)
+                    .and_then(|_| file.sync_all())
+                {
+                    drop(file);
+                    let _ = unlinkat(&directory, &file_name, AtFlags::empty());
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to write authorized repository file {}",
+                            destination.display()
+                        )
+                    });
+                }
+                drop(file);
+                if let Err(error) = fsync(&directory) {
+                    let _ = unlinkat(&directory, &file_name, AtFlags::empty());
+                    return Err(error).context("failed to sync authorized repository directory");
+                }
+                Ok((directory, file_name))
+            })();
+            let created_file = match result {
+                Ok(created_file) => created_file,
+                Err(error) => {
+                    for (directory, file_name) in created.iter().rev() {
+                        let _ = unlinkat(directory, file_name, AtFlags::empty());
+                    }
+                    return Err(error);
+                }
+            };
+            created.push(created_file);
+            destinations.push(destination);
+        }
+        Ok(destinations)
+    }
 }
 
 pub(crate) fn verify_projection_path(project_root: &Path, relative: &Path) -> Result<PathBuf> {
@@ -153,6 +241,45 @@ mod tests {
         RepositoryWriteRoute, SafetyField, SafetyFieldKind, ScopeKind, Visibility,
         authorize_repository_write,
     };
+
+    fn authorize_create<'a>(
+        project_root: &Path,
+        projections: &[RepositoryProjection<'a>],
+    ) -> ([u8; 32], AuthorizedRepositoryWriteBatch) {
+        let fields = projections
+            .iter()
+            .map(|projection| SafetyField {
+                location: "candidate.body",
+                kind: SafetyFieldKind::Text,
+                value: projection.bytes,
+            })
+            .collect::<Vec<_>>();
+        let request = RepositoryWriteRequest {
+            route: RepositoryWriteRoute::FileProposalCreate,
+            destination: MemoryDestination::Repo,
+            sensitivity: OkfProposalSensitivity::RepoSafe,
+            scope: RepositoryScope {
+                kind: ScopeKind::Repo,
+                id: None,
+                current_project_identity: project_root.as_os_str().as_encoded_bytes(),
+                configured_project_id: None,
+            },
+            visibility: Visibility::Repo,
+            authorization: AuthorizationProof::ExplicitCommand { operation: "test" },
+            freshness: Vec::<FreshnessCheck<'_>>::new(),
+            provenance: ProvenanceAssessment {
+                present: true,
+                evidence_valid: true,
+                content_class: RepositoryContentClass::GeneralRepoKnowledge,
+                source_identity: Some("test"),
+            },
+            fields,
+            projections: projections.to_vec(),
+        };
+        let context_digest = repository_write_policy_context_digest(&request);
+        let token = authorize_repository_write(&request).unwrap();
+        (context_digest, token)
+    }
 
     #[test]
     fn token_is_bound_to_exact_projection_bytes() {
@@ -270,10 +397,28 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("outside.md");
         fs::write(&target, "outside").unwrap();
-        let destination = temp.path().join(".memzoi/records/safe.md");
+        let relative = Path::new(".memzoi/records/safe.md");
+        let bytes = b"safe repository knowledge";
+        let projections = [RepositoryProjection {
+            path: relative,
+            bytes,
+            target_revision: None,
+        }];
+        let (context_digest, token) = authorize_create(temp.path(), &projections);
+        let destination = temp.path().join(relative);
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         symlink(&target, &destination).unwrap();
 
-        assert!(verify_projection_path(temp.path(), Path::new(".memzoi/records/safe.md")).is_err());
+        assert!(
+            create_repository_batch(
+                temp.path(),
+                RepositoryWriteRoute::FileProposalCreate,
+                &context_digest,
+                &token,
+                &projections,
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(target).unwrap(), "outside");
     }
 }
