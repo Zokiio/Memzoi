@@ -7,6 +7,7 @@ updated: "2026-07-01T00:00:00Z"
 status: tombstoned
 scope: repo
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 1
 source: eval
 source_ref: fixture://tombstoned-procedure

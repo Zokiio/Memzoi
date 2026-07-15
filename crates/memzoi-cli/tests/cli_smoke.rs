@@ -75,6 +75,571 @@ fn update_help_advertises_update_options() {
     );
 }
 
+fn safety_record_markdown(body: &str, content_class: Option<&str>) -> String {
+    let content_class = content_class
+        .map(|value| format!("content_class: {value}\n"))
+        .unwrap_or_default();
+    format!(
+        "---\ntype: fact\ntitle: Safety fixture\ntimestamp: 2026-07-14T00:00:00Z\nupdated: 2026-07-14T00:00:00Z\nstatus: active\nscope: repo\nvisibility: repo\n{content_class}confidence: 1\n---\n\n# Safety fixture\n\n{body}\n"
+    )
+}
+
+#[test]
+fn safety_file_scan_uses_stable_exit_codes_and_redacted_json() {
+    let temp = tempfile::tempdir().expect("temp repo");
+    let records = temp.path().join(".memzoi/records");
+    fs::create_dir_all(&records).expect("records directory");
+    let safe = records.join("safe.md");
+    fs::write(
+        &safe,
+        safety_record_markdown(
+            "General repository knowledge.",
+            Some("general_repo_knowledge"),
+        ),
+    )
+    .expect("safe record");
+
+    let mut safe_command = memzoi();
+    safe_command
+        .current_dir(temp.path())
+        .args([
+            "safety",
+            "scan",
+            "--file",
+            ".memzoi/records/safe.md",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"allowed\": true"));
+
+    let sentinel = "ghp_SECRET_SENTINEL_0123456789abcdefghijklmnop";
+    let blocked = records.join("blocked.md");
+    fs::write(
+        &blocked,
+        safety_record_markdown(sentinel, Some("general_repo_knowledge")),
+    )
+    .expect("blocked record");
+    let mut blocked_command = memzoi();
+    blocked_command
+        .current_dir(temp.path())
+        .args([
+            "safety",
+            "scan",
+            "--file",
+            ".memzoi/records/blocked.md",
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("\"allowed\": false")
+                .and(predicate::str::contains("credential_token"))
+                .and(predicate::str::contains(sentinel).not()),
+        );
+}
+
+#[test]
+fn safety_file_scan_rejects_parent_components_before_reading() {
+    let temp = tempfile::tempdir().expect("temp repo");
+    let sentinel = "PARENT-COMPONENT-TARGET-SENTINEL";
+    write_pending_proposal_file(
+        temp.path(),
+        "parent-target.md",
+        safety_record_markdown(sentinel, Some("general_repo_knowledge")),
+    );
+    fs::create_dir_all(temp.path().join(".memzoi/records")).expect("records directory");
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args([
+            "safety",
+            "scan",
+            "--file",
+            ".memzoi/records/../../.memzoi/proposals/pending/parent-target.md",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("unsafe path component")
+                .and(predicate::str::contains(sentinel).not()),
+        )
+        .stdout(predicate::str::contains(sentinel).not());
+}
+
+#[cfg(unix)]
+#[test]
+fn safety_file_scan_rejects_symlinked_ancestors_before_reading_outside() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temp repo");
+    let outside = tempfile::tempdir().expect("outside target");
+    let sentinel = "OUTSIDE-SYMLINK-TARGET-SENTINEL";
+    write_pending_proposal_file(
+        outside.path(),
+        "outside.md",
+        safety_record_markdown(sentinel, Some("general_repo_knowledge")),
+    );
+    let records = temp.path().join(".memzoi/records");
+    fs::create_dir_all(&records).expect("records directory");
+    symlink(
+        outside.path().join(".memzoi/proposals/pending"),
+        records.join("linked"),
+    )
+    .expect("symlink managed ancestor outside");
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args([
+            "safety",
+            "scan",
+            "--file",
+            ".memzoi/records/linked/outside.md",
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(sentinel).not())
+        .stdout(
+            predicate::str::contains("\"allowed\": false")
+                .and(predicate::str::contains("unsafe_output_path"))
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains(sentinel).not()),
+        );
+}
+
+#[test]
+fn safety_scans_block_oversized_worktree_staged_and_range_blobs() {
+    use std::process::Command as StdCommand;
+
+    let temp = tempfile::tempdir().expect("temp repo");
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.com"][..],
+        &["config", "user.name", "Memzoi Test"][..],
+        &["commit", "--allow-empty", "--quiet", "-m", "base"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .status()
+                .expect("run git setup")
+                .success()
+        );
+    }
+    let relative = ".memzoi/proposals/pending/oversized.md";
+    write_pending_proposal_file(temp.path(), "oversized.md", "x".repeat(512 * 1024 + 1));
+
+    let mut file = memzoi();
+    file.current_dir(temp.path())
+        .args(["safety", "scan", "--file", relative, "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("candidate_too_large"));
+
+    assert!(
+        StdCommand::new("git")
+            .args(["add", relative])
+            .current_dir(temp.path())
+            .status()
+            .expect("stage oversized fixture")
+            .success()
+    );
+    let mut staged = memzoi();
+    staged
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--staged", "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("candidate_too_large"));
+
+    assert!(
+        StdCommand::new("git")
+            .args(["commit", "--quiet", "-m", "oversized fixture"])
+            .current_dir(temp.path())
+            .status()
+            .expect("commit oversized fixture")
+            .success()
+    );
+    let mut range = memzoi();
+    range
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("candidate_too_large"));
+}
+
+#[test]
+fn safety_scan_redacts_a_blocked_repository_path() {
+    let temp = tempfile::tempdir().expect("temp repo");
+    let records = temp.path().join(".memzoi/records");
+    fs::create_dir_all(&records).expect("records directory");
+    let sentinel = "ghp_PathSecretSentinel0123456789abcdef";
+    let relative = format!(".memzoi/records/{sentinel}.md");
+    fs::write(
+        temp.path().join(&relative),
+        safety_record_markdown("Safe body.", Some("general_repo_knowledge")),
+    )
+    .expect("path fixture");
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--file", &relative, "--json"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("credential_token")
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains(sentinel).not()),
+        );
+}
+
+#[cfg(unix)]
+#[test]
+fn safety_scan_redacts_a_real_utf8_path_equal_to_the_non_utf8_sentinel() {
+    let temp = tempfile::tempdir().expect("temp repo");
+    let relative = ".memzoi/memory/<non-utf8-git-path>";
+    let path = temp.path().join(relative);
+    fs::create_dir_all(path.parent().expect("memory parent")).expect("memory directory");
+    fs::write(
+        &path,
+        safety_record_markdown(
+            "ghp_UTF8_PATH_SENTINEL_0123456789abcdefghijklmnop",
+            Some("general_repo_knowledge"),
+        ),
+    )
+    .expect("UTF-8 sentinel-looking path fixture");
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--file", relative, "--json"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("\"allowed\": false")
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains("<non-utf8-git-path>").not()),
+        );
+}
+
+#[test]
+fn staged_and_range_scans_block_contextually_prohibited_records() {
+    use std::process::Command as StdCommand;
+
+    let temp = tempfile::tempdir().expect("temp repo");
+    StdCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(temp.path())
+        .status()
+        .expect("initialize git repository");
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(temp.path())
+        .status()
+        .expect("configure git email");
+    StdCommand::new("git")
+        .args(["config", "user.name", "Memzoi Test"])
+        .current_dir(temp.path())
+        .status()
+        .expect("configure git name");
+    StdCommand::new("git")
+        .args(["commit", "--allow-empty", "--quiet", "-m", "base"])
+        .current_dir(temp.path())
+        .status()
+        .expect("create base commit");
+
+    let path_sentinel = "private-context-filename-sentinel";
+    let relative = format!(".memzoi/records/{path_sentinel}.md");
+    let path = temp.path().join(&relative);
+    fs::create_dir_all(path.parent().expect("record parent")).expect("records directory");
+    fs::write(
+        &path,
+        safety_record_markdown("Lexically harmless transcript.", Some("raw_transcript")),
+    )
+    .expect("raw transcript record");
+    StdCommand::new("git")
+        .args(["add", &relative])
+        .current_dir(temp.path())
+        .status()
+        .expect("stage contextual fixture");
+
+    let mut staged = memzoi();
+    staged
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--staged", "--json"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("raw_transcript")
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains(path_sentinel).not()),
+        );
+
+    StdCommand::new("git")
+        .args(["commit", "--quiet", "-m", "contextual fixture"])
+        .current_dir(temp.path())
+        .status()
+        .expect("commit contextual fixture");
+    let mut range = memzoi();
+    range
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("raw_transcript")
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains(path_sentinel).not()),
+        );
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_and_range_scans_block_managed_git_type_changes() {
+    use std::{os::unix::fs::symlink, process::Command as StdCommand};
+
+    for entry_kind in ["symlink", "gitlink"] {
+        let temp = tempfile::tempdir().expect("temp repo");
+        for args in [
+            &["init", "--quiet"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "Memzoi Test"][..],
+        ] {
+            assert!(
+                StdCommand::new("git")
+                    .args(args)
+                    .current_dir(temp.path())
+                    .status()
+                    .expect("run git setup")
+                    .success()
+            );
+        }
+        let relative = ".memzoi/records/type-change.md";
+        let path = temp.path().join(relative);
+        fs::create_dir_all(path.parent().expect("record parent")).expect("records directory");
+        fs::write(
+            &path,
+            safety_record_markdown("Safe baseline.", Some("general_repo_knowledge")),
+        )
+        .expect("baseline record");
+        assert!(
+            StdCommand::new("git")
+                .args(["add", relative])
+                .current_dir(temp.path())
+                .status()
+                .expect("stage baseline")
+                .success()
+        );
+        assert!(
+            StdCommand::new("git")
+                .args(["commit", "--quiet", "-m", "baseline"])
+                .current_dir(temp.path())
+                .status()
+                .expect("commit baseline")
+                .success()
+        );
+
+        if entry_kind == "symlink" {
+            fs::remove_file(&path).expect("remove regular record");
+            symlink("outside-target", &path).expect("replace record with symlink");
+            assert!(
+                StdCommand::new("git")
+                    .args(["add", relative])
+                    .current_dir(temp.path())
+                    .status()
+                    .expect("stage symlink")
+                    .success()
+            );
+        } else {
+            let head = StdCommand::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(temp.path())
+                .output()
+                .expect("read baseline commit");
+            assert!(head.status.success());
+            let oid = String::from_utf8(head.stdout).expect("commit ID is UTF-8");
+            assert!(
+                StdCommand::new("git")
+                    .args([
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("160000,{},{}", oid.trim(), relative),
+                    ])
+                    .current_dir(temp.path())
+                    .status()
+                    .expect("stage gitlink")
+                    .success()
+            );
+        }
+
+        let mut staged = memzoi();
+        staged
+            .current_dir(temp.path())
+            .args(["safety", "scan", "--staged", "--json"])
+            .assert()
+            .code(2)
+            .stdout(predicate::str::contains("\"allowed\": false"));
+
+        assert!(
+            StdCommand::new("git")
+                .args(["commit", "--quiet", "-m", entry_kind])
+                .current_dir(temp.path())
+                .status()
+                .expect("commit type change")
+                .success()
+        );
+        let mut range = memzoi();
+        range
+            .current_dir(temp.path())
+            .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+            .assert()
+            .code(2)
+            .stdout(predicate::str::contains("\"allowed\": false"));
+    }
+}
+
+#[test]
+fn range_scan_rejects_unsafe_revision_tokens_before_invoking_git() {
+    for range in ["-p...HEAD", "HEAD...-p", "HEAD ^...HEAD", "HEAD...HEAD\n"] {
+        let mut command = memzoi();
+        command
+            .args(["safety", "scan", &format!("--range={range}"), "--json"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "--range contains an unsafe Git revision token",
+            ));
+    }
+}
+
+#[test]
+fn repository_content_class_cli_defaults_fail_closed() {
+    let mut propose = memzoi();
+    propose
+        .args(["propose", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[default: unknown]"));
+
+    let mut supersede = memzoi();
+    supersede
+        .args(["supersede", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[default: unknown]"));
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_safety_scan_blocks_non_utf8_git_paths_with_exit_two() {
+    use std::io::Write;
+    use std::process::{Command as StdCommand, Stdio};
+
+    let temp = tempfile::tempdir().expect("temp repo");
+    StdCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(temp.path())
+        .status()
+        .expect("initialize git repository");
+    let records = temp.path().join(".memzoi/records");
+    fs::create_dir_all(&records).expect("records directory");
+    let object = StdCommand::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .expect("hash-object stdin")
+                .write_all(b"General repository knowledge.\n")?;
+            child.wait_with_output()
+        })
+        .expect("write Git blob");
+    assert!(object.status.success());
+    let object_id = String::from_utf8(object.stdout).expect("object ID is UTF-8");
+    let mut unrelated_entry = format!("100644 {}\tassets/invalid-", object_id.trim()).into_bytes();
+    unrelated_entry.push(0xff);
+    unrelated_entry.extend_from_slice(b".bin\0");
+    let mut update_unrelated = StdCommand::new("git")
+        .args(["update-index", "-z", "--index-info"])
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start unrelated update-index");
+    update_unrelated
+        .stdin
+        .take()
+        .expect("unrelated update-index stdin")
+        .write_all(&unrelated_entry)
+        .expect("write unrelated raw index entry");
+    assert!(
+        update_unrelated
+            .wait()
+            .expect("stage unrelated raw index entry")
+            .success()
+    );
+
+    let mut unrelated_scan = memzoi();
+    unrelated_scan
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--staged", "--json"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"allowed\": true")
+                .and(predicate::str::contains("<non-utf8-git-path>").not()),
+        );
+
+    let mut index_entry =
+        format!("100644 {}\t.memzoi/records/invalid-", object_id.trim()).into_bytes();
+    index_entry.push(0xff);
+    index_entry.extend_from_slice(b".md\0");
+    let mut update_index = StdCommand::new("git")
+        .args(["update-index", "-z", "--index-info"])
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start update-index");
+    update_index
+        .stdin
+        .take()
+        .expect("update-index stdin")
+        .write_all(&index_entry)
+        .expect("write raw index entry");
+    assert!(
+        update_index
+            .wait()
+            .expect("stage raw index entry")
+            .success()
+    );
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--staged", "--json"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("\"allowed\": false")
+                .and(predicate::str::contains("invalid_encoding"))
+                .and(predicate::str::contains(
+                    "\"path\": \".memzoi/memory/<non-utf8-git-path>\"",
+                ))
+                .and(predicate::str::contains("invalid-").not()),
+        );
+}
+
 #[test]
 fn eval_recall_help_requires_an_explicit_corpus() {
     let mut cmd = memzoi();
@@ -257,7 +822,7 @@ fn capture_plan_requires_exactly_one_explicit_source_argument() {
 }
 
 #[test]
-fn capture_plan_rejects_an_absent_reserved_memory_root_as_output() {
+fn capture_plan_does_not_create_an_absent_reserved_memory_root_for_private_output() {
     let repo = tempfile::tempdir().expect("temp repo");
     fs::create_dir(repo.path().join(".git")).expect("create git marker");
     fs::write(
@@ -278,7 +843,7 @@ fn capture_plan_rejects_an_absent_reserved_memory_root_as_output() {
             forbidden.to_str().expect("reserved path utf-8"),
         ],
     );
-    assert!(error.contains("Memzoi-managed state"), "{error}");
+    assert!(error.contains("private runtime directory"), "{error}");
     assert!(!forbidden.exists());
 }
 
@@ -308,7 +873,7 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
     assert_eq!(planned, repeated, "capture planning must be deterministic");
     assert_json_string_field(&planned, &["schema"], "memzoi/capture-plan-v1");
     assert_json_string_field(&planned, &["status"], "ready");
-    assert_json_string_field(&planned, &["data_class"], "repo_safe");
+    assert_json_string_field(&planned, &["data_class"], "private");
     assert!(json_string(&planned, "plan_id").starts_with("capture_"));
     let candidates = planned["candidates"]
         .as_array()
@@ -322,8 +887,12 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
         assert!(json_string(candidate, "claim_id").starts_with("claim_"));
         assert!(json_string(candidate, "candidate_id").starts_with("candidate_"));
         assert!(candidate["confidence"].is_string() || candidate["confidence"].is_number());
-        assert_json_string_field(&candidate["classification"], &["destination"], "repo");
-        assert_json_string_field(&candidate["classification"], &["sensitivity"], "repo-safe");
+        assert_json_string_field(
+            &candidate["classification"],
+            &["destination"],
+            "needs_review",
+        );
+        assert_json_string_field(&candidate["classification"], &["sensitivity"], "unknown");
         assert!(
             candidate["classification"]["destination_reason"]
                 .as_str()
@@ -363,7 +932,12 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
         );
     }
 
-    let artifact = repo.path().join("capture-plan.json");
+    assert_eq!(
+        managed_state_snapshot(&paths),
+        before,
+        "stdout-only planning must not mutate memory state"
+    );
+    let artifact = paths.runtime_dir.join("capture-plan.json");
     let emitted = run_json_command(
         repo.path(),
         &[
@@ -380,11 +954,6 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
         .expect("parse plan artifact");
     assert_eq!(emitted, planned);
     assert_eq!(saved, planned);
-    assert_eq!(
-        managed_state_snapshot(&paths),
-        before,
-        "planning must not mutate memory state"
-    );
 
     let saved_before = fs::read(&artifact).expect("read immutable plan artifact");
     let error = run_command_failure_stderr(
@@ -410,7 +979,6 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
             .proposals_dir()
             .join("pending")
             .join("capture-plan.json"),
-        paths.runtime_dir.join("capture-plan.json"),
         paths.exports_dir.join("capture-plan.json"),
     ] {
         let error = run_command_failure_stderr(
@@ -424,14 +992,14 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
                 forbidden.to_str().expect("managed path utf-8"),
             ],
         );
-        assert!(error.contains("Memzoi-managed state"), "{error}");
+        assert!(
+            error.contains("Memzoi-managed state")
+                || error.contains("private runtime directory")
+                || error.contains("generated exports"),
+            "{error}"
+        );
         assert!(!forbidden.exists());
     }
-    assert_eq!(
-        managed_state_snapshot(&paths),
-        before,
-        "explicit artifacts must not mutate managed state"
-    );
 }
 
 #[test]
@@ -536,7 +1104,7 @@ fn capture_review_binds_every_decision_without_mutating_memory_state() {
     assert!(review_path.is_file());
     assert_json_string_field(&review, &["schema"], "memzoi/capture-review-v1");
     assert_json_string_field(&review, &["plan_id"], json_string(&plan, "plan_id"));
-    assert_json_string_field(&review, &["data_class"], "repo_safe");
+    assert_json_string_field(&review, &["data_class"], "private");
     assert!(json_string(&review, "review_id").starts_with("review_"));
     assert_eq!(
         review["decisions"].as_array().map(Vec::len),
@@ -548,7 +1116,7 @@ fn capture_review_binds_every_decision_without_mutating_memory_state() {
     assert_eq!(saved, review);
     assert_eq!(managed_state_snapshot(&paths), before);
 
-    let decisions_path = repo.path().join("capture-decisions.json");
+    let decisions_path = paths.runtime_dir.join("capture-decisions.json");
     let human = run_command_stdout(
         repo.path(),
         &[
@@ -585,7 +1153,7 @@ fn capture_review_binds_every_decision_without_mutating_memory_state() {
             forbidden.to_str().expect("managed review path utf-8"),
         ],
     );
-    assert!(error.contains("Memzoi-managed state"), "{error}");
+    assert!(error.contains("private runtime directory"), "{error}");
     assert!(!forbidden.exists());
     assert_eq!(managed_state_snapshot(&paths), before);
 }
@@ -1346,6 +1914,8 @@ fn doctor_json_warns_about_open_proposals_and_prints_next_steps() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Doctor should surface pending proposals",
             "--body",
@@ -1702,6 +2272,7 @@ candidates:
     title: Human review candidate
     body: Preserve this candidate body in human output.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
     scope:
       kind: repo
     tags: [review]
@@ -2147,6 +2718,8 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "CLI proposals produce JSON",
             "--body",
@@ -2216,6 +2789,8 @@ fn proposal_commands_json_drive_approve_apply_supersede_and_tombstone_workflow()
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "CLI supersede writes replacement",
             "--body",
@@ -2272,6 +2847,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Default proposal is approved",
             "--body",
@@ -2296,6 +2873,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Manual proposal stays pending",
             "--body",
@@ -2320,6 +2899,8 @@ fn propose_default_approves_manual_keeps_pending_and_apply_creates_active_record
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Apply approved proposal immediately",
             "--body",
@@ -2410,6 +2991,74 @@ fn propose_omitted_sensitivity_is_explicit_unknown_and_cannot_apply() {
 }
 
 #[test]
+fn propose_and_supersede_omitted_content_class_fail_closed() {
+    let repo = initialized_temp_repo();
+    let propose_sentinel = "OMITTED-CONTENT-CLASS-PROPOSE-SENTINEL";
+    let proposed = run_command_failure_stderr(
+        repo.path(),
+        &[
+            "propose",
+            "--apply",
+            "--type",
+            "fact",
+            "--sensitivity",
+            "repo-safe",
+            "--title",
+            "Unclassified repository proposal",
+            "--body",
+            propose_sentinel,
+        ],
+    );
+    assert!(proposed.contains("repository write blocked"), "{proposed}");
+    assert!(!proposed.contains(propose_sentinel), "{proposed}");
+    assert!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("records directory")
+            .next()
+            .is_none()
+    );
+
+    let target = create_applied_memory(
+        repo.path(),
+        "fact",
+        "repo",
+        "Classified target",
+        "The target remains active when its replacement is unclassified.",
+    );
+    let supersede_sentinel = "OMITTED-CONTENT-CLASS-SUPERSEDE-SENTINEL";
+    let superseded = run_command_failure_stderr(
+        repo.path(),
+        &[
+            "supersede",
+            &target,
+            "--type",
+            "fact",
+            "--scope-kind",
+            "repo",
+            "--visibility",
+            "repo",
+            "--sensitivity",
+            "repo-safe",
+            "--title",
+            "Unclassified replacement",
+            "--body",
+            supersede_sentinel,
+        ],
+    );
+    assert!(
+        superseded.contains("repository write blocked"),
+        "{superseded}"
+    );
+    assert!(!superseded.contains(supersede_sentinel), "{superseded}");
+    assert_eq!(
+        fs::read_dir(test_paths(repo.path()).records_dir())
+            .expect("records directory")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn supersede_json_blocks_every_non_repo_safe_sensitivity_without_echoing_body() {
     for sensitivity in [
         "local-only",
@@ -2430,6 +3079,8 @@ fn supersede_json_blocks_every_non_repo_safe_sensitivity_without_echoing_body() 
                 "fact",
                 "--sensitivity",
                 "repo-safe",
+                "--content-class",
+                "general_repo_knowledge",
                 "--title",
                 "Supersede sensitivity target",
                 "--body",
@@ -2490,6 +3141,8 @@ fn cli_proposal_evidence_survives_apply_rebuild_and_recall_separately_from_linea
             "decision",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--source-kind",
             "issue",
             "--source-ref",
@@ -2536,6 +3189,8 @@ fn cli_source_reference_does_not_fabricate_an_evidence_kind() {
             "fact",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--source-ref",
             "issue://42#reference-only",
             "--title",
@@ -2578,6 +3233,8 @@ fn cli_multiline_evidence_round_trips_without_index_drift() {
             "fact",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--source-ref",
             source_ref,
             "--title",
@@ -2621,6 +3278,8 @@ fn propose_apply_implies_auto_approval_when_repo_policy_is_manual() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Apply overrides manual policy",
             "--body",
@@ -2662,6 +3321,8 @@ fn propose_policy_flags_reject_conflicting_combinations() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Conflicting policies",
             "--body",
@@ -2689,6 +3350,8 @@ fn propose_policy_flags_reject_conflicting_combinations() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Manual apply conflict",
             "--body",
@@ -2718,6 +3381,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Human reviews risky memory",
             "--body",
@@ -2741,6 +3406,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Bulk apply first approved proposal",
             "--body",
@@ -2764,6 +3431,8 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Bulk apply second approved proposal",
             "--body",
@@ -2922,7 +3591,8 @@ fn proposal_files_list_show_and_validate_valid_pending_files() {
     assert_eq!(validated.get("valid").and_then(Value::as_bool), Some(true));
     assert_eq!(
         validated.get("valid_count").and_then(Value::as_u64),
-        Some(1)
+        Some(1),
+        "{validated}"
     );
     assert_eq!(
         validated.get("invalid_count").and_then(Value::as_u64),
@@ -2966,12 +3636,14 @@ fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() 
     write_pending_proposal_file(
         repo.path(),
         "invalid-lane.md",
-        proposal_markdown_with("mystery", "create", "supersedes: []", ""),
+        proposal_markdown_with("mystery", "create", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_invalid_lane"),
     );
     write_pending_proposal_file(
         repo.path(),
         "invalid-action.md",
-        proposal_markdown_with("semantic", "update", "supersedes: []", ""),
+        proposal_markdown_with("semantic", "update", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_invalid_action"),
     );
     write_pending_proposal_file(
         repo.path(),
@@ -2991,7 +3663,8 @@ fn proposal_files_validate_reports_invalid_files_and_list_refuses_mixed_state() 
     assert_eq!(validated.get("valid").and_then(Value::as_bool), Some(false));
     assert_eq!(
         validated.get("valid_count").and_then(Value::as_u64),
-        Some(1)
+        Some(1),
+        "mixed validation result: {validated}"
     );
     assert_eq!(
         validated.get("invalid_count").and_then(Value::as_u64),
@@ -3223,8 +3896,40 @@ fn proposal_files_apply_repo_safe_create_resolves_packet_and_updates_runtime_ind
 
 #[test]
 fn proposal_files_reject_archives_reason_without_creating_canonical_memory() {
+    use std::process::Command as StdCommand;
+
     let repo = initialized_temp_repo();
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.com"][..],
+        &["config", "user.name", "Memzoi Test"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("prepare rejection range repository")
+                .success()
+        );
+    }
     write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
+    assert!(
+        StdCommand::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo.path())
+            .status()
+            .expect("stage pending proposal")
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["commit", "--quiet", "-m", "pending proposal"])
+            .current_dir(repo.path())
+            .status()
+            .expect("commit pending proposal")
+            .success()
+    );
 
     let rejected = run_json_command(
         repo.path(),
@@ -3273,6 +3978,28 @@ fn proposal_files_reject_archives_reason_without_creating_canonical_memory() {
         rendered.contains("reason: Reviewer found the evidence too weak."),
         "{rendered}"
     );
+    assert!(
+        StdCommand::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo.path())
+            .status()
+            .expect("stage rejected receipt")
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["commit", "--quiet", "-m", "rejected receipt"])
+            .current_dir(repo.path())
+            .status()
+            .expect("commit rejected receipt")
+            .success()
+    );
+    let mut scan = memzoi();
+    scan.current_dir(repo.path())
+        .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"allowed\": true"));
 
     let repeated = run_json_command(
         repo.path(),
@@ -3304,6 +4031,92 @@ fn proposal_files_reject_archives_reason_without_creating_canonical_memory() {
     );
     let search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
     assert!(search["records"].as_array().is_some_and(Vec::is_empty));
+}
+
+#[test]
+fn redacted_prohibited_class_rejection_receipt_passes_range_scan() {
+    use std::process::Command as StdCommand;
+
+    let repo = initialized_temp_repo();
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.com"][..],
+        &["config", "user.name", "Memzoi Test"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("prepare redacted receipt repository")
+                .success()
+        );
+    }
+    let prohibited = proposal_markdown_with_options(
+        "semantic",
+        "create",
+        "proposed",
+        "supersedes: []",
+        "",
+        "repo-safe",
+    )
+    .replace(
+        "content_class: general_repo_knowledge",
+        "content_class: raw_transcript",
+    );
+    write_pending_proposal_file(repo.path(), "prohibited-proposal.md", prohibited);
+    for args in [
+        &["add", "-A"][..],
+        &["commit", "--quiet", "-m", "prohibited pending proposal"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("commit prohibited pending proposal")
+                .success()
+        );
+    }
+
+    let apply_error =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        apply_error.contains("repository write blocked") && apply_error.contains("raw_transcript"),
+        "prohibited source classification was lost behind its safe receipt: {apply_error}"
+    );
+
+    run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            "mem_test_valid",
+            "--reason",
+            "Rejected at the repository trust boundary.",
+            "--json",
+        ],
+    );
+    for args in [
+        &["add", "-A"][..],
+        &["commit", "--quiet", "-m", "redacted rejection receipt"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("commit redacted rejection receipt")
+                .success()
+        );
+    }
+
+    let mut scan = memzoi();
+    scan.current_dir(repo.path())
+        .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"allowed\": true"));
 }
 
 #[test]
@@ -3470,6 +4283,37 @@ fn legacy_file_proposal_shapes_remain_showable_and_rejectable() {
         ],
     );
     assert_json_string_field(&rejected, &["outcome"], "rejected");
+}
+
+#[test]
+fn legacy_file_proposal_without_content_class_cannot_apply() {
+    let repo = initialized_temp_repo();
+    let legacy = proposal_markdown_with_options(
+        "semantic",
+        "create",
+        "proposed",
+        "supersedes: []",
+        "",
+        "repo-safe",
+    )
+    .replace("content_class: general_repo_knowledge\n", "");
+    write_pending_proposal_file(repo.path(), "legacy-unclassified.md", legacy);
+
+    let error =
+        run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
+    assert!(
+        error.contains("unknown_content_class") || error.contains("repository write blocked"),
+        "unexpected unclassified proposal error: {error}"
+    );
+    assert!(
+        test_paths(repo.path()).records_dir().read_dir().is_err()
+            || test_paths(repo.path())
+                .records_dir()
+                .read_dir()
+                .expect("read records directory")
+                .next()
+                .is_none()
+    );
 }
 
 #[test]
@@ -3971,6 +4815,7 @@ candidates:
     title: Repository convention
     body: The repository uses explicit review before durable memory changes.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
     scope:
       kind: repo
     tags: [workflow]
@@ -4312,6 +5157,7 @@ candidates:
     title: Safe imported fact
     body: This repo-safe candidate may become a reviewed proposal.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
 "#,
     )
     .expect("write blocked import manifest");
@@ -4588,6 +5434,44 @@ fn proposal_files_apply_rejects_non_repo_safe_sensitivity() {
 }
 
 #[test]
+fn repo_safe_secret_packet_is_hash_only_in_inventory_and_rejection_receipt() {
+    let repo = initialized_temp_repo();
+    let sentinel = "ghp_REPO_SAFE_SECRET_SENTINEL_0123456789abcdefghijklmnop";
+    let markdown = valid_proposal_markdown().replace("This proposal body is valid.", sentinel);
+    write_pending_proposal_file(repo.path(), "valid-proposal.md", markdown);
+
+    let listed = run_json_command(repo.path(), &["proposal-files", "list", "--json"]);
+    let rendered = serde_json::to_string(&listed).expect("serialize redacted inventory");
+    assert!(!rendered.contains(sentinel), "{rendered}");
+    let proposal = listed["proposals"]
+        .as_array()
+        .and_then(|proposals| proposals.first())
+        .unwrap_or_else(|| panic!("redacted pending proposal missing: {listed}"));
+    assert_json_string_field(proposal, &["title"], "Redacted non-repo-safe proposal");
+    let redacted_id = proposal_id_from_value(proposal).to_owned();
+
+    let rejected = run_json_command(
+        repo.path(),
+        &[
+            "proposal-files",
+            "reject",
+            &redacted_id,
+            "--reason",
+            "unsafe content removed",
+            "--json",
+        ],
+    );
+    let rendered = serde_json::to_string(&rejected).expect("serialize redacted rejection");
+    assert!(!rendered.contains(sentinel), "{rendered}");
+    assert!(
+        !repo
+            .path()
+            .join(".memzoi/proposals/pending/valid-proposal.md")
+            .exists()
+    );
+}
+
+#[test]
 fn proposal_files_supersede_preserves_target_evidence_and_creates_active_lineage() {
     let repo = initialized_temp_repo();
     write_canonical_record_fixture(
@@ -4784,22 +5668,6 @@ fn proposal_files_validate_rejects_invalid_target_shapes_and_states_before_mutat
             "is inactive",
         ),
         (
-            "cross-scope",
-            Some((
-                "project",
-                Some("other-project"),
-                "active",
-                "2026-07-01T00:00:00Z",
-            )),
-            proposal_markdown_with(
-                "semantic",
-                "supersede",
-                "supersedes:\n  - lifecycle-target",
-                "",
-            ),
-            "cross-scope",
-        ),
-        (
             "stale",
             Some(("repo", None, "active", "2026-07-07T00:00:00Z")),
             proposal_markdown_with(
@@ -4916,6 +5784,7 @@ updated: 2026-07-01T00:00:00Z
 status: active
 scope: repo
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 1
 source: human
 source_ref: evidence://outside
@@ -5091,7 +5960,8 @@ fn proposal_files_apply_fails_cleanly_for_invalid_or_missing_proposals() {
     write_pending_proposal_file(
         invalid_pending.path(),
         "invalid-lane.md",
-        proposal_markdown_with("mystery", "create", "supersedes: []", ""),
+        proposal_markdown_with("mystery", "create", "supersedes: []", "")
+            .replace("id: mem_test_valid", "id: mem_test_invalid_lane"),
     );
     let invalid = run_json_command_failure(
         invalid_pending.path(),
@@ -5124,6 +5994,8 @@ fn reject_json_prevents_apply_from_creating_active_record() {
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Rejected memories do not apply",
             "--body",
@@ -5401,6 +6273,7 @@ description: Canonical repo memory imported during rebuild.
 timestamp: 2026-07-08T00:00:00Z
 status: active
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 1
 source: test
 source_ref: test://repo-zircon
@@ -5721,6 +6594,7 @@ candidates:
     title: Session-end repo zircon decision
     body: Repo session-end zircon durable decision should become a proposal.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
     reason: Learned while implementing tests.
     scope:
       kind: repo
@@ -5879,13 +6753,13 @@ fn session_end_validates_whole_batch_before_writing_anything() {
     let input_path = repo.join("bad-session-end.yml");
     fs::write(
         &input_path,
-        r#"task: "Validate first"
+        r#"task: "BLOCKED-SESSION-END-TASK-SENTINEL"
 candidates:
   - destination: local
     type: preference
     lane: semantic
-    title: Should not write local first
-    body: This local candidate should not be written when the batch is invalid.
+    title: BLOCKED-LOCAL-TITLE-SENTINEL
+    body: BLOCKED-LOCAL-BODY-SENTINEL
   - destination: repo
     type: decision
     lane: semantic
@@ -5942,6 +6816,70 @@ candidates:
                 .next()
                 .is_none(),
         "blocked session-end batch must not write proposal files"
+    );
+}
+
+#[test]
+fn session_end_task_credentials_are_blocked_and_redacted_in_cli_json() {
+    let repo = initialized_temp_repo();
+    let input_path = repo.path().join("credential-task-session-end.yml");
+    let task_sentinel = "ghp_SESSION_END_TASK_SENTINEL_0123456789abcdefghijklmnop";
+    let input = format!(
+        "task: {task_sentinel}\ncandidates:\n  - destination: repo\n    type: fact\n    lane: semantic\n    title: Harmless repository candidate\n    body: General repository knowledge.\n    sensitivity: repo-safe\n    content_class: general_repo_knowledge\n"
+    );
+    let mut input_file = fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(&input_path)
+        .expect("create credential task session-end input");
+    let mut input_bytes = input.as_bytes();
+    std::io::copy(&mut input_bytes, &mut input_file)
+        .expect("write credential task session-end input");
+    drop(input_file);
+
+    let result = run_json_command(
+        repo.path(),
+        &[
+            "session-end",
+            "--from-file",
+            input_path.to_str().expect("session-end path utf-8"),
+            "--json",
+        ],
+    );
+    assert_json_string_field(&result, &["task"], "Redacted blocked session-end task");
+    assert_json_string_field(&result["candidates"][0], &["status"], "blocked");
+    let rendered = serde_json::to_string(&result).expect("serialize blocked session-end result");
+    assert!(!rendered.contains(task_sentinel), "{rendered}");
+}
+
+#[test]
+fn session_end_omitted_content_class_fails_closed() {
+    let repo = initialized_temp_repo();
+    let input_path = repo.path().join("unclassified-session-end.yml");
+    fs::write(
+        &input_path,
+        "task: Unclassified session end\ncandidates:\n  - destination: repo\n    type: fact\n    lane: semantic\n    title: Unclassified candidate\n    body: Lexically harmless repository knowledge.\n    sensitivity: repo-safe\n",
+    )
+    .expect("write unclassified session-end input");
+
+    let result = run_json_command(
+        repo.path(),
+        &[
+            "session-end",
+            "--from-file",
+            input_path.to_str().expect("session-end path utf-8"),
+            "--json",
+        ],
+    );
+    assert_json_string_field(&result["candidates"][0], &["status"], "blocked");
+    assert!(result["candidates"][0]["write"].is_null(), "{result}");
+    let pending = test_paths(repo.path()).proposals_dir().join("pending");
+    assert!(
+        !pending.exists()
+            || fs::read_dir(pending)
+                .expect("read pending proposals")
+                .next()
+                .is_none()
     );
 }
 
@@ -6020,6 +6958,7 @@ candidates:
     title: Proposal cannot be written
     body: This repo proposal cannot be written because pending is a file.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
 "#,
     )
     .expect("write session-end input");
@@ -6038,6 +6977,10 @@ candidates:
             || stderr.contains("failed to inspect pending proposal")
             || stderr.contains("pending proposal root ancestor must be a real directory"),
         "session-end should fail clearly on proposal file write errors: {stderr}"
+    );
+    assert!(
+        !stderr.contains("created session-end proposal batch does not match"),
+        "a create failure must not run rollback for an empty created set: {stderr}"
     );
     let local = run_json_command(repo, &["local", "list", "--json"]);
     assert!(
@@ -6061,12 +7004,14 @@ candidates:
     title: Duplicate session-end zircon
     body: First duplicate body.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
   - destination: repo
     type: decision
     lane: semantic
     title: Duplicate session-end zircon
     body: Second duplicate body.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
 "#,
     )
     .expect("write duplicate session-end input");
@@ -6115,6 +7060,7 @@ candidates:
     title: Checkpoint session-end zircon decision
     body: Checkpoint body is the explicit structured source.
     sensitivity: repo-safe
+    content_class: general_repo_knowledge
 "#;
     let checkpoint = run_json_command(
         repo,
@@ -6194,6 +7140,7 @@ fn session_end_accepts_markdown_frontmatter_with_crlf_newlines() {
             "    title: CRLF session-end zircon decision\r\n",
             "    body: CRLF Markdown frontmatter should parse as structured input.\r\n",
             "    sensitivity: repo-safe\r\n",
+            "    content_class: general_repo_knowledge\r\n",
             "---\r\n",
             "\r\n",
             "This Markdown body is not used for extraction.\r\n",
@@ -6952,6 +7899,7 @@ description: Restores context packs from canonical records.
 timestamp: 2026-07-05T00:00:00Z
 status: active
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 0.93
 source: test
 source_ref: test://rebuild-decision
@@ -6974,6 +7922,7 @@ description: Restores precheck warnings from canonical records.
 timestamp: 2026-07-05T00:00:00Z
 status: active
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 0.97
 source: test
 source_ref: test://rebuild-risk
@@ -7070,6 +8019,8 @@ fn rebuild_refuses_to_discard_open_proposals_with_ids_statuses_and_next_steps() 
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Pending rebuild protection",
             "--body",
@@ -7093,6 +8044,8 @@ fn rebuild_refuses_to_discard_open_proposals_with_ids_statuses_and_next_steps() 
             "repo",
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             "Approved rebuild protection",
             "--body",
@@ -7440,7 +8393,8 @@ fn capture_markdown_fixture() -> &'static str {
 fn capture_plan_review_fixture(repo: &Path) -> (PathBuf, PathBuf, PathBuf, Value, Value) {
     let source = repo.join("capture-source.md");
     fs::write(&source, capture_markdown_fixture()).expect("write capture source");
-    let plan_path = repo.join("capture-plan.json");
+    let runtime_dir = test_paths(repo).runtime_dir;
+    let plan_path = runtime_dir.join("capture-plan.json");
     let plan = run_json_command(
         repo,
         &[
@@ -7460,11 +8414,15 @@ fn capture_plan_review_fixture(repo: &Path) -> (PathBuf, PathBuf, PathBuf, Value
         .map(|candidate| {
             serde_json::json!({
                 "candidate_id": json_string(candidate, "candidate_id"),
-                "outcome": "accept",
+                "outcome": "edit",
+                "reason_code": "explicit-contextual-classification",
+                "memory": candidate["memory"].clone(),
+                "requested_destination": "repo",
+                "content_class": "general_repo_knowledge",
             })
         })
         .collect::<Vec<_>>();
-    let decisions_path = repo.join("capture-decisions.json");
+    let decisions_path = runtime_dir.join("capture-decisions.json");
     fs::write(
         &decisions_path,
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -7475,7 +8433,7 @@ fn capture_plan_review_fixture(repo: &Path) -> (PathBuf, PathBuf, PathBuf, Value
         .expect("serialize capture decisions"),
     )
     .expect("write capture decisions");
-    let review_path = repo.join("capture-review.json");
+    let review_path = runtime_dir.join("capture-review.json");
     let review = run_json_command(
         repo,
         &[
@@ -7682,6 +8640,7 @@ updated: {updated}
 status: {status}
 scope: {scope}
 {scope_id}visibility: repo
+content_class: general_repo_knowledge
 confidence: 1
 source: reviewed-source
 source_ref: evidence://legacy-auth
@@ -7733,6 +8692,7 @@ sources:
   - path: src/lib.rs
 supersedes: []
 sensitivity: repo-safe
+content_class: general_repo_knowledge
 ---
 
 # {title}
@@ -7795,6 +8755,7 @@ sources:
   - path: src/lib.rs
 {supersedes_yaml}
 sensitivity: {sensitivity}
+content_class: general_repo_knowledge
 ---
 
 # Valid proposal
@@ -7860,6 +8821,8 @@ fn create_applied_memory_with_visibility(
     title: &str,
     body: &str,
 ) -> String {
+    let policy_supported =
+        matches!(scope_kind, "repo" | "project") && matches!(visibility, "repo" | "public");
     let applied = run_json_command(
         repo,
         &[
@@ -7868,11 +8831,13 @@ fn create_applied_memory_with_visibility(
             "--type",
             memory_type,
             "--scope-kind",
-            scope_kind,
+            if policy_supported { scope_kind } else { "repo" },
             "--visibility",
-            visibility,
+            if policy_supported { visibility } else { "repo" },
             "--sensitivity",
             "repo-safe",
+            "--content-class",
+            "general_repo_knowledge",
             "--title",
             title,
             "--body",
@@ -7885,7 +8850,17 @@ fn create_applied_memory_with_visibility(
 
     assert_eq!(json_string(&applied, "record_status"), "active");
     assert_eq!(applied.get("applied").and_then(Value::as_bool), Some(true));
-    json_string(&applied, "record_id").to_owned()
+    let record_id = json_string(&applied, "record_id").to_owned();
+    if !policy_supported {
+        let conn = Connection::open(memory_db_path(repo))
+            .expect("open memory db for legacy read-filter fixture");
+        conn.execute(
+            "UPDATE memory_record SET scope_kind = ?1, visibility = ?2 WHERE id = ?3",
+            rusqlite::params![scope_kind, visibility, record_id],
+        )
+        .expect("seed legacy unsupported metadata fixture");
+    }
+    record_id
 }
 
 fn attach_memory_path(repo: &Path, record_id: &str, path: &str) {

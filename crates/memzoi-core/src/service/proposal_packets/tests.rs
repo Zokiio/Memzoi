@@ -385,6 +385,30 @@ fn unsafe_reject_revalidates_pending_bytes_without_leaking_raw_identity() -> any
 }
 
 #[test]
+fn unsafe_reject_reports_original_contextual_classification() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let pending = write_test_pending_proposal_with_content_class(
+        &service,
+        "Unsafe contextual classification",
+        OkfProposalSensitivity::Secret,
+        RepositoryContentClass::RawTranscript,
+    )?;
+
+    let result = service.reject_file_proposal(
+        &pending,
+        "reviewer:human",
+        "Reject unsafe contextual classification",
+    )?;
+
+    assert_eq!(result.proposal.sensitivity, OkfProposalSensitivity::Secret);
+    assert_eq!(
+        result.proposal.content_class,
+        RepositoryContentClass::RawTranscript
+    );
+    Ok(())
+}
+
+#[test]
 fn overwrite_install_never_replaces_a_file_recreated_after_backup() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let target = apply_test_record(
@@ -410,9 +434,27 @@ fn overwrite_install_never_replaces_a_file_recreated_after_backup() -> anyhow::R
         "UPDATE memory_record SET status = 'superseded' WHERE id = ?1",
         [&target.id],
     )?;
+    let projections = canonical_write_projections(&service.paths, std::slice::from_ref(&write))?;
+    let values = memory_draft_safety_values("replacement", &write.record_file.draft);
+    let authorization = authorize_repository_projection_batch(
+        &service.paths,
+        RepositoryWriteRoute::Supersede,
+        OkfProposalSensitivity::RepoSafe,
+        write.record_file.draft.scope_kind,
+        write.record_file.draft.scope_id.as_deref(),
+        write.record_file.draft.visibility,
+        AuthorizationProof::LifecycleOperation {
+            target_id: &target.id,
+        },
+        explicit_repository_provenance(write.record_file.draft.content_class, &target.id),
+        &values,
+        &projections,
+    )?;
 
     let error = session
         .commit_with_backup_hook(
+            RepositoryWriteRoute::Supersede,
+            &authorization,
             tx,
             &[write],
             |_| Ok(()),
@@ -420,7 +462,7 @@ fn overwrite_install_never_replaces_a_file_recreated_after_backup() -> anyhow::R
             |_| Ok(()),
         )
         .expect_err("no-replace overwrite must refuse the recreated target");
-    assert!(format!("{error:#}").contains("without replacing"));
+    assert!(format!("{error:#}").contains("without replacement"));
     assert_eq!(fs::read_to_string(&target_path)?, "fresh editor bytes");
     assert_eq!(
         RuntimeRecords::new(&service.conn)
@@ -436,6 +478,79 @@ fn overwrite_install_never_replaces_a_file_recreated_after_backup() -> anyhow::R
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.ends_with(".canonical.tmp"))
+    );
+    Ok(())
+}
+
+#[test]
+fn canonical_rollback_preserves_an_identical_recreated_install() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let target = apply_test_record(
+        &service,
+        sample_memory_draft("Canonical rollback identity", "Original target body"),
+    )?;
+    let target_path = service
+        .paths
+        .records_dir()
+        .join(format!("{}.md", target.id));
+    let mut replacement = target.clone();
+    replacement.status = MemoryStatus::Superseded;
+    replacement.updated_at = "2026-07-10T12:00:00Z".to_owned();
+    let session = CanonicalWriteSession::begin(&service.paths)?;
+    let write = service.prepare_record_file_write_with_conn(
+        &session,
+        &service.conn,
+        &replacement,
+        FileWriteMode::Overwrite,
+    )?;
+    let replacement_bytes = write.markdown.as_bytes().to_vec();
+    let tx = service.conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE memory_record SET status = 'superseded' WHERE id = ?1",
+        [&target.id],
+    )?;
+    let projections = canonical_write_projections(&service.paths, std::slice::from_ref(&write))?;
+    let values = memory_draft_safety_values("replacement", &write.record_file.draft);
+    let authorization = authorize_repository_projection_batch(
+        &service.paths,
+        RepositoryWriteRoute::Supersede,
+        OkfProposalSensitivity::RepoSafe,
+        write.record_file.draft.scope_kind,
+        write.record_file.draft.scope_id.as_deref(),
+        write.record_file.draft.visibility,
+        AuthorizationProof::LifecycleOperation {
+            target_id: &target.id,
+        },
+        explicit_repository_provenance(write.record_file.draft.content_class, &target.id),
+        &values,
+        &projections,
+    )?;
+    let recreated_path = target_path.clone();
+    let recreated_bytes = replacement_bytes.clone();
+
+    let error = session
+        .commit_with_hooks(
+            RepositoryWriteRoute::Supersede,
+            &authorization,
+            tx,
+            &[write],
+            |_| Ok(()),
+            move |_| {
+                fs::remove_file(&recreated_path)?;
+                fs::write(&recreated_path, &recreated_bytes)?;
+                Err(anyhow::anyhow!("injected pre-commit failure"))
+            },
+        )
+        .expect_err("rollback must not delete an identical file recreated by another owner");
+
+    assert!(format!("{error:#}").contains("pre-commit"));
+    assert_eq!(fs::read(&target_path)?, replacement_bytes);
+    assert_eq!(
+        RuntimeRecords::new(&service.conn)
+            .get(&target.id)?
+            .context("target row survived")?
+            .status,
+        MemoryStatus::Active
     );
     Ok(())
 }
@@ -468,6 +583,47 @@ fn rejection_finalization_failure_restores_raw_pending_packet() -> anyhow::Resul
             .exists()
     );
     assert!(lifecycle_transaction_artifacts(&service.paths)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn rejection_rollback_preserves_an_identical_recreated_receipt() -> anyhow::Result<()> {
+    use std::{cell::RefCell, rc::Rc};
+
+    let (_temp, service) = initialized_service()?;
+    let pending = write_test_pending_proposal(
+        &service,
+        "Rejected identical replacement",
+        OkfProposalSensitivity::RepoSafe,
+    )?;
+    let snapshot = service.load_pending_file_proposal_snapshot(&pending)?;
+    let resolved_path = service
+        .paths
+        .proposals_dir()
+        .join("resolved/rejected")
+        .join(format!("{}.md", snapshot.proposal.file_id));
+    let recreated_path = resolved_path.clone();
+    let recreated_bytes = Rc::new(RefCell::new(Vec::new()));
+    let observed_bytes = Rc::clone(&recreated_bytes);
+
+    let error = service
+        .reject_file_proposal_with_finalize_hook(
+            &pending,
+            "reviewer:human",
+            "Exercise exact rollback ownership",
+            move |_| {
+                let bytes = fs::read(&recreated_path)?;
+                fs::remove_file(&recreated_path)?;
+                fs::write(&recreated_path, &bytes)?;
+                *observed_bytes.borrow_mut() = bytes;
+                Err(anyhow::anyhow!("injected rejection finalization failure"))
+            },
+        )
+        .expect_err("rollback must preserve an identical receipt recreated by another owner");
+
+    assert!(format!("{error:#}").contains("finalization"));
+    assert!(pending.exists());
+    assert_eq!(fs::read(&resolved_path)?, *recreated_bytes.borrow());
     Ok(())
 }
 
@@ -556,21 +712,45 @@ fn applied_finalization_failure_is_reported_and_discoverable() -> anyhow::Result
             .is_file()
     );
     let artifacts = lifecycle_transaction_artifacts(&service.paths)?;
-    assert_eq!(artifacts.len(), 1, "unexpected artifacts: {artifacts:?}");
+    assert_eq!(artifacts.len(), 3, "unexpected artifacts: {artifacts:?}");
     assert!(
-        artifacts[0]
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".pending.tmp"))
+        artifacts
+            .iter()
+            .all(|artifact| artifact.starts_with(repository_transaction_root(&service.paths)))
+    );
+    assert!(
+        artifacts
+            .iter()
+            .all(|artifact| !artifact.starts_with(&service.paths.project_root))
+    );
+    let names = artifacts
+        .iter()
+        .filter_map(|artifact| artifact.file_name()?.to_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.ends_with(".pending.tmp"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.ends_with(".write.tmp"))
+            .count(),
+        2
     );
     Ok(())
 }
 
 fn initialized_service() -> anyhow::Result<(TempDir, MemoryService)> {
     let temp = TempDir::new()?;
+    let project_root = temp.path().join("project");
+    fs::create_dir(&project_root)?;
     let paths = MemoryPaths::with_runtime_home(
-        temp.path().canonicalize()?,
-        temp.path().join(".memzoi-runtime"),
+        project_root.canonicalize()?,
+        temp.path().join("runtime-home"),
     );
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
     let service = MemoryService::open_paths(paths)?;
@@ -587,6 +767,7 @@ fn repo_session_document(title: &str) -> SessionEndDocument {
             title: title.to_owned(),
             body: "The pending packet must remain inside the guarded repository root.".to_owned(),
             sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
             reason: Some("Lifecycle regression coverage".to_owned()),
             scope: None,
             tags: vec!["lifecycle".to_owned()],
@@ -611,6 +792,7 @@ fn repo_import_document(title: &str) -> ImportDocument {
             body: "The imported pending packet must remain inside the guarded repository root."
                 .to_owned(),
             sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
             scope: None,
             tags: vec!["lifecycle".to_owned()],
         }],
@@ -622,9 +804,29 @@ fn write_test_pending_proposal(
     title: &str,
     sensitivity: OkfProposalSensitivity,
 ) -> anyhow::Result<PathBuf> {
+    write_test_pending_proposal_with_content_class(
+        service,
+        title,
+        sensitivity,
+        RepositoryContentClass::GeneralRepoKnowledge,
+    )
+}
+
+fn write_test_pending_proposal_with_content_class(
+    service: &MemoryService,
+    title: &str,
+    sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
+) -> anyhow::Result<PathBuf> {
     let proposal_id = proposals::title_to_concept_slug(title)
         .context("test proposal title should produce a slug")?;
-    write_test_pending_proposal_with_id(service, &proposal_id, title, sensitivity)
+    write_test_pending_proposal_with_id_and_content_class(
+        service,
+        &proposal_id,
+        title,
+        sensitivity,
+        content_class,
+    )
 }
 
 fn write_test_pending_proposal_with_id(
@@ -632,6 +834,22 @@ fn write_test_pending_proposal_with_id(
     proposal_id: &str,
     title: &str,
     sensitivity: OkfProposalSensitivity,
+) -> anyhow::Result<PathBuf> {
+    write_test_pending_proposal_with_id_and_content_class(
+        service,
+        proposal_id,
+        title,
+        sensitivity,
+        RepositoryContentClass::GeneralRepoKnowledge,
+    )
+}
+
+fn write_test_pending_proposal_with_id_and_content_class(
+    service: &MemoryService,
+    proposal_id: &str,
+    title: &str,
+    sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
 ) -> anyhow::Result<PathBuf> {
     prepare_pending_proposal_root(&service.paths)?;
     let draft = okf::OkfCreateProposalDraft {
@@ -653,6 +871,7 @@ fn write_test_pending_proposal_with_id(
             reference: None,
         }],
         sensitivity: OkfProposalSensitivity::RepoSafe,
+        content_class,
         capture: None,
     };
     let plan =
@@ -742,6 +961,7 @@ fn sample_memory_draft(title: &str, body: &str) -> MemoryDraft {
         source_kind: Some("test".to_owned()),
         source_ref: Some("proposal-packet-tests".to_owned()),
         sensitivity: OkfProposalSensitivity::RepoSafe,
+        content_class: RepositoryContentClass::GeneralRepoKnowledge,
         confidence: 0.82,
     }
 }

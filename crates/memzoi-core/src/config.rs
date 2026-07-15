@@ -91,6 +91,8 @@ impl MemoryPaths {
     }
 
     pub fn with_runtime_home(project_root: PathBuf, runtime_home: PathBuf) -> Self {
+        let project_root = normalize_root_path(project_root);
+        let runtime_home = normalize_root_path(runtime_home);
         let memory_dir = project_root.join(MEMORY_DIR_NAME);
         let runtime_dir = runtime_home
             .join(RUNTIME_PROJECTS_DIR)
@@ -119,6 +121,34 @@ impl MemoryPaths {
 
     pub fn repo_config_path(&self) -> PathBuf {
         self.memory_dir.join("config.toml")
+    }
+}
+
+fn normalize_root_path(path: PathBuf) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map(|current| current.join(&path))
+            .unwrap_or(path)
+    };
+    let mut cursor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(mut resolved) = cursor.canonicalize() {
+            for component in missing.iter().rev() {
+                resolved.push(component);
+            }
+            return resolved;
+        }
+        let Some(name) = cursor.file_name() else {
+            return absolute;
+        };
+        missing.push(name.to_os_string());
+        let Some(parent) = cursor.parent() else {
+            return absolute;
+        };
+        cursor = parent;
     }
 }
 
@@ -387,11 +417,37 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn memory_paths_normalize_symlinked_existing_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let container = temp.path().canonicalize().unwrap();
+        let real = container.join("real");
+        let alias = container.join("alias");
+        create_dir(&real);
+        symlink(&real, &alias).unwrap();
+
+        let paths = MemoryPaths::with_runtime_home(
+            alias.join("missing-project"),
+            alias.join("missing-runtime-home"),
+        );
+
+        assert_eq!(paths.project_root, real.join("missing-project"));
+        assert!(
+            paths
+                .runtime_dir
+                .starts_with(real.join("missing-runtime-home"))
+        );
+    }
+
     #[test]
     fn proposal_approval_policy_precedence_uses_user_global_then_repo_override() {
         let temp = TempDir::new().unwrap();
         let paths = paths_with_runtime_home(&temp);
-        let user_config_path = temp.path().join(".memzoi-runtime").join("config.toml");
+        let user_config_path =
+            normalize_root_path(temp.path().join(".memzoi-runtime")).join("config.toml");
         let repo_config_path = paths.repo_config_path();
 
         let built_in = load_effective_config(&paths).unwrap();

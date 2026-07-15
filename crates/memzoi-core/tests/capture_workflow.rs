@@ -37,9 +37,10 @@ fn one_markdown_source_plans_deterministically_with_exact_evidence_and_stale_ide
 
     assert_eq!(first, second);
     assert_eq!(first.status, CapturePlanStatus::Ready);
-    assert_eq!(first.data_class, CaptureDataClass::RepoSafe);
+    assert_eq!(first.data_class, CaptureDataClass::Private);
     assert_eq!(first.summary.candidates, 1);
-    assert_eq!(first.summary.create_proposals, 1);
+    assert_eq!(first.summary.create_proposals, 0);
+    assert_eq!(first.summary.needs_review, 1);
     assert!(
         first.diagnostics.is_empty(),
         "a heading-only structural ancestor is supported Markdown structure"
@@ -50,10 +51,7 @@ fn one_markdown_source_plans_deterministically_with_exact_evidence_and_stale_ide
     );
 
     let candidate = &first.candidates[0];
-    assert!(matches!(
-        candidate.action,
-        CaptureAction::CreateProposal { .. }
-    ));
+    assert!(matches!(candidate.action, CaptureAction::NoWrite { .. }));
     let evidence = &candidate.evidence[0];
     let exact =
         &markdown.as_bytes()[evidence.span.byte_start as usize..evidence.span.byte_end as usize];
@@ -527,6 +525,7 @@ fn plan_safeguards_reject_unsafe_files_and_block_secrets_without_echoing_them() 
                 reason_code: Some("blocked".to_owned()),
                 memory: None,
                 requested_destination: None,
+                content_class: None,
             }],
         },
         "capture-reviewer",
@@ -653,10 +652,10 @@ fn plan_reports_earlier_candidate_duplicates_and_conflicts_with_targeted_precond
 
     let plan = plan_capture(&fixture.paths, capture_request("matches.md"))?;
     assert_eq!(plan.summary.candidates, 4);
-    assert_eq!(plan.summary.create_proposals, 2);
+    assert_eq!(plan.summary.create_proposals, 0);
     assert_eq!(plan.summary.duplicates, 1);
     assert_eq!(plan.summary.conflicts, 1);
-    assert_eq!(plan.summary.needs_review, 1);
+    assert_eq!(plan.summary.needs_review, 3);
     assert_eq!(plan.data_class, CaptureDataClass::Private);
 
     let duplicate = plan
@@ -782,7 +781,7 @@ fn later_review_names_its_predecessor_and_changes_only_deferred_decisions() -> a
         Some(first.review_id.as_str())
     );
     assert_ne!(later.review_id, first.review_id);
-    assert_eq!(later.decisions[1].outcome, CaptureReviewOutcome::Accept);
+    assert_eq!(later.decisions[1].outcome, CaptureReviewOutcome::Edit);
 
     let mut third_input = review_input(&plan, vec![accept(terminal), accept(deferred)]);
     third_input.prior_review_id = Some(later.review_id.clone());
@@ -862,13 +861,13 @@ fn later_review_names_its_predecessor_and_changes_only_deferred_decisions() -> a
 }
 
 #[test]
-fn reviewer_can_sanitize_unknown_safe_evidence_into_a_repo_proposal() -> anyhow::Result<()> {
+fn typed_markdown_requires_explicit_contextual_classification_for_repo() -> anyhow::Result<()> {
     let fixture = CaptureFixture::new()?;
     fixture.write_source(
-        "unclassified.md",
-        "# General note\nUse deterministic cache keys for generated artifacts.\n",
+        "typed.md",
+        "# Fact: Raw conversation excerpt\nUse deterministic cache keys for generated artifacts.\n",
     )?;
-    let plan = plan_capture(&fixture.paths, capture_request("unclassified.md"))?;
+    let plan = plan_capture(&fixture.paths, capture_request("typed.md"))?;
     let candidate = &plan.candidates[0];
     assert_eq!(
         candidate.classification.sensitivity,
@@ -878,9 +877,42 @@ fn reviewer_can_sanitize_unknown_safe_evidence_into_a_repo_proposal() -> anyhow:
         candidate.classification.destination,
         MemoryDestination::NeedsReview
     );
+    let error = build_capture_review(
+        &fixture.paths,
+        &plan,
+        review_input(&plan, vec![plain_accept(candidate)]),
+        "capture-reviewer",
+        REVIEWED_AT,
+    )
+    .expect_err("accept must not auto-upgrade typed Markdown into repo-safe knowledge");
+    assert!(error.to_string().contains("no-write capture candidates"));
     let mut memory = candidate.memory.clone();
     memory.title = "Use deterministic cache keys".to_owned();
     memory.body = "Generated artifacts use deterministic cache keys.".to_owned();
+
+    let error = build_capture_review(
+        &fixture.paths,
+        &plan,
+        review_input(
+            &plan,
+            vec![CaptureReviewDecisionInput {
+                candidate_id: candidate.candidate_id.clone(),
+                outcome: CaptureReviewOutcome::Edit,
+                reason_code: Some("missing-explicit-classification".to_owned()),
+                memory: Some(memory.clone()),
+                requested_destination: Some(MemoryDestination::Repo),
+                content_class: None,
+            }],
+        ),
+        "capture-reviewer",
+        REVIEWED_AT,
+    )
+    .expect_err("repo capture edits require an explicit safe content class");
+    assert!(
+        error
+            .to_string()
+            .contains("require explicit general_repo_knowledge classification")
+    );
 
     let review = build_capture_review(
         &fixture.paths,
@@ -1105,7 +1137,7 @@ fn complete_review_routes_only_accepted_or_edited_candidates_and_preserves_prove
             .iter()
             .filter(|decision| decision.outcome == CaptureReviewOutcome::Edit)
             .count(),
-        1
+        2
     );
 
     let service = MemoryService::open_paths(fixture.paths.clone())?;
@@ -1222,8 +1254,16 @@ fn complete_review_routes_only_accepted_or_edited_candidates_and_preserves_prove
         .expect("repo capture candidate should remain present");
     assert!(matches!(
         rerouted_repo.action,
-        CaptureAction::CreateProposal { .. }
+        CaptureAction::NoWrite { .. }
     ));
+    assert_eq!(
+        rerouted_repo.classification.destination,
+        MemoryDestination::NeedsReview
+    );
+    assert_eq!(
+        rerouted_repo.classification.sensitivity,
+        memzoi_core::OkfProposalSensitivity::Unknown
+    );
     fs::write(&canonical_path, canonical_markdown)?;
 
     drop(service);
@@ -1373,6 +1413,26 @@ fn reidentify_plan(plan: &mut memzoi_core::CapturePlan) -> anyhow::Result<()> {
 }
 
 fn accept(candidate: &memzoi_core::CaptureCandidate) -> CaptureReviewDecisionInput {
+    if candidate.classification.destination == MemoryDestination::NeedsReview
+        && candidate.classification.sensitivity == memzoi_core::OkfProposalSensitivity::Unknown
+        && matches!(candidate.action, CaptureAction::NoWrite { .. })
+        && candidate
+            .evidence
+            .iter()
+            .all(|evidence| evidence.section_kind != "unclassified")
+    {
+        return decision(
+            candidate,
+            CaptureReviewOutcome::Edit,
+            Some("explicit-contextual-classification"),
+            Some(candidate.memory.clone()),
+            Some(MemoryDestination::Repo),
+        );
+    }
+    decision(candidate, CaptureReviewOutcome::Accept, None, None, None)
+}
+
+fn plain_accept(candidate: &memzoi_core::CaptureCandidate) -> CaptureReviewDecisionInput {
     decision(candidate, CaptureReviewOutcome::Accept, None, None, None)
 }
 
@@ -1389,6 +1449,8 @@ fn decision(
         reason_code: reason_code.map(ToOwned::to_owned),
         memory,
         requested_destination,
+        content_class: (requested_destination == Some(MemoryDestination::Repo))
+            .then_some(memzoi_core::RepositoryContentClass::GeneralRepoKnowledge),
     }
 }
 

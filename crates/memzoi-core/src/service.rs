@@ -15,12 +15,13 @@ use time::{Date, OffsetDateTime, Time, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
-    CaptureApplyResult, CapturePlan, CaptureReview, CaptureSourceInputs, ContextPack,
-    ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult, ImportDocument, ImportPlan,
-    MemoryDestination, MemoryDraft, MemoryEvent, MemoryPaths, MemoryRecord, MemoryStatus,
-    OkfProposalAction, OkfProposalFile, OkfProposalOutcome, OkfProposalResolution, PrecheckInput,
-    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput,
-    SearchResult, SupersedeResult, ValidationResult, Visibility,
+    AuthorizationProof, CaptureApplyResult, CapturePlan, CaptureReview, CaptureSourceInputs,
+    ContextPack, ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult, ImportDocument,
+    ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryPaths, MemoryRecord,
+    MemoryStatus, OkfProposalAction, OkfProposalFile, OkfProposalOutcome, OkfProposalResolution,
+    OkfProposalSensitivity, PrecheckInput, PrecheckWarning, Proposal, ProposalStatus,
+    ProposalStatusFilter, RepositoryContentClass, RepositoryWriteRoute, SafetyFieldKind, ScopeKind,
+    SearchInput, SearchResult, SupersedeResult, ValidationResult, Visibility,
 };
 use crate::{
     config::{
@@ -38,6 +39,7 @@ mod capture_route_apply;
 mod derived_index;
 mod import_lifecycle;
 mod proposal_packets;
+mod repository_mutation;
 mod runtime_records;
 mod safe_files;
 mod session_end_route_apply;
@@ -53,6 +55,11 @@ pub use self::runtime_records::{CheckpointInput, LocalMemoryInput};
 
 use self::canonical_write::{CanonicalFileWrite, CanonicalWriteSession, FileWriteMode};
 use self::import_lifecycle::ImportLifecycle;
+use self::repository_mutation::{
+    authorize_repository_projection_batch, canonical_write_projections,
+    explicit_repository_provenance, memory_draft_safety_values, repository_transaction_root,
+    safety_value,
+};
 use self::runtime_records::RuntimeRecords;
 use self::safe_files::lifecycle_transaction_artifacts;
 use self::session_end_route_apply::SessionEndRouteApply;
@@ -290,6 +297,25 @@ impl MemoryService {
 
     pub fn apply_proposal(&self, proposal_id: &str, actor: &str) -> Result<MemoryRecord> {
         let session = CanonicalWriteSession::begin(&self.paths)?;
+        let proposal = proposals::load_proposal_public(&self.conn, proposal_id)?;
+        let mut safety_values = memory_draft_safety_values("proposal", &proposal.payload);
+        safety_values.push(safety_value(
+            "proposal.id".to_owned(),
+            SafetyFieldKind::Identifier,
+            proposal_id,
+        ));
+        authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::DatabaseProposalApply,
+            proposal.payload.sensitivity,
+            proposal.payload.scope_kind,
+            proposal.payload.scope_id.as_deref(),
+            proposal.payload.visibility,
+            AuthorizationProof::ApprovedDatabaseProposal { proposal_id },
+            explicit_repository_provenance(proposal.payload.content_class, proposal_id),
+            &safety_values,
+            &[],
+        )?;
         let tx = self.conn.unchecked_transaction()?;
         let record = proposals::apply_proposal(&tx, proposal_id, actor)?;
         let write = self.prepare_record_file_write_with_conn(
@@ -298,7 +324,25 @@ impl MemoryService {
             &record,
             FileWriteMode::CreateNew,
         )?;
-        session.commit(tx, &[write])?;
+        let projections = canonical_write_projections(&self.paths, std::slice::from_ref(&write))?;
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::DatabaseProposalApply,
+            proposal.payload.sensitivity,
+            proposal.payload.scope_kind,
+            proposal.payload.scope_id.as_deref(),
+            proposal.payload.visibility,
+            AuthorizationProof::ApprovedDatabaseProposal { proposal_id },
+            explicit_repository_provenance(proposal.payload.content_class, proposal_id),
+            &safety_values,
+            &projections,
+        )?;
+        session.commit(
+            RepositoryWriteRoute::DatabaseProposalApply,
+            &authorization,
+            tx,
+            &[write],
+        )?;
         Ok(record)
     }
 
@@ -324,6 +368,39 @@ impl MemoryService {
         BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
     {
         let session = CanonicalWriteSession::begin(&self.paths)?;
+        let target = RuntimeRecords::new(&self.conn)
+            .get(record_id)?
+            .with_context(|| format!("memory record not found: {record_id}"))?;
+        validate_legacy_canonical_target(&target)?;
+        if target.scope_kind != draft.scope_kind || target.scope_id != draft.scope_id {
+            bail!(
+                "cannot supersede record {record_id} cross-scope: target={}:{}, replacement={}:{}",
+                target.scope_kind.as_str(),
+                target.scope_id.as_deref().unwrap_or("-"),
+                draft.scope_kind.as_str(),
+                draft.scope_id.as_deref().unwrap_or("-")
+            );
+        }
+        let mut safety_values = memory_draft_safety_values("replacement", &draft);
+        safety_values.push(safety_value(
+            "target_record_id".to_owned(),
+            SafetyFieldKind::Identifier,
+            record_id,
+        ));
+        authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::Supersede,
+            draft.sensitivity,
+            draft.scope_kind,
+            draft.scope_id.as_deref(),
+            draft.visibility,
+            AuthorizationProof::LifecycleOperation {
+                target_id: record_id,
+            },
+            explicit_repository_provenance(draft.content_class, record_id),
+            &safety_values,
+            &[],
+        )?;
         let tx = self.conn.unchecked_transaction()?;
         let target = RuntimeRecords::new(&tx)
             .get(record_id)?
@@ -338,7 +415,7 @@ impl MemoryService {
                 draft.scope_id.as_deref().unwrap_or("-")
             );
         }
-        let result = proposals::supersede_record(&tx, record_id, actor, draft)?;
+        let result = proposals::supersede_record(&tx, record_id, actor, draft.clone())?;
         let previous_write = self.prepare_record_file_write_with_conn(
             &session,
             &tx,
@@ -351,9 +428,27 @@ impl MemoryService {
             &result.replacement,
             FileWriteMode::CreateNew,
         )?;
+        let writes = [previous_write, replacement_write];
+        let projections = canonical_write_projections(&self.paths, &writes)?;
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::Supersede,
+            draft.sensitivity,
+            draft.scope_kind,
+            draft.scope_id.as_deref(),
+            draft.visibility,
+            AuthorizationProof::LifecycleOperation {
+                target_id: record_id,
+            },
+            explicit_repository_provenance(draft.content_class, record_id),
+            &safety_values,
+            &projections,
+        )?;
         session.commit_with_hooks(
+            RepositoryWriteRoute::Supersede,
+            &authorization,
             tx,
-            &[previous_write, replacement_write],
+            &writes,
             before_install,
             before_commit,
         )?;
@@ -367,6 +462,36 @@ impl MemoryService {
         reason: &str,
     ) -> Result<MemoryRecord> {
         let session = CanonicalWriteSession::begin(&self.paths)?;
+        let target = RuntimeRecords::new(&self.conn)
+            .get(record_id)?
+            .with_context(|| format!("memory record not found: {record_id}"))?;
+        validate_legacy_canonical_target(&target)?;
+        let safety_values = vec![
+            safety_value(
+                "target_record_id".to_owned(),
+                SafetyFieldKind::Identifier,
+                record_id,
+            ),
+            safety_value(
+                "tombstone.reason".to_owned(),
+                SafetyFieldKind::Reason,
+                reason,
+            ),
+        ];
+        authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::Tombstone,
+            OkfProposalSensitivity::RepoSafe,
+            target.scope_kind,
+            target.scope_id.as_deref(),
+            target.visibility,
+            AuthorizationProof::LifecycleOperation {
+                target_id: record_id,
+            },
+            explicit_repository_provenance(RepositoryContentClass::GeneralRepoKnowledge, record_id),
+            &safety_values,
+            &[],
+        )?;
         let tx = self.conn.unchecked_transaction()?;
         let target = RuntimeRecords::new(&tx)
             .get(record_id)?
@@ -379,7 +504,27 @@ impl MemoryService {
             &record,
             FileWriteMode::Overwrite,
         )?;
-        session.commit(tx, &[write])?;
+        let projections = canonical_write_projections(&self.paths, std::slice::from_ref(&write))?;
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::Tombstone,
+            OkfProposalSensitivity::RepoSafe,
+            target.scope_kind,
+            target.scope_id.as_deref(),
+            target.visibility,
+            AuthorizationProof::LifecycleOperation {
+                target_id: record_id,
+            },
+            explicit_repository_provenance(RepositoryContentClass::GeneralRepoKnowledge, record_id),
+            &safety_values,
+            &projections,
+        )?;
+        session.commit(
+            RepositoryWriteRoute::Tombstone,
+            &authorization,
+            tx,
+            &[write],
+        )?;
         Ok(record)
     }
 
@@ -650,6 +795,20 @@ impl MemoryService {
     pub fn rebuild_paths(paths: MemoryPaths) -> Result<RebuildResult> {
         derived_index::rebuild(paths)
     }
+
+    #[cfg(test)]
+    fn rebuild_paths_with_snapshot_hook(
+        paths: MemoryPaths,
+        after_snapshot: impl FnOnce() -> Result<()>,
+    ) -> Result<RebuildResult> {
+        derived_index::rebuild_with_snapshot_hook(paths, after_snapshot)
+    }
+
+    pub(crate) fn rebuild_paths_for_trusted_recall_eval(
+        paths: MemoryPaths,
+    ) -> Result<RebuildResult> {
+        derived_index::rebuild_for_trusted_recall_eval(paths)
+    }
 }
 
 pub fn lifecycle_transaction_artifact_count(paths: &MemoryPaths) -> Result<usize> {
@@ -697,6 +856,12 @@ pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult>
         format!(
             "failed to create runtime directory {}",
             paths.runtime_dir.display()
+        )
+    })?;
+    fs::create_dir_all(repository_transaction_root(paths)).with_context(|| {
+        format!(
+            "failed to create repository transaction directory {}",
+            repository_transaction_root(paths).display()
         )
     })?;
     fs::create_dir_all(&paths.exports_dir).with_context(|| {

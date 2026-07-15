@@ -5,6 +5,7 @@ use serde_json::json;
 use std::{collections::BTreeMap, str::FromStr};
 use uuid::Uuid;
 
+use crate::RepositoryContentClass;
 use crate::events::{AppendEvent, append_event, now_utc};
 use crate::models::{
     MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
@@ -89,6 +90,9 @@ pub struct MemoryDraft {
     /// Classification for writes to canonical repo memory. Missing legacy values deserialize as unknown.
     #[serde(default)]
     pub sensitivity: OkfProposalSensitivity,
+    /// Typed contextual-policy claim for repository writes. Missing legacy values fail closed.
+    #[serde(default)]
+    pub content_class: RepositoryContentClass,
     pub confidence: f64,
 }
 
@@ -1294,6 +1298,7 @@ mod tests {
             source_kind: Some("test".to_owned()),
             source_ref: Some("proposal-red-tests".to_owned()),
             sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+            content_class: crate::RepositoryContentClass::GeneralRepoKnowledge,
             confidence: 0.82,
         }
     }

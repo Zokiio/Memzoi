@@ -26,6 +26,7 @@ sources:
   - path: docs/rfcs/0001-evidence-backed-capture.md
 supersedes: []
 sensitivity: repo-safe
+content_class: general_repo_knowledge
 ---
 
 # Proposal evidence round trip

@@ -3,7 +3,9 @@ use std::ops::Range;
 use anyhow::{Result, bail};
 
 use super::source_lines;
-use crate::{MemoryDestination, MemoryLane, MemoryType, OkfProposalSensitivity};
+use crate::{
+    MemoryDestination, MemoryLane, MemoryType, OkfProposalSensitivity, RepositoryContentClass,
+};
 
 use super::super::{
     CaptureDiagnostic, CaptureEvidence, CaptureExtraction, CaptureExtractorIdentity,
@@ -459,6 +461,11 @@ fn adr_candidate(
         extractor,
         destination,
         sensitivity,
+        if status_allows_repo {
+            RepositoryContentClass::GeneralRepoKnowledge
+        } else {
+            RepositoryContentClass::Unknown
+        },
         if status_allows_repo {
             "accepted_adr_field"
         } else if field == "supersession" {

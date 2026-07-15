@@ -2,7 +2,9 @@ use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 
 use crate::{
-    ImportApplyResult, ImportDocument, ImportPlan, MemoryDestination, MemoryPaths, MemoryStatus,
+    AuthorizationProof, ImportApplyResult, ImportDocument, ImportPlan, MemoryDestination,
+    MemoryPaths, MemoryStatus, OkfProposalSensitivity, RepositoryContentClass,
+    RepositoryWriteRoute, SafetyFieldKind, ScopeKind, Visibility,
     expiry::{self, Clock},
     import::{self, ExistingDuplicate},
     okf,
@@ -10,6 +12,13 @@ use crate::{
 
 use super::{
     proposal_packets::{FileProposalInventoryEntry, ProposalPacketLifecycle},
+    repository_mutation::{
+        AuthorizedRepositoryProjectionBatch, CreatedRepositoryFile, OwnedRepositoryProjection,
+        RepositoryMutationAuthorization, RepositorySafetyValue,
+        authorize_repository_projection_batch, create_authorized_repository_batch,
+        explicit_repository_provenance, okf_proposal_safety_values, remove_created_repository_file,
+        safety_value,
+    },
     runtime_records::{CheckpointInput, LocalMemoryInput, RuntimeRecords},
     safe_files::{RepoLifecycleLock, ensure_safe_directory},
 };
@@ -25,11 +34,85 @@ impl<'a> ImportLifecycle<'a> {
         Self { paths, conn, clock }
     }
 
-    pub(super) fn plan(&self, actor: &str, document: ImportDocument) -> Result<ImportPlan> {
+    pub(super) fn plan(&self, actor: &str, mut document: ImportDocument) -> Result<ImportPlan> {
         if actor.trim().is_empty() {
             bail!("import actor cannot be empty");
         }
         import::validate_document(&document)?;
+        let mut shared_values = Vec::new();
+        for (index, source) in document.sources.iter().enumerate() {
+            for (name, value) in [
+                ("path", source.path.as_deref()),
+                ("url", source.url.as_deref()),
+                ("ref", source.reference.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    shared_values.push(safety_value(
+                        format!("sources[{index}].{name}"),
+                        SafetyFieldKind::SourceReference,
+                        value,
+                    ));
+                }
+            }
+        }
+        for (index, candidate) in document.candidates.iter_mut().enumerate() {
+            if candidate.destination != MemoryDestination::Repo
+                || candidate.sensitivity != OkfProposalSensitivity::RepoSafe
+            {
+                continue;
+            }
+            let scope = candidate.scope.as_ref();
+            let mut values = shared_values
+                .iter()
+                .map(|value: &RepositorySafetyValue| RepositorySafetyValue {
+                    location: value.location.clone(),
+                    kind: value.kind,
+                    value: value.value.clone(),
+                })
+                .collect::<Vec<_>>();
+            values.extend([
+                safety_value(
+                    format!("candidate[{index}].title"),
+                    SafetyFieldKind::Text,
+                    &candidate.title,
+                ),
+                safety_value(
+                    format!("candidate[{index}].body"),
+                    SafetyFieldKind::Text,
+                    &candidate.body,
+                ),
+                safety_value(
+                    format!("candidate[{index}].reason"),
+                    SafetyFieldKind::Reason,
+                    &candidate.reason,
+                ),
+            ]);
+            for (tag_index, tag) in candidate.tags.iter().enumerate() {
+                values.push(safety_value(
+                    format!("candidate[{index}].tags[{tag_index}]"),
+                    SafetyFieldKind::Text,
+                    tag,
+                ));
+            }
+            if authorize_repository_projection_batch(
+                self.paths,
+                RepositoryWriteRoute::ImportApply,
+                candidate.sensitivity,
+                scope.map_or(ScopeKind::Repo, |scope| scope.kind),
+                scope.and_then(|scope| scope.id.as_deref()),
+                Visibility::Repo,
+                AuthorizationProof::ExplicitCommand {
+                    operation: "import_plan",
+                },
+                explicit_repository_provenance(candidate.content_class, actor),
+                &values,
+                &[],
+            )
+            .is_err()
+            {
+                candidate.sensitivity = OkfProposalSensitivity::Unknown;
+            }
+        }
         let proposal_packets = ProposalPacketLifecycle::new(self.paths, self.conn);
         let (inventory, reserved_proposal_ids) = proposal_packets.planning_inventory()?;
         let existing = self.load_duplicates(&inventory.pending)?;
@@ -90,6 +173,60 @@ impl<'a> ImportLifecycle<'a> {
                 okf::plan_okf_create_proposal(&pending_root, &draft)?,
             ));
         }
+        let repo_projections = planned
+            .iter()
+            .map(|(_, proposal)| {
+                OwnedRepositoryProjection::from_absolute(
+                    self.paths,
+                    &proposal.path,
+                    proposal.markdown.as_bytes(),
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut safety_values = Vec::new();
+        for (index, source) in plan.sources.iter().enumerate() {
+            for (name, value) in [
+                ("path", source.path.as_deref()),
+                ("url", source.url.as_deref()),
+                ("ref", source.reference.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    safety_values.push(safety_value(
+                        format!("sources[{index}].{name}"),
+                        SafetyFieldKind::SourceReference,
+                        value,
+                    ));
+                }
+            }
+        }
+        for (candidate_index, proposal) in &planned {
+            safety_values.extend(okf_proposal_safety_values(
+                &format!("candidate[{candidate_index}]"),
+                &proposal.parsed,
+            ));
+        }
+        let repo_authorization = (!planned.is_empty())
+            .then(|| {
+                authorize_repository_projection_batch(
+                    self.paths,
+                    RepositoryWriteRoute::ImportApply,
+                    OkfProposalSensitivity::RepoSafe,
+                    ScopeKind::Repo,
+                    None,
+                    Visibility::Repo,
+                    AuthorizationProof::ImportPlan {
+                        plan_id: &plan.plan_id,
+                    },
+                    explicit_repository_provenance(
+                        RepositoryContentClass::GeneralRepoKnowledge,
+                        &plan.plan_id,
+                    ),
+                    &safety_values,
+                    &repo_projections,
+                )
+            })
+            .transpose()?;
         let mut writes = Vec::new();
         let mut created = Vec::new();
         let result = (|| -> Result<()> {
@@ -97,9 +234,17 @@ impl<'a> ImportLifecycle<'a> {
                 proposal_packets
                     .ensure_planned_available(planned.iter().map(|(_, proposal)| proposal))?;
             }
-            for (candidate_index, proposal) in &planned {
-                let path = okf::create_okf_proposal_file(proposal)?;
-                created.push(path.clone());
+            let created_files = match repo_authorization.as_ref() {
+                Some(authorization) => create_authorized_repository_batch(
+                    self.paths,
+                    RepositoryWriteRoute::ImportApply,
+                    authorization,
+                    &repo_projections,
+                )?,
+                None => Vec::new(),
+            };
+            created.extend(created_files);
+            for ((candidate_index, proposal), created_file) in planned.iter().zip(&created) {
                 let candidate_plan = plan
                     .candidates
                     .iter()
@@ -114,6 +259,7 @@ impl<'a> ImportLifecycle<'a> {
                     proposal_id: proposal.proposal_id.clone(),
                     path: display_path,
                 });
+                debug_assert_eq!(created_file.path(), proposal.path);
             }
 
             let tx = self.conn.unchecked_transaction()?;
@@ -155,9 +301,22 @@ impl<'a> ImportLifecycle<'a> {
             Ok(())
         })();
         if let Err(error) = result {
-            if let Err(cleanup) = okf::cleanup_okf_proposal_files(&created) {
-                return Err(error)
-                    .context(format!("import apply failed; cleanup failed: {cleanup}"));
+            if let Some(authorization) = repo_authorization.as_ref()
+                && !created.is_empty()
+            {
+                if let Err(cleanup) = cleanup_authorized_import_proposals(
+                    self.paths,
+                    authorization,
+                    &repo_projections,
+                    &created,
+                ) {
+                    return Err(error)
+                        .context(format!("import apply failed; cleanup failed: {cleanup}"));
+                }
+            } else if !created.is_empty() {
+                return Err(error).context(
+                    "import apply failed; created repository files have no matching authorization",
+                );
             }
             return Err(error);
         }
@@ -216,5 +375,142 @@ impl<'a> ImportLifecycle<'a> {
         }
         entries.sort_by(|a, b| (a.kind, a.id.as_str()).cmp(&(b.kind, b.id.as_str())));
         Ok(entries)
+    }
+}
+
+fn cleanup_authorized_import_proposals(
+    paths: &MemoryPaths,
+    authorization: &AuthorizedRepositoryProjectionBatch,
+    projections: &[OwnedRepositoryProjection],
+    created: &[CreatedRepositoryFile],
+) -> Result<()> {
+    if created.len() != projections.len() {
+        bail!("created import proposal batch does not match its authorized projections");
+    }
+    let mutation = RepositoryMutationAuthorization {
+        route: RepositoryWriteRoute::ImportApply,
+        authorization,
+        projections,
+    };
+    let mut cleanup_errors = Vec::new();
+    for (created_file, _) in created.iter().zip(projections).rev() {
+        if let Err(error) = remove_created_repository_file(paths, mutation, created_file) {
+            cleanup_errors.push(format!("{}: {error:#}", created_file.path().display()));
+        }
+    }
+    if cleanup_errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", cleanup_errors.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_cleanup_preserves_a_concurrent_repository_replacement() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let runtime = tempfile::tempdir()?;
+        let paths = MemoryPaths::with_runtime_home(
+            project.path().to_path_buf(),
+            runtime.path().to_path_buf(),
+        );
+        let destination = paths.proposals_dir().join("pending/mem_import_cleanup.md");
+        let authorized_bytes = b"authorized import proposal\n";
+        let projections = vec![OwnedRepositoryProjection::from_absolute(
+            &paths,
+            &destination,
+            authorized_bytes,
+            None,
+        )?];
+        let authorization = authorize_repository_projection_batch(
+            &paths,
+            RepositoryWriteRoute::ImportApply,
+            OkfProposalSensitivity::RepoSafe,
+            ScopeKind::Repo,
+            None,
+            Visibility::Repo,
+            AuthorizationProof::ImportPlan {
+                plan_id: "import-cleanup-test",
+            },
+            explicit_repository_provenance(
+                RepositoryContentClass::GeneralRepoKnowledge,
+                "import-cleanup-test",
+            ),
+            &[],
+            &projections,
+        )?;
+        let created = create_authorized_repository_batch(
+            &paths,
+            RepositoryWriteRoute::ImportApply,
+            &authorization,
+            &projections,
+        )?;
+        let replacement = b"concurrent human replacement\n";
+        std::fs::write(&destination, replacement)?;
+
+        let error =
+            cleanup_authorized_import_proposals(&paths, &authorization, &projections, &created)
+                .expect_err("cleanup must not delete bytes that were not authorized by the import");
+
+        assert!(format!("{error:#}").contains("does not match"));
+        assert_eq!(std::fs::read(&destination)?, replacement);
+        Ok(())
+    }
+
+    #[test]
+    fn import_cleanup_preserves_an_identical_recreated_file() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let runtime = tempfile::tempdir()?;
+        let paths = MemoryPaths::with_runtime_home(
+            project.path().to_path_buf(),
+            runtime.path().to_path_buf(),
+        );
+        let destination = paths
+            .proposals_dir()
+            .join("pending/mem_import_identical_cleanup.md");
+        let authorized_bytes = b"authorized import proposal\n";
+        let projections = vec![OwnedRepositoryProjection::from_absolute(
+            &paths,
+            &destination,
+            authorized_bytes,
+            None,
+        )?];
+        let authorization = authorize_repository_projection_batch(
+            &paths,
+            RepositoryWriteRoute::ImportApply,
+            OkfProposalSensitivity::RepoSafe,
+            ScopeKind::Repo,
+            None,
+            Visibility::Repo,
+            AuthorizationProof::ImportPlan {
+                plan_id: "import-identical-cleanup-test",
+            },
+            explicit_repository_provenance(
+                RepositoryContentClass::GeneralRepoKnowledge,
+                "import-identical-cleanup-test",
+            ),
+            &[],
+            &projections,
+        )?;
+        let created = create_authorized_repository_batch(
+            &paths,
+            RepositoryWriteRoute::ImportApply,
+            &authorization,
+            &projections,
+        )?;
+
+        std::fs::remove_file(&destination)?;
+        std::fs::write(&destination, authorized_bytes)?;
+
+        let error =
+            cleanup_authorized_import_proposals(&paths, &authorization, &projections, &created)
+                .expect_err("cleanup must preserve an identical file recreated by another owner");
+
+        assert!(format!("{error:#}").contains("no longer identifies"));
+        assert_eq!(std::fs::read(&destination)?, authorized_bytes);
+        Ok(())
     }
 }

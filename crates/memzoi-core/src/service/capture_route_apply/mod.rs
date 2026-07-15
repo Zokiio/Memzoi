@@ -4,12 +4,20 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use crate::{
     CaptureAction, CaptureApplyResult, CapturePlan, CaptureReview, CaptureReviewDecisionInput,
     CaptureReviewInput, CaptureReviewOutcome, CaptureSourceInputs, CaptureWrite, MemoryDestination,
-    MemoryPaths, OkfProposalSource,
+    MemoryPaths, OkfProposalSensitivity, OkfProposalSource, RepositoryContentClass,
+    RepositoryWriteRoute, ScopeKind, Visibility,
     expiry::{self, Clock},
     okf,
 };
 
-use super::{proposal_packets::ProposalPacketLifecycle, safe_files::RepoLifecycleLock};
+use super::{
+    proposal_packets::ProposalPacketLifecycle,
+    repository_mutation::{
+        OwnedRepositoryProjection, authorize_repository_projection_batch,
+        explicit_repository_provenance, okf_proposal_safety_values,
+    },
+    safe_files::RepoLifecycleLock,
+};
 
 mod journal;
 mod runtime;
@@ -105,6 +113,14 @@ impl<'a> CaptureRouteApply<'a> {
                                 .map(|c| c.classification.destination)
                         })
                         .flatten(),
+                    content_class: (decision.outcome == CaptureReviewOutcome::Edit)
+                        .then(|| {
+                            decision
+                                .reviewed_candidate
+                                .as_ref()
+                                .map(|c| c.classification.content_class)
+                        })
+                        .flatten(),
                 })
                 .collect(),
         };
@@ -169,6 +185,12 @@ impl<'a> CaptureRouteApply<'a> {
             let CaptureAction::CreateProposal { proposal_id, .. } = &candidate.action else {
                 continue;
             };
+            validate_capture_proposal_policy(
+                &candidate.memory.scope,
+                candidate.classification.destination,
+                candidate.classification.sensitivity,
+                candidate.classification.content_class,
+            )?;
             let provenance = capture_provenance(&plan, &review, decision, candidate, actor);
             let draft = okf::OkfCreateProposalDraft {
                 proposal_id: proposal_id.clone(),
@@ -197,6 +219,7 @@ impl<'a> CaptureRouteApply<'a> {
                     })
                     .collect(),
                 sensitivity: candidate.classification.sensitivity,
+                content_class: candidate.classification.content_class,
                 capture: Some(provenance),
             };
             planned.push((
@@ -204,6 +227,47 @@ impl<'a> CaptureRouteApply<'a> {
                 okf::plan_okf_create_proposal(&pending_root, &draft)?,
             ));
         }
+
+        let repo_projections = planned
+            .iter()
+            .map(|(_, proposal)| {
+                OwnedRepositoryProjection::from_absolute(
+                    self.paths,
+                    &proposal.path,
+                    proposal.markdown.as_bytes(),
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut repo_safety_values = Vec::new();
+        for (candidate_id, proposal) in &planned {
+            repo_safety_values.extend(okf_proposal_safety_values(
+                &format!("candidate[{candidate_id}]"),
+                &proposal.parsed,
+            ));
+        }
+        let repo_authorization = (!planned.is_empty())
+            .then(|| {
+                authorize_repository_projection_batch(
+                    self.paths,
+                    RepositoryWriteRoute::CaptureApply,
+                    OkfProposalSensitivity::RepoSafe,
+                    ScopeKind::Repo,
+                    None,
+                    Visibility::Repo,
+                    crate::AuthorizationProof::CaptureReview {
+                        plan_id: &plan.plan_id,
+                        review_id: &review.review_id,
+                    },
+                    explicit_repository_provenance(
+                        RepositoryContentClass::GeneralRepoKnowledge,
+                        &review.review_id,
+                    ),
+                    &repo_safety_values,
+                    &repo_projections,
+                )
+            })
+            .transpose()?;
 
         let mut writes = Vec::new();
         let result = (|| -> Result<()> {
@@ -238,13 +302,31 @@ impl<'a> CaptureRouteApply<'a> {
                     .ensure_planned_available(planned.iter().map(|(_, proposal)| proposal))?;
             }
 
-            let journal = (!planned.is_empty())
-                .then(|| build_capture_apply_journal(&plan, &review, &planned))
+            let journal = repo_authorization
+                .as_ref()
+                .map(|authorization| {
+                    build_capture_apply_journal(self.paths, &plan, &review, &planned, authorization)
+                })
                 .transpose()?;
             if let Some(journal) = journal.as_ref() {
                 write_capture_apply_journal(self.paths, journal)?;
-                stage_capture_apply_proposals(self.paths, journal, &planned)?;
-                install_capture_apply_proposals(self.paths, journal)?;
+                stage_capture_apply_proposals(
+                    self.paths,
+                    journal,
+                    &planned,
+                    repo_authorization
+                        .as_ref()
+                        .context("capture repository authorization disappeared")?,
+                    &repo_projections,
+                )?;
+                install_capture_apply_proposals(
+                    self.paths,
+                    journal,
+                    repo_authorization
+                        .as_ref()
+                        .context("capture repository authorization disappeared")?,
+                    &repo_projections,
+                )?;
             }
             for (candidate_id, proposal) in &planned {
                 writes.push(CaptureWrite::ProposalFile {
@@ -310,8 +392,46 @@ impl<'a> CaptureRouteApply<'a> {
     }
 }
 
+fn validate_capture_proposal_policy(
+    scope: &crate::CaptureMemoryScope,
+    destination: MemoryDestination,
+    sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
+) -> Result<()> {
+    if destination != MemoryDestination::Repo {
+        bail!("capture repository proposals require the repo destination");
+    }
+    validate_capture_proposal_projection_values(
+        scope.kind,
+        scope.id.as_deref(),
+        sensitivity,
+        content_class,
+    )
+}
+
+fn validate_capture_proposal_projection_values(
+    kind: ScopeKind,
+    id: Option<&str>,
+    sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
+) -> Result<()> {
+    if kind != ScopeKind::Repo || id.is_some() {
+        bail!("capture repository proposals require repo scope without a scope id");
+    }
+    if sensitivity != OkfProposalSensitivity::RepoSafe
+        || content_class != RepositoryContentClass::GeneralRepoKnowledge
+    {
+        bail!(
+            "capture repository proposals require repo-safe sensitivity and general_repo_knowledge content"
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn recover_on_open(paths: &MemoryPaths, conn: &Connection) -> Result<()> {
-    if journal::capture_apply_journal_exists(paths)? {
+    if journal::capture_apply_journal_exists(paths)?
+        || journal::legacy_capture_apply_journal_exists(paths)?
+    {
         let _lifecycle_lock = RepoLifecycleLock::acquire(paths)?;
         recover_capture_apply(paths, conn)
             .context("failed to recover an interrupted capture apply")?;

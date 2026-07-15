@@ -4,12 +4,21 @@ use anyhow::{Context, Result, bail};
 use rusqlite::Transaction;
 use uuid::Uuid;
 
-use crate::{MemoryPaths, MemoryRecord, okf};
+use crate::{MemoryPaths, MemoryRecord, RepositoryWriteRoute, okf, repository_io};
 
-use super::safe_files::{
-    RepoLifecycleLock, ensure_path_absent, ensure_regular_file, ensure_safe_path_parent,
-    file_content_hash, install_staged_file_no_replace, remove_staged_file,
-    sibling_transaction_path, stage_file,
+use super::{
+    repository_mutation::{
+        AuthorizedRepositoryProjectionBatch, CreatedRepositoryFile, OwnedRepositoryProjection,
+        RepositoryMutationAuthorization, backup_repository_file_to_transaction,
+        borrowed_repository_projections, canonical_write_projections,
+        install_verified_staged_file_no_replace, remove_installed_repository_file,
+        repository_transaction_path, restore_verified_staged_file_no_replace,
+        stage_authorized_file,
+    },
+    safe_files::{
+        RepoLifecycleLock, ensure_path_absent, ensure_regular_file, ensure_safe_path_parent,
+        file_content_hash, remove_staged_file,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,9 +31,9 @@ pub(super) enum FileWriteMode {
 pub(super) struct CanonicalFileWrite {
     pub(super) record_file: okf::OkfRecordFile,
     pub(super) path: PathBuf,
-    markdown: String,
-    mode: FileWriteMode,
-    expected_existing_hash: Option<String>,
+    pub(super) markdown: String,
+    pub(super) mode: FileWriteMode,
+    pub(super) expected_existing_hash: Option<String>,
 }
 
 #[derive(Debug)]
@@ -34,7 +43,8 @@ pub(super) struct StagedCanonicalFileWrite {
     pub(super) backup_path: Option<PathBuf>,
     pub(super) mode: FileWriteMode,
     pub(super) expected_existing_hash: Option<String>,
-    pub(super) installed: bool,
+    pub(super) expected_staged_hash: String,
+    pub(super) installed_file: Option<CreatedRepositoryFile>,
 }
 
 /// Holds the repository lifecycle lock from canonical precondition capture
@@ -82,12 +92,20 @@ impl<'a> CanonicalWriteSession<'a> {
         )
     }
 
-    pub(super) fn commit(self, tx: Transaction<'_>, writes: &[CanonicalFileWrite]) -> Result<()> {
-        commit_db_and_canonical_writes(self.paths, tx, writes)
+    pub(super) fn commit(
+        self,
+        expected_route: RepositoryWriteRoute,
+        authorization: &AuthorizedRepositoryProjectionBatch,
+        tx: Transaction<'_>,
+        writes: &[CanonicalFileWrite],
+    ) -> Result<()> {
+        commit_db_and_canonical_writes(self.paths, expected_route, authorization, tx, writes)
     }
 
     pub(super) fn commit_with_hooks<BeforeInstall, BeforeCommit>(
         self,
+        expected_route: RepositoryWriteRoute,
+        authorization: &AuthorizedRepositoryProjectionBatch,
         tx: Transaction<'_>,
         writes: &[CanonicalFileWrite],
         before_install: BeforeInstall,
@@ -99,6 +117,8 @@ impl<'a> CanonicalWriteSession<'a> {
     {
         commit_db_and_canonical_writes_with_hooks(
             self.paths,
+            expected_route,
+            authorization,
             tx,
             writes,
             before_install,
@@ -107,8 +127,11 @@ impl<'a> CanonicalWriteSession<'a> {
     }
 
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_with_backup_hook<BeforeInstall, AfterBackup, BeforeCommit>(
         self,
+        expected_route: RepositoryWriteRoute,
+        authorization: &AuthorizedRepositoryProjectionBatch,
         tx: Transaction<'_>,
         writes: &[CanonicalFileWrite],
         before_install: BeforeInstall,
@@ -122,6 +145,8 @@ impl<'a> CanonicalWriteSession<'a> {
     {
         commit_db_and_canonical_writes_with_backup_hook(
             self.paths,
+            expected_route,
+            authorization,
             tx,
             writes,
             before_install,
@@ -205,13 +230,41 @@ pub(super) fn validate_canonical_write_precondition(
     }
 }
 
+fn verify_staged_file_contents(path: &Path, expected_hash: &str) -> Result<()> {
+    ensure_regular_file(path, "staged repository file")?;
+    if file_content_hash(path)? != expected_hash {
+        bail!("staged repository bytes changed after authorization");
+    }
+    Ok(())
+}
+
 pub(super) fn stage_canonical_writes(
+    paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
+    authorization: &AuthorizedRepositoryProjectionBatch,
+    projections: &[OwnedRepositoryProjection],
     writes: &[CanonicalFileWrite],
     nonce: &str,
 ) -> Result<Vec<StagedCanonicalFileWrite>> {
+    let borrowed = borrowed_repository_projections(projections);
+    repository_io::verify_repository_batch(
+        &paths.project_root,
+        expected_route,
+        &authorization.policy_context_digest,
+        &authorization.capability,
+        &borrowed,
+    )?;
     let mut staged = Vec::with_capacity(writes.len());
     for write in writes {
-        let temp_path = match stage_file(&write.path, &write.markdown, nonce) {
+        let temp_path = match stage_authorized_file(
+            paths,
+            expected_route,
+            authorization,
+            projections,
+            &write.path,
+            &write.markdown,
+            nonce,
+        ) {
             Ok(path) => path,
             Err(error) => {
                 return attach_cleanup_error(
@@ -222,14 +275,15 @@ pub(super) fn stage_canonical_writes(
             }
         };
         let backup_path = (write.mode == FileWriteMode::Overwrite)
-            .then(|| sibling_transaction_path(&write.path, nonce, "canonical"));
+            .then(|| repository_transaction_path(paths, &write.path, nonce, "canonical"));
         staged.push(StagedCanonicalFileWrite {
             path: write.path.clone(),
             temp_path,
             backup_path,
             mode: write.mode,
             expected_existing_hash: write.expected_existing_hash.clone(),
-            installed: false,
+            expected_staged_hash: blake3::hash(write.markdown.as_bytes()).to_hex().to_string(),
+            installed_file: None,
         });
     }
     Ok(staged)
@@ -237,17 +291,25 @@ pub(super) fn stage_canonical_writes(
 
 pub(super) fn install_staged_canonical_writes<BeforeInstall>(
     paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
     writes: &mut [StagedCanonicalFileWrite],
     before_install: BeforeInstall,
 ) -> Result<()>
 where
     BeforeInstall: FnMut(usize) -> Result<()>,
 {
-    install_staged_canonical_writes_with_backup_hook(paths, writes, before_install, |_, _| Ok(()))
+    install_staged_canonical_writes_with_backup_hook(
+        paths,
+        mutation,
+        writes,
+        before_install,
+        |_, _| Ok(()),
+    )
 }
 
 pub(super) fn install_staged_canonical_writes_with_backup_hook<BeforeInstall, AfterBackup>(
     paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
     writes: &mut [StagedCanonicalFileWrite],
     mut before_install: BeforeInstall,
     mut after_backup: AfterBackup,
@@ -258,41 +320,63 @@ where
 {
     for (index, write) in writes.iter_mut().enumerate() {
         before_install(index)?;
+        verify_staged_file_contents(&write.temp_path, &write.expected_staged_hash)?;
         validate_canonical_write_precondition(paths, write)?;
         if let Some(backup_path) = &write.backup_path {
-            std::fs::rename(&write.path, backup_path).with_context(|| {
-                format!(
-                    "failed to stage canonical memory record {}",
-                    write.path.display()
-                )
-            })?;
+            validate_canonical_write_precondition(paths, write)?;
+            backup_repository_file_to_transaction(
+                paths,
+                mutation,
+                &write.path,
+                backup_path,
+                write
+                    .expected_existing_hash
+                    .as_deref()
+                    .context("overwrite write is missing captured canonical hash")?,
+            )?;
             after_backup(index, &write.path)?;
         }
-        install_staged_file_no_replace(&write.temp_path, &write.path)?;
-        write.installed = true;
+        let installed_file = install_verified_staged_file_no_replace(
+            paths,
+            mutation,
+            &write.temp_path,
+            &write.path,
+            &write.expected_staged_hash,
+        )?;
+        write.installed_file = Some(installed_file);
     }
     Ok(())
 }
 
 pub(super) fn rollback_staged_canonical_writes(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
     writes: &mut [StagedCanonicalFileWrite],
 ) -> Result<()> {
     let mut errors = Vec::new();
     for write in writes.iter_mut().rev() {
-        if write.installed {
+        if let Some(installed_file) = write.installed_file.take() {
             record_cleanup_result(
                 &mut errors,
-                remove_staged_file(&write.path),
+                remove_installed_repository_file(paths, mutation, &installed_file),
                 format!("remove installed canonical file {}", write.path.display()),
             );
-            write.installed = false;
         }
         if let Some(backup_path) = &write.backup_path
             && backup_path.exists()
         {
             record_cleanup_result(
                 &mut errors,
-                install_staged_file_no_replace(backup_path, &write.path),
+                restore_verified_staged_file_no_replace(
+                    paths,
+                    mutation,
+                    backup_path,
+                    &write.path,
+                    write
+                        .expected_existing_hash
+                        .as_deref()
+                        .unwrap_or("<missing-canonical-backup-hash>"),
+                ),
                 format!(
                     "restore canonical backup {} to {}",
                     backup_path.display(),
@@ -330,14 +414,26 @@ pub(super) fn finalize_staged_canonical_writes(writes: &[StagedCanonicalFileWrit
 
 pub(super) fn commit_db_and_canonical_writes(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
 ) -> Result<()> {
-    commit_db_and_canonical_writes_with_hooks(paths, tx, writes, |_| Ok(()), |_| Ok(()))
+    commit_db_and_canonical_writes_with_hooks(
+        paths,
+        expected_route,
+        authorization,
+        tx,
+        writes,
+        |_| Ok(()),
+        |_| Ok(()),
+    )
 }
 
 pub(super) fn commit_db_and_canonical_writes_with_hooks<BeforeInstall, BeforeCommit>(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
     before_install: BeforeInstall,
@@ -349,6 +445,8 @@ where
 {
     commit_db_and_canonical_writes_with_backup_hook(
         paths,
+        expected_route,
+        authorization,
         tx,
         writes,
         before_install,
@@ -357,12 +455,15 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn commit_db_and_canonical_writes_with_backup_hook<
     BeforeInstall,
     AfterBackup,
     BeforeCommit,
 >(
     paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
+    authorization: &AuthorizedRepositoryProjectionBatch,
     tx: Transaction<'_>,
     writes: &[CanonicalFileWrite],
     before_install: BeforeInstall,
@@ -374,31 +475,53 @@ where
     AfterBackup: FnMut(usize, &Path) -> Result<()>,
     BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
 {
+    let projections = canonical_write_projections(paths, writes)?;
+    let mutation = RepositoryMutationAuthorization {
+        route: expected_route,
+        authorization,
+        projections: &projections,
+    };
+    let borrowed = borrowed_repository_projections(&projections);
+    repository_io::verify_repository_batch(
+        &paths.project_root,
+        expected_route,
+        &authorization.policy_context_digest,
+        &authorization.capability,
+        &borrowed,
+    )?;
     let nonce = Uuid::now_v7().to_string();
-    let mut staged = stage_canonical_writes(writes, &nonce)?;
+    let mut staged = stage_canonical_writes(
+        paths,
+        expected_route,
+        authorization,
+        &projections,
+        writes,
+        &nonce,
+    )?;
     if let Err(error) = install_staged_canonical_writes_with_backup_hook(
         paths,
+        mutation,
         &mut staged,
         before_install,
         after_backup,
     ) {
         return attach_cleanup_error(
             error,
-            rollback_staged_canonical_writes(&mut staged),
+            rollback_staged_canonical_writes(paths, mutation, &mut staged),
             "canonical install rollback",
         );
     }
     if let Err(error) = before_commit(&tx) {
         return attach_cleanup_error(
             error,
-            rollback_staged_canonical_writes(&mut staged),
+            rollback_staged_canonical_writes(paths, mutation, &mut staged),
             "canonical pre-commit rollback",
         );
     }
     if let Err(error) = tx.commit() {
         return attach_cleanup_error(
             anyhow::Error::new(error).context("failed to commit memory lifecycle transaction"),
-            rollback_staged_canonical_writes(&mut staged),
+            rollback_staged_canonical_writes(paths, mutation, &mut staged),
             "canonical commit rollback",
         );
     }
@@ -470,7 +593,8 @@ mod tests {
             backup_path: Some(path.with_file_name(".captured-target.backup.tmp")),
             mode: FileWriteMode::Overwrite,
             expected_existing_hash: Some(file_content_hash(&path)?),
-            installed: false,
+            expected_staged_hash: blake3::hash(b"replacement bytes").to_hex().to_string(),
+            installed_file: None,
         };
         fs::write(&path, "concurrent human edit")?;
 

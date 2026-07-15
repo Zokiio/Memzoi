@@ -1,6 +1,7 @@
 use super::super::safe_files::RepoLifecycleLock;
 use super::transaction::{
-    attach_cleanup_error, rollback_rejected_file_proposal, validate_resolution_actor,
+    RejectedFileProposalRollback, attach_cleanup_error, rollback_rejected_file_proposal,
+    validate_resolution_actor,
 };
 use super::*;
 
@@ -68,7 +69,34 @@ impl MemoryService {
         }
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let snapshot = self.load_pending_file_proposal_snapshot(proposal_path)?;
-        let proposal = snapshot.proposal.clone();
+        let mut proposal = snapshot.proposal.clone();
+        let original_values = okf_proposal_safety_values("proposal", &proposal);
+        if authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::FileProposalRejectReceipt,
+            proposal.sensitivity,
+            proposal.scope_kind,
+            proposal.scope_id.as_deref(),
+            Visibility::Repo,
+            AuthorizationProof::ExplicitCommand {
+                operation: "file_proposal_reject",
+            },
+            explicit_repository_provenance(proposal.content_class, &proposal.id),
+            &original_values,
+            &[],
+        )
+        .is_err()
+        {
+            let raw = fs::read_to_string(proposal_path)
+                .context("failed to read rejected proposal during redacted preflight")?;
+            proposal = okf::preflight_okf_proposal_markdown(
+                self.paths.proposals_dir().join("pending"),
+                proposal_path,
+                &raw,
+            )?
+            .context("pending proposal was ignored during redacted rejection")?
+            .receipt_proposal;
+        }
         self.validate_fresh_file_proposal_identity(&proposal)?;
         let mut resolution = OkfProposalResolution {
             outcome: OkfProposalOutcome::Rejected,
@@ -91,15 +119,73 @@ impl MemoryService {
             .join("resolved")
             .join("rejected")
             .join(format!("{}.md", proposal.file_id));
-        self.prepare_resolution_destination(&resolved_path)?;
         let archived_proposal = proposal.clone();
         let resolved_markdown =
             okf::render_resolved_okf_proposal_markdown(&archived_proposal, &resolution)?;
+        let projections = vec![
+            OwnedRepositoryProjection::from_absolute(
+                &self.paths,
+                &resolved_path,
+                resolved_markdown.as_bytes(),
+                None,
+            )?,
+            OwnedRepositoryProjection::existing_from_absolute(
+                &self.paths,
+                proposal_path,
+                &snapshot.bytes,
+                &snapshot.expected_hash,
+            )?,
+        ];
+        let mut safety_values = okf_proposal_safety_values("receipt", &archived_proposal);
+        safety_values.push(safety_value(
+            "resolution.reason".to_owned(),
+            SafetyFieldKind::Reason,
+            reason,
+        ));
+        safety_values.push(safety_value(
+            "resolution.resolved_by".to_owned(),
+            SafetyFieldKind::Identifier,
+            actor,
+        ));
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::FileProposalRejectReceipt,
+            OkfProposalSensitivity::RepoSafe,
+            ScopeKind::Repo,
+            None,
+            Visibility::Repo,
+            AuthorizationProof::ExplicitCommand {
+                operation: "file_proposal_reject",
+            },
+            explicit_repository_provenance(
+                RepositoryContentClass::GeneralRepoKnowledge,
+                "redacted_file_proposal_rejection_receipt",
+            ),
+            &safety_values,
+            &projections,
+        )?;
+        let mutation = RepositoryMutationAuthorization {
+            route: RepositoryWriteRoute::FileProposalRejectReceipt,
+            authorization: &authorization,
+            projections: &projections,
+        };
+        self.prepare_resolution_destination(&resolved_path)?;
         let nonce = Uuid::now_v7().to_string();
-        let resolved_temp = stage_file(&resolved_path, &resolved_markdown, &nonce)?;
-        let pending_backup = sibling_transaction_path(proposal_path, &nonce, "pending");
+        let resolved_temp = stage_authorized_file(
+            &self.paths,
+            RepositoryWriteRoute::FileProposalRejectReceipt,
+            &authorization,
+            &projections,
+            &resolved_path,
+            &resolved_markdown,
+            &nonce,
+        )?;
+        let pending_backup =
+            repository_transaction_path(&self.paths, proposal_path, &nonce, "pending");
+        let resolved_hash = blake3::hash(resolved_markdown.as_bytes())
+            .to_hex()
+            .to_string();
 
-        let display_pending_path = snapshot.display_path.clone();
         if let Err(error) = before_pending_revalidation(proposal_path) {
             return attach_cleanup_error(
                 error,
@@ -107,12 +193,13 @@ impl MemoryService {
                 "rejection staging cleanup",
             );
         }
-        if let Err(error) = fs::rename(proposal_path, &pending_backup).with_context(|| {
-            format!(
-                "failed to stage pending proposal {} for rejection",
-                display_pending_path.display()
-            )
-        }) {
+        if let Err(error) = backup_repository_file_to_transaction(
+            &self.paths,
+            mutation,
+            proposal_path,
+            &pending_backup,
+            &snapshot.expected_hash,
+        ) {
             return attach_cleanup_error(
                 error,
                 remove_staged_file(&resolved_temp),
@@ -124,41 +211,56 @@ impl MemoryService {
         {
             return attach_cleanup_error(
                 error,
-                rollback_rejected_file_proposal(
-                    proposal_path,
-                    &pending_backup,
-                    &resolved_path,
-                    false,
-                    &resolved_temp,
-                ),
+                rollback_rejected_file_proposal(RejectedFileProposalRollback {
+                    paths: &self.paths,
+                    mutation,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
+                    resolved_file: None,
+                    resolved_temp: &resolved_temp,
+                }),
                 "rejection captured-byte rollback",
             );
         }
-        if let Err(error) = install_staged_file_no_replace(&resolved_temp, &resolved_path) {
-            return attach_cleanup_error(
-                error,
-                rollback_rejected_file_proposal(
-                    proposal_path,
-                    &pending_backup,
-                    &resolved_path,
-                    false,
-                    &resolved_temp,
-                ),
-                "rejection install rollback",
-            );
-        }
+        let resolved_file = match install_verified_staged_file_no_replace(
+            &self.paths,
+            mutation,
+            &resolved_temp,
+            &resolved_path,
+            &resolved_hash,
+        ) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return attach_cleanup_error(
+                    error,
+                    rollback_rejected_file_proposal(RejectedFileProposalRollback {
+                        paths: &self.paths,
+                        mutation,
+                        pending_path: proposal_path,
+                        pending_backup: &pending_backup,
+                        pending_hash: &snapshot.expected_hash,
+                        resolved_file: None,
+                        resolved_temp: &resolved_temp,
+                    }),
+                    "rejection install rollback",
+                );
+            }
+        };
         if let Err(error) = before_finalize(&pending_backup)
             .context("proposal-file rejection finalization was interrupted")
         {
             return attach_cleanup_error(
                 error,
-                rollback_rejected_file_proposal(
-                    proposal_path,
-                    &pending_backup,
-                    &resolved_path,
-                    true,
-                    &resolved_temp,
-                ),
+                rollback_rejected_file_proposal(RejectedFileProposalRollback {
+                    paths: &self.paths,
+                    mutation,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
+                    resolved_file: Some(resolved_file),
+                    resolved_temp: &resolved_temp,
+                }),
                 "rejection finalization rollback",
             );
         }
@@ -170,19 +272,27 @@ impl MemoryService {
         }) {
             return attach_cleanup_error(
                 error,
-                rollback_rejected_file_proposal(
-                    proposal_path,
-                    &pending_backup,
-                    &resolved_path,
-                    true,
-                    &resolved_temp,
-                ),
+                rollback_rejected_file_proposal(RejectedFileProposalRollback {
+                    paths: &self.paths,
+                    mutation,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
+                    resolved_file: Some(resolved_file),
+                    resolved_temp: &resolved_temp,
+                }),
                 "rejection cleanup rollback",
             );
         }
 
+        remove_staged_file(&resolved_temp)
+            .context("proposal-file rejection completed but resolved staging cleanup failed")?;
+
+        let mut reported_proposal = archived_proposal;
+        reported_proposal.sensitivity = snapshot.source_sensitivity;
+        reported_proposal.content_class = snapshot.source_content_class;
         Ok(FileProposalResolutionResult {
-            proposal: archived_proposal,
+            proposal: reported_proposal,
             resolution,
             resolved_path,
             record: None,

@@ -43,6 +43,9 @@ pub(crate) enum Commands {
         /// Repo sharing classification. Canonical apply requires repo-safe.
         #[arg(long, default_value = "unknown")]
         sensitivity: String,
+        /// Contextual repository-content classification. Canonical apply requires general repo knowledge.
+        #[arg(long = "content-class", default_value = "unknown")]
+        content_class: String,
         #[arg(long)]
         title: String,
         #[arg(long)]
@@ -160,6 +163,9 @@ pub(crate) enum Commands {
         /// Repo sharing classification. Canonical replacement requires repo-safe.
         #[arg(long, default_value = "unknown")]
         sensitivity: String,
+        /// Contextual repository-content classification. Canonical replacement requires general repo knowledge.
+        #[arg(long = "content-class", default_value = "unknown")]
+        content_class: String,
         #[arg(long)]
         title: String,
         #[arg(long)]
@@ -251,6 +257,12 @@ pub(crate) enum Commands {
         json: bool,
     },
 
+    /// Scan repository memory blobs for prohibited content without modifying Git.
+    Safety {
+        #[command(subcommand)]
+        command: SafetyCommands,
+    },
+
     /// Export active repo memory into reviewable files.
     Export {
         /// Export format: okf, agents-md, or claude-md.
@@ -314,6 +326,21 @@ pub(crate) enum Commands {
     Integrate {
         #[command(subcommand)]
         command: IntegrateCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SafetyCommands {
+    /// Scan a staged index, a branch range head, or one working-tree file.
+    Scan {
+        #[arg(long, conflicts_with_all = ["range", "file"])]
+        staged: bool,
+        #[arg(long, value_name = "BASE...HEAD", conflicts_with_all = ["staged", "file"])]
+        range: Option<String>,
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["staged", "range"])]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -822,6 +849,7 @@ pub(crate) struct DraftCommand {
     pub(crate) source_kind: Option<String>,
     pub(crate) source_ref: Option<String>,
     pub(crate) sensitivity: String,
+    pub(crate) content_class: String,
     pub(crate) title: String,
     pub(crate) body: String,
 }

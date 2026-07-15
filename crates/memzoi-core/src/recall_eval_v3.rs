@@ -295,7 +295,7 @@ pub fn run_recall_v3_eval(path: impl AsRef<Path>) -> Result<RecallV3Report> {
         MemoryPaths::with_runtime_home(temp.path().join("project"), temp.path().join("runtime"));
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: true })?;
     stage_records(&loaded.root, &loaded.corpus, &paths.records_dir())?;
-    MemoryService::rebuild_paths(paths.clone())?;
+    MemoryService::rebuild_paths_for_trusted_recall_eval(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
     let runtime_records = seed_runtime_fixtures(&service, &loaded.corpus.runtime_fixtures)?;
@@ -378,7 +378,7 @@ pub fn run_recall_v3_eval_with_candidates(
         MemoryPaths::with_runtime_home(temp.path().join("project"), temp.path().join("runtime"));
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: true })?;
     stage_records(&loaded.root, &loaded.corpus, &paths.records_dir())?;
-    MemoryService::rebuild_paths(paths.clone())?;
+    MemoryService::rebuild_paths_for_trusted_recall_eval(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
     let runtime_records = seed_runtime_fixtures(&service, &loaded.corpus.runtime_fixtures)?;

@@ -43,6 +43,18 @@ pub(super) fn rebuild(paths: MemoryPaths) -> Result<RebuildResult> {
     rebuild::rebuild(paths)
 }
 
+pub(super) fn rebuild_for_trusted_recall_eval(paths: MemoryPaths) -> Result<RebuildResult> {
+    rebuild::rebuild_for_trusted_recall_eval(paths)
+}
+
+#[cfg(test)]
+pub(super) fn rebuild_with_snapshot_hook(
+    paths: MemoryPaths,
+    after_snapshot: impl FnOnce() -> Result<()>,
+) -> Result<RebuildResult> {
+    rebuild::rebuild_with_snapshot_hook(paths, after_snapshot)
+}
+
 pub(super) fn record_matches(canonical: &okf::OkfRecordFile, indexed: &MemoryRecord) -> bool {
     drift::repo_record_matches(canonical, indexed)
 }

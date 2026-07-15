@@ -1,8 +1,95 @@
 use std::fs;
 
 use super::*;
-use crate::{MemoryLane, MemoryStatus, MemoryType, ProposalStatus, ScopeKind, Visibility};
+use crate::repository_io;
+use crate::{
+    MemoryLane, MemoryStatus, MemoryType, ProposalStatus, ScopeKind, SessionEndCandidate,
+    SessionEndCandidateStatus, Visibility,
+};
 use tempfile::TempDir;
+
+#[cfg(unix)]
+#[test]
+fn create_only_write_and_sync_failures_leave_no_partial_repository_file() -> anyhow::Result<()> {
+    for failure in [
+        repository_io::InjectedCreateFileFailure::Write,
+        repository_io::InjectedCreateFileFailure::Sync,
+    ] {
+        let (_temp, service) = initialized_service()?;
+        let token = format!("createfailure{}", Uuid::now_v7());
+        repository_io::inject_repository_create_failure(failure);
+
+        let error = service
+            .propose_memory_with_options(
+                "agent:failure-test",
+                sample_memory_draft("Injected create failure", &token),
+                ProposeOptions {
+                    approval_override: None,
+                    apply: true,
+                },
+            )
+            .expect_err("injected create persistence failure must abort the write");
+
+        assert!(format!("{error:#}").contains("injected repository"));
+        assert!(okf::read_okf_record_files(service.paths.records_dir())?.is_empty());
+        assert!(
+            service
+                .search_memory(SearchInput {
+                    query: token,
+                    ..SearchInput::default()
+                })?
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn overwrite_write_and_sync_failures_restore_the_original_repository_file() -> anyhow::Result<()> {
+    for failure in [
+        repository_io::InjectedCreateFileFailure::Write,
+        repository_io::InjectedCreateFileFailure::Sync,
+    ] {
+        let (_temp, service) = initialized_service()?;
+        let target = apply_test_record(
+            &service,
+            sample_memory_draft("Injected overwrite target", "Original durable body."),
+        )?;
+        let target_path = service
+            .paths
+            .records_dir()
+            .join(format!("{}.md", target.id));
+        let original_markdown = fs::read(&target_path)?;
+        repository_io::inject_repository_create_failure(failure);
+
+        let error = service
+            .supersede_record(
+                &target.id,
+                "agent:failure-test",
+                sample_memory_draft(
+                    "Injected overwrite replacement",
+                    "Replacement durable body.",
+                ),
+            )
+            .expect_err("injected overwrite persistence failure must abort the write");
+
+        assert!(format!("{error:#}").contains("injected repository"));
+        assert_eq!(fs::read(&target_path)?, original_markdown);
+        assert_eq!(
+            RuntimeRecords::new(&service.conn)
+                .get(&target.id)?
+                .context("original record must remain indexed")?
+                .status,
+            MemoryStatus::Active
+        );
+        let records = okf::read_okf_record_files(service.paths.records_dir())?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].concept_id, target.id);
+        assert_eq!(records[0].status, MemoryStatus::Active);
+    }
+    Ok(())
+}
 
 #[test]
 fn propose_with_options_auto_approves_unique_proposals_by_default() -> anyhow::Result<()> {
@@ -385,12 +472,15 @@ fn legacy_lifecycle_rejects_runtime_targets_without_canonical_leaks() -> anyhow:
 #[test]
 fn legacy_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
-    let mut private_draft = sample_memory_draft(
+    let private_draft = sample_memory_draft(
         "Private repo target",
         "Private visibility must not be rewritten through a legacy lifecycle route.",
     );
-    private_draft.visibility = Visibility::Private;
     let private = apply_test_record(&service, private_draft)?;
+    service.conn.execute(
+        "UPDATE memory_record SET visibility = 'private' WHERE id = ?1",
+        [&private.id],
+    )?;
     let private_path = service
         .paths
         .records_dir()
@@ -594,11 +684,71 @@ fn show_proposal_reports_missing_ids() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn blocked_session_end_result_redacts_task_and_every_candidate_title() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let task_sentinel = "ghp_SESSION_END_TASK_SENTINEL_0123456789abcdefghijklmnop";
+    let local_title_sentinel = "BLOCKED-LOCAL-TITLE-SENTINEL";
+    let repo_title_sentinel = "BLOCKED-REPO-TITLE-SENTINEL";
+    let result = service.promote_session_end(
+        "agent:red-tests",
+        SessionEndDocument {
+            task: task_sentinel.to_owned(),
+            candidates: vec![
+                SessionEndCandidate {
+                    destination: MemoryDestination::Local,
+                    memory_type: MemoryType::Fact,
+                    lane: MemoryLane::Semantic,
+                    title: local_title_sentinel.to_owned(),
+                    body: "This candidate must not be written when the repo candidate blocks."
+                        .to_owned(),
+                    sensitivity: OkfProposalSensitivity::RepoSafe,
+                    content_class: RepositoryContentClass::GeneralRepoKnowledge,
+                    reason: None,
+                    scope: None,
+                    tags: Vec::new(),
+                },
+                SessionEndCandidate {
+                    destination: MemoryDestination::Repo,
+                    memory_type: MemoryType::Fact,
+                    lane: MemoryLane::Semantic,
+                    title: repo_title_sentinel.to_owned(),
+                    body: "This otherwise safe candidate must block because of the task."
+                        .to_owned(),
+                    sensitivity: OkfProposalSensitivity::RepoSafe,
+                    content_class: RepositoryContentClass::GeneralRepoKnowledge,
+                    reason: None,
+                    scope: None,
+                    tags: Vec::new(),
+                },
+            ],
+        },
+    )?;
+
+    assert_eq!(result.task, "Redacted blocked session-end task");
+    assert!(
+        result
+            .candidates
+            .iter()
+            .all(|candidate| candidate.status == SessionEndCandidateStatus::Blocked)
+    );
+    let rendered = serde_json::to_string(&result)?;
+    for sentinel in [task_sentinel, local_title_sentinel, repo_title_sentinel] {
+        assert!(
+            !rendered.contains(sentinel),
+            "blocked result leaked {sentinel}: {rendered}"
+        );
+    }
+    Ok(())
+}
+
 fn initialized_service() -> anyhow::Result<(TempDir, MemoryService)> {
     let temp = TempDir::new()?;
+    let project_root = temp.path().join("project");
+    fs::create_dir(&project_root)?;
     let paths = MemoryPaths::with_runtime_home(
-        temp.path().canonicalize()?,
-        temp.path().join(".memzoi-runtime"),
+        project_root.canonicalize()?,
+        temp.path().join("runtime-home"),
     );
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
     let service = MemoryService::open_paths(paths)?;
@@ -661,6 +811,7 @@ fn sample_memory_draft(title: &str, body: &str) -> MemoryDraft {
         source_kind: Some("test".to_owned()),
         source_ref: Some("service-proposal-tests".to_owned()),
         sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+        content_class: crate::RepositoryContentClass::GeneralRepoKnowledge,
         confidence: 0.82,
     }
 }

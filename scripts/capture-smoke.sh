@@ -67,10 +67,12 @@ with open(os.path.join(out, 'cli-plan.json')) as fh:
     plan = json.load(fh)
 assert plan['schema'] == 'memzoi/capture-plan-v1'
 assert plan['status'] == 'ready'
-assert plan['data_class'] == 'repo_safe'
+assert plan['data_class'] == 'private'
 assert len(plan['candidates']) == 1
 candidate = plan['candidates'][0]
 assert candidate['memory']['type'] == 'procedure'
+assert candidate['classification']['destination'] == 'needs_review'
+assert candidate['classification']['sensitivity'] == 'unknown'
 assert candidate['evidence'][0]['locator']['path'] == 'notes/capture.md'
 PY
 
@@ -180,13 +182,11 @@ with open(path, 'w') as fh:
 
 assert ordered[0]['result']['serverInfo']['name'] == 'memzoi'
 result = ordered[1]['result']
-assert result['isError'] is False
-plan = result['structuredContent']
-assert plan['schema'] == 'memzoi/capture-plan-v1'
-assert plan['status'] == 'ready'
-assert plan['data_class'] == 'repo_safe'
-assert len(plan['candidates']) == 1
-assert plan['candidates'][0]['evidence'][0]['locator']['path'] == 'notes/capture.md'
+assert result['isError'] is True
+assert result['content'][0]['text'] == (
+    'private capture plans are not available to this MCP client'
+)
+assert 'structuredContent' not in result
 PY
 
 if [[ -e "$TMP/repo/.memzoi" || -e "$MEMZOI_HOME" ]]; then

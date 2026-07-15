@@ -421,6 +421,8 @@ pub struct CaptureClassification {
     pub destination_reason: String,
     pub sensitivity: OkfProposalSensitivity,
     pub sensitivity_reason: String,
+    #[serde(default)]
+    pub content_class: crate::RepositoryContentClass,
     pub policy: MemoryDestinationPolicy,
 }
 
@@ -593,6 +595,8 @@ pub struct CaptureReviewDecisionInput {
     pub memory: Option<CaptureMemoryDraft>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_destination: Option<MemoryDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_class: Option<crate::RepositoryContentClass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -921,14 +925,20 @@ fn build_capture_review_inner(
         validate_reason_code(reason_code.as_deref())?;
         let reviewed_candidate = match decision.outcome {
             CaptureReviewOutcome::Accept => {
-                if decision.memory.is_some() || decision.requested_destination.is_some() {
+                if decision.memory.is_some()
+                    || decision.requested_destination.is_some()
+                    || decision.content_class.is_some()
+                {
                     bail!("accept decisions cannot edit capture candidates");
                 }
                 require_routeable_review_action(&candidate.action)?;
                 Some(candidate.clone())
             }
             CaptureReviewOutcome::Reject | CaptureReviewOutcome::Defer => {
-                if decision.memory.is_some() || decision.requested_destination.is_some() {
+                if decision.memory.is_some()
+                    || decision.requested_destination.is_some()
+                    || decision.content_class.is_some()
+                {
                     bail!("reject and defer decisions cannot edit capture candidates");
                 }
                 None
@@ -955,6 +965,7 @@ fn build_capture_review_inner(
                     candidate,
                     memory,
                     destination,
+                    decision.content_class,
                 )?)
             }
         };
@@ -1073,24 +1084,27 @@ fn validate_prior_review_lineage(
 fn review_decision_as_input(
     decision: &CaptureReviewDecision,
 ) -> Result<CaptureReviewDecisionInput> {
-    let (memory, requested_destination) = if decision.outcome == CaptureReviewOutcome::Edit {
-        let candidate = decision
-            .reviewed_candidate
-            .as_ref()
-            .context("edited prior review decision is missing its candidate")?;
-        (
-            Some(candidate.memory.clone()),
-            Some(candidate.classification.destination),
-        )
-    } else {
-        (None, None)
-    };
+    let (memory, requested_destination, content_class) =
+        if decision.outcome == CaptureReviewOutcome::Edit {
+            let candidate = decision
+                .reviewed_candidate
+                .as_ref()
+                .context("edited prior review decision is missing its candidate")?;
+            (
+                Some(candidate.memory.clone()),
+                Some(candidate.classification.destination),
+                Some(candidate.classification.content_class),
+            )
+        } else {
+            (None, None, None)
+        };
     Ok(CaptureReviewDecisionInput {
         candidate_id: decision.candidate_id.clone(),
         outcome: decision.outcome,
         reason_code: decision.reason_code.clone(),
         memory,
         requested_destination,
+        content_class,
     })
 }
 
@@ -1494,6 +1508,7 @@ pub(crate) fn validate_capture_plan_live_state(
             &plan.extractor,
             destination,
             sensitivity,
+            capture_content_class(destination, sensitivity),
             destination_reason,
             sensitivity_reason,
         )?);
@@ -1650,14 +1665,25 @@ fn markdown_candidate_policy(candidate: &CaptureCandidate) -> Result<CoreCandida
     let (memory_type, lane, destination, sensitivity) =
         typed_section_policy(section_kind).context("capture Markdown section kind is invalid")?;
     validate_typed_evidence_heading(candidate, section_kind, None)?;
-    Ok((
-        memory_type,
-        lane,
-        destination,
-        sensitivity,
-        "deterministic_typed_markdown_section",
-        "deterministic_typed_markdown_profile",
-    ))
+    if destination == MemoryDestination::Repo {
+        Ok((
+            memory_type,
+            lane,
+            MemoryDestination::NeedsReview,
+            OkfProposalSensitivity::Unknown,
+            "generic_markdown_requires_contextual_review",
+            "generic_markdown_sensitivity_unknown",
+        ))
+    } else {
+        Ok((
+            memory_type,
+            lane,
+            destination,
+            sensitivity,
+            "deterministic_typed_markdown_section",
+            "deterministic_typed_markdown_profile",
+        ))
+    }
 }
 
 fn instruction_candidate_policy(candidate: &CaptureCandidate) -> Result<CoreCandidatePolicy> {
@@ -3240,6 +3266,7 @@ fn extract_candidates(
                 extractor,
                 MemoryDestination::NeedsReview,
                 OkfProposalSensitivity::Unknown,
+                crate::RepositoryContentClass::Unknown,
                 "unrecognized_markdown_requires_review",
                 "unrecognized_markdown_sensitivity_unknown",
             )?],
@@ -3274,6 +3301,22 @@ fn extract_candidates(
                 heading_path: &section.heading_path,
             },
         )?;
+        let (destination, sensitivity, destination_reason, sensitivity_reason) =
+            if destination == MemoryDestination::Repo {
+                (
+                    MemoryDestination::NeedsReview,
+                    OkfProposalSensitivity::Unknown,
+                    "generic_markdown_requires_contextual_review",
+                    "generic_markdown_sensitivity_unknown",
+                )
+            } else {
+                (
+                    destination,
+                    sensitivity,
+                    "deterministic_typed_markdown_section",
+                    "deterministic_typed_markdown_profile",
+                )
+            };
         candidates.push(candidate(
             CaptureMemoryDraft {
                 memory_type,
@@ -3287,8 +3330,9 @@ fn extract_candidates(
             extractor,
             destination,
             sensitivity,
-            "deterministic_typed_markdown_section",
-            "deterministic_typed_markdown_profile",
+            capture_content_class(destination, sensitivity),
+            destination_reason,
+            sensitivity_reason,
         )?);
     }
     if candidates.is_empty() {
@@ -3628,12 +3672,14 @@ fn default_scope(source: &CaptureSourceRequest) -> CaptureScope {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn candidate(
     memory: CaptureMemoryDraft,
     evidence: Vec<CaptureEvidence>,
     extractor: &CaptureExtractorIdentity,
     destination: MemoryDestination,
     sensitivity: OkfProposalSensitivity,
+    content_class: crate::RepositoryContentClass,
     destination_reason: &str,
     sensitivity_reason: &str,
 ) -> Result<CaptureCandidate> {
@@ -3644,6 +3690,7 @@ fn candidate(
         destination_reason: destination_reason.to_owned(),
         sensitivity,
         sensitivity_reason: sensitivity_reason.to_owned(),
+        content_class,
         policy: destination.policy(),
     };
     let action = preliminary_action(&classification);
@@ -3671,6 +3718,7 @@ fn rebuild_edited_candidate(
     original: &CaptureCandidate,
     memory: &CaptureMemoryDraft,
     destination: MemoryDestination,
+    content_class: Option<crate::RepositoryContentClass>,
 ) -> Result<CaptureCandidate> {
     let memory = normalize_reviewed_memory(memory)?;
     let mut scan = Vec::with_capacity(memory.title.len() + memory.body.len() + 1);
@@ -3683,6 +3731,11 @@ fn rebuild_edited_candidate(
 
     let (sensitivity, destination_reason, sensitivity_reason) = match destination {
         MemoryDestination::Repo => {
+            if content_class != Some(crate::RepositoryContentClass::GeneralRepoKnowledge) {
+                bail!(
+                    "reviewed capture edits routed to repo require explicit general_repo_knowledge classification"
+                );
+            }
             if original.evidence.iter().any(|evidence| {
                 matches!(
                     &evidence.semantic_location,
@@ -3737,6 +3790,7 @@ fn rebuild_edited_candidate(
         &original.extraction,
         destination,
         sensitivity,
+        content_class.unwrap_or_else(|| capture_content_class(destination, sensitivity)),
         destination_reason,
         sensitivity_reason,
     )?;
@@ -3759,6 +3813,24 @@ fn rebuild_edited_candidate(
             bail!("reviewed capture edit conflicts with existing memory")
         }
         _ => bail!("reviewed capture edit did not produce the requested safe route"),
+    }
+}
+
+fn capture_content_class(
+    destination: MemoryDestination,
+    sensitivity: OkfProposalSensitivity,
+) -> crate::RepositoryContentClass {
+    use crate::RepositoryContentClass;
+
+    match sensitivity {
+        OkfProposalSensitivity::RawTranscript => RepositoryContentClass::RawTranscript,
+        OkfProposalSensitivity::PrivatePersonalData => RepositoryContentClass::PrivatePersonalData,
+        OkfProposalSensitivity::TemporaryState => RepositoryContentClass::TemporaryTaskState,
+        OkfProposalSensitivity::LocalOnly => RepositoryContentClass::LocalOnlyState,
+        OkfProposalSensitivity::RepoSafe if destination == MemoryDestination::Repo => {
+            RepositoryContentClass::GeneralRepoKnowledge
+        }
+        _ => RepositoryContentClass::Unknown,
     }
 }
 

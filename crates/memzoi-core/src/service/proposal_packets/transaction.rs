@@ -1,5 +1,27 @@
 use super::*;
 
+pub(super) struct FileResolutionRollback<'a> {
+    pub(super) paths: &'a MemoryPaths,
+    pub(super) mutation: RepositoryMutationAuthorization<'a>,
+    pub(super) pending_path: &'a Path,
+    pub(super) pending_backup: &'a Path,
+    pub(super) pending_hash: &'a str,
+    pub(super) pending_moved: bool,
+    pub(super) writes: &'a mut [StagedCanonicalFileWrite],
+    pub(super) resolved_file: Option<CreatedRepositoryFile>,
+    pub(super) resolved_temp: &'a Path,
+}
+
+pub(super) struct RejectedFileProposalRollback<'a> {
+    pub(super) paths: &'a MemoryPaths,
+    pub(super) mutation: RepositoryMutationAuthorization<'a>,
+    pub(super) pending_path: &'a Path,
+    pub(super) pending_backup: &'a Path,
+    pub(super) pending_hash: &'a str,
+    pub(super) resolved_file: Option<CreatedRepositoryFile>,
+    pub(super) resolved_temp: &'a Path,
+}
+
 impl MemoryService {
     pub(super) fn load_pending_file_proposal_snapshot(
         &self,
@@ -56,6 +78,9 @@ impl MemoryService {
         }
         Ok(PendingFileProposalSnapshot {
             proposal,
+            source_sensitivity: preflight.sensitivity,
+            source_content_class: preflight.content_class,
+            bytes: markdown.into_bytes(),
             expected_hash,
             display_path,
         })
@@ -67,10 +92,10 @@ impl MemoryService {
         pending_backup: &Path,
         snapshot: &PendingFileProposalSnapshot,
     ) -> Result<()> {
-        let pending_root = self.paths.proposals_dir().join("pending");
+        let transaction_root = repository_transaction_root(&self.paths);
         ensure_safe_existing_file(
-            &self.paths.project_root,
-            &pending_root,
+            &self.paths.runtime_dir,
+            &transaction_root,
             pending_backup,
             "captured pending proposal",
         )
@@ -124,60 +149,56 @@ pub(super) fn cleanup_staged_file_resolution(
     finish_cleanup("proposal-file staging cleanup", errors)
 }
 
-pub(super) fn rollback_file_resolution(
-    pending_path: &Path,
-    pending_backup: &Path,
-    pending_moved: bool,
-    writes: &mut [StagedCanonicalFileWrite],
-    resolved_path: &Path,
-    resolved_installed: bool,
-    resolved_temp: &Path,
-) -> Result<()> {
+pub(super) fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> Result<()> {
     let mut errors = Vec::new();
-    if resolved_installed {
+    if let Some(resolved_file) = rollback.resolved_file {
         record_cleanup_result(
             &mut errors,
-            remove_staged_file(resolved_path),
+            remove_installed_repository_file(rollback.paths, rollback.mutation, &resolved_file),
             "remove resolved packet".to_owned(),
         );
     }
     record_cleanup_result(
         &mut errors,
-        rollback_staged_canonical_writes(writes),
+        rollback_staged_canonical_writes(rollback.paths, rollback.mutation, rollback.writes),
         "roll back canonical writes".to_owned(),
     );
-    if pending_moved {
+    if rollback.pending_moved {
         record_cleanup_result(
             &mut errors,
-            install_staged_file_no_replace(pending_backup, pending_path)
-                .map_err(|_| anyhow!("failed to restore pending proposal without replacing it")),
+            restore_verified_staged_file_no_replace(
+                rollback.paths,
+                rollback.mutation,
+                rollback.pending_backup,
+                rollback.pending_path,
+                rollback.pending_hash,
+            )
+            .map_err(|_| anyhow!("failed to restore pending proposal without replacing it")),
             "restore pending packet".to_owned(),
         );
     }
     record_cleanup_result(
         &mut errors,
-        remove_staged_file(resolved_temp),
+        remove_staged_file(rollback.resolved_temp),
         "remove staged resolved packet".to_owned(),
     );
     finish_cleanup("proposal-file rollback", errors)
 }
 
 pub(super) fn rollback_rejected_file_proposal(
-    pending_path: &Path,
-    pending_backup: &Path,
-    resolved_path: &Path,
-    resolved_installed: bool,
-    resolved_temp: &Path,
+    rollback: RejectedFileProposalRollback<'_>,
 ) -> Result<()> {
-    rollback_file_resolution(
-        pending_path,
-        pending_backup,
-        true,
-        &mut [],
-        resolved_path,
-        resolved_installed,
-        resolved_temp,
-    )
+    rollback_file_resolution(FileResolutionRollback {
+        paths: rollback.paths,
+        mutation: rollback.mutation,
+        pending_path: rollback.pending_path,
+        pending_backup: rollback.pending_backup,
+        pending_hash: rollback.pending_hash,
+        pending_moved: true,
+        writes: &mut [],
+        resolved_file: rollback.resolved_file,
+        resolved_temp: rollback.resolved_temp,
+    })
 }
 
 pub(super) fn attach_cleanup_error<T>(

@@ -65,13 +65,26 @@ fn scan_proposal_directory(
                 continue;
             }
         };
-        let non_repo_safe = preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe;
-        let display_path = if non_repo_safe {
+        let source_sensitivity = preflight.sensitivity;
+        let source_content_class = preflight.content_class;
+        let relative_path = actual_path
+            .strip_prefix(&paths.project_root)
+            .unwrap_or_else(|_| Path::new("../unsafe-proposal-path"));
+        let content_allowed = crate::scan_repository_blob(
+            paths.project_root.as_os_str().as_encoded_bytes(),
+            relative_path,
+            markdown.as_bytes(),
+        )
+        .allowed;
+        let requires_redaction = preflight.sensitivity != crate::OkfProposalSensitivity::RepoSafe
+            || preflight.content_class != RepositoryContentClass::GeneralRepoKnowledge
+            || !content_allowed;
+        let display_path = if requires_redaction {
             root.join(format!("{}.md", preflight.receipt_proposal.file_id))
         } else {
             actual_path.clone()
         };
-        let parsed = if non_repo_safe && expected_outcome.is_none() {
+        let parsed = if requires_redaction && expected_outcome.is_none() {
             Some(preflight.receipt_proposal.clone())
         } else {
             match okf::parse_okf_proposal_markdown(root, &actual_path, &markdown) {
@@ -79,7 +92,7 @@ fn scan_proposal_directory(
                 Err(error) => {
                     errors.push(FileProposalInventoryError {
                         display_path,
-                        error: if non_repo_safe {
+                        error: if requires_redaction {
                             "invalid redacted resolved proposal packet".to_owned()
                         } else {
                             error.to_string()
@@ -90,7 +103,7 @@ fn scan_proposal_directory(
             }
         };
         if let Some(mut proposal) = parsed {
-            if non_repo_safe && expected_outcome.is_some() {
+            if requires_redaction && expected_outcome.is_some() {
                 proposal = redact_resolved_proposal_for_inventory(proposal, preflight);
             }
             let state_error = if proposal.status != expected_status {
@@ -126,6 +139,8 @@ fn scan_proposal_directory(
             } else {
                 entries.push(FileProposalInventoryEntry {
                     proposal,
+                    source_sensitivity,
+                    source_content_class,
                     display_path,
                     actual_path,
                 });
@@ -167,7 +182,7 @@ pub(super) fn require_clean_file_proposal_inventory(
     Ok(())
 }
 
-pub(super) fn prepare_pending_proposal_root(paths: &MemoryPaths) -> Result<()> {
+pub(crate) fn prepare_pending_proposal_root(paths: &MemoryPaths) -> Result<()> {
     preflight_pending_proposal_root(paths)?;
     ensure_safe_directory(
         &paths.project_root,

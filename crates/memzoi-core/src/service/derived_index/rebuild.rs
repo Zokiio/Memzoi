@@ -14,6 +14,26 @@ use super::{
 };
 
 pub(super) fn rebuild(paths: MemoryPaths) -> Result<RebuildResult> {
+    rebuild_with_options(paths, || Ok(()), true)
+}
+
+pub(super) fn rebuild_for_trusted_recall_eval(paths: MemoryPaths) -> Result<RebuildResult> {
+    rebuild_with_options(paths, || Ok(()), false)
+}
+
+#[cfg(test)]
+pub(super) fn rebuild_with_snapshot_hook(
+    paths: MemoryPaths,
+    after_snapshot: impl FnOnce() -> Result<()>,
+) -> Result<RebuildResult> {
+    rebuild_with_options(paths, after_snapshot, true)
+}
+
+fn rebuild_with_options(
+    paths: MemoryPaths,
+    after_snapshot: impl FnOnce() -> Result<()>,
+    validate_repository_safety: bool,
+) -> Result<RebuildResult> {
     let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
     let records_root = paths.records_dir();
     ensure_safe_directory(
@@ -22,7 +42,15 @@ pub(super) fn rebuild(paths: MemoryPaths) -> Result<RebuildResult> {
         false,
         "canonical record root",
     )?;
-    let records = okf::read_okf_record_files(&records_root)?;
+    let snapshots = okf::read_okf_record_snapshots(&records_root)?;
+    after_snapshot()?;
+    if validate_repository_safety {
+        validate_canonical_record_snapshots_for_rebuild(&paths, &snapshots)?;
+    }
+    let records = snapshots
+        .into_iter()
+        .map(|snapshot| snapshot.record)
+        .collect::<Vec<_>>();
     let runtime_records = load_runtime_records_for_rebuild(&paths.db_path)?;
     guard_no_open_proposals(&paths.db_path)?;
     guard_no_runtime_record_id_collisions(&records, &runtime_records)?;
@@ -39,6 +67,35 @@ pub(super) fn rebuild(paths: MemoryPaths) -> Result<RebuildResult> {
             .map(|record| record.concept_id)
             .collect(),
     })
+}
+
+fn validate_canonical_record_snapshots_for_rebuild(
+    paths: &MemoryPaths,
+    snapshots: &[okf::OkfRecordSnapshot],
+) -> Result<()> {
+    for snapshot in snapshots {
+        let relative = snapshot
+            .path
+            .strip_prefix(&paths.project_root)
+            .context("canonical record escaped the project root during rebuild")?;
+        let report = crate::scan_managed_repository_blob(
+            paths.project_root.as_os_str().as_encoded_bytes(),
+            relative,
+            &snapshot.bytes,
+        );
+        if !report.allowed {
+            let findings = report
+                .findings
+                .iter()
+                .map(|finding| format!("{}:{}", finding.code.as_str(), finding.fingerprint))
+                .collect::<Vec<_>>()
+                .join(",");
+            bail!(
+                "rebuild refused because a canonical record failed repository safety validation ({findings})"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn load_runtime_records_for_rebuild(db_path: &Path) -> Result<Vec<RuntimeRecordSnapshot>> {

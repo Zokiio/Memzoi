@@ -1,7 +1,12 @@
+use std::fs;
+
 use rusqlite::Connection;
 use tempfile::TempDir;
 
-use crate::{MemoryDraft, MemoryLane, MemoryPaths, MemoryType, ScopeKind, Visibility};
+use crate::{
+    MemoryDraft, MemoryLane, MemoryPaths, MemoryRecord, MemoryType, ScopeKind, SearchInput,
+    Visibility,
+};
 
 use super::super::{InitRequest, MemoryService, ProposalApprovalOverride, ProposeOptions};
 
@@ -117,15 +122,66 @@ fn rebuild_refuses_when_open_proposals_cannot_be_inspected() -> anyhow::Result<(
     Ok(())
 }
 
+#[test]
+fn rebuild_scans_the_same_immutable_snapshot_that_it_imports() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let record = apply_test_record(
+        &service,
+        sample_memory_draft("Immutable rebuild snapshot", "Safe indexed baseline body."),
+    )?;
+    let record_path = service
+        .paths
+        .records_dir()
+        .join(format!("{}.md", record.id));
+    let safe = fs::read_to_string(&record_path)?;
+    let prohibited = safe
+        .replace(
+            "content_class: general_repo_knowledge",
+            "content_class: raw_transcript",
+        )
+        .replace(
+            "Safe indexed baseline body.",
+            "Lexically harmless snapshotracesentinel payload.",
+        );
+    fs::write(&record_path, prohibited)?;
+
+    let error = MemoryService::rebuild_paths_with_snapshot_hook(service.paths.clone(), || {
+        fs::write(&record_path, &safe)?;
+        Ok(())
+    })
+    .expect_err("the prohibited first snapshot must block after a safe replacement");
+    assert!(format!("{error:#}").contains("raw_transcript"));
+    assert!(
+        service
+            .search_memory(SearchInput {
+                query: "snapshotracesentinel".to_owned(),
+                limit: 10,
+                ..SearchInput::default()
+            })?
+            .is_empty(),
+        "the unscanned first snapshot reached runtime search"
+    );
+    Ok(())
+}
+
 fn initialized_service() -> anyhow::Result<(TempDir, MemoryService)> {
     let temp = TempDir::new()?;
+    let project_root = temp.path().join("project");
+    std::fs::create_dir(&project_root)?;
     let paths = MemoryPaths::with_runtime_home(
-        temp.path().canonicalize()?,
-        temp.path().join(".memzoi-runtime"),
+        project_root.canonicalize()?,
+        temp.path().join("runtime-home"),
     );
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
     let service = MemoryService::open_paths(paths)?;
     Ok((temp, service))
+}
+
+fn apply_test_record(service: &MemoryService, draft: MemoryDraft) -> anyhow::Result<MemoryRecord> {
+    let proposal = service.propose_memory("agent:red-tests", draft)?;
+    service.validate_proposal(&proposal.id)?;
+    service.approve_proposal(&proposal.id, "reviewer:human")?;
+    service.apply_proposal(&proposal.id, "agent:applier")
 }
 
 fn sample_memory_draft(title: &str, body: &str) -> MemoryDraft {
@@ -141,6 +197,7 @@ fn sample_memory_draft(title: &str, body: &str) -> MemoryDraft {
         source_kind: Some("test".to_owned()),
         source_ref: Some("service-proposal-tests".to_owned()),
         sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+        content_class: crate::RepositoryContentClass::GeneralRepoKnowledge,
         confidence: 0.82,
     }
 }

@@ -30,6 +30,27 @@ impl MemoryService {
             {
                 continue;
             }
+            if entry.source_sensitivity != crate::OkfProposalSensitivity::RepoSafe {
+                inventory.errors.push(FileProposalInventoryError {
+                    display_path: entry.display_path,
+                    error: format!(
+                        "OKF proposal sensitivity {} cannot be applied into repo records; {}",
+                        entry.source_sensitivity.as_str(),
+                        okf::repo_apply_sensitivity_guidance(entry.source_sensitivity)
+                    ),
+                });
+                continue;
+            }
+            if entry.source_content_class != RepositoryContentClass::GeneralRepoKnowledge {
+                inventory.errors.push(FileProposalInventoryError {
+                    display_path: entry.display_path,
+                    error: format!(
+                        "repository write blocked: OKF proposal content class {} cannot be applied into repo records; classify or sanitize it as general_repo_knowledge first",
+                        entry.source_content_class.as_str()
+                    ),
+                });
+                continue;
+            }
             match self.build_file_proposal_apply_plan(&entry.proposal, &resolved_at) {
                 Ok(_) => valid.push(entry),
                 Err(error) => {

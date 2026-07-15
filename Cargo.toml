@@ -25,7 +25,8 @@ fastembed = { version = "=5.17.2", default-features = false, features = ["ort-do
 ignore = "=0.4.28"
 predicates = "3"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
-rustix = { version = "1", features = ["fs"] }
+regex = "1"
+rustix = { version = "1", features = ["fs", "process"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

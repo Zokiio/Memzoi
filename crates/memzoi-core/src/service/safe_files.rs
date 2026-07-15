@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{ErrorKind, Write},
+    io::ErrorKind,
     path::{Component, Path, PathBuf},
 };
 
@@ -181,65 +181,6 @@ pub(super) fn ensure_regular_file(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn sibling_transaction_path(path: &Path, nonce: &str, role: &str) -> PathBuf {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("memzoi");
-    path.with_file_name(format!(".{name}.{nonce}.{role}.tmp"))
-}
-
-pub(super) fn stage_file(final_path: &Path, contents: &str, nonce: &str) -> Result<PathBuf> {
-    let parent = final_path.parent().context("staged file has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    let temp_path = sibling_transaction_path(final_path, nonce, "write");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)
-        .with_context(|| format!("failed to stage file {}", final_path.display()))?;
-    if let Err(error) = file
-        .write_all(contents.as_bytes())
-        .and_then(|_| file.sync_all())
-    {
-        drop(file);
-        let stage_error = anyhow::Error::new(error)
-            .context(format!("failed to stage file {}", final_path.display()));
-        return match remove_staged_file(&temp_path) {
-            Ok(()) => Err(stage_error),
-            Err(cleanup_error) => Err(stage_error).context(format!(
-                "additionally failed to remove incomplete staged file {}: {cleanup_error:#}",
-                temp_path.display()
-            )),
-        };
-    }
-    Ok(temp_path)
-}
-
-pub(super) fn install_staged_file_no_replace(staged: &Path, destination: &Path) -> Result<()> {
-    fs::hard_link(staged, destination).with_context(|| {
-        format!(
-            "failed to install {} without replacing an existing file",
-            destination.display()
-        )
-    })?;
-    if let Err(error) = fs::remove_file(staged) {
-        let install_error = anyhow::Error::new(error).context(format!(
-            "failed to finalize no-replace install {}",
-            destination.display()
-        ));
-        return match remove_staged_file(destination) {
-            Ok(()) => Err(install_error),
-            Err(rollback_error) => Err(install_error).context(format!(
-                "additionally failed to roll back {}: {rollback_error:#}",
-                destination.display()
-            )),
-        };
-    }
-    Ok(())
-}
-
 pub(super) fn remove_staged_file(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -253,8 +194,15 @@ pub(super) fn lifecycle_transaction_artifacts(paths: &MemoryPaths) -> Result<Vec
     for (root, label) in [
         (paths.records_dir(), "canonical record root"),
         (paths.proposals_dir(), "proposal root"),
+        (
+            super::repository_mutation::repository_transaction_root(paths),
+            "local repository transaction root",
+        ),
     ] {
         match fs::symlink_metadata(&root) {
+            Ok(_) if root.starts_with(&paths.runtime_dir) => {
+                ensure_safe_directory(&paths.runtime_dir, &root, false, label)?
+            }
             Ok(_) => ensure_safe_directory(&paths.project_root, &root, false, label)?,
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => {
@@ -331,25 +279,6 @@ mod tests {
                 .contains("another repo lifecycle operation is in progress"),
             "unexpected lock contention error: {error:#}"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn no_replace_install_preserves_concurrent_destination() -> anyhow::Result<()> {
-        let temp = TempDir::new()?;
-        let staged = temp.path().join("staged.tmp");
-        let destination = temp.path().join("record.md");
-        fs::write(&staged, "new proposal bytes")?;
-        fs::write(&destination, "concurrent canonical bytes")?;
-
-        let error = install_staged_file_no_replace(&staged, &destination)
-            .expect_err("no-replace install must refuse a concurrent destination");
-        assert!(error.to_string().contains("without replacing"));
-        assert_eq!(
-            fs::read_to_string(&destination)?,
-            "concurrent canonical bytes"
-        );
-        assert_eq!(fs::read_to_string(&staged)?, "new proposal bytes");
         Ok(())
     }
 }

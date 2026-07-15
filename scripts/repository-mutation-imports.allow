@@ -1,0 +1,15 @@
+crates/memzoi-cli/src/commands.rs|openat
+crates/memzoi-cli/src/commands/capture.rs|linkat
+crates/memzoi-cli/src/commands/capture.rs|openat
+crates/memzoi-cli/src/commands/capture.rs|unlinkat
+crates/memzoi-core/src/capture.rs|File
+crates/memzoi-core/src/capture.rs|openat
+crates/memzoi-core/src/capture/sources.rs|open
+crates/memzoi-core/src/capture/sources.rs|openat
+crates/memzoi-core/src/repository_io.rs|mkdirat
+crates/memzoi-core/src/repository_io.rs|openat
+crates/memzoi-core/src/repository_io.rs|renameat_with
+crates/memzoi-core/src/repository_io.rs|unlinkat
+crates/memzoi-core/src/service/capture_route_apply/journal.rs|OpenOptions
+crates/memzoi-core/src/service/repository_mutation.rs|OpenOptions
+crates/memzoi-core/src/service/safe_files.rs|OpenOptions

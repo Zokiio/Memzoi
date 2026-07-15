@@ -763,6 +763,10 @@ fn tools_list_result() -> Value {
                             "type": "string",
                             "enum": ["repo-safe", "local-only", "sensitive", "secret", "raw-transcript", "private-personal-data", "temporary-state", "unknown"]
                         },
+                        "content_class": {
+                            "type": "string",
+                            "enum": ["general_repo_knowledge", "raw_transcript", "private_personal_data", "screen_or_activity_history", "private_endpoint", "undisclosed_vulnerability", "unminimized_private_evidence", "temporary_task_state", "local_only_state", "unknown"]
+                        },
                         "confidence": { "type": "number" },
                         "actor": { "type": "string" },
                         "approval_mode": {
@@ -1088,6 +1092,7 @@ fn memory_draft(arguments: &Value) -> Result<MemoryDraft> {
         source_kind: optional_string(arguments, "source_kind"),
         source_ref: optional_string(arguments, "source_ref"),
         sensitivity: optional_sensitivity(arguments)?.unwrap_or_default(),
+        content_class: optional_content_class(arguments)?.unwrap_or_default(),
         confidence: optional_f64(arguments, "confidence")?.unwrap_or(1.0),
     })
 }
@@ -1132,6 +1137,13 @@ fn optional_visibility(value: &Value) -> Result<Option<Visibility>> {
 
 fn optional_sensitivity(value: &Value) -> Result<Option<OkfProposalSensitivity>> {
     optional_str(value, "sensitivity")
+        .map(str::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)
+}
+
+fn optional_content_class(value: &Value) -> Result<Option<memzoi_core::RepositoryContentClass>> {
+    optional_str(value, "content_class")
         .map(str::parse)
         .transpose()
         .map_err(anyhow::Error::msg)
@@ -1261,6 +1273,7 @@ mod tests {
             source_kind: Some("test".to_owned()),
             source_ref: Some("mcp-smoke".to_owned()),
             sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: memzoi_core::RepositoryContentClass::GeneralRepoKnowledge,
             confidence: 1.0,
         }
     }
@@ -1880,7 +1893,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_tool_matches_core_plan_and_leaves_managed_state_unchanged() {
+    fn capture_tool_withholds_unclassified_typed_markdown_without_mutation() {
         let (_temp, state) = capture_test_state();
         let source_path = "notes.md";
         fs::write(
@@ -1891,7 +1904,16 @@ mod tests {
         let arguments = capture_arguments(source_path);
         let before = managed_state_snapshot(&state);
 
-        let response = capture_response(&state, "capture-parity", arguments.clone());
+        let request = serde_json::from_value::<CaptureRequest>(arguments.clone()).unwrap();
+        let expected = plan_capture(&state.paths, request).unwrap();
+        assert_eq!(expected.data_class, CaptureDataClass::Private);
+        assert_eq!(expected.candidates.len(), 1);
+        assert_eq!(
+            expected.candidates[0].classification.destination,
+            memzoi_core::MemoryDestination::NeedsReview
+        );
+
+        let response = capture_response(&state, "capture-parity", arguments);
 
         let after = managed_state_snapshot(&state);
         assert_managed_state_unchanged(&before, &after, "MCP capture planning mutated state");
@@ -1899,40 +1921,16 @@ mod tests {
             state.service.get().is_none(),
             "capture planning must not open the mutable MemoryService"
         );
-        let result = &response["result"];
-        assert_eq!(result["isError"], false);
-        let structured = &result["structuredContent"];
-        assert_eq!(structured["schema"], "memzoi/capture-plan-v1");
-        assert_eq!(structured["status"], "ready");
-        assert_eq!(structured["data_class"], "repo_safe");
-        assert!(
-            structured["plan_id"]
-                .as_str()
-                .is_some_and(|plan_id| plan_id.starts_with("capture_"))
-        );
-        assert_eq!(structured["candidates"][0]["memory"]["type"], "decision");
+        assert_eq!(response["result"]["isError"], true);
         assert_eq!(
-            structured["candidates"][0]["evidence"][0]["locator"]["kind"],
-            "project_path"
+            response["result"]["content"][0]["text"],
+            PRIVATE_CAPTURE_DENIED
         );
-        assert_eq!(
-            structured["candidates"][0]["classification"]["sensitivity"],
-            "repo-safe"
-        );
-        assert_eq!(structured["summary"]["duplicates"], 0);
-        assert_eq!(structured["summary"]["conflicts"], 0);
-        assert!(structured["safeguards"].is_object());
-
-        let request = serde_json::from_value::<CaptureRequest>(arguments).unwrap();
-        let expected = plan_capture(&state.paths, request).unwrap();
-        assert_eq!(structured, &serde_json::to_value(expected).unwrap());
-        let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
-            .expect("MCP capture text should encode the versioned plan");
-        assert_eq!(text, *structured);
+        assert!(response["result"].get("structuredContent").is_none());
     }
 
     #[test]
-    fn maximum_candidate_plan_fits_the_bounded_mcp_response_without_duplication() {
+    fn maximum_candidate_private_plan_is_withheld_with_a_bounded_response() {
         let (_temp, state) = capture_test_state();
         let source_path = "large-plan.md";
         let mut markdown = String::new();
@@ -1953,17 +1951,13 @@ mod tests {
         assert!(encoded.len() <= MAX_JSONRPC_MESSAGE_BYTES + 1);
         let decoded: Value = serde_json::from_slice(&encoded).unwrap();
         assert!(decoded.get("error").is_none(), "{decoded}");
+        assert_eq!(decoded["result"]["isError"], true);
         assert_eq!(
-            decoded["result"]["structuredContent"]["candidates"]
-                .as_array()
-                .map(Vec::len),
-            Some(100)
+            decoded["result"]["content"][0]["text"],
+            PRIVATE_CAPTURE_DENIED
         );
-        assert!(
-            decoded["result"]["content"][0]["text"]
-                .as_str()
-                .is_some_and(|text| text.len() < 1024)
-        );
+        assert!(decoded["result"].get("structuredContent").is_none());
+        assert!(encoded.len() < 1024);
         let after = managed_state_snapshot(&state);
         assert_managed_state_unchanged(&before, &after, "large MCP capture mutated state");
         assert!(state.service.get().is_none());
@@ -2361,6 +2355,7 @@ title: Expired MCP diagnostic
 timestamp: 2026-01-01T00:00:00Z
 status: active
 visibility: repo
+content_class: general_repo_knowledge
 confidence: confirmed
 scope: repo
 source: test

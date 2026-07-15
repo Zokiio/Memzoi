@@ -1,7 +1,7 @@
 use super::super::safe_files::RepoLifecycleLock;
 use super::transaction::{
-    attach_cleanup_error, cleanup_staged_file_resolution, rebuild_fts_content_index,
-    rollback_file_resolution, validate_resolution_actor,
+    FileResolutionRollback, attach_cleanup_error, cleanup_staged_file_resolution,
+    rebuild_fts_content_index, rollback_file_resolution, validate_resolution_actor,
 };
 use super::*;
 
@@ -49,6 +49,19 @@ impl MemoryService {
         validate_resolution_actor(actor)?;
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         let snapshot = self.load_pending_file_proposal_snapshot(proposal_path)?;
+        if snapshot.source_sensitivity != crate::OkfProposalSensitivity::RepoSafe {
+            bail!(
+                "OKF proposal sensitivity {} cannot be applied into repo records; {}",
+                snapshot.source_sensitivity.as_str(),
+                okf::repo_apply_sensitivity_guidance(snapshot.source_sensitivity)
+            );
+        }
+        if snapshot.source_content_class != RepositoryContentClass::GeneralRepoKnowledge {
+            bail!(
+                "repository write blocked: OKF proposal content class {} cannot be applied into repo records; classify or sanitize it as general_repo_knowledge first",
+                snapshot.source_content_class.as_str()
+            );
+        }
         let proposal = snapshot.proposal.clone();
         self.validate_fresh_file_proposal_identity(&proposal)?;
         let resolved_at = expiry::format_timestamp(self.now())?;
@@ -67,12 +80,64 @@ impl MemoryService {
             .join("resolved")
             .join("applied")
             .join(format!("{}.md", proposal.file_id));
-        self.prepare_resolution_destination(&resolved_path)?;
-
         let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
+        let mut projections = canonical_write_projections(&self.paths, &plan.writes)?;
+        projections.push(OwnedRepositoryProjection::from_absolute(
+            &self.paths,
+            &resolved_path,
+            resolved_markdown.as_bytes(),
+            None,
+        )?);
+        projections.push(OwnedRepositoryProjection::existing_from_absolute(
+            &self.paths,
+            proposal_path,
+            &snapshot.bytes,
+            &snapshot.expected_hash,
+        )?);
+        let mut safety_values = okf_proposal_safety_values("proposal", &proposal);
+        safety_values.push(safety_value(
+            "resolution.resolved_by".to_owned(),
+            SafetyFieldKind::Identifier,
+            actor,
+        ));
+        let authorization = authorize_repository_projection_batch(
+            &self.paths,
+            RepositoryWriteRoute::FileProposalApply,
+            proposal.sensitivity,
+            proposal.scope_kind,
+            proposal.scope_id.as_deref(),
+            Visibility::Repo,
+            AuthorizationProof::ExplicitCommand {
+                operation: "file_proposal_apply",
+            },
+            explicit_repository_provenance(proposal.content_class, &proposal.id),
+            &safety_values,
+            &projections,
+        )?;
+        let mutation = RepositoryMutationAuthorization {
+            route: RepositoryWriteRoute::FileProposalApply,
+            authorization: &authorization,
+            projections: &projections,
+        };
+        self.prepare_resolution_destination(&resolved_path)?;
         let nonce = Uuid::now_v7().to_string();
-        let mut staged_writes = stage_canonical_writes(&plan.writes, &nonce)?;
-        let resolved_temp = match stage_file(&resolved_path, &resolved_markdown, &nonce) {
+        let mut staged_writes = stage_canonical_writes(
+            &self.paths,
+            RepositoryWriteRoute::FileProposalApply,
+            &authorization,
+            &projections,
+            &plan.writes,
+            &nonce,
+        )?;
+        let resolved_temp = match stage_authorized_file(
+            &self.paths,
+            RepositoryWriteRoute::FileProposalApply,
+            &authorization,
+            &projections,
+            &resolved_path,
+            &resolved_markdown,
+            &nonce,
+        ) {
             Ok(path) => path,
             Err(error) => {
                 return attach_cleanup_error(
@@ -82,7 +147,11 @@ impl MemoryService {
                 );
             }
         };
-        let pending_backup = sibling_transaction_path(proposal_path, &nonce, "pending");
+        let pending_backup =
+            repository_transaction_path(&self.paths, proposal_path, &nonce, "pending");
+        let resolved_hash = blake3::hash(resolved_markdown.as_bytes())
+            .to_hex()
+            .to_string();
 
         let tx = match self.conn.unchecked_transaction() {
             Ok(tx) => tx,
@@ -128,38 +197,47 @@ impl MemoryService {
         }
 
         let mut pending_moved = false;
-        let mut resolved_installed = false;
+        let mut resolved_file = None;
         let install_result = (|| -> Result<()> {
             for write in &staged_writes {
                 validate_canonical_write_precondition(&self.paths, write)?;
             }
             before_pending_revalidation(proposal_path)?;
-            fs::rename(proposal_path, &pending_backup).with_context(|| {
-                format!(
-                    "failed to stage pending proposal {} for resolution",
-                    proposal_path.display()
-                )
-            })?;
+            backup_repository_file_to_transaction(
+                &self.paths,
+                mutation,
+                proposal_path,
+                &pending_backup,
+                &snapshot.expected_hash,
+            )?;
             pending_moved = true;
             self.revalidate_moved_pending_file_proposal(proposal_path, &pending_backup, &snapshot)?;
-            install_staged_canonical_writes(&self.paths, &mut staged_writes, |_| Ok(()))?;
-            install_staged_file_no_replace(&resolved_temp, &resolved_path)?;
-            resolved_installed = true;
+            install_staged_canonical_writes(&self.paths, mutation, &mut staged_writes, |_| Ok(()))?;
+            let installed_file = install_verified_staged_file_no_replace(
+                &self.paths,
+                mutation,
+                &resolved_temp,
+                &resolved_path,
+                &resolved_hash,
+            )?;
+            resolved_file = Some(installed_file);
             Ok(())
         })();
 
         if let Err(error) = install_result {
             return attach_cleanup_error(
                 error,
-                rollback_file_resolution(
-                    proposal_path,
-                    &pending_backup,
+                rollback_file_resolution(FileResolutionRollback {
+                    paths: &self.paths,
+                    mutation,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
                     pending_moved,
-                    &mut staged_writes,
-                    &resolved_path,
-                    resolved_installed,
-                    &resolved_temp,
-                ),
+                    writes: &mut staged_writes,
+                    resolved_file,
+                    resolved_temp: &resolved_temp,
+                }),
                 "proposal-file install rollback",
             );
         }
@@ -168,15 +246,17 @@ impl MemoryService {
             return attach_cleanup_error(
                 anyhow::Error::new(error)
                     .context("failed to commit proposal-file runtime index update"),
-                rollback_file_resolution(
-                    proposal_path,
-                    &pending_backup,
+                rollback_file_resolution(FileResolutionRollback {
+                    paths: &self.paths,
+                    mutation,
+                    pending_path: proposal_path,
+                    pending_backup: &pending_backup,
+                    pending_hash: &snapshot.expected_hash,
                     pending_moved,
-                    &mut staged_writes,
-                    &resolved_path,
-                    resolved_installed,
-                    &resolved_temp,
-                ),
+                    writes: &mut staged_writes,
+                    resolved_file,
+                    resolved_temp: &resolved_temp,
+                }),
                 "proposal-file commit rollback",
             );
         }
@@ -187,6 +267,8 @@ impl MemoryService {
             .context("proposal-file apply committed but pending backup cleanup failed")?;
         finalize_staged_canonical_writes(&staged_writes)
             .context("proposal-file apply committed but canonical cleanup failed")?;
+        remove_staged_file(&resolved_temp)
+            .context("proposal-file apply committed but resolved staging cleanup failed")?;
         Ok(FileProposalResolutionResult {
             proposal,
             resolution,
