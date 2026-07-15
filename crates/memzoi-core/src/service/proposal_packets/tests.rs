@@ -1,7 +1,8 @@
+use super::super::safe_files::RepoLifecycleLock;
 use super::*;
 use crate::{
     ImportCandidateInput, MemoryLane, MemoryType, OkfProposalSensitivity, OkfProposalSource,
-    SessionEndCandidate,
+    SessionEndCandidate, SessionEndWrite,
 };
 use tempfile::TempDir;
 

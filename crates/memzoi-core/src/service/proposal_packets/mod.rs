@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::canonical_write::{
     CanonicalFileWrite, StagedCanonicalFileWrite, cleanup_staged_canonical_writes,
     finalize_staged_canonical_writes, install_staged_canonical_writes,
