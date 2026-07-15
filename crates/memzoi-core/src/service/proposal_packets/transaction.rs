@@ -8,9 +8,7 @@ pub(super) struct FileResolutionRollback<'a> {
     pub(super) pending_hash: &'a str,
     pub(super) pending_moved: bool,
     pub(super) writes: &'a mut [StagedCanonicalFileWrite],
-    pub(super) resolved_path: &'a Path,
-    pub(super) resolved_hash: &'a str,
-    pub(super) resolved_identity: Option<RepositoryFileIdentity>,
+    pub(super) resolved_file: Option<CreatedRepositoryFile>,
     pub(super) resolved_temp: &'a Path,
 }
 
@@ -20,9 +18,7 @@ pub(super) struct RejectedFileProposalRollback<'a> {
     pub(super) pending_path: &'a Path,
     pub(super) pending_backup: &'a Path,
     pub(super) pending_hash: &'a str,
-    pub(super) resolved_path: &'a Path,
-    pub(super) resolved_hash: &'a str,
-    pub(super) resolved_identity: Option<RepositoryFileIdentity>,
+    pub(super) resolved_file: Option<CreatedRepositoryFile>,
     pub(super) resolved_temp: &'a Path,
 }
 
@@ -155,16 +151,10 @@ pub(super) fn cleanup_staged_file_resolution(
 
 pub(super) fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> Result<()> {
     let mut errors = Vec::new();
-    if let Some(resolved_identity) = rollback.resolved_identity {
+    if let Some(resolved_file) = rollback.resolved_file {
         record_cleanup_result(
             &mut errors,
-            remove_installed_repository_file(
-                rollback.paths,
-                rollback.mutation,
-                rollback.resolved_path,
-                rollback.resolved_hash,
-                resolved_identity,
-            ),
+            remove_installed_repository_file(rollback.paths, rollback.mutation, &resolved_file),
             "remove resolved packet".to_owned(),
         );
     }
@@ -206,9 +196,7 @@ pub(super) fn rollback_rejected_file_proposal(
         pending_hash: rollback.pending_hash,
         pending_moved: true,
         writes: &mut [],
-        resolved_path: rollback.resolved_path,
-        resolved_hash: rollback.resolved_hash,
-        resolved_identity: rollback.resolved_identity,
+        resolved_file: rollback.resolved_file,
         resolved_temp: rollback.resolved_temp,
     })
 }

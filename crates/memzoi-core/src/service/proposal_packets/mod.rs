@@ -12,7 +12,7 @@ use super::canonical_write::{
     validate_canonical_write_precondition,
 };
 use super::repository_mutation::{
-    OwnedRepositoryProjection, RepositoryFileIdentity, RepositoryMutationAuthorization,
+    CreatedRepositoryFile, OwnedRepositoryProjection, RepositoryMutationAuthorization,
     authorize_repository_projection_batch, backup_repository_file_to_transaction,
     canonical_write_projections, explicit_repository_provenance,
     install_verified_staged_file_no_replace, okf_proposal_safety_values,

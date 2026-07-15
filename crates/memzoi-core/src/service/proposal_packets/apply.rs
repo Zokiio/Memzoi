@@ -197,7 +197,7 @@ impl MemoryService {
         }
 
         let mut pending_moved = false;
-        let mut resolved_identity = None;
+        let mut resolved_file = None;
         let install_result = (|| -> Result<()> {
             for write in &staged_writes {
                 validate_canonical_write_precondition(&self.paths, write)?;
@@ -213,14 +213,14 @@ impl MemoryService {
             pending_moved = true;
             self.revalidate_moved_pending_file_proposal(proposal_path, &pending_backup, &snapshot)?;
             install_staged_canonical_writes(&self.paths, mutation, &mut staged_writes, |_| Ok(()))?;
-            let installed_identity = install_verified_staged_file_no_replace(
+            let installed_file = install_verified_staged_file_no_replace(
                 &self.paths,
                 mutation,
                 &resolved_temp,
                 &resolved_path,
                 &resolved_hash,
             )?;
-            resolved_identity = Some(installed_identity);
+            resolved_file = Some(installed_file);
             Ok(())
         })();
 
@@ -235,9 +235,7 @@ impl MemoryService {
                     pending_hash: &snapshot.expected_hash,
                     pending_moved,
                     writes: &mut staged_writes,
-                    resolved_path: &resolved_path,
-                    resolved_hash: &resolved_hash,
-                    resolved_identity,
+                    resolved_file,
                     resolved_temp: &resolved_temp,
                 }),
                 "proposal-file install rollback",
@@ -256,9 +254,7 @@ impl MemoryService {
                     pending_hash: &snapshot.expected_hash,
                     pending_moved,
                     writes: &mut staged_writes,
-                    resolved_path: &resolved_path,
-                    resolved_hash: &resolved_hash,
-                    resolved_identity,
+                    resolved_file,
                     resolved_temp: &resolved_temp,
                 }),
                 "proposal-file commit rollback",

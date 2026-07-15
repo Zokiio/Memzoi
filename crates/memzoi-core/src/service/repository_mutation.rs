@@ -50,6 +50,10 @@ impl CreatedRepositoryFile {
     pub(super) fn path(&self) -> &Path {
         &self.0.path
     }
+
+    pub(super) fn identity(&self) -> RepositoryFileIdentity {
+        self.0.identity
+    }
 }
 
 impl AuthorizedRepositoryProjectionBatch {
@@ -491,7 +495,7 @@ pub(super) fn install_verified_staged_file_no_replace(
     staged: &Path,
     destination: &Path,
     expected_hash: &str,
-) -> Result<repository_io::RepositoryFileIdentity> {
+) -> Result<CreatedRepositoryFile> {
     install_verified_staged_projection_no_replace(
         paths,
         mutation,
@@ -509,7 +513,7 @@ fn install_verified_staged_projection_no_replace(
     destination: &Path,
     expected_hash: &str,
     expected_purpose: RepositoryProjectionPurpose,
-) -> Result<repository_io::RepositoryFileIdentity> {
+) -> Result<CreatedRepositoryFile> {
     let relative = destination
         .strip_prefix(&paths.project_root)
         .context("repository install destination is outside the project root")?;
@@ -531,6 +535,7 @@ fn install_verified_staged_projection_no_replace(
         &repository_transaction_root(paths),
         staged,
     )
+    .map(CreatedRepositoryFile)
 }
 
 fn select_authorized_projection_index(
@@ -639,37 +644,9 @@ pub(super) fn backup_repository_file_to_transaction_with_identity(
 pub(super) fn remove_installed_repository_file(
     paths: &MemoryPaths,
     mutation: RepositoryMutationAuthorization<'_>,
-    path: &Path,
-    expected_hash: &str,
-    expected_identity: RepositoryFileIdentity,
+    installed: &CreatedRepositoryFile,
 ) -> Result<()> {
-    let relative = path
-        .strip_prefix(&paths.project_root)
-        .context("repository rollback path is outside the project root")?;
-    let matches = mutation
-        .projections
-        .iter()
-        .enumerate()
-        .filter(|(_, projection)| {
-            projection.purpose == RepositoryProjectionPurpose::Write
-                && projection.relative_path == relative
-                && blake3::hash(&projection.bytes).to_hex().as_str() == expected_hash
-        })
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let [projection_index] = matches.as_slice() else {
-        bail!("repository removal must select exactly one authorized path and byte projection");
-    };
-    let borrowed = borrowed_repository_projections(mutation.projections);
-    repository_io::remove_repository_file_if_matching(
-        &paths.project_root,
-        mutation.route,
-        &mutation.authorization.policy_context_digest,
-        &mutation.authorization.capability,
-        &borrowed,
-        *projection_index,
-        expected_identity,
-    )
+    remove_created_repository_file(paths, mutation, installed)
 }
 
 #[cfg(test)]

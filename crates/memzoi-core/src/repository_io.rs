@@ -17,6 +17,7 @@ pub(crate) struct RepositoryFileIdentity {
 #[derive(Debug)]
 pub(crate) struct CreatedRepositoryFile {
     pub(crate) path: PathBuf,
+    pub(crate) identity: RepositoryFileIdentity,
     projection_index: usize,
     #[cfg(unix)]
     directory: std::os::fd::OwnedFd,
@@ -411,7 +412,7 @@ fn create_authorized_repository_projection(
     let file = openat(
         &directory,
         &file_name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         repository_file_mode(),
     )
     .with_context(|| format!("failed to create {label} without replacement"))?;
@@ -615,7 +616,7 @@ pub(crate) fn install_transaction_file_no_replace(
     projection_index: usize,
     transaction_root: &Path,
     staged_path: &Path,
-) -> Result<RepositoryFileIdentity> {
+) -> Result<CreatedRepositoryFile> {
     #[cfg(not(unix))]
     {
         let _ = (
@@ -706,7 +707,15 @@ pub(crate) fn install_transaction_file_no_replace(
                 )),
             };
         }
-        repository_file_identity(&destination, "installed repository destination")
+        let identity = repository_file_identity(&destination, "created repository file")?;
+        Ok(CreatedRepositoryFile {
+            path: project_root.join(projection.path),
+            identity,
+            projection_index,
+            directory: destination_directory,
+            file_name: destination_name,
+            file: destination,
+        })
     }
 }
 
@@ -842,75 +851,6 @@ pub(crate) fn backup_repository_file(
     }
 }
 
-pub(crate) fn remove_repository_file_if_matching(
-    project_root: &Path,
-    expected_route: RepositoryWriteRoute,
-    expected_policy_context_digest: &[u8; 32],
-    authorization: &AuthorizedRepositoryWriteBatch,
-    projections: &[RepositoryProjection<'_>],
-    projection_index: usize,
-    expected_identity: RepositoryFileIdentity,
-) -> Result<()> {
-    verify_repository_batch(
-        project_root,
-        expected_route,
-        expected_policy_context_digest,
-        authorization,
-        projections,
-    )?;
-    #[cfg(not(unix))]
-    {
-        let _ = (
-            project_root,
-            expected_route,
-            expected_policy_context_digest,
-            authorization,
-            projections,
-            projection_index,
-            expected_identity,
-        );
-        bail!("secure repository removal is unavailable on this platform");
-    }
-
-    #[cfg(unix)]
-    {
-        let projection = projections
-            .get(projection_index)
-            .context("authorized repository projection index is out of bounds")?;
-        if projection.purpose != crate::RepositoryProjectionPurpose::Write {
-            bail!("repository removal requires an authorized write projection");
-        }
-        let (directory, file_name, project_identity) =
-            open_repository_parent(project_root, projection.path)?;
-        verify_repository_batch_for_identity(
-            &project_identity,
-            expected_route,
-            expected_policy_context_digest,
-            authorization,
-            projections,
-        )?;
-        let (file, bytes) = read_regular_at(
-            &directory,
-            &file_name,
-            projection.bytes.len() as u64,
-            "repository rollback file",
-        )?;
-        if repository_file_identity(&file, "repository rollback file")? != expected_identity {
-            bail!("repository rollback file identity does not match the installed file ownership");
-        }
-        if bytes != projection.bytes {
-            bail!("repository rollback file does not match the authorized projection bytes");
-        }
-        remove_pinned_named_file(
-            &directory,
-            &file_name,
-            &file,
-            Some(projection.bytes),
-            "repository rollback file",
-        )
-    }
-}
-
 pub(crate) fn verify_repository_batch(
     project_root: &Path,
     expected_route: RepositoryWriteRoute,
@@ -976,7 +916,6 @@ pub(crate) fn remove_created_repository_file(
         .get(created.projection_index)
         .context("created repository file projection index is out of bounds")?;
     if projection.purpose != crate::RepositoryProjectionPurpose::Write
-        || projection.target_revision.is_some()
         || created.path != project_root.join(projection.path)
     {
         bail!("created repository file does not match its authorized projection");
@@ -1189,8 +1128,10 @@ pub(crate) fn create_repository_batch(
                 }
             };
             let (directory, file_name, file) = created_file;
+            let identity = repository_file_identity(&file, "created repository batch file")?;
             created.push(CreatedRepositoryFile {
                 path: destination,
+                identity,
                 projection_index,
                 directory,
                 file_name,
@@ -1739,6 +1680,8 @@ mod tests {
         fs::write(&destination, b"concurrent replacement").unwrap();
         let created = [CreatedRepositoryFile {
             path: destination.clone(),
+            identity: repository_file_identity(&created_file, "created repository test file")
+                .unwrap(),
             projection_index: 0,
             directory,
             file_name: std::ffi::OsString::from("created.md"),

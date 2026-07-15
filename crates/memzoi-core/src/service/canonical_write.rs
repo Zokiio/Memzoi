@@ -8,7 +8,7 @@ use crate::{MemoryPaths, MemoryRecord, RepositoryWriteRoute, okf, repository_io}
 
 use super::{
     repository_mutation::{
-        AuthorizedRepositoryProjectionBatch, OwnedRepositoryProjection, RepositoryFileIdentity,
+        AuthorizedRepositoryProjectionBatch, CreatedRepositoryFile, OwnedRepositoryProjection,
         RepositoryMutationAuthorization, backup_repository_file_to_transaction,
         borrowed_repository_projections, canonical_write_projections,
         install_verified_staged_file_no_replace, remove_installed_repository_file,
@@ -44,7 +44,7 @@ pub(super) struct StagedCanonicalFileWrite {
     pub(super) mode: FileWriteMode,
     pub(super) expected_existing_hash: Option<String>,
     pub(super) expected_staged_hash: String,
-    pub(super) installed_identity: Option<RepositoryFileIdentity>,
+    pub(super) installed_file: Option<CreatedRepositoryFile>,
 }
 
 /// Holds the repository lifecycle lock from canonical precondition capture
@@ -283,7 +283,7 @@ pub(super) fn stage_canonical_writes(
             mode: write.mode,
             expected_existing_hash: write.expected_existing_hash.clone(),
             expected_staged_hash: blake3::hash(write.markdown.as_bytes()).to_hex().to_string(),
-            installed_identity: None,
+            installed_file: None,
         });
     }
     Ok(staged)
@@ -336,14 +336,14 @@ where
             )?;
             after_backup(index, &write.path)?;
         }
-        let installed_identity = install_verified_staged_file_no_replace(
+        let installed_file = install_verified_staged_file_no_replace(
             paths,
             mutation,
             &write.temp_path,
             &write.path,
             &write.expected_staged_hash,
         )?;
-        write.installed_identity = Some(installed_identity);
+        write.installed_file = Some(installed_file);
     }
     Ok(())
 }
@@ -355,19 +355,12 @@ pub(super) fn rollback_staged_canonical_writes(
 ) -> Result<()> {
     let mut errors = Vec::new();
     for write in writes.iter_mut().rev() {
-        if let Some(installed_identity) = write.installed_identity {
+        if let Some(installed_file) = write.installed_file.take() {
             record_cleanup_result(
                 &mut errors,
-                remove_installed_repository_file(
-                    paths,
-                    mutation,
-                    &write.path,
-                    &write.expected_staged_hash,
-                    installed_identity,
-                ),
+                remove_installed_repository_file(paths, mutation, &installed_file),
                 format!("remove installed canonical file {}", write.path.display()),
             );
-            write.installed_identity = None;
         }
         if let Some(backup_path) = &write.backup_path
             && backup_path.exists()
@@ -601,7 +594,7 @@ mod tests {
             mode: FileWriteMode::Overwrite,
             expected_existing_hash: Some(file_content_hash(&path)?),
             expected_staged_hash: blake3::hash(b"replacement bytes").to_hex().to_string(),
-            installed_identity: None,
+            installed_file: None,
         };
         fs::write(&path, "concurrent human edit")?;
 

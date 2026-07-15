@@ -148,17 +148,7 @@ impl<'a> SessionEndRouteApply<'a> {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut safety_values = vec![safety_value(
-            "session_end.task".to_owned(),
-            SafetyFieldKind::SourceReference,
-            document.task.as_bytes(),
-        )];
-        for (index, plan) in repo_plans.iter().filter_map(Option::as_ref).enumerate() {
-            safety_values.extend(okf_proposal_safety_values(
-                &format!("candidate[{index}]"),
-                &plan.parsed,
-            ));
-        }
+        let safety_values = session_end_repository_safety_values(&document.task, &repo_plans);
         let repo_authorization = has_repo_writes
             .then(|| {
                 authorize_repository_projection_batch(
@@ -335,6 +325,27 @@ impl<'a> SessionEndRouteApply<'a> {
     }
 }
 
+fn session_end_repository_safety_values(
+    task: &str,
+    repo_plans: &[Option<okf::OkfCreateProposalPlan>],
+) -> Vec<super::repository_mutation::RepositorySafetyValue> {
+    let mut values = vec![safety_value(
+        "session_end.task".to_owned(),
+        SafetyFieldKind::SourceReference,
+        task.as_bytes(),
+    )];
+    for (index, plan) in repo_plans.iter().enumerate() {
+        let Some(plan) = plan else {
+            continue;
+        };
+        values.extend(okf_proposal_safety_values(
+            &format!("candidate[{index}]"),
+            &plan.parsed,
+        ));
+    }
+    values
+}
+
 fn cleanup_authorized_session_end_proposals(
     paths: &crate::MemoryPaths,
     authorization: &AuthorizedRepositoryProjectionBatch,
@@ -437,6 +448,44 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    #[test]
+    fn repository_safety_values_preserve_mixed_candidate_indices() -> Result<()> {
+        let pending_root = tempfile::tempdir()?;
+        let candidate = crate::SessionEndCandidate {
+            destination: MemoryDestination::Repo,
+            memory_type: crate::MemoryType::Fact,
+            lane: crate::MemoryLane::Semantic,
+            title: "Repository candidate".to_owned(),
+            body: "Keep its original document index.".to_owned(),
+            sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
+            reason: None,
+            scope: None,
+            tags: Vec::new(),
+        };
+        let draft = session_end_proposal_draft(
+            &candidate,
+            "agent:test",
+            "2026-07-15T00:00:00Z",
+            "mem_session_indexed".to_owned(),
+        )?;
+        let plan = okf::plan_okf_create_proposal(pending_root.path(), &draft)?;
+
+        let values = session_end_repository_safety_values("mixed batch", &[None, Some(plan)]);
+        let locations = values
+            .iter()
+            .map(|value| value.location.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(locations.contains(&"candidate[1].title"));
+        assert!(
+            !locations
+                .iter()
+                .any(|location| location.starts_with("candidate[0]."))
+        );
+        Ok(())
+    }
 
     #[test]
     fn session_end_cleanup_preserves_a_concurrent_repository_replacement() -> Result<()> {

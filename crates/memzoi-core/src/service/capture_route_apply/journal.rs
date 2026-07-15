@@ -807,7 +807,7 @@ where
         let staged = capture_apply_stage_path(paths, journal, entry);
         let destination = capture_apply_destination_path(paths, entry);
         before_install(index, &staged)?;
-        let identity = install_verified_staged_file_no_replace(
+        let installed_file = install_verified_staged_file_no_replace(
             paths,
             mutation,
             &staged,
@@ -820,6 +820,7 @@ where
                 destination.display()
             )
         })?;
+        let identity = installed_file.identity();
         after_install_before_ownership(index, &destination)?;
         record_capture_apply_install_ownership(paths, journal, entry, identity)?;
     }
