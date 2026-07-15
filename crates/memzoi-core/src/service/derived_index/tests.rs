@@ -1,3 +1,4 @@
+use rusqlite::Connection;
 use tempfile::TempDir;
 
 use crate::{MemoryDraft, MemoryLane, MemoryPaths, MemoryType, ScopeKind, Visibility};
@@ -73,6 +74,44 @@ fn rebuild_refuses_to_discard_open_proposals_with_actionable_details() -> anyhow
     assert!(
         message.contains("memzoi reject <proposal-id> --reason"),
         "rebuild refusal should suggest rejecting proposals before rebuild: {message}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn rebuild_refuses_when_open_proposals_cannot_be_inspected() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let db_path = service.paths.db_path.clone();
+    service.conn.execute_batch(
+        "ALTER TABLE proposal RENAME TO proposal_with_expected_schema;
+         CREATE TABLE proposal (
+             id TEXT PRIMARY KEY,
+             status TEXT NOT NULL
+         );",
+    )?;
+
+    let error = service
+        .rebuild()
+        .expect_err("rebuild should fail closed when proposal inspection fails");
+    let message = error.to_string();
+    assert!(
+        message.contains("rebuild refused because open proposals could not be inspected"),
+        "rebuild refusal should explain the failed proposal inspection: {message}"
+    );
+
+    let conn = Connection::open(db_path)?;
+    let original_proposal_table_remains: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_schema
+             WHERE type = 'table' AND name = 'proposal_with_expected_schema'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(
+        original_proposal_table_remains,
+        "failed proposal inspection must not replace the derived database"
     );
 
     Ok(())

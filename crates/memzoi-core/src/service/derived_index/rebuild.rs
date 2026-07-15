@@ -23,8 +23,8 @@ pub(super) fn rebuild(paths: MemoryPaths) -> Result<RebuildResult> {
         "canonical record root",
     )?;
     let records = okf::read_okf_record_files(&records_root)?;
-    guard_no_open_proposals(&paths.db_path)?;
     let runtime_records = load_runtime_records_for_rebuild(&paths.db_path)?;
+    guard_no_open_proposals(&paths.db_path)?;
     guard_no_runtime_record_id_collisions(&records, &runtime_records)?;
     remove_database_files(&paths.db_path)?;
     let conn = db::open_database(&paths.db_path)?;
@@ -100,9 +100,12 @@ fn guard_no_open_proposals(db_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let Ok(open_proposals) = open_proposal_summaries(db_path) else {
-        return Ok(());
-    };
+    let open_proposals = open_proposal_summaries(db_path).with_context(|| {
+        format!(
+            "rebuild refused because open proposals could not be inspected in {}",
+            db_path.display()
+        )
+    })?;
     if !open_proposals.is_empty() {
         let count = open_proposals.len();
         let summaries = open_proposals
