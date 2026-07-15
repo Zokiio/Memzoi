@@ -1,3 +1,4 @@
+use super::super::safe_files::RepoLifecycleLock;
 use super::inventory::{
     db_proposal_identity_tokens, require_clean_file_proposal_inventory,
     scan_file_proposal_inventory,
