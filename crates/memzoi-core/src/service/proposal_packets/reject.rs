@@ -290,6 +290,7 @@ impl MemoryService {
 
         let mut reported_proposal = archived_proposal;
         reported_proposal.sensitivity = snapshot.source_sensitivity;
+        reported_proposal.content_class = snapshot.source_content_class;
         Ok(FileProposalResolutionResult {
             proposal: reported_proposal,
             resolution,

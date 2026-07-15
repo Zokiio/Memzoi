@@ -385,6 +385,30 @@ fn unsafe_reject_revalidates_pending_bytes_without_leaking_raw_identity() -> any
 }
 
 #[test]
+fn unsafe_reject_reports_original_contextual_classification() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let pending = write_test_pending_proposal_with_content_class(
+        &service,
+        "Unsafe contextual classification",
+        OkfProposalSensitivity::Secret,
+        RepositoryContentClass::RawTranscript,
+    )?;
+
+    let result = service.reject_file_proposal(
+        &pending,
+        "reviewer:human",
+        "Reject unsafe contextual classification",
+    )?;
+
+    assert_eq!(result.proposal.sensitivity, OkfProposalSensitivity::Secret);
+    assert_eq!(
+        result.proposal.content_class,
+        RepositoryContentClass::RawTranscript
+    );
+    Ok(())
+}
+
+#[test]
 fn overwrite_install_never_replaces_a_file_recreated_after_backup() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let target = apply_test_record(
@@ -780,9 +804,29 @@ fn write_test_pending_proposal(
     title: &str,
     sensitivity: OkfProposalSensitivity,
 ) -> anyhow::Result<PathBuf> {
+    write_test_pending_proposal_with_content_class(
+        service,
+        title,
+        sensitivity,
+        RepositoryContentClass::GeneralRepoKnowledge,
+    )
+}
+
+fn write_test_pending_proposal_with_content_class(
+    service: &MemoryService,
+    title: &str,
+    sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
+) -> anyhow::Result<PathBuf> {
     let proposal_id = proposals::title_to_concept_slug(title)
         .context("test proposal title should produce a slug")?;
-    write_test_pending_proposal_with_id(service, &proposal_id, title, sensitivity)
+    write_test_pending_proposal_with_id_and_content_class(
+        service,
+        &proposal_id,
+        title,
+        sensitivity,
+        content_class,
+    )
 }
 
 fn write_test_pending_proposal_with_id(
@@ -790,6 +834,22 @@ fn write_test_pending_proposal_with_id(
     proposal_id: &str,
     title: &str,
     sensitivity: OkfProposalSensitivity,
+) -> anyhow::Result<PathBuf> {
+    write_test_pending_proposal_with_id_and_content_class(
+        service,
+        proposal_id,
+        title,
+        sensitivity,
+        RepositoryContentClass::GeneralRepoKnowledge,
+    )
+}
+
+fn write_test_pending_proposal_with_id_and_content_class(
+    service: &MemoryService,
+    proposal_id: &str,
+    title: &str,
+    sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
 ) -> anyhow::Result<PathBuf> {
     prepare_pending_proposal_root(&service.paths)?;
     let draft = okf::OkfCreateProposalDraft {
@@ -811,7 +871,7 @@ fn write_test_pending_proposal_with_id(
             reference: None,
         }],
         sensitivity: OkfProposalSensitivity::RepoSafe,
-        content_class: RepositoryContentClass::GeneralRepoKnowledge,
+        content_class,
         capture: None,
     };
     let plan =
