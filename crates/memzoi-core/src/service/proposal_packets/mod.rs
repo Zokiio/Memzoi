@@ -5,9 +5,9 @@ use super::canonical_write::{
     validate_canonical_write_precondition,
 };
 use super::safe_files::{
-    ensure_path_absent, ensure_regular_file, ensure_safe_directory, ensure_safe_existing_file,
-    ensure_safe_path_parent, install_staged_file_no_replace, remove_staged_file,
-    sibling_transaction_path, stage_file,
+    RepoLifecycleLock, ensure_path_absent, ensure_regular_file, ensure_safe_directory,
+    ensure_safe_existing_file, ensure_safe_path_parent, install_staged_file_no_replace,
+    remove_staged_file, sibling_transaction_path, stage_file,
 };
 use super::*;
 
@@ -112,3 +112,4 @@ impl<'a> ProposalPacketLifecycle<'a> {
         preflight_pending_proposal_root(self.paths)
     }
 }
+use std::collections::BTreeSet;
