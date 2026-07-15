@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
+use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::{Date, OffsetDateTime, Time, format_description::well_known::Rfc3339};
@@ -18,11 +18,10 @@ use crate::import::{self, ExistingDuplicate};
 use crate::{
     CaptureApplyResult, CapturePlan, CaptureReview, CaptureSourceInputs, ContextPack,
     ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult, ImportDocument, ImportPlan,
-    MemoryDestination, MemoryDraft, MemoryEvent, MemoryLane, MemoryPath, MemoryPaths, MemoryRecord,
-    MemoryStatus, MemoryType, OkfProposalAction, OkfProposalFile, OkfProposalOutcome,
-    OkfProposalResolution, PrecheckInput, PrecheckWarning, Proposal, ProposalStatus,
-    ProposalStatusFilter, ScopeKind, SearchInput, SearchResult, SupersedeResult, ValidationResult,
-    Visibility,
+    MemoryDestination, MemoryDraft, MemoryEvent, MemoryPaths, MemoryRecord, MemoryStatus,
+    OkfProposalAction, OkfProposalFile, OkfProposalOutcome, OkfProposalResolution, PrecheckInput,
+    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, ScopeKind, SearchInput,
+    SearchResult, SupersedeResult, ValidationResult, Visibility,
 };
 use crate::{
     config::{
@@ -41,16 +40,21 @@ use crate::{
 
 mod canonical_write;
 mod capture_route_apply;
+mod derived_index;
 mod proposal_packets;
+mod runtime_records;
 mod safe_files;
 
+pub use self::derived_index::{RebuildResult, RepoIndexDrift};
 pub use self::proposal_packets::{
     FileProposalInventory, FileProposalInventoryEntry, FileProposalInventoryError,
     FileProposalResolutionResult, scan_file_proposal_inventory,
 };
+pub use self::runtime_records::{CheckpointInput, LocalMemoryInput};
 
 use self::canonical_write::{CanonicalFileWrite, CanonicalWriteSession, FileWriteMode};
 use self::proposal_packets::ProposalPacketLifecycle;
+use self::runtime_records::RuntimeRecords;
 use self::safe_files::{RepoLifecycleLock, ensure_safe_directory, lifecycle_transaction_artifacts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,44 +117,6 @@ pub struct ExportInput {
 pub struct ExportResult {
     pub format: ExportFormat,
     pub written_paths: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebuildResult {
-    pub records_root: PathBuf,
-    pub db_path: PathBuf,
-    pub record_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepoIndexDrift {
-    pub missing_from_index: Vec<String>,
-    pub stale_in_index: Vec<String>,
-    pub changed_in_index: Vec<String>,
-    pub fts_out_of_sync: bool,
-}
-
-impl RepoIndexDrift {
-    pub fn is_current(&self) -> bool {
-        self.missing_from_index.is_empty()
-            && self.stale_in_index.is_empty()
-            && self.changed_in_index.is_empty()
-            && !self.fts_out_of_sync
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LocalMemoryInput {
-    pub memory_type: MemoryType,
-    pub lane: MemoryLane,
-    pub title: String,
-    pub body: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointInput {
-    pub task: String,
-    pub note: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,7 +325,8 @@ impl MemoryService {
     {
         let session = CanonicalWriteSession::begin(&self.paths)?;
         let tx = self.conn.unchecked_transaction()?;
-        let target = record_by_id(&tx, record_id)?
+        let target = RuntimeRecords::new(&tx)
+            .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
         validate_legacy_canonical_target(&target)?;
         if target.scope_kind != draft.scope_kind || target.scope_id != draft.scope_id {
@@ -401,7 +368,8 @@ impl MemoryService {
     ) -> Result<MemoryRecord> {
         let session = CanonicalWriteSession::begin(&self.paths)?;
         let tx = self.conn.unchecked_transaction()?;
-        let target = record_by_id(&tx, record_id)?
+        let target = RuntimeRecords::new(&tx)
+            .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
         validate_legacy_canonical_target(&target)?;
         let record = proposals::tombstone_record(&tx, record_id, actor, reason)?;
@@ -422,7 +390,7 @@ impl MemoryService {
         record: &MemoryRecord,
         mode: FileWriteMode,
     ) -> Result<CanonicalFileWrite> {
-        let tags = record_tags(conn, &record.id)?;
+        let tags = RuntimeRecords::new(conn).tags(&record.id)?;
         let applies_to = search::load_paths(conn, &record.id)?
             .into_iter()
             .map(|path| path.path)
@@ -438,55 +406,14 @@ impl MemoryService {
     }
 
     pub fn inspect_expiry(&self, record_id: &str) -> Result<ExpiryDiagnostic> {
-        let record = record_by_id(&self.conn, record_id)?
+        let record = RuntimeRecords::new(&self.conn)
+            .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
         expiry::diagnose(record, self.now())
     }
 
     pub fn repo_index_drift(&self) -> Result<RepoIndexDrift> {
-        ensure_safe_directory(
-            &self.paths.project_root,
-            &self.paths.records_dir(),
-            false,
-            "canonical record root",
-        )?;
-        let canonical = okf::read_okf_record_files(self.paths.records_dir())?
-            .into_iter()
-            .filter(|record| record.status == MemoryStatus::Active)
-            .map(|record| (record.concept_id.clone(), record))
-            .collect::<BTreeMap<_, _>>();
-        let indexed = indexed_active_records_for_destination(&self.conn, MemoryDestination::Repo)?
-            .into_iter()
-            .map(|record| (record.id.clone(), record))
-            .collect::<BTreeMap<_, _>>();
-
-        let missing_from_index = canonical
-            .keys()
-            .filter(|id| !indexed.contains_key(*id))
-            .cloned()
-            .collect();
-        let stale_in_index = indexed
-            .keys()
-            .filter(|id| !canonical.contains_key(*id))
-            .cloned()
-            .collect();
-        let changed_in_index = canonical
-            .iter()
-            .filter_map(|(id, canonical)| {
-                indexed
-                    .get(id)
-                    .filter(|indexed| !repo_record_matches(canonical, indexed))
-                    .map(|_| id.clone())
-            })
-            .collect();
-        let fts_out_of_sync = !fts_content_index_is_current(&self.conn)?;
-
-        Ok(RepoIndexDrift {
-            missing_from_index,
-            stale_in_index,
-            changed_in_index,
-            fts_out_of_sync,
-        })
+        derived_index::inspect(&self.paths, &self.conn)
     }
 
     pub fn create_local_memory(
@@ -495,11 +422,11 @@ impl MemoryService {
         input: LocalMemoryInput,
     ) -> Result<MemoryRecord> {
         let now = self.now_timestamp()?;
-        create_local_memory_with_conn(&self.conn, actor, &input, &now)
+        RuntimeRecords::new(&self.conn).create_local(actor, &input, &now)
     }
 
     pub fn list_local_memory(&self) -> Result<Vec<MemoryRecord>> {
-        active_records_for_destination(&self.conn, MemoryDestination::Local, self.now())
+        RuntimeRecords::new(&self.conn).active_for_destination(MemoryDestination::Local, self.now())
     }
 
     pub fn search_local_memory(&self, query: String, limit: usize) -> Result<Vec<SearchResult>> {
@@ -518,15 +445,16 @@ impl MemoryService {
 
     pub fn create_checkpoint(&self, actor: &str, input: CheckpointInput) -> Result<MemoryRecord> {
         let now = self.now_timestamp()?;
-        create_checkpoint_with_conn(&self.conn, actor, &input, &now)
+        RuntimeRecords::new(&self.conn).create_checkpoint(actor, &input, &now)
     }
 
     pub fn list_checkpoints(&self) -> Result<Vec<MemoryRecord>> {
-        active_checkpoint_records(&self.conn, self.now())
+        RuntimeRecords::new(&self.conn).active_checkpoints(self.now())
     }
 
     pub fn show_checkpoint(&self, record_id: &str) -> Result<MemoryRecord> {
-        checkpoint_record(&self.conn, record_id, self.now())?
+        RuntimeRecords::new(&self.conn)
+            .checkpoint(record_id, self.now())?
             .with_context(|| format!("checkpoint not found: {record_id}"))
     }
 
@@ -597,8 +525,7 @@ impl MemoryService {
             for (index, candidate) in document.candidates.iter().enumerate() {
                 match candidate.destination {
                     MemoryDestination::Local => {
-                        let record = create_local_memory_with_conn(
-                            &tx,
+                        let record = RuntimeRecords::new(&tx).create_local(
                             actor,
                             &LocalMemoryInput {
                                 memory_type: candidate.memory_type,
@@ -611,8 +538,7 @@ impl MemoryService {
                         runtime_writes[index] = Some((record.id, MemoryDestination::Local));
                     }
                     MemoryDestination::Session => {
-                        let record = create_checkpoint_with_conn(
-                            &tx,
+                        let record = RuntimeRecords::new(&tx).create_checkpoint(
                             actor,
                             &CheckpointInput {
                                 task: candidate.title.clone(),
@@ -800,26 +726,26 @@ impl MemoryService {
                     continue;
                 };
                 let record = match route {
-                    crate::MemoryWriteRoute::RuntimeLocal => create_local_memory_with_conn(
-                        &tx,
-                        actor,
-                        &LocalMemoryInput {
-                            memory_type: candidate.memory_type,
-                            lane: candidate.lane,
-                            title: candidate.title.clone(),
-                            body: candidate.body.clone(),
-                        },
-                        &timestamp,
-                    )?,
-                    crate::MemoryWriteRoute::RuntimeSession => create_checkpoint_with_conn(
-                        &tx,
-                        actor,
-                        &CheckpointInput {
-                            task: candidate.title.clone(),
-                            note: candidate.body.clone(),
-                        },
-                        &timestamp,
-                    )?,
+                    crate::MemoryWriteRoute::RuntimeLocal => RuntimeRecords::new(&tx)
+                        .create_local(
+                            actor,
+                            &LocalMemoryInput {
+                                memory_type: candidate.memory_type,
+                                lane: candidate.lane,
+                                title: candidate.title.clone(),
+                                body: candidate.body.clone(),
+                            },
+                            &timestamp,
+                        )?,
+                    crate::MemoryWriteRoute::RuntimeSession => RuntimeRecords::new(&tx)
+                        .create_checkpoint(
+                            actor,
+                            &CheckpointInput {
+                                task: candidate.title.clone(),
+                                note: candidate.body.clone(),
+                            },
+                            &timestamp,
+                        )?,
                     _ => bail!("import runtime candidate has invalid route {route}"),
                 };
                 writes.push(crate::ImportWrite::RuntimeRecord {
@@ -977,7 +903,7 @@ impl MemoryService {
                 hash: import::content_hash(&entry.proposal.body),
             });
         }
-        let runtime_records = records_for_runtime_preservation(&self.conn)?;
+        let runtime_records = RuntimeRecords::new(&self.conn).records_for_preservation()?;
         let now = self.now();
         let mut runtime = Vec::new();
         for record in runtime_records {
@@ -1060,31 +986,7 @@ impl MemoryService {
     }
 
     pub fn rebuild_paths(paths: MemoryPaths) -> Result<RebuildResult> {
-        let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
-        let records_root = paths.records_dir();
-        ensure_safe_directory(
-            &paths.project_root,
-            &records_root,
-            false,
-            "canonical record root",
-        )?;
-        let records = okf::read_okf_record_files(&records_root)?;
-        guard_no_open_proposals(&paths.db_path)?;
-        let runtime_records = load_runtime_records_for_rebuild(&paths.db_path)?;
-        guard_no_runtime_record_id_collisions(&records, &runtime_records)?;
-        remove_database_files(&paths.db_path)?;
-        let conn = db::open_database(&paths.db_path)?;
-        db::init_database(&conn)?;
-        okf::import_okf_records(&conn, &records)?;
-        restore_runtime_records_after_rebuild(&conn, &runtime_records)?;
-        Ok(RebuildResult {
-            records_root,
-            db_path: paths.db_path,
-            record_ids: records
-                .into_iter()
-                .map(|record| record.concept_id)
-                .collect(),
-        })
+        derived_index::rebuild(paths)
     }
 }
 
@@ -1144,41 +1046,6 @@ fn blocked_session_end_result(document: SessionEndDocument) -> SessionEndResult 
 
 pub fn lifecycle_transaction_artifact_count(paths: &MemoryPaths) -> Result<usize> {
     Ok(lifecycle_transaction_artifacts(paths)?.len())
-}
-
-fn repo_record_matches(canonical: &okf::OkfRecordFile, indexed: &MemoryRecord) -> bool {
-    let draft = &canonical.draft;
-    indexed.memory_type == draft.memory_type
-        && indexed.lane == draft.lane
-        && indexed.destination == MemoryDestination::Repo
-        && indexed.scope_kind == draft.scope_kind
-        && indexed.scope_id == draft.scope_id
-        && indexed.visibility == draft.visibility
-        && indexed.title == draft.title
-        && indexed.body == draft.body
-        && indexed.status == canonical.status
-        && indexed.confidence == draft.confidence
-        && indexed.source_kind == draft.source_kind
-        && indexed.source_ref == draft.source_ref
-        && indexed.proposal_id == canonical.proposal_id
-        && indexed.content_hash == blake3::hash(draft.body.as_bytes()).to_hex().to_string()
-        && indexed.created_at == canonical.created
-        && indexed.updated_at == canonical.updated.as_deref().unwrap_or(&canonical.created)
-        && indexed.supersedes_id == canonical.supersedes_id
-        && indexed.expires_at == canonical.expires_at
-}
-
-fn fts_content_index_is_current(conn: &Connection) -> Result<bool> {
-    match conn.execute(
-        "INSERT INTO memory_fts(memory_fts, rank) VALUES ('integrity-check', 1)",
-        [],
-    ) {
-        Ok(_) => Ok(true),
-        Err(error) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseCorrupt) => {
-            Ok(false)
-        }
-        Err(error) => Err(error).context("failed to verify full-text index integrity"),
-    }
 }
 
 fn validate_legacy_canonical_target(target: &MemoryRecord) -> Result<()> {
@@ -1254,528 +1121,6 @@ pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult>
         db_path: paths.db_path.clone(),
         exports_dir: paths.exports_dir.clone(),
     })
-}
-
-fn record_tags(conn: &Connection, record_id: &str) -> Result<Vec<String>> {
-    let mut stmt =
-        conn.prepare("SELECT tag FROM memory_tag WHERE record_id = ?1 ORDER BY tag ASC")?;
-    let rows = stmt.query_map([record_id], |row| row.get(0))?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InsertMode {
-    Create,
-    RestoreIfAbsent,
-}
-
-fn create_local_memory_with_conn(
-    conn: &Connection,
-    actor: &str,
-    input: &LocalMemoryInput,
-    now: &str,
-) -> Result<MemoryRecord> {
-    validate_local_memory_input(input)?;
-    let id = next_prefixed_record_id(conn, "local", &input.title)?;
-    let body = input.body.trim().to_owned();
-    let record = MemoryRecord {
-        id,
-        memory_type: input.memory_type,
-        lane: input.lane,
-        destination: MemoryDestination::Local,
-        scope_kind: ScopeKind::Personal,
-        scope_id: None,
-        visibility: Visibility::Private,
-        title: input.title.trim().to_owned(),
-        body,
-        status: MemoryStatus::Active,
-        confidence: 1.0,
-        source_kind: Some("memzoi-local".to_owned()),
-        source_ref: None,
-        proposal_id: None,
-        capture: None,
-        content_hash: blake3::hash(input.body.trim().as_bytes())
-            .to_hex()
-            .to_string(),
-        created_at: now.to_owned(),
-        updated_at: now.to_owned(),
-        supersedes_id: None,
-        expires_at: None,
-    };
-    insert_memory_record_row(conn, &record, InsertMode::Create)?;
-    append_event(
-        conn,
-        AppendEvent {
-            event_type: "memory.local_created".to_owned(),
-            actor: actor.to_owned(),
-            payload: json!({
-                "record_id": &record.id,
-                "destination": record.destination.as_str(),
-                "title": &record.title,
-            }),
-            record_id: Some(record.id.clone()),
-            proposal_id: None,
-        },
-    )?;
-    Ok(record)
-}
-
-fn create_checkpoint_with_conn(
-    conn: &Connection,
-    actor: &str,
-    input: &CheckpointInput,
-    now: &str,
-) -> Result<MemoryRecord> {
-    validate_checkpoint_input(input)?;
-    let id = next_prefixed_record_id(conn, "session", &input.task)?;
-    let body = input.note.trim().to_owned();
-    let record = MemoryRecord {
-        id,
-        memory_type: MemoryType::Episode,
-        lane: MemoryLane::Session,
-        destination: MemoryDestination::Session,
-        scope_kind: ScopeKind::Personal,
-        scope_id: None,
-        visibility: Visibility::Private,
-        title: input.task.trim().to_owned(),
-        body,
-        status: MemoryStatus::Active,
-        confidence: 1.0,
-        source_kind: Some("memzoi-checkpoint".to_owned()),
-        source_ref: None,
-        proposal_id: None,
-        capture: None,
-        content_hash: blake3::hash(input.note.trim().as_bytes())
-            .to_hex()
-            .to_string(),
-        created_at: now.to_owned(),
-        updated_at: now.to_owned(),
-        supersedes_id: None,
-        expires_at: None,
-    };
-    insert_memory_record_row(conn, &record, InsertMode::Create)?;
-    append_event(
-        conn,
-        AppendEvent {
-            event_type: "memory.checkpoint_created".to_owned(),
-            actor: actor.to_owned(),
-            payload: json!({
-                "record_id": &record.id,
-                "destination": record.destination.as_str(),
-                "title": &record.title,
-            }),
-            record_id: Some(record.id.clone()),
-            proposal_id: None,
-        },
-    )?;
-    Ok(record)
-}
-
-fn validate_local_memory_input(input: &LocalMemoryInput) -> Result<()> {
-    if input.title.trim().is_empty() {
-        bail!("title is required");
-    }
-    if input.body.trim().is_empty() {
-        bail!("body is required");
-    }
-    Ok(())
-}
-
-fn validate_checkpoint_input(input: &CheckpointInput) -> Result<()> {
-    if input.task.trim().is_empty() {
-        bail!("task is required");
-    }
-    if input.note.trim().is_empty() {
-        bail!("note is required");
-    }
-    Ok(())
-}
-
-fn next_prefixed_record_id(conn: &Connection, prefix: &str, title: &str) -> Result<String> {
-    let slug = proposals::title_to_concept_slug(title)
-        .unwrap_or_else(|| format!("memory-{}", Uuid::now_v7()));
-    let base = format!("{prefix}-{slug}");
-    if !record_id_exists(conn, &base)? {
-        return Ok(base);
-    }
-    for suffix in 2.. {
-        let candidate = format!("{base}-{suffix}");
-        if !record_id_exists(conn, &candidate)? {
-            return Ok(candidate);
-        }
-    }
-    unreachable!("unbounded suffix search returns")
-}
-
-fn record_id_exists(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM memory_record WHERE id = ?1)",
-        [id],
-        |row| row.get(0),
-    )?)
-}
-
-fn insert_memory_record_row(
-    conn: &Connection,
-    record: &MemoryRecord,
-    mode: InsertMode,
-) -> Result<()> {
-    let verb = match mode {
-        InsertMode::Create => "INSERT INTO",
-        InsertMode::RestoreIfAbsent => "INSERT OR IGNORE INTO",
-    };
-    let sql = format!(
-        "{verb} memory_record (
-          id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
-          confidence, source_kind, source_ref, proposal_id, content_hash, created_at, updated_at,
-          supersedes_id, expires_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
-    );
-    conn.execute(
-        &sql,
-        rusqlite::params![
-            &record.id,
-            record.memory_type.as_str(),
-            record.lane.as_str(),
-            record.destination.as_str(),
-            record.scope_kind.as_str(),
-            &record.scope_id,
-            record.visibility.as_str(),
-            &record.title,
-            &record.body,
-            record.status.as_str(),
-            record.confidence,
-            &record.source_kind,
-            &record.source_ref,
-            &record.proposal_id,
-            &record.content_hash,
-            &record.created_at,
-            &record.updated_at,
-            &record.supersedes_id,
-            &record.expires_at,
-        ],
-    )?;
-    crate::capture::store_capture_provenance(conn, &record.id, record.capture.as_ref())?;
-    Ok(())
-}
-
-fn indexed_active_records_for_destination(
-    conn: &Connection,
-    destination: MemoryDestination,
-) -> Result<Vec<MemoryRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
-                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at, proposal_id
-         FROM memory_record
-         WHERE status = 'active'
-           AND destination = ?1
-         ORDER BY updated_at DESC, id ASC",
-    )?;
-    let rows = stmt.query_map([destination.as_str()], search::record_from_row)?;
-    let mut records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-    load_capture_provenance_for_records(conn, &mut records)?;
-    Ok(records)
-}
-
-fn active_records_for_destination(
-    conn: &Connection,
-    destination: MemoryDestination,
-    now: OffsetDateTime,
-) -> Result<Vec<MemoryRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
-                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at, proposal_id
-         FROM memory_record
-         WHERE status = 'active'
-           AND destination = ?1
-           AND memzoi_is_expired(expires_at, ?2) = 0
-         ORDER BY updated_at DESC, id ASC",
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![destination.as_str(), expiry::format_timestamp(now)?],
-        search::record_from_row,
-    )?;
-    let mut records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-    load_capture_provenance_for_records(conn, &mut records)?;
-    Ok(records)
-}
-
-fn active_checkpoint_records(conn: &Connection, now: OffsetDateTime) -> Result<Vec<MemoryRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
-                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at, proposal_id
-         FROM memory_record
-         WHERE status = 'active'
-           AND destination = 'session'
-           AND source_kind = 'memzoi-checkpoint'
-           AND memzoi_is_expired(expires_at, ?1) = 0
-         ORDER BY created_at DESC, id ASC",
-    )?;
-    let rows = stmt.query_map([expiry::format_timestamp(now)?], search::record_from_row)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-fn checkpoint_record(
-    conn: &Connection,
-    record_id: &str,
-    now: OffsetDateTime,
-) -> Result<Option<MemoryRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
-                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at, proposal_id
-         FROM memory_record
-         WHERE id = ?1
-           AND status = 'active'
-           AND destination = 'session'
-           AND source_kind = 'memzoi-checkpoint'
-           AND memzoi_is_expired(expires_at, ?2) = 0",
-    )?;
-    stmt.query_row(
-        rusqlite::params![record_id, expiry::format_timestamp(now)?],
-        search::record_from_row,
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-fn record_by_id(conn: &Connection, record_id: &str) -> Result<Option<MemoryRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
-                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at, proposal_id
-         FROM memory_record
-         WHERE id = ?1",
-    )?;
-    let mut record = stmt
-        .query_row([record_id], search::record_from_row)
-        .optional()
-        .map_err(anyhow::Error::from)?;
-    drop(stmt);
-    if let Some(record) = &mut record {
-        record.capture = crate::capture::load_capture_provenance(conn, &record.id)?;
-    }
-    Ok(record)
-}
-
-fn load_capture_provenance_for_records(
-    conn: &Connection,
-    records: &mut [MemoryRecord],
-) -> Result<()> {
-    for record in records {
-        record.capture = crate::capture::load_capture_provenance(conn, &record.id)?;
-    }
-    Ok(())
-}
-
-fn records_for_runtime_preservation(conn: &Connection) -> Result<Vec<MemoryRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
-                confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at, proposal_id
-         FROM memory_record
-         WHERE destination IN ('local', 'session')
-         ORDER BY updated_at DESC, id ASC",
-    )?;
-    let rows = stmt.query_map([], search::record_from_row)?;
-    let mut records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-    load_capture_provenance_for_records(conn, &mut records)?;
-    Ok(records)
-}
-
-#[derive(Debug, Clone)]
-struct RuntimeRecordPreservation {
-    record: MemoryRecord,
-    tags: Vec<String>,
-    paths: Vec<MemoryPath>,
-}
-
-fn runtime_records_for_rebuild_preservation(
-    conn: &Connection,
-) -> Result<Vec<RuntimeRecordPreservation>> {
-    records_for_runtime_preservation(conn)?
-        .into_iter()
-        .map(|record| {
-            let tags = record_tags(conn, &record.id)?;
-            let paths = runtime_record_paths(conn, &record.id)?;
-            Ok(RuntimeRecordPreservation {
-                record,
-                tags,
-                paths,
-            })
-        })
-        .collect()
-}
-
-fn runtime_record_paths(conn: &Connection, record_id: &str) -> Result<Vec<MemoryPath>> {
-    let mut stmt = conn.prepare(
-        "SELECT path, symbol, line_start, line_end
-         FROM memory_path
-         WHERE record_id = ?1
-         ORDER BY path ASC, COALESCE(symbol, '') ASC, COALESCE(line_start, 0) ASC",
-    )?;
-    let rows = stmt.query_map([record_id], |row| {
-        Ok(MemoryPath {
-            path: row.get(0)?,
-            symbol: row.get(1)?,
-            line_start: row.get(2)?,
-            line_end: row.get(3)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-fn load_runtime_records_for_rebuild(db_path: &Path) -> Result<Vec<RuntimeRecordPreservation>> {
-    if !db_path.exists() {
-        return Ok(Vec::new());
-    }
-    let conn = db::open_database(db_path).with_context(|| {
-        format!(
-            "rebuild refused because local/session runtime memory could not be preserved from {}",
-            db_path.display()
-        )
-    })?;
-    db::init_database(&conn).with_context(|| {
-        format!(
-            "rebuild refused because local/session runtime memory could not be migrated before preservation from {}",
-            db_path.display()
-        )
-    })?;
-    runtime_records_for_rebuild_preservation(&conn).context(
-        "rebuild refused because local/session runtime memory could not be loaded for preservation",
-    )
-}
-
-fn guard_no_runtime_record_id_collisions(
-    records: &[okf::OkfRecordFile],
-    runtime_records: &[RuntimeRecordPreservation],
-) -> Result<()> {
-    if runtime_records.is_empty() {
-        return Ok(());
-    }
-
-    let repo_ids = records
-        .iter()
-        .map(|record| record.concept_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let collisions = runtime_records
-        .iter()
-        .filter_map(|snapshot| {
-            let record = &snapshot.record;
-            repo_ids
-                .contains(record.id.as_str())
-                .then_some(record.id.as_str())
-        })
-        .collect::<Vec<_>>();
-    if collisions.is_empty() {
-        return Ok(());
-    }
-
-    bail!(
-        "rebuild refused because local/session runtime memory record id{} would collide with canonical repo record{}: {}",
-        if collisions.len() == 1 { "" } else { "s" },
-        if collisions.len() == 1 { "" } else { "s" },
-        collisions.join(", ")
-    );
-}
-
-fn restore_runtime_records_after_rebuild(
-    conn: &Connection,
-    records: &[RuntimeRecordPreservation],
-) -> Result<()> {
-    for snapshot in records {
-        let record = &snapshot.record;
-        insert_memory_record_row(conn, record, InsertMode::RestoreIfAbsent)?;
-        for tag in &snapshot.tags {
-            conn.execute(
-                "INSERT OR IGNORE INTO memory_tag(record_id, tag) VALUES (?1, ?2)",
-                rusqlite::params![record.id, tag],
-            )?;
-        }
-        for (index, path) in snapshot.paths.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO memory_path(id, record_id, path, symbol, line_start, line_end)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    format!("{}_restored_path_{index}", record.id),
-                    record.id,
-                    path.path,
-                    path.symbol,
-                    path.line_start,
-                    path.line_end,
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn guard_no_open_proposals(db_path: &Path) -> Result<()> {
-    if !db_path.exists() {
-        return Ok(());
-    }
-
-    let Ok(open_proposals) = open_proposal_summaries(db_path) else {
-        return Ok(());
-    };
-    if !open_proposals.is_empty() {
-        let count = open_proposals.len();
-        let summaries = open_proposals
-            .into_iter()
-            .map(|(id, status)| format!("{id} ({status})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            "rebuild refused because {count} open proposal{} would be discarded: {summaries}. Run `memzoi proposals list --status open`, `memzoi proposals apply --all-approved`, or `memzoi reject <proposal-id> --reason \"...\"` before rebuilding.",
-            if count == 1 { "" } else { "s" }
-        );
-    }
-    Ok(())
-}
-
-fn open_proposal_summaries(db_path: &Path) -> rusqlite::Result<Vec<(String, String)>> {
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let has_proposal_table: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'proposal')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_proposal_table {
-        return Ok(Vec::new());
-    }
-    let mut stmt = conn.prepare(
-        "SELECT id, status
-         FROM proposal
-         WHERE status IN ('pending', 'validated', 'approved')
-         ORDER BY created_at ASC, id ASC",
-    )?;
-    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    rows.collect()
-}
-
-fn remove_database_files(db_path: &Path) -> Result<()> {
-    for path in [
-        db_path.to_path_buf(),
-        db_path.with_extension("db-wal"),
-        db_path.with_extension("db-shm"),
-    ] {
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to remove derived database file {}", path.display())
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 fn default_config() -> &'static str {
@@ -2366,80 +1711,6 @@ mod tests {
             &target_before,
             "commit-rollback-replacement",
         )?;
-        Ok(())
-    }
-
-    #[test]
-    fn rebuild_refuses_to_discard_open_proposals_with_actionable_details() -> anyhow::Result<()> {
-        let (_temp, service) = initialized_service()?;
-        let pending = service.propose_memory_with_options(
-            "agent:red-tests",
-            sample_memory_draft("Pending rebuild proposal", "Pending rebuild proposal body"),
-            ProposeOptions {
-                approval_override: Some(ProposalApprovalOverride::Manual),
-                apply: false,
-            },
-        )?;
-        let validated = service.propose_memory_with_options(
-            "agent:red-tests",
-            sample_memory_draft(
-                "Validated rebuild proposal",
-                "Validated rebuild proposal body",
-            ),
-            ProposeOptions {
-                approval_override: Some(ProposalApprovalOverride::Manual),
-                apply: false,
-            },
-        )?;
-        service.conn.execute(
-            "UPDATE proposal SET status = 'validated' WHERE id = ?1",
-            [validated.proposal.id.as_str()],
-        )?;
-        let approved = service.propose_memory_with_options(
-            "agent:red-tests",
-            sample_memory_draft(
-                "Approved rebuild proposal",
-                "Approved rebuild proposal body",
-            ),
-            ProposeOptions {
-                approval_override: None,
-                apply: false,
-            },
-        )?;
-
-        let error = service
-            .rebuild()
-            .expect_err("rebuild should not discard open proposals");
-        let message = error.to_string();
-
-        assert!(
-            message.contains("rebuild refused because 3 open proposals would be discarded"),
-            "rebuild refusal should include the open proposal count: {message}"
-        );
-        for (proposal_id, status) in [
-            (pending.proposal.id.as_str(), "pending"),
-            (validated.proposal.id.as_str(), "validated"),
-            (approved.proposal.id.as_str(), "approved"),
-        ] {
-            let summary = format!("{proposal_id} ({status})");
-            assert!(
-                message.contains(&summary),
-                "rebuild refusal should include open proposal summary {summary}: {message}"
-            );
-        }
-        assert!(
-            message.contains("memzoi proposals list --status open"),
-            "rebuild refusal should suggest listing open proposals: {message}"
-        );
-        assert!(
-            message.contains("memzoi proposals apply --all-approved"),
-            "rebuild refusal should suggest applying approved proposals: {message}"
-        );
-        assert!(
-            message.contains("memzoi reject <proposal-id> --reason"),
-            "rebuild refusal should suggest rejecting proposals before rebuild: {message}"
-        );
-
         Ok(())
     }
 
