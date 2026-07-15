@@ -7,10 +7,10 @@ use uuid::Uuid;
 use crate::{MemoryPaths, MemoryRecord, RepositoryWriteRoute, okf, repository_io};
 
 use super::{
-    canonical_write_projections,
     repository_mutation::{
         AuthorizedRepositoryProjectionBatch, OwnedRepositoryProjection,
         RepositoryMutationAuthorization, backup_repository_file_to_transaction,
+        borrowed_repository_projections, canonical_write_projections,
         install_verified_staged_file_no_replace, remove_installed_repository_file,
         repository_transaction_path, restore_verified_staged_file_no_replace,
         stage_authorized_file,
@@ -246,7 +246,7 @@ pub(super) fn stage_canonical_writes(
     writes: &[CanonicalFileWrite],
     nonce: &str,
 ) -> Result<Vec<StagedCanonicalFileWrite>> {
-    let borrowed = super::borrowed_repository_projections(projections);
+    let borrowed = borrowed_repository_projections(projections);
     repository_io::verify_repository_batch(
         &paths.project_root,
         expected_route,
@@ -487,7 +487,7 @@ where
         authorization,
         projections: &projections,
     };
-    let borrowed = super::borrowed_repository_projections(&projections);
+    let borrowed = borrowed_repository_projections(&projections);
     repository_io::verify_repository_batch(
         &paths.project_root,
         expected_route,

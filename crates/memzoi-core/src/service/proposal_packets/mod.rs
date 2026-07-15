@@ -1,3 +1,10 @@
+use std::collections::BTreeSet;
+
+use crate::{
+    AuthorizationProof, OkfProposalSensitivity, RepositoryContentClass, RepositoryWriteRoute,
+    SafetyFieldKind,
+};
+
 use super::canonical_write::{
     CanonicalFileWrite, StagedCanonicalFileWrite, cleanup_staged_canonical_writes,
     finalize_staged_canonical_writes, install_staged_canonical_writes,
@@ -6,9 +13,11 @@ use super::canonical_write::{
 };
 use super::repository_mutation::{
     OwnedRepositoryProjection, RepositoryMutationAuthorization,
-    backup_repository_file_to_transaction, install_verified_staged_file_no_replace,
+    authorize_repository_projection_batch, backup_repository_file_to_transaction,
+    canonical_write_projections, explicit_repository_provenance,
+    install_verified_staged_file_no_replace, okf_proposal_safety_values,
     remove_installed_repository_file, repository_transaction_path, repository_transaction_root,
-    restore_verified_staged_file_no_replace, stage_authorized_file,
+    restore_verified_staged_file_no_replace, safety_value, stage_authorized_file,
 };
 use super::safe_files::{
     ensure_path_absent, ensure_regular_file, ensure_safe_directory, ensure_safe_existing_file,

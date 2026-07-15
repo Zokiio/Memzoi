@@ -1,3 +1,4 @@
+use super::super::safe_files::RepoLifecycleLock;
 use super::transaction::{
     RejectedFileProposalRollback, attach_cleanup_error, rollback_rejected_file_proposal,
     validate_resolution_actor,

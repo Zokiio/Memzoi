@@ -16,12 +16,12 @@ use crate::{
 };
 
 use super::super::{
-    authorize_repository_projection_batch, borrowed_repository_projections,
-    explicit_repository_provenance, okf_proposal_safety_values,
     proposal_packets::{ProposalPacketLifecycle, prepare_pending_proposal_root},
     repository_mutation::{
         AuthorizedRepositoryProjectionBatch, OwnedRepositoryProjection,
-        repository_transaction_path, stage_authorized_file,
+        authorize_repository_projection_batch, borrowed_repository_projections,
+        explicit_repository_provenance, okf_proposal_safety_values, repository_transaction_path,
+        stage_authorized_file,
     },
     safe_files::{ensure_path_absent, remove_staged_file, sync_directory},
 };

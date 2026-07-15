@@ -1,5 +1,9 @@
+use super::super::safe_files::RepoLifecycleLock;
 use super::*;
-use crate::{ImportCandidateInput, OkfProposalSensitivity, OkfProposalSource, SessionEndCandidate};
+use crate::{
+    ImportCandidateInput, MemoryLane, MemoryType, OkfProposalSensitivity, OkfProposalSource,
+    SessionEndCandidate, SessionEndWrite,
+};
 use tempfile::TempDir;
 
 #[test]
@@ -220,7 +224,9 @@ fn file_create_refuses_to_replace_a_local_runtime_row() -> anyhow::Result<()> {
             .join(format!("{record_id}.md"))
             .exists()
     );
-    let runtime = record_by_id(&service.conn, record_id)?.context("runtime row survived")?;
+    let runtime = RuntimeRecords::new(&service.conn)
+        .get(record_id)?
+        .context("runtime row survived")?;
     assert_eq!(runtime.destination, MemoryDestination::Local);
     assert_eq!(runtime.body, "Runtime collision sentinel");
     assert!(lifecycle_transaction_artifacts(&service.paths)?.is_empty());
@@ -254,13 +260,15 @@ fn file_supersede_runtime_collision_rolls_back_target_and_replacement() -> anyho
     assert!(error.to_string().contains("owned by non-repo memory"));
     assert_eq!(fs::read(&target_path)?, target_before);
     assert_eq!(
-        record_by_id(&service.conn, &target.id)?
+        RuntimeRecords::new(&service.conn)
+            .get(&target.id)?
             .context("target row survived")?
             .status,
         MemoryStatus::Active
     );
-    let runtime =
-        record_by_id(&service.conn, replacement_id)?.context("session collision row survived")?;
+    let runtime = RuntimeRecords::new(&service.conn)
+        .get(replacement_id)?
+        .context("session collision row survived")?;
     assert_eq!(runtime.destination, MemoryDestination::Session);
     assert!(pending.is_file());
     assert!(lifecycle_transaction_artifacts(&service.paths)?.is_empty());
@@ -433,7 +441,8 @@ fn overwrite_install_never_replaces_a_file_recreated_after_backup() -> anyhow::R
     assert!(format!("{error:#}").contains("without replacement"));
     assert_eq!(fs::read_to_string(&target_path)?, "fresh editor bytes");
     assert_eq!(
-        record_by_id(&service.conn, &target.id)?
+        RuntimeRecords::new(&service.conn)
+            .get(&target.id)?
             .context("target row survived")?
             .status,
         MemoryStatus::Active
@@ -755,7 +764,7 @@ fn insert_runtime_record_with_id(
         supersedes_id: None,
         expires_at: None,
     };
-    insert_memory_record_row(&service.conn, &record, InsertMode::Create)
+    RuntimeRecords::new(&service.conn).insert_for_test(&record)
 }
 
 fn apply_test_record(service: &MemoryService, draft: MemoryDraft) -> anyhow::Result<MemoryRecord> {

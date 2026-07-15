@@ -108,6 +108,7 @@ fi
 if grep -RFn \
   --include='*.rs' \
   --exclude='service.rs' \
+  --exclude='tests.rs' \
   --exclude='okf.rs' \
   'okf::create_okf_proposal_file(' \
   crates/memzoi-core/src >/dev/null; then
@@ -123,8 +124,10 @@ awk '
 ' crates/memzoi-core/src/okf.rs
 
 grep -Fq 'authorization: &AuthorizedRepositoryWriteBatch' crates/memzoi-core/src/repository_io.rs
-grep -Fq 'authorization: &AuthorizedRepositoryProjectionBatch' crates/memzoi-core/src/service.rs
-grep -Fq 'repository_io::verify_repository_batch' crates/memzoi-core/src/service.rs
+grep -Fq 'authorization: &AuthorizedRepositoryProjectionBatch' \
+  crates/memzoi-core/src/service/repository_mutation.rs
+grep -Fq 'repository_io::verify_repository_batch' \
+  crates/memzoi-core/src/service/repository_mutation.rs
 grep -Fq 'expected_route: RepositoryWriteRoute' crates/memzoi-core/src/repository_io.rs
 grep -Fq 'pub const ALL: [Self; 14]' crates/memzoi-core/src/repository_write_safety/policy.rs
 

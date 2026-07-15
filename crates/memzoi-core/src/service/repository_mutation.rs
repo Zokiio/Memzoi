@@ -1,5 +1,5 @@
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -7,12 +7,16 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    AuthorizedRepositoryWriteBatch, MemoryPaths, RepositoryProjectionPurpose, RepositoryWriteRoute,
-    SafetyFieldKind, repository_io,
+    AuthorizationProof, AuthorizedRepositoryWriteBatch, MemoryDestination, MemoryDraft,
+    MemoryPaths, OkfProposalFile, OkfProposalSensitivity, ProvenanceAssessment,
+    RepositoryContentClass, RepositoryProjection, RepositoryProjectionPurpose, RepositoryScope,
+    RepositoryWriteRequest, RepositoryWriteRoute, SafetyField, SafetyFieldKind, ScopeKind,
+    Visibility, authorize_repository_write, repository_io,
+    repository_write_safety::repository_write_policy_context_digest,
 };
 
 use super::{
-    borrowed_repository_projections,
+    canonical_write::CanonicalFileWrite,
     safe_files::{ensure_safe_directory, remove_staged_file, sync_directory},
 };
 
@@ -75,6 +79,276 @@ impl OwnedRepositoryProjection {
         projection.purpose = RepositoryProjectionPurpose::Existing;
         Ok(projection)
     }
+}
+
+pub(super) fn memory_draft_safety_values(
+    prefix: &str,
+    draft: &MemoryDraft,
+) -> Vec<RepositorySafetyValue> {
+    let mut values = vec![
+        safety_value(
+            format!("{prefix}.title"),
+            SafetyFieldKind::Text,
+            &draft.title,
+        ),
+        safety_value(format!("{prefix}.body"), SafetyFieldKind::Text, &draft.body),
+        safety_value(
+            format!("{prefix}.content_class"),
+            SafetyFieldKind::Identifier,
+            draft.content_class.as_str(),
+        ),
+    ];
+    for (index, tag) in draft.tags.iter().enumerate() {
+        values.push(safety_value(
+            format!("{prefix}.tags[{index}]"),
+            SafetyFieldKind::Text,
+            tag,
+        ));
+    }
+    if let Some(scope_id) = draft.scope_id.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.scope_id"),
+            SafetyFieldKind::Identifier,
+            scope_id,
+        ));
+    }
+    if let Some(source_kind) = draft.source_kind.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.source_kind"),
+            SafetyFieldKind::SourceReference,
+            source_kind,
+        ));
+    }
+    if let Some(source_ref) = draft.source_ref.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.source_ref"),
+            SafetyFieldKind::SourceReference,
+            source_ref,
+        ));
+    }
+    values
+}
+
+pub(super) fn okf_proposal_safety_values(
+    prefix: &str,
+    proposal: &OkfProposalFile,
+) -> Vec<RepositorySafetyValue> {
+    let mut values = vec![
+        safety_value(
+            format!("{prefix}.id"),
+            SafetyFieldKind::Identifier,
+            &proposal.id,
+        ),
+        safety_value(
+            format!("{prefix}.file_id"),
+            SafetyFieldKind::Identifier,
+            &proposal.file_id,
+        ),
+        safety_value(
+            format!("{prefix}.title"),
+            SafetyFieldKind::Text,
+            &proposal.title,
+        ),
+        safety_value(
+            format!("{prefix}.description"),
+            SafetyFieldKind::Text,
+            &proposal.description,
+        ),
+        safety_value(
+            format!("{prefix}.body"),
+            SafetyFieldKind::Text,
+            &proposal.body,
+        ),
+        safety_value(
+            format!("{prefix}.proposed_by"),
+            SafetyFieldKind::Identifier,
+            &proposal.proposal.proposed_by,
+        ),
+        safety_value(
+            format!("{prefix}.content_class"),
+            SafetyFieldKind::Identifier,
+            proposal.content_class.as_str(),
+        ),
+    ];
+    if let Some(reason) = proposal.proposal.reason.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.reason"),
+            SafetyFieldKind::Reason,
+            reason,
+        ));
+    }
+    if let Some(target) = proposal.proposal.target.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.target"),
+            SafetyFieldKind::Identifier,
+            target,
+        ));
+    }
+    if let Some(scope_id) = proposal.scope_id.as_deref() {
+        values.push(safety_value(
+            format!("{prefix}.scope_id"),
+            SafetyFieldKind::Identifier,
+            scope_id,
+        ));
+    }
+    for (index, path) in proposal.applies_to.iter().enumerate() {
+        values.push(safety_value(
+            format!("{prefix}.applies_to[{index}]"),
+            SafetyFieldKind::Path,
+            path,
+        ));
+    }
+    for (index, tag) in proposal.tags.iter().enumerate() {
+        values.push(safety_value(
+            format!("{prefix}.tags[{index}]"),
+            SafetyFieldKind::Text,
+            tag,
+        ));
+    }
+    for (index, source) in proposal.sources.iter().enumerate() {
+        for (name, value) in [
+            ("path", source.path.as_deref()),
+            ("url", source.url.as_deref()),
+            ("ref", source.reference.as_deref()),
+        ] {
+            if let Some(value) = value {
+                values.push(safety_value(
+                    format!("{prefix}.sources[{index}].{name}"),
+                    SafetyFieldKind::SourceReference,
+                    value,
+                ));
+            }
+        }
+    }
+    values
+}
+
+pub(super) fn safety_value(
+    location: String,
+    kind: SafetyFieldKind,
+    value: impl AsRef<[u8]>,
+) -> RepositorySafetyValue {
+    RepositorySafetyValue {
+        location,
+        kind,
+        value: value.as_ref().to_vec(),
+    }
+}
+
+pub(super) fn borrowed_repository_projections(
+    projections: &[OwnedRepositoryProjection],
+) -> Vec<RepositoryProjection<'_>> {
+    projections
+        .iter()
+        .map(|projection| RepositoryProjection {
+            path: &projection.relative_path,
+            bytes: &projection.bytes,
+            target_revision: projection.target_revision.as_deref(),
+            purpose: projection.purpose,
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn authorize_repository_projection_batch(
+    paths: &MemoryPaths,
+    route: RepositoryWriteRoute,
+    sensitivity: OkfProposalSensitivity,
+    scope_kind: ScopeKind,
+    scope_id: Option<&str>,
+    visibility: Visibility,
+    authorization: AuthorizationProof<'_>,
+    provenance: ProvenanceAssessment<'_>,
+    values: &[RepositorySafetyValue],
+    projections: &[OwnedRepositoryProjection],
+) -> Result<AuthorizedRepositoryProjectionBatch> {
+    let fields = values
+        .iter()
+        .map(|value| SafetyField {
+            location: &value.location,
+            kind: value.kind,
+            value: &value.value,
+        })
+        .collect();
+    let projections = borrowed_repository_projections(projections);
+    let request = RepositoryWriteRequest {
+        route,
+        destination: MemoryDestination::Repo,
+        sensitivity,
+        scope: RepositoryScope {
+            kind: scope_kind,
+            id: scope_id,
+            current_project_identity: paths.project_root.as_os_str().as_encoded_bytes(),
+            configured_project_id: None,
+        },
+        visibility,
+        authorization,
+        freshness: Vec::new(),
+        provenance,
+        fields,
+        projections,
+    };
+    let policy_context_digest = repository_write_policy_context_digest(&request);
+    let capability = authorize_repository_write(&request).map_err(anyhow::Error::new)?;
+    Ok(AuthorizedRepositoryProjectionBatch {
+        capability,
+        policy_context_digest,
+    })
+}
+
+pub(super) fn create_authorized_repository_batch(
+    paths: &MemoryPaths,
+    expected_route: RepositoryWriteRoute,
+    authorization: &AuthorizedRepositoryProjectionBatch,
+    projections: &[OwnedRepositoryProjection],
+) -> Result<Vec<PathBuf>> {
+    let borrowed = borrowed_repository_projections(projections);
+    repository_io::create_repository_batch(
+        &paths.project_root,
+        expected_route,
+        &authorization.policy_context_digest,
+        &authorization.capability,
+        &borrowed,
+    )
+}
+
+pub(super) fn explicit_repository_provenance(
+    content_class: RepositoryContentClass,
+    source_identity: &str,
+) -> ProvenanceAssessment<'_> {
+    let valid = !source_identity.trim().is_empty();
+    ProvenanceAssessment {
+        present: valid,
+        evidence_valid: valid,
+        content_class,
+        source_identity: valid.then_some(source_identity),
+    }
+}
+
+pub(super) fn canonical_write_projections(
+    paths: &MemoryPaths,
+    writes: &[CanonicalFileWrite],
+) -> Result<Vec<OwnedRepositoryProjection>> {
+    let mut projections = Vec::with_capacity(writes.len() * 2);
+    for write in writes {
+        projections.push(OwnedRepositoryProjection::from_absolute(
+            paths,
+            &write.path,
+            write.markdown.as_bytes(),
+            write.expected_existing_hash.as_deref(),
+        )?);
+        if let Some(expected_revision) = write.expected_existing_hash.as_deref() {
+            let existing_bytes = fs::read(&write.path)
+                .context("failed to snapshot existing repository projection bytes")?;
+            projections.push(OwnedRepositoryProjection::existing_from_absolute(
+                paths,
+                &write.path,
+                &existing_bytes,
+                expected_revision,
+            )?);
+        }
+    }
+    Ok(projections)
 }
 
 #[derive(Clone, Copy)]
