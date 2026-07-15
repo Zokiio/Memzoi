@@ -2,7 +2,10 @@ use std::fs;
 
 use super::*;
 use crate::repository_io;
-use crate::{MemoryLane, MemoryStatus, MemoryType, ProposalStatus, ScopeKind, Visibility};
+use crate::{
+    MemoryLane, MemoryStatus, MemoryType, ProposalStatus, ScopeKind, SessionEndCandidate,
+    SessionEndCandidateStatus, Visibility,
+};
 use tempfile::TempDir;
 
 #[cfg(unix)]
@@ -678,6 +681,64 @@ fn show_proposal_reports_missing_ids() -> anyhow::Result<()> {
         "missing proposal show error should include the requested id: {error:#}"
     );
 
+    Ok(())
+}
+
+#[test]
+fn blocked_session_end_result_redacts_task_and_every_candidate_title() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let task_sentinel = "ghp_SESSION_END_TASK_SENTINEL_0123456789abcdefghijklmnop";
+    let local_title_sentinel = "BLOCKED-LOCAL-TITLE-SENTINEL";
+    let repo_title_sentinel = "BLOCKED-REPO-TITLE-SENTINEL";
+    let result = service.promote_session_end(
+        "agent:red-tests",
+        SessionEndDocument {
+            task: task_sentinel.to_owned(),
+            candidates: vec![
+                SessionEndCandidate {
+                    destination: MemoryDestination::Local,
+                    memory_type: MemoryType::Fact,
+                    lane: MemoryLane::Semantic,
+                    title: local_title_sentinel.to_owned(),
+                    body: "This candidate must not be written when the repo candidate blocks."
+                        .to_owned(),
+                    sensitivity: OkfProposalSensitivity::RepoSafe,
+                    content_class: RepositoryContentClass::GeneralRepoKnowledge,
+                    reason: None,
+                    scope: None,
+                    tags: Vec::new(),
+                },
+                SessionEndCandidate {
+                    destination: MemoryDestination::Repo,
+                    memory_type: MemoryType::Fact,
+                    lane: MemoryLane::Semantic,
+                    title: repo_title_sentinel.to_owned(),
+                    body: "This otherwise safe candidate must block because of the task."
+                        .to_owned(),
+                    sensitivity: OkfProposalSensitivity::RepoSafe,
+                    content_class: RepositoryContentClass::GeneralRepoKnowledge,
+                    reason: None,
+                    scope: None,
+                    tags: Vec::new(),
+                },
+            ],
+        },
+    )?;
+
+    assert_eq!(result.task, "Redacted blocked session-end task");
+    assert!(
+        result
+            .candidates
+            .iter()
+            .all(|candidate| candidate.status == SessionEndCandidateStatus::Blocked)
+    );
+    let rendered = serde_json::to_string(&result)?;
+    for sentinel in [task_sentinel, local_title_sentinel, repo_title_sentinel] {
+        assert!(
+            !rendered.contains(sentinel),
+            "blocked result leaked {sentinel}: {rendered}"
+        );
+    }
     Ok(())
 }
 

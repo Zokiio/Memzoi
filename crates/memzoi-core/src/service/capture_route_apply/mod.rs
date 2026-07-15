@@ -185,6 +185,12 @@ impl<'a> CaptureRouteApply<'a> {
             let CaptureAction::CreateProposal { proposal_id, .. } = &candidate.action else {
                 continue;
             };
+            validate_capture_proposal_policy(
+                &candidate.memory.scope,
+                candidate.classification.destination,
+                candidate.classification.sensitivity,
+                candidate.classification.content_class,
+            )?;
             let provenance = capture_provenance(&plan, &review, decision, candidate, actor);
             let draft = okf::OkfCreateProposalDraft {
                 proposal_id: proposal_id.clone(),
@@ -313,7 +319,14 @@ impl<'a> CaptureRouteApply<'a> {
                         .context("capture repository authorization disappeared")?,
                     &repo_projections,
                 )?;
-                install_capture_apply_proposals(self.paths, journal)?;
+                install_capture_apply_proposals(
+                    self.paths,
+                    journal,
+                    repo_authorization
+                        .as_ref()
+                        .context("capture repository authorization disappeared")?,
+                    &repo_projections,
+                )?;
             }
             for (candidate_id, proposal) in &planned {
                 writes.push(CaptureWrite::ProposalFile {
@@ -377,6 +390,42 @@ impl<'a> CaptureRouteApply<'a> {
             writes,
         })
     }
+}
+
+fn validate_capture_proposal_policy(
+    scope: &crate::CaptureMemoryScope,
+    destination: MemoryDestination,
+    sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
+) -> Result<()> {
+    if destination != MemoryDestination::Repo {
+        bail!("capture repository proposals require the repo destination");
+    }
+    validate_capture_proposal_projection_values(
+        scope.kind,
+        scope.id.as_deref(),
+        sensitivity,
+        content_class,
+    )
+}
+
+fn validate_capture_proposal_projection_values(
+    kind: ScopeKind,
+    id: Option<&str>,
+    sensitivity: OkfProposalSensitivity,
+    content_class: RepositoryContentClass,
+) -> Result<()> {
+    if kind != ScopeKind::Repo || id.is_some() {
+        bail!("capture repository proposals require repo scope without a scope id");
+    }
+    if sensitivity != OkfProposalSensitivity::RepoSafe
+        || content_class != RepositoryContentClass::GeneralRepoKnowledge
+    {
+        bail!(
+            "capture repository proposals require repo-safe sensitivity and general_repo_knowledge content"
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn recover_on_open(paths: &MemoryPaths, conn: &Connection) -> Result<()> {

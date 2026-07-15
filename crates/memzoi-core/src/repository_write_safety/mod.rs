@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 pub const REPOSITORY_WRITE_SAFETY_SCHEMA: &str = "memzoi/repository-write-safety-v1";
 pub const REPOSITORY_WRITE_SAFETY_VERSION: &str = "1";
 pub const REPOSITORY_WRITE_DETECTOR_POLICY_VERSION: &str = "1";
+pub const REPOSITORY_WRITE_MAX_BLOB_BYTES: usize = detectors::MAX_FIELD_BYTES;
 
 /// Capability minted only after the shared repository-write policy authorizes an exact batch.
 ///

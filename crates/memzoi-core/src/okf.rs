@@ -311,20 +311,6 @@ fn create_okf_proposal_file_with_writer(
     Ok(path.to_path_buf())
 }
 
-pub(crate) fn cleanup_okf_proposal_files(paths: &[PathBuf]) -> Result<()> {
-    for path in paths.iter().rev() {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to remove proposal {}", path.display()));
-            }
-        }
-    }
-    Ok(())
-}
-
 fn validate_okf_create_proposal_draft(draft: &OkfCreateProposalDraft) -> Result<()> {
     validate_proposal_identifier(draft.proposal_id.trim())?;
     if draft.title.trim().is_empty() {

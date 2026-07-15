@@ -20,6 +20,8 @@ use super::{
     safe_files::{ensure_safe_directory, remove_staged_file, sync_directory},
 };
 
+pub(super) use crate::repository_io::RepositoryFileIdentity;
+
 #[derive(Debug)]
 pub(super) struct RepositorySafetyValue {
     pub(super) location: String,
@@ -39,6 +41,15 @@ pub(super) struct OwnedRepositoryProjection {
 pub(super) struct AuthorizedRepositoryProjectionBatch {
     pub(super) capability: AuthorizedRepositoryWriteBatch,
     pub(super) policy_context_digest: [u8; 32],
+}
+
+#[derive(Debug)]
+pub(super) struct CreatedRepositoryFile(repository_io::CreatedRepositoryFile);
+
+impl CreatedRepositoryFile {
+    pub(super) fn path(&self) -> &Path {
+        &self.0.path
+    }
 }
 
 impl AuthorizedRepositoryProjectionBatch {
@@ -262,6 +273,7 @@ pub(super) fn authorize_repository_projection_batch(
     values: &[RepositorySafetyValue],
     projections: &[OwnedRepositoryProjection],
 ) -> Result<AuthorizedRepositoryProjectionBatch> {
+    let project_identity = repository_io::repository_project_identity(&paths.project_root)?;
     let fields = values
         .iter()
         .map(|value| SafetyField {
@@ -278,7 +290,7 @@ pub(super) fn authorize_repository_projection_batch(
         scope: RepositoryScope {
             kind: scope_kind,
             id: scope_id,
-            current_project_identity: paths.project_root.as_os_str().as_encoded_bytes(),
+            current_project_identity: &project_identity,
             configured_project_id: None,
         },
         visibility,
@@ -301,7 +313,7 @@ pub(super) fn create_authorized_repository_batch(
     expected_route: RepositoryWriteRoute,
     authorization: &AuthorizedRepositoryProjectionBatch,
     projections: &[OwnedRepositoryProjection],
-) -> Result<Vec<PathBuf>> {
+) -> Result<Vec<CreatedRepositoryFile>> {
     let borrowed = borrowed_repository_projections(projections);
     repository_io::create_repository_batch(
         &paths.project_root,
@@ -309,6 +321,23 @@ pub(super) fn create_authorized_repository_batch(
         &authorization.policy_context_digest,
         &authorization.capability,
         &borrowed,
+    )
+    .map(|created| created.into_iter().map(CreatedRepositoryFile).collect())
+}
+
+pub(super) fn remove_created_repository_file(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    created: &CreatedRepositoryFile,
+) -> Result<()> {
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    repository_io::remove_created_repository_file(
+        &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+        &created.0,
     )
 }
 
@@ -462,34 +491,70 @@ pub(super) fn install_verified_staged_file_no_replace(
     staged: &Path,
     destination: &Path,
     expected_hash: &str,
-) -> Result<()> {
+) -> Result<repository_io::RepositoryFileIdentity> {
+    install_verified_staged_projection_no_replace(
+        paths,
+        mutation,
+        staged,
+        destination,
+        expected_hash,
+        RepositoryProjectionPurpose::Write,
+    )
+}
+
+fn install_verified_staged_projection_no_replace(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    staged: &Path,
+    destination: &Path,
+    expected_hash: &str,
+    expected_purpose: RepositoryProjectionPurpose,
+) -> Result<repository_io::RepositoryFileIdentity> {
     let relative = destination
         .strip_prefix(&paths.project_root)
         .context("repository install destination is outside the project root")?;
-    let matches = mutation
-        .projections
+    let projection_index = select_authorized_projection_index(
+        mutation.projections,
+        relative,
+        expected_hash,
+        expected_purpose,
+    )?;
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    repository_io::install_transaction_file_no_replace(
+        &paths.project_root,
+        mutation.route,
+        expected_purpose,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+        projection_index,
+        &repository_transaction_root(paths),
+        staged,
+    )
+}
+
+fn select_authorized_projection_index(
+    projections: &[OwnedRepositoryProjection],
+    relative_path: &Path,
+    expected_hash: &str,
+    expected_purpose: RepositoryProjectionPurpose,
+) -> Result<usize> {
+    let matches = projections
         .iter()
         .enumerate()
         .filter(|(_, projection)| {
-            projection.relative_path == relative
+            projection.purpose == expected_purpose
+                && projection.relative_path == relative_path
                 && blake3::hash(&projection.bytes).to_hex().as_str() == expected_hash
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     let [projection_index] = matches.as_slice() else {
-        bail!("repository install must select exactly one authorized path and byte projection");
+        bail!(
+            "repository install must select exactly one authorized path, byte, and purpose projection"
+        );
     };
-    let borrowed = borrowed_repository_projections(mutation.projections);
-    repository_io::install_transaction_file_no_replace(
-        &paths.project_root,
-        mutation.route,
-        &mutation.authorization.policy_context_digest,
-        &mutation.authorization.capability,
-        &borrowed,
-        *projection_index,
-        &repository_transaction_root(paths),
-        staged,
-    )
+    Ok(*projection_index)
 }
 
 pub(super) fn restore_verified_staged_file_no_replace(
@@ -499,7 +564,14 @@ pub(super) fn restore_verified_staged_file_no_replace(
     destination: &Path,
     expected_hash: &str,
 ) -> Result<()> {
-    install_verified_staged_file_no_replace(paths, mutation, staged, destination, expected_hash)?;
+    install_verified_staged_projection_no_replace(
+        paths,
+        mutation,
+        staged,
+        destination,
+        expected_hash,
+        RepositoryProjectionPurpose::Existing,
+    )?;
     remove_staged_file(staged).with_context(|| {
         format!(
             "failed to remove restored transaction source {}",
@@ -514,6 +586,24 @@ pub(super) fn backup_repository_file_to_transaction(
     source: &Path,
     backup: &Path,
     expected_hash: &str,
+) -> Result<()> {
+    backup_repository_file_to_transaction_with_identity(
+        paths,
+        mutation,
+        source,
+        backup,
+        expected_hash,
+        None,
+    )
+}
+
+pub(super) fn backup_repository_file_to_transaction_with_identity(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    source: &Path,
+    backup: &Path,
+    expected_hash: &str,
+    expected_identity: Option<RepositoryFileIdentity>,
 ) -> Result<()> {
     let relative = source
         .strip_prefix(&paths.project_root)
@@ -540,6 +630,7 @@ pub(super) fn backup_repository_file_to_transaction(
         &mutation.authorization.capability,
         &borrowed,
         *projection_index,
+        expected_identity,
         &repository_transaction_root(paths),
         backup,
     )
@@ -550,6 +641,7 @@ pub(super) fn remove_installed_repository_file(
     mutation: RepositoryMutationAuthorization<'_>,
     path: &Path,
     expected_hash: &str,
+    expected_identity: RepositoryFileIdentity,
 ) -> Result<()> {
     let relative = path
         .strip_prefix(&paths.project_root)
@@ -576,5 +668,53 @@ pub(super) fn remove_installed_repository_file(
         &mutation.authorization.capability,
         &borrowed,
         *projection_index,
+        expected_identity,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projection_selection_distinguishes_identical_write_and_existing_bytes() {
+        let relative_path = Path::new(".memzoi/records/identical.md");
+        let bytes = b"identical canonical bytes";
+        let hash = blake3::hash(bytes).to_hex().to_string();
+        let projections = vec![
+            OwnedRepositoryProjection {
+                relative_path: relative_path.to_path_buf(),
+                bytes: bytes.to_vec(),
+                target_revision: None,
+                purpose: RepositoryProjectionPurpose::Write,
+            },
+            OwnedRepositoryProjection {
+                relative_path: relative_path.to_path_buf(),
+                bytes: bytes.to_vec(),
+                target_revision: Some(hash.clone()),
+                purpose: RepositoryProjectionPurpose::Existing,
+            },
+        ];
+
+        assert_eq!(
+            select_authorized_projection_index(
+                &projections,
+                relative_path,
+                &hash,
+                RepositoryProjectionPurpose::Write,
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            select_authorized_projection_index(
+                &projections,
+                relative_path,
+                &hash,
+                RepositoryProjectionPurpose::Existing,
+            )
+            .unwrap(),
+            1
+        );
+    }
 }

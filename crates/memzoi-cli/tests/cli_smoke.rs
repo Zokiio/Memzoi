@@ -140,6 +140,141 @@ fn safety_file_scan_uses_stable_exit_codes_and_redacted_json() {
 }
 
 #[test]
+fn safety_file_scan_rejects_parent_components_before_reading() {
+    let temp = tempfile::tempdir().expect("temp repo");
+    let sentinel = "PARENT-COMPONENT-TARGET-SENTINEL";
+    write_pending_proposal_file(
+        temp.path(),
+        "parent-target.md",
+        safety_record_markdown(sentinel, Some("general_repo_knowledge")),
+    );
+    fs::create_dir_all(temp.path().join(".memzoi/records")).expect("records directory");
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args([
+            "safety",
+            "scan",
+            "--file",
+            ".memzoi/records/../../.memzoi/proposals/pending/parent-target.md",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("unsafe path component")
+                .and(predicate::str::contains(sentinel).not()),
+        )
+        .stdout(predicate::str::contains(sentinel).not());
+}
+
+#[cfg(unix)]
+#[test]
+fn safety_file_scan_rejects_symlinked_ancestors_before_reading_outside() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temp repo");
+    let outside = tempfile::tempdir().expect("outside target");
+    let sentinel = "OUTSIDE-SYMLINK-TARGET-SENTINEL";
+    write_pending_proposal_file(
+        outside.path(),
+        "outside.md",
+        safety_record_markdown(sentinel, Some("general_repo_knowledge")),
+    );
+    let records = temp.path().join(".memzoi/records");
+    fs::create_dir_all(&records).expect("records directory");
+    symlink(
+        outside.path().join(".memzoi/proposals/pending"),
+        records.join("linked"),
+    )
+    .expect("symlink managed ancestor outside");
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args([
+            "safety",
+            "scan",
+            "--file",
+            ".memzoi/records/linked/outside.md",
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(sentinel).not())
+        .stdout(
+            predicate::str::contains("\"allowed\": false")
+                .and(predicate::str::contains("unsafe_output_path"))
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains(sentinel).not()),
+        );
+}
+
+#[test]
+fn safety_scans_block_oversized_worktree_staged_and_range_blobs() {
+    use std::process::Command as StdCommand;
+
+    let temp = tempfile::tempdir().expect("temp repo");
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "test@example.com"][..],
+        &["config", "user.name", "Memzoi Test"][..],
+        &["commit", "--allow-empty", "--quiet", "-m", "base"][..],
+    ] {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .status()
+                .expect("run git setup")
+                .success()
+        );
+    }
+    let relative = ".memzoi/proposals/pending/oversized.md";
+    write_pending_proposal_file(temp.path(), "oversized.md", "x".repeat(512 * 1024 + 1));
+
+    let mut file = memzoi();
+    file.current_dir(temp.path())
+        .args(["safety", "scan", "--file", relative, "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("candidate_too_large"));
+
+    assert!(
+        StdCommand::new("git")
+            .args(["add", relative])
+            .current_dir(temp.path())
+            .status()
+            .expect("stage oversized fixture")
+            .success()
+    );
+    let mut staged = memzoi();
+    staged
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--staged", "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("candidate_too_large"));
+
+    assert!(
+        StdCommand::new("git")
+            .args(["commit", "--quiet", "-m", "oversized fixture"])
+            .current_dir(temp.path())
+            .status()
+            .expect("commit oversized fixture")
+            .success()
+    );
+    let mut range = memzoi();
+    range
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--range", "HEAD^...HEAD", "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("candidate_too_large"));
+}
+
+#[test]
 fn safety_scan_redacts_a_blocked_repository_path() {
     let temp = tempfile::tempdir().expect("temp repo");
     let records = temp.path().join(".memzoi/records");
@@ -162,6 +297,35 @@ fn safety_scan_redacts_a_blocked_repository_path() {
             predicate::str::contains("credential_token")
                 .and(predicate::str::contains("<redacted-path:"))
                 .and(predicate::str::contains(sentinel).not()),
+        );
+}
+
+#[cfg(unix)]
+#[test]
+fn safety_scan_redacts_a_real_utf8_path_equal_to_the_non_utf8_sentinel() {
+    let temp = tempfile::tempdir().expect("temp repo");
+    let relative = ".memzoi/memory/<non-utf8-git-path>";
+    let path = temp.path().join(relative);
+    fs::create_dir_all(path.parent().expect("memory parent")).expect("memory directory");
+    fs::write(
+        &path,
+        safety_record_markdown(
+            "ghp_UTF8_PATH_SENTINEL_0123456789abcdefghijklmnop",
+            Some("general_repo_knowledge"),
+        ),
+    )
+    .expect("UTF-8 sentinel-looking path fixture");
+
+    let mut command = memzoi();
+    command
+        .current_dir(temp.path())
+        .args(["safety", "scan", "--file", relative, "--json"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicate::str::contains("\"allowed\": false")
+                .and(predicate::str::contains("<redacted-path:"))
+                .and(predicate::str::contains("<non-utf8-git-path>").not()),
         );
 }
 
@@ -469,7 +633,9 @@ fn staged_safety_scan_blocks_non_utf8_git_paths_with_exit_two() {
         .stdout(
             predicate::str::contains("\"allowed\": false")
                 .and(predicate::str::contains("invalid_encoding"))
-                .and(predicate::str::contains("<non-utf8-git-path>"))
+                .and(predicate::str::contains(
+                    "\"path\": \".memzoi/memory/<non-utf8-git-path>\"",
+                ))
                 .and(predicate::str::contains("invalid-").not()),
         );
 }
@@ -6587,13 +6753,13 @@ fn session_end_validates_whole_batch_before_writing_anything() {
     let input_path = repo.join("bad-session-end.yml");
     fs::write(
         &input_path,
-        r#"task: "Validate first"
+        r#"task: "BLOCKED-SESSION-END-TASK-SENTINEL"
 candidates:
   - destination: local
     type: preference
     lane: semantic
-    title: Should not write local first
-    body: This local candidate should not be written when the batch is invalid.
+    title: BLOCKED-LOCAL-TITLE-SENTINEL
+    body: BLOCKED-LOCAL-BODY-SENTINEL
   - destination: repo
     type: decision
     lane: semantic
@@ -6651,6 +6817,39 @@ candidates:
                 .is_none(),
         "blocked session-end batch must not write proposal files"
     );
+}
+
+#[test]
+fn session_end_task_credentials_are_blocked_and_redacted_in_cli_json() {
+    let repo = initialized_temp_repo();
+    let input_path = repo.path().join("credential-task-session-end.yml");
+    let task_sentinel = "ghp_SESSION_END_TASK_SENTINEL_0123456789abcdefghijklmnop";
+    let input = format!(
+        "task: {task_sentinel}\ncandidates:\n  - destination: repo\n    type: fact\n    lane: semantic\n    title: Harmless repository candidate\n    body: General repository knowledge.\n    sensitivity: repo-safe\n    content_class: general_repo_knowledge\n"
+    );
+    let mut input_file = fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(&input_path)
+        .expect("create credential task session-end input");
+    let mut input_bytes = input.as_bytes();
+    std::io::copy(&mut input_bytes, &mut input_file)
+        .expect("write credential task session-end input");
+    drop(input_file);
+
+    let result = run_json_command(
+        repo.path(),
+        &[
+            "session-end",
+            "--from-file",
+            input_path.to_str().expect("session-end path utf-8"),
+            "--json",
+        ],
+    );
+    assert_json_string_field(&result, &["task"], "Redacted blocked session-end task");
+    assert_json_string_field(&result["candidates"][0], &["status"], "blocked");
+    let rendered = serde_json::to_string(&result).expect("serialize blocked session-end result");
+    assert!(!rendered.contains(task_sentinel), "{rendered}");
 }
 
 #[test]
@@ -6778,6 +6977,10 @@ candidates:
             || stderr.contains("failed to inspect pending proposal")
             || stderr.contains("pending proposal root ancestor must be a real directory"),
         "session-end should fail clearly on proposal file write errors: {stderr}"
+    );
+    assert!(
+        !stderr.contains("created session-end proposal batch does not match"),
+        "a create failure must not run rollback for an empty created set: {stderr}"
     );
     let local = run_json_command(repo, &["local", "list", "--json"]);
     assert!(

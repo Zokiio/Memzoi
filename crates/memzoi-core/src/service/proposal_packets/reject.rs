@@ -219,35 +219,38 @@ impl MemoryService {
                     pending_hash: &snapshot.expected_hash,
                     resolved_path: &resolved_path,
                     resolved_hash: &resolved_hash,
-                    resolved_installed: false,
+                    resolved_identity: None,
                     resolved_temp: &resolved_temp,
                 }),
                 "rejection captured-byte rollback",
             );
         }
-        if let Err(error) = install_verified_staged_file_no_replace(
+        let resolved_identity = match install_verified_staged_file_no_replace(
             &self.paths,
             mutation,
             &resolved_temp,
             &resolved_path,
             &resolved_hash,
         ) {
-            return attach_cleanup_error(
-                error,
-                rollback_rejected_file_proposal(RejectedFileProposalRollback {
-                    paths: &self.paths,
-                    mutation,
-                    pending_path: proposal_path,
-                    pending_backup: &pending_backup,
-                    pending_hash: &snapshot.expected_hash,
-                    resolved_path: &resolved_path,
-                    resolved_hash: &resolved_hash,
-                    resolved_installed: false,
-                    resolved_temp: &resolved_temp,
-                }),
-                "rejection install rollback",
-            );
-        }
+            Ok(identity) => identity,
+            Err(error) => {
+                return attach_cleanup_error(
+                    error,
+                    rollback_rejected_file_proposal(RejectedFileProposalRollback {
+                        paths: &self.paths,
+                        mutation,
+                        pending_path: proposal_path,
+                        pending_backup: &pending_backup,
+                        pending_hash: &snapshot.expected_hash,
+                        resolved_path: &resolved_path,
+                        resolved_hash: &resolved_hash,
+                        resolved_identity: None,
+                        resolved_temp: &resolved_temp,
+                    }),
+                    "rejection install rollback",
+                );
+            }
+        };
         if let Err(error) = before_finalize(&pending_backup)
             .context("proposal-file rejection finalization was interrupted")
         {
@@ -261,7 +264,7 @@ impl MemoryService {
                     pending_hash: &snapshot.expected_hash,
                     resolved_path: &resolved_path,
                     resolved_hash: &resolved_hash,
-                    resolved_installed: true,
+                    resolved_identity: Some(resolved_identity),
                     resolved_temp: &resolved_temp,
                 }),
                 "rejection finalization rollback",
@@ -283,7 +286,7 @@ impl MemoryService {
                     pending_hash: &snapshot.expected_hash,
                     resolved_path: &resolved_path,
                     resolved_hash: &resolved_hash,
-                    resolved_installed: true,
+                    resolved_identity: Some(resolved_identity),
                     resolved_temp: &resolved_temp,
                 }),
                 "rejection cleanup rollback",

@@ -10,7 +10,7 @@ pub(super) struct FileResolutionRollback<'a> {
     pub(super) writes: &'a mut [StagedCanonicalFileWrite],
     pub(super) resolved_path: &'a Path,
     pub(super) resolved_hash: &'a str,
-    pub(super) resolved_installed: bool,
+    pub(super) resolved_identity: Option<RepositoryFileIdentity>,
     pub(super) resolved_temp: &'a Path,
 }
 
@@ -22,7 +22,7 @@ pub(super) struct RejectedFileProposalRollback<'a> {
     pub(super) pending_hash: &'a str,
     pub(super) resolved_path: &'a Path,
     pub(super) resolved_hash: &'a str,
-    pub(super) resolved_installed: bool,
+    pub(super) resolved_identity: Option<RepositoryFileIdentity>,
     pub(super) resolved_temp: &'a Path,
 }
 
@@ -155,7 +155,7 @@ pub(super) fn cleanup_staged_file_resolution(
 
 pub(super) fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> Result<()> {
     let mut errors = Vec::new();
-    if rollback.resolved_installed {
+    if let Some(resolved_identity) = rollback.resolved_identity {
         record_cleanup_result(
             &mut errors,
             remove_installed_repository_file(
@@ -163,6 +163,7 @@ pub(super) fn rollback_file_resolution(rollback: FileResolutionRollback<'_>) -> 
                 rollback.mutation,
                 rollback.resolved_path,
                 rollback.resolved_hash,
+                resolved_identity,
             ),
             "remove resolved packet".to_owned(),
         );
@@ -207,7 +208,7 @@ pub(super) fn rollback_rejected_file_proposal(
         writes: &mut [],
         resolved_path: rollback.resolved_path,
         resolved_hash: rollback.resolved_hash,
-        resolved_installed: rollback.resolved_installed,
+        resolved_identity: rollback.resolved_identity,
         resolved_temp: rollback.resolved_temp,
     })
 }

@@ -16,22 +16,27 @@ use crate::{
 };
 
 use super::super::{
-    proposal_packets::{ProposalPacketLifecycle, prepare_pending_proposal_root},
+    proposal_packets::ProposalPacketLifecycle,
     repository_mutation::{
-        AuthorizedRepositoryProjectionBatch, OwnedRepositoryProjection,
-        authorize_repository_projection_batch, borrowed_repository_projections,
-        explicit_repository_provenance, okf_proposal_safety_values, repository_transaction_path,
+        AuthorizedRepositoryProjectionBatch, OwnedRepositoryProjection, RepositoryFileIdentity,
+        RepositoryMutationAuthorization, authorize_repository_projection_batch,
+        backup_repository_file_to_transaction_with_identity, borrowed_repository_projections,
+        explicit_repository_provenance, install_verified_staged_file_no_replace,
+        okf_proposal_safety_values, repository_transaction_path, repository_transaction_root,
         stage_authorized_file,
     },
-    safe_files::{ensure_path_absent, remove_staged_file, sync_directory},
+    safe_files::{ensure_safe_directory, remove_staged_file, sync_directory},
 };
 
 pub(super) const CAPTURE_APPLY_JOURNAL_SCHEMA: &str = "memzoi/capture-apply-journal-v2";
 const CAPTURE_APPLY_COMMIT_SCHEMA: &str = "memzoi/capture-apply-commit-v2";
+const CAPTURE_APPLY_OWNERSHIP_SCHEMA: &str = "memzoi/capture-apply-ownership-v2";
 const CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v2.json";
+const CAPTURE_APPLY_OWNERSHIP_FILE: &str = "capture-apply-ownership-v2.json";
 const LEGACY_CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v1.json";
 const CAPTURE_APPLY_COMMIT_EVENT: &str = "capture.apply_committed";
 const MAX_CAPTURE_APPLY_JOURNAL_BYTES: u64 = 256 * 1024;
+const MAX_CAPTURE_APPLY_OWNERSHIP_BYTES: u64 = 64 * 1024;
 const MAX_CAPTURE_APPLY_JOURNAL_ENTRIES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +90,24 @@ struct CaptureApplyCommitMarker {
     plan_id: String,
     review_id: String,
     proposal_ids: Vec<String>,
+    journal_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureApplyOwnershipManifest {
+    schema: String,
+    journal_digest: String,
+    entries: Vec<CaptureApplyOwnershipEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureApplyOwnershipEntry {
+    proposal_id: String,
+    content_hash: String,
+    device: u64,
+    inode: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +123,52 @@ struct LoadedCaptureApplyJournal {
     content_hash: String,
 }
 
+struct LoadedCaptureApplyOwnership {
+    manifest: CaptureApplyOwnershipManifest,
+    content_bytes: u64,
+    content_hash: String,
+}
+
+struct CaptureRecoveryAuthorization {
+    authorization: AuthorizedRepositoryProjectionBatch,
+    projections: Vec<OwnedRepositoryProjection>,
+}
+
+#[cfg(test)]
+type AfterCaptureRecoveryBackupHook = Box<dyn FnOnce() -> Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_CAPTURE_RECOVERY_BACKUP_HOOK: std::cell::RefCell<
+        Option<AfterCaptureRecoveryBackupHook>,
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(super) fn inject_after_capture_recovery_backup_hook(
+    hook: impl FnOnce() -> Result<()> + 'static,
+) {
+    AFTER_CAPTURE_RECOVERY_BACKUP_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_capture_recovery_backup_hook() -> Result<()> {
+    AFTER_CAPTURE_RECOVERY_BACKUP_HOOK.with(|slot| {
+        let hook = slot.borrow_mut().take();
+        hook.map_or(Ok(()), |hook| hook())
+    })
+}
+
+fn capture_project_context_digest(paths: &MemoryPaths) -> Result<String> {
+    Ok(blake3::hash(&repository_io::repository_project_identity(
+        &paths.project_root,
+    )?)
+    .to_hex()
+    .to_string())
+}
+
 pub(super) fn build_capture_apply_journal(
     paths: &MemoryPaths,
     plan: &CapturePlan,
@@ -113,9 +182,7 @@ pub(super) fn build_capture_apply_journal(
         detector_policy_version: crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.to_owned(),
         route: RepositoryWriteRoute::CaptureApply.as_str().to_owned(),
         authorization_digest: authorization.digest(),
-        project_context_digest: blake3::hash(paths.project_root.as_os_str().as_encoded_bytes())
-            .to_hex()
-            .to_string(),
+        project_context_digest: capture_project_context_digest(paths)?,
         journal_id: Uuid::now_v7().to_string(),
         plan_id: plan.plan_id.clone(),
         review_id: review.review_id.clone(),
@@ -178,7 +245,185 @@ fn capture_apply_commit_event_id(journal: &CaptureApplyJournal) -> String {
     format!("evt_capture_apply_{}", journal.journal_id)
 }
 
-fn capture_apply_commit_marker(journal: &CaptureApplyJournal) -> CaptureApplyCommitMarker {
+fn capture_apply_journal_bytes(journal: &CaptureApplyJournal) -> Result<Vec<u8>> {
+    let mut bytes =
+        serde_json::to_vec_pretty(journal).context("failed to serialize capture apply journal")?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_CAPTURE_APPLY_JOURNAL_BYTES {
+        bail!("capture apply journal is too large");
+    }
+    Ok(bytes)
+}
+
+fn capture_apply_journal_digest(journal: &CaptureApplyJournal) -> Result<String> {
+    Ok(blake3::hash(&capture_apply_journal_bytes(journal)?)
+        .to_hex()
+        .to_string())
+}
+
+pub(super) fn capture_apply_ownership_path(paths: &MemoryPaths) -> PathBuf {
+    paths.runtime_dir.join(CAPTURE_APPLY_OWNERSHIP_FILE)
+}
+
+fn capture_apply_ownership_exists(paths: &MemoryPaths) -> Result<bool> {
+    match fs::symlink_metadata(capture_apply_ownership_path(paths)) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("capture apply ownership must be a regular file")
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("failed to inspect capture apply ownership"),
+    }
+}
+
+fn validate_capture_apply_ownership(
+    manifest: &CaptureApplyOwnershipManifest,
+    journal: &CaptureApplyJournal,
+    expected_journal_digest: &str,
+) -> Result<()> {
+    if manifest.schema != CAPTURE_APPLY_OWNERSHIP_SCHEMA {
+        bail!("unsupported capture apply ownership schema");
+    }
+    validate_lower_hex_digest(&manifest.journal_digest, "ownership journal digest")?;
+    if manifest.journal_digest != expected_journal_digest {
+        bail!(
+            "capture apply ownership does not match the exact journal; refusing recovery mutation"
+        );
+    }
+    if manifest.entries.len() > journal.entries.len() {
+        bail!("capture apply ownership contains too many entries");
+    }
+    let mut proposal_ids = BTreeSet::new();
+    for ownership in &manifest.entries {
+        validate_capture_apply_proposal_id(&ownership.proposal_id)?;
+        validate_lower_hex_digest(&ownership.content_hash, "ownership content hash")?;
+        if !proposal_ids.insert(ownership.proposal_id.as_str()) {
+            bail!("capture apply ownership contains a duplicate proposal id");
+        }
+        if !journal.entries.iter().any(|entry| {
+            entry.proposal_id == ownership.proposal_id
+                && entry.content_hash == ownership.content_hash
+        }) {
+            bail!("capture apply ownership entry does not match its exact journal entry");
+        }
+    }
+    Ok(())
+}
+
+fn load_capture_apply_ownership(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    expected_journal_digest: &str,
+) -> Result<Option<LoadedCaptureApplyOwnership>> {
+    let path = capture_apply_ownership_path(paths);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("capture apply ownership must be a regular file")
+        }
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("failed to inspect capture apply ownership"),
+    };
+    if metadata.len() == 0 || metadata.len() > MAX_CAPTURE_APPLY_OWNERSHIP_BYTES {
+        bail!("capture apply ownership has an invalid size");
+    }
+    let bytes = fs::read(&path).context("failed to read capture apply ownership")?;
+    if bytes.len() as u64 != metadata.len() {
+        bail!("capture apply ownership changed while it was being read");
+    }
+    let manifest: CaptureApplyOwnershipManifest =
+        serde_json::from_slice(&bytes).context("failed to parse capture apply ownership")?;
+    validate_capture_apply_ownership(&manifest, journal, expected_journal_digest)?;
+    Ok(Some(LoadedCaptureApplyOwnership {
+        manifest,
+        content_bytes: bytes.len() as u64,
+        content_hash: blake3::hash(&bytes).to_hex().to_string(),
+    }))
+}
+
+fn write_capture_apply_ownership(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    manifest: &CaptureApplyOwnershipManifest,
+) -> Result<()> {
+    let journal_digest = capture_apply_journal_digest(journal)?;
+    validate_capture_apply_ownership(manifest, journal, &journal_digest)?;
+    let mut bytes = serde_json::to_vec_pretty(manifest)
+        .context("failed to serialize capture apply ownership")?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_CAPTURE_APPLY_OWNERSHIP_BYTES {
+        bail!("capture apply ownership is too large");
+    }
+    let temp_path = paths.runtime_dir.join(format!(
+        ".{CAPTURE_APPLY_OWNERSHIP_FILE}.{}.tmp",
+        Uuid::now_v7()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp_path)
+        .context("failed to stage capture apply ownership")?;
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = remove_staged_file(&temp_path);
+        return Err(error).context("failed to persist capture apply ownership");
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&temp_path, capture_apply_ownership_path(paths)) {
+        let _ = remove_staged_file(&temp_path);
+        return Err(error).context("failed to atomically install capture apply ownership");
+    }
+    sync_directory(&paths.runtime_dir).context("failed to sync capture apply ownership")
+}
+
+fn record_capture_apply_install_ownership(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    entry: &CaptureApplyJournalEntry,
+    identity: RepositoryFileIdentity,
+) -> Result<()> {
+    let journal_digest = capture_apply_journal_digest(journal)?;
+    let mut manifest = load_capture_apply_ownership(paths, journal, &journal_digest)?
+        .map(|loaded| loaded.manifest)
+        .unwrap_or(CaptureApplyOwnershipManifest {
+            schema: CAPTURE_APPLY_OWNERSHIP_SCHEMA.to_owned(),
+            journal_digest,
+            entries: Vec::new(),
+        });
+    let ownership = CaptureApplyOwnershipEntry {
+        proposal_id: entry.proposal_id.clone(),
+        content_hash: entry.content_hash.clone(),
+        device: identity.device,
+        inode: identity.inode,
+    };
+    if let Some(existing) = manifest
+        .entries
+        .iter_mut()
+        .find(|existing| existing.proposal_id == entry.proposal_id)
+    {
+        *existing = ownership;
+    } else {
+        manifest.entries.push(ownership);
+    }
+    manifest.entries.sort_by_key(|ownership| {
+        journal
+            .entries
+            .iter()
+            .position(|entry| entry.proposal_id == ownership.proposal_id)
+            .unwrap_or(usize::MAX)
+    });
+    write_capture_apply_ownership(paths, journal, &manifest)
+}
+
+fn capture_apply_commit_marker(
+    journal: &CaptureApplyJournal,
+    journal_digest: String,
+) -> CaptureApplyCommitMarker {
     CaptureApplyCommitMarker {
         schema: CAPTURE_APPLY_COMMIT_SCHEMA.to_owned(),
         journal_id: journal.journal_id.clone(),
@@ -189,6 +434,7 @@ fn capture_apply_commit_marker(journal: &CaptureApplyJournal) -> CaptureApplyCom
             .iter()
             .map(|entry| entry.proposal_id.clone())
             .collect(),
+        journal_digest,
     }
 }
 
@@ -307,6 +553,9 @@ fn recover_legacy_capture_apply(paths: &MemoryPaths) -> Result<bool> {
     if capture_apply_journal_exists(paths)? {
         bail!("current and legacy capture apply journals cannot coexist");
     }
+    if capture_apply_ownership_exists(paths)? {
+        bail!("legacy journal and current capture ownership cannot coexist");
+    }
     let path = legacy_capture_apply_journal_path(paths);
     let metadata =
         fs::symlink_metadata(&path).context("failed to inspect legacy capture apply journal")?;
@@ -325,22 +574,32 @@ fn recover_legacy_capture_apply(paths: &MemoryPaths) -> Result<bool> {
     validate_capture_apply_journal_token(&journal.journal_id, "legacy journal id")?;
     validate_capture_apply_journal_token(&journal.plan_id, "legacy plan id")?;
     validate_capture_apply_journal_token(&journal.review_id, "legacy review id")?;
-    prepare_pending_proposal_root(paths)?;
+    let mut recovery_entries = Vec::with_capacity(journal.entries.len());
     for entry in &journal.entries {
         validate_capture_apply_proposal_id(&entry.proposal_id)?;
         validate_lower_hex_digest(&entry.content_hash, "legacy content hash")?;
+        if entry.content_bytes == 0 || entry.content_bytes > 8 * 1024 * 1024 {
+            bail!("legacy capture apply journal contains an invalid proposal size");
+        }
         let destination = paths
             .proposals_dir()
             .join("pending")
             .join(format!("{}.md", entry.proposal_id));
         let staged = repository_transaction_path(paths, &destination, &journal.journal_id, "write");
-        remove_capture_apply_file_if_matching(
-            &destination,
-            entry.content_bytes,
-            &entry.content_hash,
-            "legacy unverified capture proposal",
-        )?;
-        remove_capture_apply_file_if_matching(
+        match fs::symlink_metadata(&destination) {
+            Ok(_) => bail!(
+                "legacy capture recovery has no installed-file ownership proof; refusing recovery mutation"
+            ),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).context("failed to inspect legacy capture destination");
+            }
+        }
+        recovery_entries.push((staged, entry));
+    }
+    for (staged, entry) in recovery_entries {
+        remove_capture_apply_transaction_file_if_matching(
+            paths,
             &staged,
             entry.content_bytes,
             &entry.content_hash,
@@ -353,7 +612,6 @@ fn recover_legacy_capture_apply(paths: &MemoryPaths) -> Result<bool> {
         blake3::hash(&bytes).to_hex().as_ref(),
         "legacy capture apply journal",
     )?;
-    sync_directory(&paths.proposals_dir().join("pending"))?;
     sync_directory(&paths.runtime_dir)?;
     Ok(true)
 }
@@ -388,15 +646,13 @@ pub(super) fn write_capture_apply_journal(
 ) -> Result<()> {
     validate_capture_apply_journal(journal)?;
     fs::create_dir_all(&paths.runtime_dir).context("failed to create capture journal directory")?;
-    if capture_apply_journal_exists(paths)? || legacy_capture_apply_journal_exists(paths)? {
+    if capture_apply_journal_exists(paths)?
+        || legacy_capture_apply_journal_exists(paths)?
+        || capture_apply_ownership_exists(paths)?
+    {
         bail!("an interrupted capture apply must be recovered before starting another one");
     }
-    let mut bytes =
-        serde_json::to_vec_pretty(journal).context("failed to serialize capture apply journal")?;
-    bytes.push(b'\n');
-    if bytes.len() as u64 > MAX_CAPTURE_APPLY_JOURNAL_BYTES {
-        bail!("capture apply journal is too large");
-    }
+    let bytes = capture_apply_journal_bytes(journal)?;
     let journal_path = capture_apply_journal_path(paths);
     let temp_path = paths.runtime_dir.join(format!(
         ".{CAPTURE_APPLY_JOURNAL_FILE}.{}.tmp",
@@ -492,26 +748,80 @@ pub(super) fn stage_capture_apply_proposals(
 pub(super) fn install_capture_apply_proposals(
     paths: &MemoryPaths,
     journal: &CaptureApplyJournal,
+    authorization: &AuthorizedRepositoryProjectionBatch,
+    projections: &[OwnedRepositoryProjection],
 ) -> Result<()> {
+    install_capture_apply_proposals_with_hook(paths, journal, authorization, projections, |_, _| {
+        Ok(())
+    })
+}
+
+pub(super) fn install_capture_apply_proposals_with_hook<BeforeInstall>(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    authorization: &AuthorizedRepositoryProjectionBatch,
+    projections: &[OwnedRepositoryProjection],
+    before_install: BeforeInstall,
+) -> Result<()>
+where
+    BeforeInstall: FnMut(usize, &Path) -> Result<()>,
+{
+    install_capture_apply_proposals_with_hooks(
+        paths,
+        journal,
+        authorization,
+        projections,
+        before_install,
+        |_, _| Ok(()),
+    )
+}
+
+pub(super) fn install_capture_apply_proposals_with_hooks<BeforeInstall, AfterInstall>(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    authorization: &AuthorizedRepositoryProjectionBatch,
+    projections: &[OwnedRepositoryProjection],
+    mut before_install: BeforeInstall,
+    mut after_install_before_ownership: AfterInstall,
+) -> Result<()>
+where
+    BeforeInstall: FnMut(usize, &Path) -> Result<()>,
+    AfterInstall: FnMut(usize, &Path) -> Result<()>,
+{
     validate_capture_apply_journal(journal)?;
-    for entry in &journal.entries {
+    let journal_digest = capture_apply_journal_digest(journal)?;
+    let persisted = load_capture_apply_journal(paths)?
+        .context("capture apply journal must be durable before repository installation")?;
+    if persisted.journal != *journal || persisted.content_hash != journal_digest {
+        bail!("durable capture apply journal changed before repository installation");
+    }
+    if journal.authorization_digest != authorization.digest() {
+        bail!("capture apply journal authorization digest does not match the current capability");
+    }
+    let mutation = RepositoryMutationAuthorization {
+        route: RepositoryWriteRoute::CaptureApply,
+        authorization,
+        projections,
+    };
+    for (index, entry) in journal.entries.iter().enumerate() {
         let staged = capture_apply_stage_path(paths, journal, entry);
         let destination = capture_apply_destination_path(paths, entry);
-        if !capture_apply_file_matches(
+        before_install(index, &staged)?;
+        let identity = install_verified_staged_file_no_replace(
+            paths,
+            mutation,
             &staged,
-            entry.content_bytes,
+            &destination,
             &entry.content_hash,
-            "staged capture proposal",
-        )? {
-            bail!("staged capture proposal is missing");
-        }
-        ensure_path_absent(&destination, "capture proposal")?;
-        fs::hard_link(&staged, &destination).with_context(|| {
+        )
+        .with_context(|| {
             format!(
                 "failed to install capture proposal {} without replacement",
                 destination.display()
             )
         })?;
+        after_install_before_ownership(index, &destination)?;
+        record_capture_apply_install_ownership(paths, journal, entry, identity)?;
     }
     sync_directory(&paths.proposals_dir().join("pending"))
         .context("failed to sync installed capture proposals")
@@ -523,7 +833,8 @@ pub(super) fn append_capture_apply_commit_marker(
     actor: &str,
     timestamp: &str,
 ) -> Result<()> {
-    let payload = serde_json::to_string(&capture_apply_commit_marker(journal))
+    let marker = capture_apply_commit_marker(journal, capture_apply_journal_digest(journal)?);
+    let payload = serde_json::to_string(&marker)
         .context("failed to serialize capture apply commit marker")?;
     conn.execute(
         "INSERT INTO event_log (
@@ -541,9 +852,19 @@ pub(super) fn append_capture_apply_commit_marker(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn capture_apply_commit_marker_exists(
     conn: &Connection,
     journal: &CaptureApplyJournal,
+) -> Result<bool> {
+    let journal_digest = capture_apply_journal_digest(journal)?;
+    capture_apply_commit_marker_exists_for_digest(conn, journal, &journal_digest)
+}
+
+fn capture_apply_commit_marker_exists_for_digest(
+    conn: &Connection,
+    journal: &CaptureApplyJournal,
+    journal_digest: &str,
 ) -> Result<bool> {
     let row = conn
         .query_row(
@@ -561,24 +882,21 @@ pub(super) fn capture_apply_commit_marker_exists(
     }
     let marker: CaptureApplyCommitMarker = serde_json::from_str(&payload_json)
         .context("failed to parse capture apply commit marker")?;
-    if marker != capture_apply_commit_marker(journal) {
+    if marker != capture_apply_commit_marker(journal, journal_digest.to_owned()) {
         bail!("capture apply commit marker does not match its journal");
     }
     Ok(true)
 }
 
-fn capture_recovery_authorization_is_current(
+fn capture_recovery_authorization(
     paths: &MemoryPaths,
     journal: &CaptureApplyJournal,
-) -> Result<bool> {
+) -> Result<Option<CaptureRecoveryAuthorization>> {
     if journal.safety_contract_version != crate::REPOSITORY_WRITE_SAFETY_VERSION
         || journal.detector_policy_version != crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION
-        || journal.project_context_digest
-            != blake3::hash(paths.project_root.as_os_str().as_encoded_bytes())
-                .to_hex()
-                .to_string()
+        || journal.project_context_digest != capture_project_context_digest(paths)?
     {
-        return Ok(false);
+        return Ok(None);
     }
     let pending_root = paths.proposals_dir().join("pending");
     let mut projections = Vec::with_capacity(journal.entries.len());
@@ -586,29 +904,41 @@ fn capture_recovery_authorization_is_current(
     for entry in &journal.entries {
         let destination = capture_apply_destination_path(paths, entry);
         let staged = capture_apply_stage_path(paths, journal, entry);
-        let source = if capture_apply_file_matches(
+        let bytes = if let Some(bytes) = read_capture_apply_transaction_file_if_exists(
+            paths,
             &staged,
             entry.content_bytes,
-            &entry.content_hash,
             "staged capture proposal",
         )? {
-            staged
-        } else if capture_apply_file_matches(
-            &destination,
-            entry.content_bytes,
-            &entry.content_hash,
-            "installed capture proposal",
-        )? {
-            destination.clone()
+            bytes
         } else {
-            return Ok(true);
+            let relative = destination
+                .strip_prefix(&paths.project_root)
+                .context("capture recovery destination is outside the project root")?;
+            repository_io::read_repository_file_if_exists(
+                &paths.project_root,
+                relative,
+                entry.content_bytes,
+                "installed capture proposal",
+            )?
+            .context("committed capture proposal and its staging file are both missing")?
         };
-        let bytes = fs::read(&source).context("failed to read capture recovery projection")?;
+        ensure_capture_apply_bytes_match(
+            &bytes,
+            &entry.content_hash,
+            "capture recovery projection",
+        )?;
         let markdown = std::str::from_utf8(&bytes)
             .map_err(|_| anyhow!("capture recovery projection has invalid encoding"))?;
         let proposal = okf::parse_okf_proposal_markdown(&pending_root, &destination, markdown)
             .map_err(|_| anyhow!("capture recovery projection is malformed"))?
             .context("capture recovery projection was ignored")?;
+        super::validate_capture_proposal_projection_values(
+            proposal.scope_kind,
+            proposal.scope_id.as_deref(),
+            proposal.sensitivity,
+            proposal.content_class,
+        )?;
         values.extend(okf_proposal_safety_values(
             &format!("candidate[{}]", entry.candidate_id),
             &proposal,
@@ -638,46 +968,211 @@ fn capture_recovery_authorization_is_current(
         &values,
         &projections,
     );
-    Ok(authorization
-        .is_ok_and(|authorization| authorization.digest() == journal.authorization_digest))
+    Ok(authorization.ok().and_then(|authorization| {
+        (authorization.digest() == journal.authorization_digest).then_some(
+            CaptureRecoveryAuthorization {
+                authorization,
+                projections,
+            },
+        )
+    }))
+}
+
+fn capture_ownership_identity(entry: &CaptureApplyOwnershipEntry) -> RepositoryFileIdentity {
+    RepositoryFileIdentity {
+        device: entry.device,
+        inode: entry.inode,
+    }
+}
+
+fn capture_apply_recovery_backup_path(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    entry: &CaptureApplyJournalEntry,
+) -> PathBuf {
+    repository_transaction_path(
+        paths,
+        &capture_apply_destination_path(paths, entry),
+        &journal.review_id,
+        "recovery-cleanup",
+    )
+}
+
+fn preflight_uncommitted_capture_recovery_backup(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    entry: &CaptureApplyJournalEntry,
+    has_ownership: bool,
+) -> Result<()> {
+    let backup = capture_apply_recovery_backup_path(paths, journal, entry);
+    let Some(bytes) = read_capture_apply_transaction_file_if_exists(
+        paths,
+        &backup,
+        entry.content_bytes,
+        "capture recovery backup",
+    )?
+    else {
+        return Ok(());
+    };
+    ensure_capture_apply_bytes_match(&bytes, &entry.content_hash, "capture recovery backup")?;
+    if !has_ownership {
+        bail!(
+            "capture recovery backup has no installed-file ownership proof; refusing recovery mutation"
+        );
+    }
+    Ok(())
+}
+
+fn preflight_uncommitted_capture_recovery(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    ownership: Option<&CaptureApplyOwnershipManifest>,
+) -> Result<Vec<Option<RepositoryFileIdentity>>> {
+    let mut installed = Vec::with_capacity(journal.entries.len());
+    for entry in &journal.entries {
+        let expected_identity = ownership
+            .and_then(|manifest| {
+                manifest
+                    .entries
+                    .iter()
+                    .find(|ownership| ownership.proposal_id == entry.proposal_id)
+            })
+            .map(capture_ownership_identity);
+        preflight_uncommitted_capture_recovery_backup(
+            paths,
+            journal,
+            entry,
+            expected_identity.is_some(),
+        )?;
+        let destination = capture_apply_destination_path(paths, entry);
+        match fs::symlink_metadata(&destination) {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                installed.push(expected_identity);
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .context("failed to inspect uncommitted capture destination before recovery");
+            }
+        }
+        let relative = destination
+            .strip_prefix(&paths.project_root)
+            .context("capture recovery destination is outside the project root")?;
+        let snapshot = repository_io::read_repository_file_with_identity_if_exists(
+            &paths.project_root,
+            relative,
+            entry.content_bytes,
+            "uncommitted capture proposal",
+        )
+        .context("uncommitted capture destination is ambiguous; refusing recovery mutation")?;
+        let Some((bytes, actual_identity)) = snapshot else {
+            installed.push(expected_identity);
+            continue;
+        };
+        ensure_capture_apply_bytes_match(
+            &bytes,
+            &entry.content_hash,
+            "uncommitted capture proposal",
+        )?;
+        let expected_identity = expected_identity.context(
+                "uncommitted capture destination has no installed-file ownership proof; refusing recovery mutation",
+            )?;
+        if actual_identity != expected_identity {
+            bail!(
+                "uncommitted capture destination does not match installed-file ownership; refusing recovery mutation"
+            );
+        }
+        installed.push(Some(expected_identity));
+    }
+    Ok(installed)
 }
 
 pub(super) fn recover_capture_apply(
     paths: &MemoryPaths,
     conn: &Connection,
 ) -> Result<CaptureApplyRecoveryOutcome> {
+    recover_capture_apply_with_hook(paths, conn, |_, _| Ok(()))
+}
+
+pub(super) fn recover_capture_apply_with_hook<BeforeInstall>(
+    paths: &MemoryPaths,
+    conn: &Connection,
+    mut before_install: BeforeInstall,
+) -> Result<CaptureApplyRecoveryOutcome>
+where
+    BeforeInstall: FnMut(usize, &Path) -> Result<()>,
+{
     if recover_legacy_capture_apply(paths)? {
         return Ok(CaptureApplyRecoveryOutcome::RolledBack);
     }
     let Some(loaded) = load_capture_apply_journal(paths)? else {
+        if capture_apply_ownership_exists(paths)? {
+            bail!("capture apply ownership exists without its journal; refusing recovery mutation");
+        }
         return Ok(CaptureApplyRecoveryOutcome::NoJournal);
     };
     let journal = &loaded.journal;
-    let committed = capture_apply_commit_marker_exists(conn, journal)?
-        && capture_recovery_authorization_is_current(paths, journal)?;
-    ProposalPacketLifecycle::new(paths, conn).prepare_pending_root()?;
+    if journal.project_context_digest != capture_project_context_digest(paths)? {
+        bail!(
+            "capture apply journal belongs to a different repository root; refusing recovery mutation"
+        );
+    }
+    let ownership = load_capture_apply_ownership(paths, journal, &loaded.content_hash)?;
+    let recovery_authorization = if capture_apply_commit_marker_exists_for_digest(
+        conn,
+        journal,
+        &loaded.content_hash,
+    )? {
+        Some(
+            capture_recovery_authorization(paths, journal)
+                .context(
+                    "failed to validate committed capture recovery authorization; refusing recovery mutation",
+                )?
+                .context(
+                    "committed capture apply journal authorization is stale or invalid; refusing recovery mutation",
+                )?,
+        )
+    } else {
+        None
+    };
+    let committed = recovery_authorization.is_some();
 
-    if committed {
-        for entry in &journal.entries {
+    if let Some(recovery_authorization) = recovery_authorization.as_ref() {
+        ProposalPacketLifecycle::new(paths, conn).prepare_pending_root()?;
+        let mutation = RepositoryMutationAuthorization {
+            route: RepositoryWriteRoute::CaptureApply,
+            authorization: &recovery_authorization.authorization,
+            projections: &recovery_authorization.projections,
+        };
+        for (index, entry) in journal.entries.iter().enumerate() {
             let destination = capture_apply_destination_path(paths, entry);
-            if capture_apply_file_matches(
-                &destination,
+            let relative = destination
+                .strip_prefix(&paths.project_root)
+                .context("capture recovery destination is outside the project root")?;
+            if let Some(bytes) = repository_io::read_repository_file_if_exists(
+                &paths.project_root,
+                relative,
                 entry.content_bytes,
-                &entry.content_hash,
                 "committed capture proposal",
             )? {
+                ensure_capture_apply_bytes_match(
+                    &bytes,
+                    &entry.content_hash,
+                    "committed capture proposal",
+                )?;
                 continue;
             }
             let staged = capture_apply_stage_path(paths, journal, entry);
-            if !capture_apply_file_matches(
+            before_install(index, &staged)?;
+            install_verified_staged_file_no_replace(
+                paths,
+                mutation,
                 &staged,
-                entry.content_bytes,
+                &destination,
                 &entry.content_hash,
-                "staged capture proposal",
-            )? {
-                bail!("committed capture proposal and its staging file are both missing");
-            }
-            fs::hard_link(&staged, &destination).with_context(|| {
+            )
+            .with_context(|| {
                 format!(
                     "failed to finish committed capture proposal {}",
                     destination.display()
@@ -688,15 +1183,23 @@ pub(super) fn recover_capture_apply(
             .context("failed to sync recovered capture proposals")?;
         for entry in &journal.entries {
             let destination = capture_apply_destination_path(paths, entry);
-            if !capture_apply_file_matches(
-                &destination,
+            let relative = destination
+                .strip_prefix(&paths.project_root)
+                .context("capture recovery destination is outside the project root")?;
+            let bytes = repository_io::read_repository_file_if_exists(
+                &paths.project_root,
+                relative,
                 entry.content_bytes,
+                "committed capture proposal",
+            )?
+            .context("committed capture proposal is missing after recovery")?;
+            ensure_capture_apply_bytes_match(
+                &bytes,
                 &entry.content_hash,
                 "committed capture proposal",
-            )? {
-                bail!("committed capture proposal is missing after recovery");
-            }
-            remove_capture_apply_file_if_matching(
+            )?;
+            remove_capture_apply_transaction_file_if_matching(
+                paths,
                 &capture_apply_stage_path(paths, journal, entry),
                 entry.content_bytes,
                 &entry.content_hash,
@@ -704,14 +1207,17 @@ pub(super) fn recover_capture_apply(
             )?;
         }
     } else {
-        for entry in &journal.entries {
-            remove_capture_apply_file_if_matching(
-                &capture_apply_destination_path(paths, entry),
-                entry.content_bytes,
-                &entry.content_hash,
-                "uncommitted capture proposal",
-            )?;
-            remove_capture_apply_file_if_matching(
+        let installed = preflight_uncommitted_capture_recovery(
+            paths,
+            journal,
+            ownership.as_ref().map(|loaded| &loaded.manifest),
+        )?;
+        for (entry, expected_identity) in journal.entries.iter().zip(installed) {
+            if let Some(expected_identity) = expected_identity {
+                remove_uncommitted_capture_destination(paths, journal, entry, expected_identity)?;
+            }
+            remove_capture_apply_transaction_file_if_matching(
+                paths,
                 &capture_apply_stage_path(paths, journal, entry),
                 entry.content_bytes,
                 &entry.content_hash,
@@ -719,8 +1225,15 @@ pub(super) fn recover_capture_apply(
             )?;
         }
     }
-    sync_directory(&paths.proposals_dir().join("pending"))
-        .context("failed to sync capture recovery cleanup")?;
+
+    if let Some(ownership) = ownership {
+        remove_capture_apply_file_if_matching(
+            &capture_apply_ownership_path(paths),
+            ownership.content_bytes,
+            &ownership.content_hash,
+            "capture apply ownership",
+        )?;
+    }
 
     let journal_path = capture_apply_journal_path(paths);
     remove_capture_apply_file_if_matching(
@@ -735,6 +1248,169 @@ pub(super) fn recover_capture_apply(
     } else {
         CaptureApplyRecoveryOutcome::RolledBack
     })
+}
+
+fn ensure_capture_apply_bytes_match(bytes: &[u8], expected_hash: &str, label: &str) -> Result<()> {
+    if blake3::hash(bytes).to_hex().as_str() != expected_hash {
+        bail!("{label} does not match the recovery journal; refusing recovery mutation");
+    }
+    Ok(())
+}
+
+fn remove_capture_apply_transaction_file_if_matching(
+    paths: &MemoryPaths,
+    path: &Path,
+    expected_bytes: u64,
+    expected_hash: &str,
+    label: &str,
+) -> Result<()> {
+    let Some(bytes) =
+        read_capture_apply_transaction_file_if_exists(paths, path, expected_bytes, label)?
+    else {
+        return Ok(());
+    };
+    ensure_capture_apply_bytes_match(&bytes, expected_hash, label)?;
+    remove_staged_file(path)?;
+    sync_directory(&repository_transaction_root(paths))
+}
+
+fn read_capture_apply_transaction_file_if_exists(
+    paths: &MemoryPaths,
+    path: &Path,
+    expected_bytes: u64,
+    label: &str,
+) -> Result<Option<Vec<u8>>> {
+    let transaction_root = repository_transaction_root(paths);
+    match fs::symlink_metadata(&transaction_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!("repository transaction root must be a real directory")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("failed to inspect repository transaction root"),
+    }
+    repository_io::read_transaction_file_if_exists(&transaction_root, path, expected_bytes, label)
+}
+
+fn remove_uncommitted_capture_destination(
+    paths: &MemoryPaths,
+    journal: &CaptureApplyJournal,
+    entry: &CaptureApplyJournalEntry,
+    expected_identity: RepositoryFileIdentity,
+) -> Result<()> {
+    let destination = capture_apply_destination_path(paths, entry);
+    let backup = capture_apply_recovery_backup_path(paths, journal, entry);
+    remove_capture_destination_with_recovery_authorization(
+        paths,
+        &destination,
+        &backup,
+        entry.content_bytes,
+        &entry.content_hash,
+        &journal.authorization_digest,
+        &journal.review_id,
+        "uncommitted capture proposal",
+        expected_identity,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remove_capture_destination_with_recovery_authorization(
+    paths: &MemoryPaths,
+    destination: &Path,
+    backup: &Path,
+    expected_bytes: u64,
+    expected_hash: &str,
+    authorization_digest: &str,
+    source_identity: &str,
+    label: &str,
+    expected_identity: RepositoryFileIdentity,
+) -> Result<()> {
+    let relative = destination
+        .strip_prefix(&paths.project_root)
+        .context("capture recovery destination is outside the project root")?;
+    let Some((bytes, actual_identity)) =
+        repository_io::read_repository_file_with_identity_if_exists(
+            &paths.project_root,
+            relative,
+            expected_bytes,
+            label,
+        )
+        .with_context(|| {
+            format!("{label} does not match the recovery journal; refusing recovery deletion")
+        })?
+    else {
+        return remove_capture_apply_transaction_file_if_matching(
+            paths,
+            backup,
+            expected_bytes,
+            expected_hash,
+            "capture recovery backup",
+        );
+    };
+    if actual_identity != expected_identity {
+        bail!("{label} does not match installed-file ownership; refusing recovery deletion");
+    }
+    if blake3::hash(&bytes).to_hex().as_str() != expected_hash {
+        bail!("{label} does not match the recovery journal; refusing recovery deletion");
+    }
+    remove_capture_apply_transaction_file_if_matching(
+        paths,
+        backup,
+        expected_bytes,
+        expected_hash,
+        "capture recovery backup",
+    )?;
+    let transaction_root = repository_transaction_root(paths);
+    ensure_safe_directory(
+        &paths.runtime_dir,
+        &transaction_root,
+        true,
+        "local repository transaction root",
+    )?;
+    let projections = vec![OwnedRepositoryProjection::existing_from_absolute(
+        paths,
+        destination,
+        &bytes,
+        expected_hash,
+    )?];
+    let authorization = authorize_repository_projection_batch(
+        paths,
+        RepositoryWriteRoute::Recovery,
+        OkfProposalSensitivity::RepoSafe,
+        ScopeKind::Repo,
+        None,
+        Visibility::Repo,
+        crate::AuthorizationProof::Recovery {
+            authorization_digest,
+        },
+        explicit_repository_provenance(
+            RepositoryContentClass::GeneralRepoKnowledge,
+            source_identity,
+        ),
+        &[],
+        &projections,
+    )?;
+    backup_repository_file_to_transaction_with_identity(
+        paths,
+        RepositoryMutationAuthorization {
+            route: RepositoryWriteRoute::Recovery,
+            authorization: &authorization,
+            projections: &projections,
+        },
+        destination,
+        backup,
+        expected_hash,
+        Some(expected_identity),
+    )?;
+    #[cfg(test)]
+    run_after_capture_recovery_backup_hook()?;
+    remove_capture_apply_transaction_file_if_matching(
+        paths,
+        backup,
+        expected_bytes,
+        expected_hash,
+        "capture recovery backup",
+    )
 }
 
 fn capture_apply_file_matches(

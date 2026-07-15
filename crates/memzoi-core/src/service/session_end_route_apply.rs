@@ -18,9 +18,10 @@ use crate::{
 use super::{
     proposal_packets::ProposalPacketLifecycle,
     repository_mutation::{
-        OwnedRepositoryProjection, authorize_repository_projection_batch,
+        AuthorizedRepositoryProjectionBatch, CreatedRepositoryFile, OwnedRepositoryProjection,
+        RepositoryMutationAuthorization, authorize_repository_projection_batch,
         create_authorized_repository_batch, explicit_repository_provenance,
-        okf_proposal_safety_values, safety_value,
+        okf_proposal_safety_values, remove_created_repository_file, safety_value,
     },
     runtime_records::{CheckpointInput, LocalMemoryInput, RuntimeRecords},
     safe_files::RepoLifecycleLock,
@@ -50,6 +51,11 @@ impl<'a> SessionEndRouteApply<'a> {
             }
             let scope = candidate.scope.as_ref();
             let mut values = vec![
+                safety_value(
+                    "session_end.task".to_owned(),
+                    SafetyFieldKind::SourceReference,
+                    &document.task,
+                ),
                 safety_value(
                     format!("candidate[{index}].title"),
                     SafetyFieldKind::Text,
@@ -191,16 +197,17 @@ impl<'a> SessionEndRouteApply<'a> {
                     authorization,
                     &repo_projections,
                 )?;
-                created_proposal_files.extend(created.iter().cloned());
-                let mut created = created.into_iter();
+                created_proposal_files.extend(created);
+                let mut created_iter = created_proposal_files.iter();
                 for (index, plan) in repo_plans.iter().enumerate() {
                     let Some(plan) = plan else {
                         continue;
                     };
-                    let path = created
+                    let created_file = created_iter
                         .next()
                         .context("authorized session-end projection count changed")?;
-                    repo_writes[index] = Some((plan.proposal_id.clone(), path));
+                    repo_writes[index] =
+                        Some((plan.proposal_id.clone(), created_file.path().to_path_buf()));
                 }
             }
             let tx = self.conn.unchecked_transaction()?;
@@ -239,10 +246,24 @@ impl<'a> SessionEndRouteApply<'a> {
             Ok(())
         })();
         if let Err(error) = write_result {
-            if let Err(cleanup_error) = okf::cleanup_okf_proposal_files(&created_proposal_files) {
-                return Err(error).context(format!(
-                    "session-end promotion failed; additionally failed to clean up created proposal files: {cleanup_error}"
-                ));
+            if created_proposal_files.is_empty() {
+                return Err(error);
+            }
+            if let Some(authorization) = repo_authorization.as_ref() {
+                if let Err(cleanup_error) = cleanup_authorized_session_end_proposals(
+                    self.paths,
+                    authorization,
+                    &repo_projections,
+                    &created_proposal_files,
+                ) {
+                    return Err(error).context(format!(
+                        "session-end promotion failed; additionally failed to clean up created proposal files: {cleanup_error}"
+                    ));
+                }
+            } else {
+                return Err(error).context(
+                    "session-end promotion failed; created repository files have no matching authorization",
+                );
             }
             return Err(error);
         }
@@ -314,6 +335,35 @@ impl<'a> SessionEndRouteApply<'a> {
     }
 }
 
+fn cleanup_authorized_session_end_proposals(
+    paths: &crate::MemoryPaths,
+    authorization: &AuthorizedRepositoryProjectionBatch,
+    projections: &[OwnedRepositoryProjection],
+    created: &[CreatedRepositoryFile],
+) -> Result<()> {
+    if created.len() != projections.len() {
+        anyhow::bail!(
+            "created session-end proposal batch does not match its authorized projections"
+        );
+    }
+    let mutation = RepositoryMutationAuthorization {
+        route: RepositoryWriteRoute::SessionEndPromotion,
+        authorization,
+        projections,
+    };
+    let mut cleanup_errors = Vec::new();
+    for (created_file, _) in created.iter().zip(projections).rev() {
+        if let Err(error) = remove_created_repository_file(paths, mutation, created_file) {
+            cleanup_errors.push(format!("{}: {error:#}", created_file.path().display()));
+        }
+    }
+    if cleanup_errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", cleanup_errors.join("; "))
+    }
+}
+
 fn blocked_result(
     document: SessionEndDocument,
     unsafe_repo_candidates: &BTreeSet<usize>,
@@ -357,7 +407,11 @@ fn blocked_result(
                     | MemoryDestination::Local
                     | MemoryDestination::Session => "session-end batch contains an unsafe repo candidate; no writes were performed".to_owned(),
                 };
-                (candidate.title.trim().to_owned(), status, Some(reason))
+                (
+                    "Redacted blocked session-end candidate".to_owned(),
+                    status,
+                    Some(reason),
+                )
             };
             SessionEndCandidateResult {
                 index,
@@ -373,7 +427,74 @@ fn blocked_result(
         })
         .collect();
     SessionEndResult {
-        task: document.task.trim().to_owned(),
+        task: "Redacted blocked session-end task".to_owned(),
         candidates,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn session_end_cleanup_preserves_a_concurrent_repository_replacement() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let runtime = tempfile::tempdir()?;
+        let paths = crate::MemoryPaths::with_runtime_home(
+            project.path().to_path_buf(),
+            runtime.path().to_path_buf(),
+        );
+        let destination = paths.proposals_dir().join("pending/mem_session_cleanup.md");
+        let authorized_bytes = b"authorized session-end proposal\n";
+        let projections = vec![OwnedRepositoryProjection::from_absolute(
+            &paths,
+            &destination,
+            authorized_bytes,
+            None,
+        )?];
+        let authorization = authorize_repository_projection_batch(
+            &paths,
+            RepositoryWriteRoute::SessionEndPromotion,
+            OkfProposalSensitivity::RepoSafe,
+            ScopeKind::Repo,
+            None,
+            Visibility::Repo,
+            AuthorizationProof::ExplicitCommand {
+                operation: "session_end_cleanup_test",
+            },
+            explicit_repository_provenance(
+                RepositoryContentClass::GeneralRepoKnowledge,
+                "session-end-cleanup-test",
+            ),
+            &[],
+            &projections,
+        )?;
+        let created = create_authorized_repository_batch(
+            &paths,
+            RepositoryWriteRoute::SessionEndPromotion,
+            &authorization,
+            &projections,
+        )?;
+        let replacement = b"concurrent human replacement\n";
+        let mut destination_file = std::fs::File::options()
+            .write(true)
+            .truncate(true)
+            .open(&destination)?;
+        std::io::copy(&mut replacement.as_slice(), &mut destination_file)?;
+        destination_file.flush()?;
+
+        let error = cleanup_authorized_session_end_proposals(
+            &paths,
+            &authorization,
+            &projections,
+            &created,
+        )
+        .expect_err("cleanup must not delete bytes not authorized by session-end");
+
+        assert!(format!("{error:#}").contains("does not match"));
+        assert_eq!(std::fs::read(&destination)?, replacement);
+        Ok(())
     }
 }
