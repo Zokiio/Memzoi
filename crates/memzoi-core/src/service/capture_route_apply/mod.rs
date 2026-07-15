@@ -21,7 +21,8 @@ use self::journal::{
     install_capture_apply_proposals, recover_capture_apply, stage_capture_apply_proposals,
     write_capture_apply_journal,
 };
-use self::runtime::{capture_provenance, create_capture_runtime_with_conn};
+use self::runtime::capture_provenance;
+use super::runtime_records::RuntimeRecords;
 
 pub(super) struct CaptureRouteApply<'a> {
     paths: &'a MemoryPaths,
@@ -262,8 +263,7 @@ impl<'a> CaptureRouteApply<'a> {
                     _ => bail!("capture runtime candidate has an invalid route"),
                 };
                 let provenance = capture_provenance(&plan, &review, decision, candidate, actor);
-                let record = create_capture_runtime_with_conn(
-                    &tx,
+                let record = RuntimeRecords::new(&tx).create_capture(
                     actor,
                     candidate,
                     destination,

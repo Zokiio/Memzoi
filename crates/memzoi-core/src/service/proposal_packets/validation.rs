@@ -1,3 +1,4 @@
+use super::super::safe_files::RepoLifecycleLock;
 use super::inventory::{
     db_proposal_identity_tokens, require_clean_file_proposal_inventory,
     scan_file_proposal_inventory,
@@ -103,7 +104,7 @@ impl MemoryService {
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .any(|matches| !matches);
-        let fts_out_of_sync = !fts_content_index_is_current(&self.conn)?;
+        let fts_out_of_sync = !derived_index::fts_is_current(&self.conn)?;
         let runtime_index_updated = relational_drift || fts_out_of_sync;
         if runtime_index_updated {
             let tx = self.conn.unchecked_transaction()?;
@@ -349,10 +350,10 @@ impl MemoryService {
     }
 
     fn indexed_record_matches_canonical(&self, canonical: &okf::OkfRecordFile) -> Result<bool> {
-        let Some(indexed) = record_by_id(&self.conn, &canonical.concept_id)? else {
+        let Some(indexed) = RuntimeRecords::new(&self.conn).get(&canonical.concept_id)? else {
             return Ok(false);
         };
-        if !repo_record_matches(canonical, &indexed) {
+        if !derived_index::record_matches(canonical, &indexed) {
             return Ok(false);
         }
 
@@ -364,7 +365,7 @@ impl MemoryService {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        if record_tags(&self.conn, &canonical.concept_id)? != expected_tags {
+        if RuntimeRecords::new(&self.conn).tags(&canonical.concept_id)? != expected_tags {
             return Ok(false);
         }
         let mut expected_paths = canonical.applies_to.clone();

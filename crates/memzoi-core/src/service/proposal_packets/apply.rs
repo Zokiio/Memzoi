@@ -1,3 +1,4 @@
+use super::super::safe_files::RepoLifecycleLock;
 use super::transaction::{
     attach_cleanup_error, cleanup_staged_file_resolution, rebuild_fts_content_index,
     rollback_file_resolution, validate_resolution_actor,
