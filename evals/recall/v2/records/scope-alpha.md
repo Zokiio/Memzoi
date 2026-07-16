@@ -8,6 +8,7 @@ status: active
 scope: team
 scope_id: team-alpha
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 1
 source: eval
 source_ref: fixture://scope-alpha

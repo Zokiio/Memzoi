@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -30,6 +32,17 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run tests
         run: cargo test --workspace
+      - name: Test repository-write safety boundary
+        run: |
+          cargo test -p memzoi-core --test repository_write_safety
+          cargo test -p memzoi-core --test repository_write_route_parity
+          scripts/check-repository-write-boundary.sh
+      - name: Scan resulting repository memory blobs
+        if: github.event_name == 'pull_request'
+        run: >-
+          cargo run --locked -p memzoi-cli -- safety scan
+          --range "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          --json
       - name: Run recall and capture evaluations
         run: make eval
       - name: Run onboarding smoke test

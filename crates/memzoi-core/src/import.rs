@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDestination, MemoryDestinationClassification, MemoryDestinationPolicy, MemoryLane,
-    MemoryType, MemoryWriteRoute, OkfProposalSensitivity, OkfProposalSource, ScopeKind,
-    okf::OkfCreateProposalDraft,
+    MemoryType, MemoryWriteRoute, OkfProposalSensitivity, OkfProposalSource,
+    RepositoryContentClass, ScopeKind, okf::OkfCreateProposalDraft,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,9 +33,15 @@ pub struct ImportCandidateInput {
     pub body: String,
     #[serde(default)]
     pub sensitivity: OkfProposalSensitivity,
+    #[serde(default = "default_repository_content_class")]
+    pub content_class: RepositoryContentClass,
     pub scope: Option<ImportScope>,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+fn default_repository_content_class() -> RepositoryContentClass {
+    RepositoryContentClass::Unknown
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +69,7 @@ pub struct ImportCandidate {
     pub title: String,
     pub body: String,
     pub sensitivity: OkfProposalSensitivity,
+    pub content_class: RepositoryContentClass,
     pub scope: ImportScope,
     pub tags: Vec<String>,
     pub content_hash: String,
@@ -143,6 +150,7 @@ pub struct ImportPlanCandidate {
     pub title: String,
     pub body: String,
     pub sensitivity: OkfProposalSensitivity,
+    pub content_class: RepositoryContentClass,
     pub scope: ImportScope,
     pub tags: Vec<String>,
     pub content_hash: String,
@@ -378,6 +386,7 @@ fn normalize_candidate(index: usize, raw: &ImportCandidateInput) -> Result<Impor
         title,
         body,
         sensitivity: raw.sensitivity,
+        content_class: raw.content_class,
         scope,
         tags,
         content_hash: content_hash(&raw.body),
@@ -580,6 +589,7 @@ pub(crate) fn build_plan(
             title,
             body,
             sensitivity: c.sensitivity,
+            content_class: c.content_class,
             scope,
             tags,
             content_hash: c.content_hash,
@@ -672,6 +682,7 @@ pub(crate) fn proposal_draft(
         tags: candidate.tags.clone(),
         sources: sources.to_vec(),
         sensitivity: candidate.sensitivity,
+        content_class: candidate.content_class,
         capture: None,
     }
 }

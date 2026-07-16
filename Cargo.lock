@@ -1100,6 +1100,7 @@ dependencies = [
  "criterion",
  "fastembed",
  "ignore",
+ "regex",
  "rusqlite",
  "rustix",
  "serde",
@@ -1111,7 +1112,9 @@ dependencies = [
  "thiserror",
  "time",
  "toml",
+ "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

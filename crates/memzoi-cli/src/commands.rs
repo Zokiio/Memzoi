@@ -1,7 +1,11 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
-    process::Command,
+    io::Read,
+    path::{Component, Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -10,9 +14,10 @@ use memzoi_core::{
     ImportPlan, InitRequest, LocalMemoryInput, MemoryDestination, MemoryDraft, MemoryLane,
     MemoryRecord, MemoryService, MemoryType, OkfProposalSensitivity, OkfProposalStatus,
     PrecheckInput, Proposal, ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus,
-    ProposalStatusFilter, ProposeOptions, ScopeKind, SearchInput, SearchResult, SessionEndResult,
-    SessionEndWrite, Visibility, discover_paths, lifecycle_transaction_artifact_count,
-    parse_import_document, parse_session_end_document, scan_file_proposal_inventory,
+    ProposalStatusFilter, ProposeOptions, REPOSITORY_WRITE_MAX_BLOB_BYTES, ScopeKind, SearchInput,
+    SearchResult, SessionEndResult, SessionEndWrite, Visibility, discover_paths,
+    lifecycle_transaction_artifact_count, parse_import_document, parse_session_end_document,
+    scan_file_proposal_inventory, scan_managed_repository_blob,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -21,7 +26,7 @@ use crate::{
     cli::{
         CaptureCommands, CheckpointCommands, Cli, Commands, DraftCommand, EvalCommands,
         EventCommands, ImportCommands, IntegrateCommands, LocalCommands, McpCommands,
-        ProposalCommands, ProposalFileCommands,
+        ProposalCommands, ProposalFileCommands, SafetyCommands,
     },
     eval, integrate, mcp,
     output::{print_json, print_jsonl_row},
@@ -30,6 +35,582 @@ use crate::{
 
 mod capture;
 mod proposal_files;
+
+const NON_UTF8_GIT_PATH_SENTINEL: &str = ".memzoi/memory/<non-utf8-git-path>";
+const MAX_SAFETY_SCAN_GIT_DIFF_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SAFETY_SCAN_BLOBS: usize = 4_096;
+const MAX_GIT_OBJECT_SIZE_OUTPUT_BYTES: usize = 128;
+const GIT_SAFETY_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn safety_scan_command(
+    staged: bool,
+    range: Option<String>,
+    file: Option<PathBuf>,
+    as_json: bool,
+) -> Result<()> {
+    let selected = usize::from(staged) + usize::from(range.is_some()) + usize::from(file.is_some());
+    if selected != 1 {
+        bail!("safety scan requires exactly one of --staged, --range, or --file");
+    }
+    let cwd = std::env::current_dir().context("failed to inspect current directory")?;
+    let paths = discover_paths(&cwd)?;
+    let project_identity = paths.project_root.as_os_str().as_encoded_bytes();
+    let blobs = if staged {
+        load_staged_memory_blobs(&paths.project_root)?
+    } else if let Some(range) = range.as_deref() {
+        load_range_memory_blobs(&paths.project_root, range)?
+    } else {
+        vec![load_working_tree_memory_blob(
+            &paths.project_root,
+            file.as_deref().context("--file disappeared")?,
+        )?]
+    };
+
+    let mut reports = Vec::with_capacity(blobs.len());
+    for blob in blobs {
+        let report = scan_safety_blob(&paths.project_root, project_identity, &blob)?;
+        reports.push((blob, report));
+    }
+    let allowed = reports.iter().all(|(_, report)| report.allowed);
+    if as_json {
+        print_json(&json!({
+            "schema": "memzoi/repository-safety-scan-v1",
+            "allowed": allowed,
+            "files": reports.iter().map(|(blob, report)| json!({
+                "path": safety_scan_report_path(blob, report),
+                "report": report,
+            })).collect::<Vec<_>>(),
+        }))?;
+    } else if allowed {
+        println!("repository safety scan allowed {} blob(s)", reports.len());
+    } else {
+        println!("repository safety scan blocked");
+        for (blob, report) in &reports {
+            let display_path = safety_scan_report_path(blob, report);
+            for finding in &report.findings {
+                println!(
+                    "{}: {} at {} ({})",
+                    display_path,
+                    finding.code.as_str(),
+                    finding.field.0,
+                    finding.fingerprint
+                );
+            }
+        }
+    }
+    if !allowed {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn safety_scan_report_path(
+    blob: &SafetyScanBlob,
+    report: &memzoi_core::RepositoryWriteSafetyReport,
+) -> String {
+    let display = blob.path.to_string_lossy();
+    if report.allowed
+        || matches!(
+            blob.path_provenance,
+            SafetyScanPathProvenance::SyntheticNonUtf8GitPath
+        )
+    {
+        return display.into_owned();
+    }
+    format!(
+        "<redacted-path:{}>",
+        blake3::hash(blob.path.as_os_str().as_encoded_bytes()).to_hex()
+    )
+}
+
+enum SafetyScanPathProvenance {
+    Repository,
+    SyntheticNonUtf8GitPath,
+}
+
+enum SafetyScanBlobSource {
+    WorkingTree,
+    GitObject(String),
+    Inline(Vec<u8>),
+    Unsupported,
+}
+
+struct SafetyScanBlob {
+    path: PathBuf,
+    source: SafetyScanBlobSource,
+    path_provenance: SafetyScanPathProvenance,
+}
+
+fn scan_safety_blob(
+    project_root: &Path,
+    project_identity: &[u8],
+    blob: &SafetyScanBlob,
+) -> Result<memzoi_core::RepositoryWriteSafetyReport> {
+    let bytes = match &blob.source {
+        SafetyScanBlobSource::WorkingTree => {
+            let Some(bytes) = read_working_tree_blob(project_root, &blob.path)? else {
+                return Ok(scan_unsupported_safety_blob(project_identity));
+            };
+            bytes
+        }
+        SafetyScanBlobSource::GitObject(oid) => read_git_blob(project_root, oid)?,
+        SafetyScanBlobSource::Inline(bytes) => bytes.clone(),
+        SafetyScanBlobSource::Unsupported => {
+            return Ok(scan_unsupported_safety_blob(project_identity));
+        }
+    };
+    Ok(scan_managed_repository_blob(
+        project_identity,
+        &blob.path,
+        &bytes,
+    ))
+}
+
+fn scan_unsupported_safety_blob(
+    project_identity: &[u8],
+) -> memzoi_core::RepositoryWriteSafetyReport {
+    scan_managed_repository_blob(project_identity, Path::new("../unsupported-git-entry"), b"")
+}
+
+fn load_working_tree_memory_blob(project_root: &Path, path: &Path) -> Result<SafetyScanBlob> {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(project_root)
+            .context("safety scan file must be inside the current repository")?
+            .to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!("safety scan path contains an unsafe path component");
+    }
+    require_memory_scan_path(&relative)?;
+    Ok(SafetyScanBlob {
+        path: relative,
+        source: SafetyScanBlobSource::WorkingTree,
+        path_provenance: SafetyScanPathProvenance::Repository,
+    })
+}
+
+#[cfg(unix)]
+fn read_working_tree_blob(project_root: &Path, relative: &Path) -> Result<Option<Vec<u8>>> {
+    use rustix::{
+        fs::{AtFlags, CWD, FileType, Mode, OFlags, openat, statat},
+        io::Errno,
+    };
+
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(component) => Ok(component),
+            _ => bail!("safety scan path contains an unsafe path component"),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (file_name, ancestors) = components
+        .split_last()
+        .context("safety scan path must name a managed file")?;
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = openat(CWD, project_root, directory_flags, Mode::empty())
+        .context("failed to open safety scan repository without following symbolic links")?;
+    for component in ancestors {
+        let stat = statat(&directory, *component, AtFlags::SYMLINK_NOFOLLOW)
+            .context("failed to inspect safety scan file ancestor")?;
+        if !FileType::from_raw_mode(stat.st_mode).is_dir() {
+            return Ok(None);
+        }
+        directory = match openat(&directory, *component, directory_flags, Mode::empty()) {
+            Ok(directory) => directory,
+            Err(Errno::LOOP | Errno::NOTDIR) => return Ok(None),
+            Err(error) => {
+                return Err(error).context("failed to open safety scan file ancestor");
+            }
+        };
+    }
+    let stat = statat(&directory, *file_name, AtFlags::SYMLINK_NOFOLLOW)
+        .context("failed to inspect safety scan file")?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file() {
+        return Ok(None);
+    }
+    let file_flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let file = match openat(&directory, *file_name, file_flags, Mode::empty()) {
+        Ok(file) => file,
+        Err(Errno::LOOP | Errno::NOTDIR) => return Ok(None),
+        Err(error) => return Err(error).context("failed to open safety scan file"),
+    };
+    let file = fs::File::from(file);
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    read_bounded_file(file).map(Some)
+}
+
+#[cfg(not(unix))]
+fn read_working_tree_blob(project_root: &Path, relative: &Path) -> Result<Option<Vec<u8>>> {
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(component) => Ok(component),
+            _ => bail!("safety scan path contains an unsafe path component"),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (file_name, ancestors) = components
+        .split_last()
+        .context("safety scan path must name a managed file")?;
+    let mut current = project_root.to_path_buf();
+    for component in ancestors {
+        current.push(*component);
+        let metadata = fs::symlink_metadata(&current)
+            .context("failed to inspect safety scan file ancestor")?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Ok(None);
+        }
+    }
+    current.push(*file_name);
+    let metadata = fs::symlink_metadata(&current).context("failed to inspect safety scan file")?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(None);
+    }
+    read_bounded_file(fs::File::open(current)?).map(Some)
+}
+
+fn read_bounded_file(file: fs::File) -> Result<Vec<u8>> {
+    let size = file.metadata()?.len();
+    if size > REPOSITORY_WRITE_MAX_BLOB_BYTES as u64 {
+        return Ok(oversized_blob_probe());
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(REPOSITORY_WRITE_MAX_BLOB_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .context("failed to read safety scan file")?;
+    if bytes.len() > REPOSITORY_WRITE_MAX_BLOB_BYTES {
+        return Ok(oversized_blob_probe());
+    }
+    Ok(bytes)
+}
+
+fn load_staged_memory_blobs(project_root: &Path) -> Result<Vec<SafetyScanBlob>> {
+    let diff = git_output_bounded(
+        project_root,
+        &[
+            "diff",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            "--no-ext-diff",
+            "--cached",
+            "--diff-filter=ACMT",
+            "--",
+            ".memzoi/records",
+            ".memzoi/proposals",
+            ".memzoi/memory",
+        ],
+        MAX_SAFETY_SCAN_GIT_DIFF_BYTES,
+        "changed-path metadata",
+    )?;
+    load_git_memory_blobs(&diff)
+}
+
+fn load_range_memory_blobs(project_root: &Path, range: &str) -> Result<Vec<SafetyScanBlob>> {
+    let (base, head) = range
+        .split_once("...")
+        .filter(|(base, head)| !base.is_empty() && !head.is_empty() && !head.contains("..."))
+        .context("--range must use BASE...HEAD syntax")?;
+    validate_git_revision(base)?;
+    validate_git_revision(head)?;
+    let normalized = format!("{base}...{head}");
+    let diff = git_output_bounded(
+        project_root,
+        &[
+            "diff",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            "--no-ext-diff",
+            "--diff-filter=ACMT",
+            &normalized,
+            "--",
+            ".memzoi/records",
+            ".memzoi/proposals",
+            ".memzoi/memory",
+        ],
+        MAX_SAFETY_SCAN_GIT_DIFF_BYTES,
+        "changed-path metadata",
+    )?;
+    load_git_memory_blobs(&diff)
+}
+
+fn validate_git_revision(revision: &str) -> Result<()> {
+    if revision.starts_with('-')
+        || revision.contains('\0')
+        || revision.chars().any(char::is_whitespace)
+    {
+        bail!("--range contains an unsafe Git revision token");
+    }
+    Ok(())
+}
+
+fn load_git_memory_blobs(diff: &[u8]) -> Result<Vec<SafetyScanBlob>> {
+    let mut blobs = Vec::new();
+    let mut fields = diff.split(|byte| *byte == 0);
+    while let Some(header) = fields.next() {
+        if header.is_empty() {
+            break;
+        }
+        let raw_path = fields
+            .next()
+            .context("Git safety scan returned a raw entry without a path")?;
+        if blobs.len() == MAX_SAFETY_SCAN_BLOBS {
+            bail!("Git safety scan contains more than {MAX_SAFETY_SCAN_BLOBS} managed blobs");
+        }
+        let (new_mode, new_oid) = parse_raw_git_diff_header(header)?;
+        if !is_raw_memory_scan_path(raw_path) {
+            continue;
+        }
+        let Ok(path) = std::str::from_utf8(raw_path) else {
+            blobs.push(SafetyScanBlob {
+                path: PathBuf::from(NON_UTF8_GIT_PATH_SENTINEL),
+                source: SafetyScanBlobSource::Inline(raw_path.to_vec()),
+                path_provenance: SafetyScanPathProvenance::SyntheticNonUtf8GitPath,
+            });
+            continue;
+        };
+        let relative = PathBuf::from(path);
+        if !is_memory_scan_path(&relative) {
+            continue;
+        }
+        let source = if matches!(new_mode, "100644" | "100755") {
+            SafetyScanBlobSource::GitObject(new_oid.to_owned())
+        } else {
+            SafetyScanBlobSource::Unsupported
+        };
+        blobs.push(SafetyScanBlob {
+            path: relative,
+            source,
+            path_provenance: SafetyScanPathProvenance::Repository,
+        });
+    }
+    blobs.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(blobs)
+}
+
+fn parse_raw_git_diff_header(header: &[u8]) -> Result<(&str, &str)> {
+    let header = std::str::from_utf8(header)
+        .context("Git safety scan returned a non-UTF-8 raw entry header")?;
+    let mut parts = header.split_ascii_whitespace();
+    let old_mode = parts
+        .next()
+        .and_then(|mode| mode.strip_prefix(':'))
+        .context("Git safety scan returned an invalid raw entry header")?;
+    let new_mode = parts
+        .next()
+        .context("Git safety scan raw entry omitted the new mode")?;
+    let old_oid = parts
+        .next()
+        .context("Git safety scan raw entry omitted the old object ID")?;
+    let new_oid = parts
+        .next()
+        .context("Git safety scan raw entry omitted the new object ID")?;
+    let status = parts
+        .next()
+        .context("Git safety scan raw entry omitted the status")?;
+    if parts.next().is_some()
+        || !matches!(old_mode.len(), 6)
+        || !matches!(new_mode.len(), 6)
+        || !matches!(status, "A" | "C" | "M" | "T")
+        || old_oid.len() != new_oid.len()
+        || !(40..=64).contains(&new_oid.len())
+        || !old_oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !new_oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("Git safety scan returned an invalid raw entry header");
+    }
+    Ok((new_mode, new_oid))
+}
+
+fn is_raw_memory_scan_path(path: &[u8]) -> bool {
+    path.starts_with(b".memzoi/records/")
+        || path.starts_with(b".memzoi/proposals/")
+        || path.starts_with(b".memzoi/memory/")
+}
+
+fn git_output_bounded(
+    project_root: &Path,
+    args: &[&str],
+    max_stdout_bytes: usize,
+    output_label: &str,
+) -> Result<Vec<u8>> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(project_root)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+    }
+    let child = command
+        .spawn()
+        .context("failed to run Git for repository safety scan")?;
+    child_output_bounded(
+        child,
+        max_stdout_bytes,
+        output_label,
+        GIT_SAFETY_SCAN_TIMEOUT,
+    )
+}
+
+fn child_output_bounded(
+    mut child: Child,
+    max_stdout_bytes: usize,
+    output_label: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .context("Git safety scan timeout exceeds the supported duration")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("Git safety scan command did not expose stdout")?;
+    let (read_sender, read_receiver) = mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let mut output = Vec::with_capacity(max_stdout_bytes.min(64 * 1024));
+        let result = (&mut stdout)
+            .take(max_stdout_bytes as u64 + 1)
+            .read_to_end(&mut output)
+            .map(|_| output);
+        let _ = read_sender.send(result);
+    });
+    let output =
+        match read_receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                terminate_child_process_group(&mut child);
+                let _ = reader.join();
+                return Err(error).context("failed to read bounded Git safety scan output");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                terminate_child_process_group(&mut child);
+                let _ = reader.join();
+                bail!("Git safety scan {output_label} timed out");
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                terminate_child_process_group(&mut child);
+                let _ = reader.join();
+                bail!("Git safety scan {output_label} reader failed");
+            }
+        };
+    if reader.join().is_err() {
+        terminate_child_process_group(&mut child);
+        bail!("Git safety scan {output_label} reader failed");
+    }
+    if output.len() > max_stdout_bytes {
+        terminate_child_process_group(&mut child);
+        bail!("Git safety scan {output_label} exceeds the supported size limit");
+    }
+    let status = wait_for_child_until(&mut child, deadline, output_label)?;
+    if !status.success() {
+        bail!("Git safety scan command failed with status {status}");
+    }
+    Ok(output)
+}
+
+fn wait_for_child_until(
+    child: &mut Child,
+    deadline: Instant,
+    output_label: &str,
+) -> Result<std::process::ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(error) => {
+                terminate_child_process_group(child);
+                return Err(error).context("failed to wait for Git repository safety scan");
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            terminate_child_process_group(child);
+            bail!("Git safety scan {output_label} timed out");
+        }
+        thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
+
+fn terminate_child_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        use rustix::process::{Pid, Signal, kill_process_group};
+
+        let _ = kill_process_group(Pid::from_child(child), Signal::KILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn read_git_blob(project_root: &Path, oid: &str) -> Result<Vec<u8>> {
+    let size = git_output_bounded(
+        project_root,
+        &["cat-file", "-s", oid],
+        MAX_GIT_OBJECT_SIZE_OUTPUT_BYTES,
+        "object-size response",
+    )?;
+    let size = std::str::from_utf8(&size)
+        .context("Git safety scan returned a non-UTF-8 object size")?
+        .trim()
+        .parse::<u64>()
+        .context("Git safety scan returned an invalid object size")?;
+    if size > REPOSITORY_WRITE_MAX_BLOB_BYTES as u64 {
+        return Ok(oversized_blob_probe());
+    }
+    let bytes = git_output_bounded(
+        project_root,
+        &["cat-file", "blob", oid],
+        REPOSITORY_WRITE_MAX_BLOB_BYTES,
+        "blob",
+    )?;
+    if bytes.len() as u64 != size {
+        bail!("Git safety scan object size changed during immutable blob read");
+    }
+    Ok(bytes)
+}
+
+fn oversized_blob_probe() -> Vec<u8> {
+    vec![b'\n'; REPOSITORY_WRITE_MAX_BLOB_BYTES + 1]
+}
+
+fn require_memory_scan_path(path: &Path) -> Result<()> {
+    if !is_memory_scan_path(path) {
+        bail!(
+            "safety scan path is outside managed repository memory: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn is_memory_scan_path(path: &Path) -> bool {
+    let mut components = path.components();
+    let managed_root = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(root)), Some(Component::Normal(area)))
+            if root == ".memzoi"
+                && matches!(area.to_str(), Some("records" | "proposals" | "memory"))
+    );
+    managed_root
+        && components.next().is_some()
+        && components.all(|component| matches!(component, Component::Normal(_)))
+}
 
 pub(crate) fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -41,6 +622,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             source_kind,
             source_ref,
             sensitivity,
+            content_class,
             title,
             body,
             actor,
@@ -56,6 +638,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 source_kind,
                 source_ref,
                 sensitivity,
+                content_class,
                 title,
                 body,
             },
@@ -213,6 +796,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             source_kind,
             source_ref,
             sensitivity,
+            content_class,
             title,
             body,
             actor,
@@ -226,6 +810,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 source_kind,
                 source_ref,
                 sensitivity,
+                content_class,
                 title,
                 body,
             },
@@ -284,6 +869,14 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             scope_kind,
             json,
         } => precheck_command(path, action, command, scope_kind, json),
+        Commands::Safety { command } => match command {
+            SafetyCommands::Scan {
+                staged,
+                range,
+                file,
+                json,
+            } => safety_scan_command(staged, range, file, json),
+        },
         Commands::Export {
             format,
             scope_kind,
@@ -1384,12 +1977,97 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         push_next_step(&mut next_steps, "memzoi init");
     }
 
-    let proposal_inventory = if paths.config_path.is_file() && paths.db_path.is_file() {
-        MemoryService::open_paths(paths.clone())
-            .and_then(|service| service.validate_file_proposal_inventory())
+    let shared_schema_is_ready = if paths.shared_db_path.is_file() {
+        checks.push(check(
+            "shared_database",
+            "ok",
+            paths.shared_db_path.display().to_string(),
+        ));
+        match schema_ready(&paths.shared_db_path) {
+            Ok(true) => {
+                checks.push(check(
+                    "shared_schema",
+                    "ok",
+                    "shared runtime schema is initialized",
+                ));
+                true
+            }
+            Ok(false) => {
+                checks.push(check(
+                    "shared_schema",
+                    "warning",
+                    "shared runtime schema is missing tables",
+                ));
+                false
+            }
+            Err(error) => {
+                checks.push(check("shared_schema", "warning", error.to_string()));
+                false
+            }
+        }
     } else {
-        scan_file_proposal_inventory(&paths)
+        checks.push(check(
+            "shared_database",
+            "warning",
+            format!("{} missing", paths.shared_db_path.display()),
+        ));
+        checks.push(check(
+            "shared_schema",
+            "skip",
+            "shared database missing; run init first",
+        ));
+        false
     };
+
+    let schema_is_ready = if paths.index_db_path.is_file() {
+        checks.push(check(
+            "database",
+            "ok",
+            paths.index_db_path.display().to_string(),
+        ));
+        match schema_ready(&paths.index_db_path) {
+            Ok(true) => {
+                checks.push(check(
+                    "schema",
+                    "ok",
+                    "worktree index schema is initialized",
+                ));
+                true
+            }
+            Ok(false) => {
+                checks.push(check(
+                    "schema",
+                    "warning",
+                    "worktree index schema is missing tables",
+                ));
+                false
+            }
+            Err(error) => {
+                checks.push(check("schema", "warning", error.to_string()));
+                false
+            }
+        }
+    } else {
+        checks.push(check(
+            "database",
+            "warning",
+            format!("{} missing", paths.index_db_path.display()),
+        ));
+        checks.push(check(
+            "schema",
+            "skip",
+            "worktree index missing; run init first",
+        ));
+        false
+    };
+
+    let proposal_inventory =
+        if paths.config_path.is_file() && shared_schema_is_ready && schema_is_ready {
+            MemoryService::open_paths(paths.clone())
+                .and_then(|service| service.validate_file_proposal_inventory())
+        } else {
+            scan_file_proposal_inventory(&paths)
+        };
     match proposal_inventory {
         Ok(inventory) => {
             let invalid = inventory.errors.len();
@@ -1455,14 +2133,14 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                 "lifecycle_transactions",
                 "warning",
                 format!(
-                    "{} hidden lifecycle transaction artifact{} require inspection under the Memzoi records/proposals roots",
+                    "{} hidden lifecycle transaction artifact{} require inspection in local runtime storage or the legacy records/proposals roots",
                     count,
                     if count == 1 { "" } else { "s" },
                 ),
             ));
             push_next_step(
                 &mut next_steps,
-                "inspect hidden .memzoi lifecycle transaction artifacts before retrying",
+                "inspect local Memzoi repository transaction artifacts before retrying",
             );
         }
         Err(error) => checks.push(check(
@@ -1487,51 +2165,7 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         push_next_step(&mut next_steps, "memzoi init");
     }
 
-    if paths.shared_db_path.is_file() {
-        checks.push(check(
-            "shared_database",
-            "ok",
-            paths.shared_db_path.display().to_string(),
-        ));
-    } else {
-        checks.push(check(
-            "shared_database",
-            "warning",
-            format!("{} missing", paths.shared_db_path.display()),
-        ));
-    }
-
-    let schema_is_ready = if paths.db_path.is_file() {
-        checks.push(check("database", "ok", paths.db_path.display().to_string()));
-        match schema_ready(&paths.db_path) {
-            Ok(true) => {
-                checks.push(check("schema", "ok", "memory schema is initialized"));
-                true
-            }
-            Ok(false) => {
-                checks.push(check(
-                    "schema",
-                    "warning",
-                    "memory schema is missing tables",
-                ));
-                false
-            }
-            Err(error) => {
-                checks.push(check("schema", "warning", error.to_string()));
-                false
-            }
-        }
-    } else {
-        checks.push(check(
-            "database",
-            "warning",
-            format!("{} missing", paths.db_path.display()),
-        ));
-        checks.push(check("schema", "skip", "database missing; run init first"));
-        false
-    };
-
-    if paths.db_path.is_file() && schema_is_ready {
+    if shared_schema_is_ready && schema_is_ready {
         match MemoryService::open_paths(paths.clone())
             .and_then(|service| service.open_proposal_counts())
         {
@@ -1702,8 +2336,9 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
             body: sample_body.to_string(),
             tags: Vec::new(),
             source_kind: Some("quickstart".to_string()),
-            source_ref: None,
+            source_ref: Some("quickstart://built-in-sample".to_string()),
             sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: memzoi_core::RepositoryContentClass::GeneralRepoKnowledge,
             confidence: 1.0,
         };
         let proposal = service.propose_memory("quickstart", draft)?;
@@ -1752,15 +2387,39 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
     }
 }
 
-fn schema_ready(db_path: &PathBuf) -> Result<bool> {
+fn schema_ready(db_path: &Path) -> Result<bool> {
+    const REQUIRED_TABLES: &[&str] = &[
+        "schema_migrations",
+        "event_log",
+        "memory_record",
+        "scope_binding",
+        "memory_path",
+        "proposal",
+        "memory_tag",
+        "memory_capture",
+        "read_audit",
+        "memory_fts",
+    ];
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("failed to open database {}", db_path.display()))?;
-    let exists = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'memory_record')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
-    Ok(exists)
+    let quick_check: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        bail!(
+            "database integrity check failed for {}: {quick_check}",
+            db_path.display()
+        );
+    }
+    for table in REQUIRED_TABLES {
+        let exists = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn check(name: &str, status: &str, message: impl Into<String>) -> serde_json::Value {
@@ -1801,6 +2460,7 @@ fn draft_from_args(args: DraftCommand) -> Result<MemoryDraft> {
         source_kind,
         source_ref,
         sensitivity,
+        content_class,
         title,
         body,
     } = args;
@@ -1816,6 +2476,7 @@ fn draft_from_args(args: DraftCommand) -> Result<MemoryDraft> {
         source_kind: normalize_optional_metadata(source_kind, "source-kind")?,
         source_ref: normalize_optional_metadata(source_ref, "source-ref")?,
         sensitivity: sensitivity.parse().map_err(anyhow::Error::msg)?,
+        content_class: content_class.parse().map_err(anyhow::Error::msg)?,
         confidence: 1.0,
     })
 }
@@ -1898,4 +2559,74 @@ fn parse_scope_kind(value: &str) -> Result<ScopeKind> {
 
 fn parse_visibility(value: &str) -> Result<Visibility> {
     value.parse().map_err(anyhow::Error::msg)
+}
+
+#[cfg(test)]
+mod safety_scan_limit_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn spawn_timeout_fixture(script: &str) -> Child {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", script])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        command.spawn().expect("spawn timeout fixture")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_git_subprocess_tree_times_out_while_stdout_is_open() {
+        let child = spawn_timeout_fixture("sleep 10");
+        let started = Instant::now();
+
+        let error =
+            child_output_bounded(child, 1_024, "timeout fixture", Duration::from_millis(50))
+                .expect_err("a silent child process tree must time out");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout must terminate the whole subprocess group"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_git_subprocess_tree_times_out_after_stdout_closes() {
+        let child = spawn_timeout_fixture("exec 1>&-; sleep 10");
+        let started = Instant::now();
+
+        let error =
+            child_output_bounded(child, 1_024, "timeout fixture", Duration::from_millis(50))
+                .expect_err("a child that closes stdout but stays alive must time out");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout must still cover process exit after stdout reaches EOF"
+        );
+    }
+
+    #[test]
+    fn raw_git_scan_rejects_excessive_managed_blob_count() {
+        let mut diff = Vec::new();
+        for index in 0..=MAX_SAFETY_SCAN_BLOBS {
+            diff.extend_from_slice(
+                b":100644 100644 0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 A\0",
+            );
+            diff.extend_from_slice(format!(".memzoi/records/{index}.md\0").as_bytes());
+        }
+
+        let error = match load_git_memory_blobs(&diff) {
+            Ok(_) => panic!("managed changed-path cardinality must be bounded"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("more than 4096 managed blobs"));
+    }
 }

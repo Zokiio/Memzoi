@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail};
 
 use super::source_lines;
-use crate::{MemoryDestination, MemoryType, OkfProposalSensitivity, ScopeKind};
+use crate::{
+    MemoryDestination, MemoryType, OkfProposalSensitivity, RepositoryContentClass, ScopeKind,
+};
 
 use super::super::{
     CAPTURE_MAX_GIT_CHANGED_FILES, CAPTURE_MAX_GIT_DIFF_HUNKS, CaptureDiagnostic, CaptureEvidence,
@@ -217,6 +219,7 @@ pub(super) fn extract(
                         extractor,
                         MemoryDestination::NeedsReview,
                         OkfProposalSensitivity::Unknown,
+                        RepositoryContentClass::Unknown,
                         "deleted_git_guidance_requires_review",
                         "deleted_git_guidance_has_no_direct_lifecycle_authority",
                     )?);
@@ -319,6 +322,7 @@ pub(super) fn extract(
                         extractor,
                         MemoryDestination::Repo,
                         OkfProposalSensitivity::RepoSafe,
+                        RepositoryContentClass::GeneralRepoKnowledge,
                         "deterministic_typed_added_git_guidance",
                         "explicit_repo_diff_passed_safeguards",
                     )?);

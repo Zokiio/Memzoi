@@ -24,8 +24,8 @@ Memzoi v0 is local-first and intended for dogfooding and early experimentation. 
 
 - File-native canonical memory records under `.memzoi/records/`.
 - OKF-compatible proposal file schema under `.memzoi/proposals/pending/`.
-- Local runtime state under `~/.memzoi/projects/<project-key>/` for derived SQLite indexes,
-  generated exports, and DB-local open proposal state.
+- Repository runtime state under `~/.memzoi/projects/<repository-key>/`: durable local/session
+  memory and proposal state in `shared.db`, plus per-worktree derived indexes and exports.
 - Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
 - Rebuild from canonical records with `memzoi rebuild` when the derived runtime index
   needs to be regenerated.
@@ -48,8 +48,9 @@ Memzoi separates canonical memory files from derived runtime state.
 
 1. Typed, scoped, versioned durable memory records live under `.memzoi/records/`.
 2. Verbose review packets can live under `.memzoi/proposals/pending/` before becoming compact records.
-3. A local runtime directory under `~/.memzoi/projects/<project-key>/` holds derived SQLite
-   indexes, generated exports, and DB-local pending proposal state.
+3. A local runtime directory under `~/.memzoi/projects/<repository-key>/` holds the
+   repository-wide `shared.db` authority for local/session memory and proposal state, alongside
+   disposable per-worktree indexes and generated exports.
 4. Agent-facing APIs support recall, context building, proposed writes, exports, and pre-action checks.
 
 The project keeps reviewability central: agent writes should be proposed first, human-readable exports should be diffable, and repo-shared memory must not contain secrets or private personal data.

@@ -7,11 +7,11 @@ title: Exports and Files
 Memzoi keeps canonical authored memory under repo `.memzoi/records/` and keeps runtime state under
 `~/.memzoi/projects/<repository-key>/`. OKF-compatible proposal files are schema-defined under
 `.memzoi/proposals/pending/`, while the current CLI/MCP proposal inbox is still DB-local workflow
-state. Valid CLI proposals default to `approved`, but approved is not applied: canonical record files
-are written only by explicit CLI apply flows. Rebuild restores records from canonical files and
-refuses to discard readable open DB-local proposals. If the runtime database is corrupt or unreadable,
-rebuild treats it as a disposable derived cache and may discard DB-local proposal state. See the
-[OKF profile](./okf-profile.md) for the file-native source layout.
+state in repository-wide `shared.db`. Valid CLI proposals default to `approved`, but approved is not
+applied: canonical record files are written only by explicit CLI apply flows. Rebuild replaces only
+the current worktree's disposable `index.db`; it preserves local/session memory and proposals in
+`shared.db` and fails closed if that shared authority is unreadable. See the [OKF profile](./okf-profile.md)
+for the file-native source layout.
 
 ## Format roles
 

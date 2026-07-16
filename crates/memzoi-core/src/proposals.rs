@@ -5,6 +5,7 @@ use serde_json::json;
 use std::{collections::BTreeMap, str::FromStr};
 use uuid::Uuid;
 
+use crate::RepositoryContentClass;
 use crate::events::{AppendEvent, append_event, now_utc};
 use crate::models::{
     MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
@@ -89,6 +90,9 @@ pub struct MemoryDraft {
     /// Classification for writes to canonical repo memory. Missing legacy values deserialize as unknown.
     #[serde(default)]
     pub sensitivity: OkfProposalSensitivity,
+    /// Typed contextual-policy claim for repository writes. Missing legacy values fail closed.
+    #[serde(default)]
+    pub content_class: RepositoryContentClass,
     pub confidence: f64,
 }
 
@@ -200,8 +204,17 @@ pub fn open_proposal_counts(conn: &Connection) -> Result<BTreeMap<ProposalStatus
     Ok(counts)
 }
 
+#[cfg(test)]
 pub fn validate_proposal(conn: &Connection, proposal_id: &str) -> Result<ValidationResult> {
-    let proposal = load_proposal(conn, proposal_id)?;
+    validate_proposal_against_records(conn, conn, proposal_id)
+}
+
+pub fn validate_proposal_against_records(
+    proposal_conn: &Connection,
+    records_conn: &Connection,
+    proposal_id: &str,
+) -> Result<ValidationResult> {
+    let proposal = load_proposal(proposal_conn, proposal_id)?;
     let hash = content_hash(&proposal.payload);
     let mut issues = Vec::new();
     if proposal.payload.title.trim().is_empty() {
@@ -231,7 +244,7 @@ pub fn validate_proposal(conn: &Connection, proposal_id: &str) -> Result<Validat
             content_hash: None,
         });
     }
-    for record_id in duplicate_record_ids(conn, &hash)? {
+    for record_id in duplicate_record_ids(records_conn, &hash)? {
         issues.push(ValidationIssue {
             code: "duplicate_content_hash".to_owned(),
             message: "an active memory already has the same content hash".to_owned(),
@@ -243,7 +256,7 @@ pub fn validate_proposal(conn: &Connection, proposal_id: &str) -> Result<Validat
         is_valid: issues.is_empty(),
         issues,
     };
-    conn.execute(
+    proposal_conn.execute(
         "UPDATE proposal SET validation_json = ?1, updated_at = ?2 WHERE id = ?3",
         params![serde_json::to_string(&result)?, now_utc()?, proposal_id],
     )?;
@@ -1294,6 +1307,7 @@ mod tests {
             source_kind: Some("test".to_owned()),
             source_ref: Some("proposal-red-tests".to_owned()),
             sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+            content_class: crate::RepositoryContentClass::GeneralRepoKnowledge,
             confidence: 0.82,
         }
     }

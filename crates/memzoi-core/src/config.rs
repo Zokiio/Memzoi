@@ -7,7 +7,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::git_repository::{discover_git_repository, list_git_worktree_roots};
+use crate::git_repository::{
+    GitRepositoryIdentity, discover_git_repository, list_git_worktree_roots,
+};
 
 const MEMORY_DIR_NAME: &str = ".memzoi";
 const RUNTIME_PROJECTS_DIR: &str = "projects";
@@ -90,6 +92,7 @@ pub struct MemoryPaths {
     pub db_path: PathBuf,
     pub config_path: PathBuf,
     pub exports_dir: PathBuf,
+    pub(crate) runtime_identity_error: Option<String>,
 }
 
 impl MemoryPaths {
@@ -98,26 +101,38 @@ impl MemoryPaths {
     }
 
     pub fn with_runtime_home(project_root: PathBuf, runtime_home: PathBuf) -> Self {
-        let memory_dir = project_root.join(MEMORY_DIR_NAME);
+        let project_root = normalize_root_path(project_root);
+        let runtime_home = normalize_root_path(runtime_home);
         let identity = RuntimeIdentity::discover(&project_root);
+        Self::with_runtime_identity(project_root, runtime_home, identity)
+    }
+
+    fn with_runtime_identity(
+        project_root: PathBuf,
+        runtime_home: PathBuf,
+        identity: RuntimeIdentity,
+    ) -> Self {
+        let memory_dir = project_root.join(MEMORY_DIR_NAME);
         let repository_runtime_dir = runtime_home
             .join(RUNTIME_PROJECTS_DIR)
-            .join(identity.repository_key);
+            .join(&identity.repository_key);
         let worktree_runtime_dir = repository_runtime_dir
             .join("worktrees")
-            .join(identity.worktree_key);
+            .join(&identity.worktree_key);
         let shared_db_path = repository_runtime_dir.join("shared.db");
         let index_db_path = worktree_runtime_dir.join("index.db");
-        let legacy_runtime_dirs = identity
+        let mut legacy_runtime_dirs = identity
             .legacy_project_roots
             .iter()
-            .map(|root| {
-                runtime_home
-                    .join(RUNTIME_PROJECTS_DIR)
-                    .join(project_runtime_key(root))
+            .flat_map(|root| {
+                [project_runtime_key(root), non_git_repository_key(root)]
+                    .into_iter()
+                    .map(|key| runtime_home.join(RUNTIME_PROJECTS_DIR).join(key))
             })
             .filter(|path| path != &repository_runtime_dir)
-            .collect();
+            .collect::<Vec<_>>();
+        legacy_runtime_dirs.sort();
+        legacy_runtime_dirs.dedup();
         Self {
             project_root,
             db_path: index_db_path.clone(),
@@ -130,7 +145,15 @@ impl MemoryPaths {
             index_db_path,
             legacy_runtime_dirs,
             memory_dir,
+            runtime_identity_error: identity.discovery_error,
         }
+    }
+
+    pub(crate) fn validate_runtime_identity(&self) -> Result<()> {
+        if let Some(error) = &self.runtime_identity_error {
+            bail!("{error}");
+        }
+        Ok(())
     }
 
     pub fn records_dir(&self) -> PathBuf {
@@ -155,20 +178,57 @@ struct RuntimeIdentity {
     repository_key: String,
     worktree_key: String,
     legacy_project_roots: Vec<PathBuf>,
+    discovery_error: Option<String>,
 }
 
 impl RuntimeIdentity {
     fn discover(project_root: &Path) -> Self {
+        Self::discover_with(
+            project_root,
+            discover_git_repository,
+            list_git_worktree_roots,
+        )
+    }
+
+    fn discover_with(
+        project_root: &Path,
+        discover_git: impl FnOnce(&Path) -> Result<Option<GitRepositoryIdentity>>,
+        list_worktrees: impl FnOnce(&Path) -> Result<Vec<PathBuf>>,
+    ) -> Self {
         let project_root = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
-        let Ok(Some(git)) = discover_git_repository(&project_root) else {
-            let key = project_runtime_key(&project_root);
-            return Self {
-                repository_key: key.clone(),
-                worktree_key: key,
-                legacy_project_roots: vec![project_root],
-            };
+        let git = match discover_git(&project_root) {
+            Ok(Some(git)) => git,
+            Ok(None) => {
+                return match find_git_marker(&project_root) {
+                    Ok(Some(marker)) => Self::unresolved_git(
+                        &project_root,
+                        format!(
+                            "Git repository identity is unavailable for {} despite Git metadata at {}; refusing non-Git runtime fallback",
+                            project_root.display(),
+                            marker.display()
+                        ),
+                    ),
+                    Ok(None) => Self::non_git(&project_root),
+                    Err(error) => Self::unresolved_git(
+                        &project_root,
+                        format!(
+                            "Git repository identity could not be verified for {}: {error:#}",
+                            project_root.display()
+                        ),
+                    ),
+                };
+            }
+            Err(error) => {
+                return Self::unresolved_git(
+                    &project_root,
+                    format!(
+                        "Git repository identity discovery failed for {}: {error:#}",
+                        project_root.display()
+                    ),
+                );
+            }
         };
         let relative_project = project_root
             .strip_prefix(&git.worktree_root)
@@ -188,11 +248,35 @@ impl RuntimeIdentity {
                 relative_project.as_os_str().as_encoded_bytes(),
             ],
         );
-        let mut legacy_project_roots = list_git_worktree_roots(&git.worktree_root)
-            .unwrap_or_default()
+        let roots = match list_worktrees(&git.worktree_root) {
+            Ok(roots) if !roots.is_empty() => roots,
+            Ok(_) => {
+                return Self {
+                    repository_key,
+                    worktree_key,
+                    legacy_project_roots: vec![project_root.clone()],
+                    discovery_error: Some(format!(
+                        "Git repository identity discovery failed for {}: worktree enumeration returned no worktrees",
+                        project_root.display()
+                    )),
+                };
+            }
+            Err(error) => {
+                return Self {
+                    repository_key,
+                    worktree_key,
+                    legacy_project_roots: vec![project_root.clone()],
+                    discovery_error: Some(format!(
+                        "Git repository identity discovery failed for {}: linked worktree enumeration failed: {error:#}",
+                        project_root.display()
+                    )),
+                };
+            }
+        };
+        let mut legacy_project_roots = roots
             .into_iter()
             .map(|root| root.join(relative_project))
-            .filter_map(|root| root.canonicalize().ok())
+            .map(normalize_root_path)
             .collect::<Vec<_>>();
         if !legacy_project_roots.contains(&project_root) {
             legacy_project_roots.push(project_root);
@@ -203,8 +287,65 @@ impl RuntimeIdentity {
             repository_key,
             worktree_key,
             legacy_project_roots,
+            discovery_error: None,
         }
     }
+
+    fn non_git(project_root: &Path) -> Self {
+        let repository_key = non_git_repository_key(project_root);
+        let worktree_key = runtime_key(
+            "worktree",
+            &[
+                b"non-git-worktree-v1",
+                project_root.as_os_str().as_encoded_bytes(),
+            ],
+        );
+        Self {
+            repository_key,
+            worktree_key,
+            legacy_project_roots: vec![project_root.to_path_buf()],
+            discovery_error: None,
+        }
+    }
+
+    fn unresolved_git(project_root: &Path, discovery_error: String) -> Self {
+        let repository_key = runtime_key(
+            "unresolved-git",
+            &[
+                b"unresolved-git-repository-v1",
+                project_root.as_os_str().as_encoded_bytes(),
+            ],
+        );
+        let worktree_key = runtime_key(
+            "unresolved-git-worktree",
+            &[
+                b"unresolved-git-worktree-v1",
+                project_root.as_os_str().as_encoded_bytes(),
+            ],
+        );
+        Self {
+            repository_key,
+            worktree_key,
+            legacy_project_roots: vec![project_root.to_path_buf()],
+            discovery_error: Some(discovery_error),
+        }
+    }
+}
+
+fn find_git_marker(start: &Path) -> Result<Option<PathBuf>> {
+    for candidate in start.ancestors() {
+        let marker = candidate.join(".git");
+        match fs::symlink_metadata(&marker) {
+            Ok(_) => return Ok(Some(marker)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect Git metadata {}", marker.display())
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn repository_display_name(common_dir: &Path, relative_project: &Path) -> String {
@@ -245,6 +386,34 @@ fn runtime_key(prefix: &str, fields: &[&[u8]]) -> String {
         &prefix
     };
     format!("{prefix}-{}", &hash[..16])
+}
+
+fn normalize_root_path(path: PathBuf) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map(|current| current.join(&path))
+            .unwrap_or(path)
+    };
+    let mut cursor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(mut resolved) = cursor.canonicalize() {
+            for component in missing.iter().rev() {
+                resolved.push(component);
+            }
+            return resolved;
+        }
+        let Some(name) = cursor.file_name() else {
+            return absolute;
+        };
+        missing.push(name.to_os_string());
+        let Some(parent) = cursor.parent() else {
+            return absolute;
+        };
+        cursor = parent;
+    }
 }
 
 pub fn load_effective_config(paths: &MemoryPaths) -> Result<EffectiveConfig> {
@@ -373,6 +542,20 @@ fn project_runtime_key(project_root: &Path) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "project".to_owned());
     format!("{prefix}-{}", &hash[..16])
+}
+
+fn non_git_repository_key(project_root: &Path) -> String {
+    let project_name = project_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("project");
+    runtime_key(
+        project_name,
+        &[
+            b"non-git-repository-v2",
+            project_root.as_os_str().as_encoded_bytes(),
+        ],
+    )
 }
 
 fn sanitize_runtime_segment(value: &str) -> String {
@@ -511,13 +694,43 @@ mod tests {
                 .join(".memzoi")
                 .join("records")
         );
+        assert_ne!(
+            paths.repository_runtime_dir, paths.legacy_runtime_dirs[0],
+            "the versioned runtime must remain distinct from its path-keyed migration source"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_paths_normalize_symlinked_existing_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let container = temp.path().canonicalize().unwrap();
+        let real = container.join("real");
+        let alias = container.join("alias");
+        create_dir(&real);
+        symlink(&real, &alias).unwrap();
+
+        let paths = MemoryPaths::with_runtime_home(
+            alias.join("missing-project"),
+            alias.join("missing-runtime-home"),
+        );
+
+        assert_eq!(paths.project_root, real.join("missing-project"));
+        assert!(
+            paths
+                .runtime_dir
+                .starts_with(real.join("missing-runtime-home"))
+        );
     }
 
     #[test]
     fn proposal_approval_policy_precedence_uses_user_global_then_repo_override() {
         let temp = TempDir::new().unwrap();
         let paths = paths_with_runtime_home(&temp);
-        let user_config_path = temp.path().join(".memzoi-runtime").join("config.toml");
+        let user_config_path =
+            normalize_root_path(temp.path().join(".memzoi-runtime")).join("config.toml");
         let repo_config_path = paths.repo_config_path();
 
         let built_in = load_effective_config(&paths).unwrap();
@@ -659,7 +872,57 @@ proposal_approval = "sometimes"
         );
         assert_ne!(main_paths.index_db_path, linked_paths.index_db_path);
         assert_ne!(main_paths.exports_dir, linked_paths.exports_dir);
-        assert_eq!(runtime_home_for_paths(&linked_paths), runtime_home);
+        assert_eq!(
+            runtime_home_for_paths(&linked_paths),
+            normalize_root_path(runtime_home)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn git_marker_without_discovery_never_selects_the_non_git_runtime() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let project = temp.path().join("project");
+        create_dir(project.join(".git"));
+        let project = project.canonicalize()?;
+        let runtime_home = normalize_root_path(temp.path().join("runtime"));
+
+        let paths = MemoryPaths::with_runtime_home(project.clone(), runtime_home.clone());
+
+        assert!(paths.validate_runtime_identity().is_err());
+        assert_ne!(
+            paths.repository_runtime_dir,
+            runtime_home
+                .join(RUNTIME_PROJECTS_DIR)
+                .join(non_git_repository_key(&project))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn linked_worktree_enumeration_failure_is_stored_in_memory_paths() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let project = temp.path().join("project");
+        create_dir(&project);
+        run_git(&project, &["init", "-q"])?;
+        let project = project.canonicalize()?;
+        let git = discover_git_repository(&project)?
+            .context("Git fixture should have a repository identity")?;
+        let identity = RuntimeIdentity::discover_with(
+            &project,
+            |_| Ok(Some(git)),
+            |_| bail!("injected worktree enumeration failure"),
+        );
+        let paths = MemoryPaths::with_runtime_identity(
+            project,
+            normalize_root_path(temp.path().join("runtime")),
+            identity,
+        );
+
+        let error = paths
+            .validate_runtime_identity()
+            .expect_err("partial linked-worktree discovery must fail closed");
+        assert!(format!("{error:#}").contains("injected worktree enumeration failure"));
         Ok(())
     }
 

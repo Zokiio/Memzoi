@@ -5,7 +5,7 @@
   "corpus": {
     "name": "memzoi-capture-v1",
     "version": "memzoi-capture-corpus/v1",
-    "digest": "blake3:f52871bedc75e075abf1973bd0323f0f9dd3b17d62367c11899adf06f634c0ec"
+    "digest": "blake3:686c766d4542659506950c5bf516950d13292c1993c68122385ff2eac0fdd880"
   },
   "profiles": [
     {
@@ -100,13 +100,13 @@
     "optional_skips": 0,
     "review_burden": {
       "proposed": 25,
-      "accepted": 11,
+      "accepted": 6,
       "rejected": 9,
-      "edited": 1,
+      "edited": 6,
       "deferred": 4,
       "duplicates": 5,
       "conflicts": 4,
-      "needs_review": 8
+      "needs_review": 14
     }
   },
   "profile_metrics": {
@@ -341,13 +341,13 @@
       "optional_skips": 0,
       "review_burden": {
         "proposed": 10,
-        "accepted": 5,
+        "accepted": 0,
         "rejected": 3,
-        "edited": 1,
+        "edited": 6,
         "deferred": 1,
         "duplicates": 2,
         "conflicts": 1,
-        "needs_review": 2
+        "needs_review": 8
       }
     }
   },
@@ -371,7 +371,7 @@
       "profile": "markdown-deterministic",
       "execution": "executed",
       "plan_status": "ready",
-      "data_class": "repo_safe",
+      "data_class": "private",
       "diagnostic_codes": [],
       "matched_candidates": [
         "deterministic-fact",
@@ -383,13 +383,13 @@
       "unexpected_candidates": 0,
       "review_burden": {
         "proposed": 2,
-        "accepted": 1,
+        "accepted": 0,
         "rejected": 1,
-        "edited": 0,
+        "edited": 1,
         "deferred": 0,
         "duplicates": 0,
         "conflicts": 0,
-        "needs_review": 0
+        "needs_review": 2
       },
       "assertions": {
         "actions": true,
@@ -421,7 +421,7 @@
       "profile": "markdown-deterministic",
       "execution": "executed",
       "plan_status": "ready",
-      "data_class": "repo_safe",
+      "data_class": "private",
       "diagnostic_codes": [
         "unsupported_markdown_content",
         "unsupported_markdown_content"
@@ -435,13 +435,13 @@
       "unexpected_candidates": 0,
       "review_burden": {
         "proposed": 1,
-        "accepted": 1,
+        "accepted": 0,
         "rejected": 0,
-        "edited": 0,
+        "edited": 1,
         "deferred": 0,
         "duplicates": 0,
         "conflicts": 0,
-        "needs_review": 0
+        "needs_review": 1
       },
       "assertions": {
         "actions": true,
@@ -487,13 +487,13 @@
       "unexpected_candidates": 0,
       "review_burden": {
         "proposed": 4,
-        "accepted": 2,
+        "accepted": 0,
         "rejected": 1,
-        "edited": 0,
+        "edited": 2,
         "deferred": 1,
         "duplicates": 1,
         "conflicts": 1,
-        "needs_review": 1
+        "needs_review": 3
       },
       "assertions": {
         "actions": true,
@@ -525,7 +525,7 @@
       "profile": "markdown-deterministic",
       "execution": "executed",
       "plan_status": "ready",
-      "data_class": "repo_safe",
+      "data_class": "private",
       "diagnostic_codes": [],
       "matched_candidates": [
         "inventory-duplicate"
@@ -574,7 +574,7 @@
       "profile": "markdown-deterministic",
       "execution": "executed",
       "plan_status": "ready",
-      "data_class": "repo_safe",
+      "data_class": "private",
       "diagnostic_codes": [],
       "matched_candidates": [
         "stale-warning"
@@ -585,13 +585,13 @@
       "unexpected_candidates": 0,
       "review_burden": {
         "proposed": 1,
-        "accepted": 1,
+        "accepted": 0,
         "rejected": 0,
-        "edited": 0,
+        "edited": 1,
         "deferred": 0,
         "duplicates": 0,
         "conflicts": 0,
-        "needs_review": 0
+        "needs_review": 1
       },
       "assertions": {
         "actions": true,

@@ -274,6 +274,8 @@ Before opening a pull request, run the relevant checks from the [Development](#d
 
 ## Security and Privacy
 
+Repository-bound memory is protected by a shared, projection-bound safety capability. See [Repository-write safety](docs/repository-write-safety.md) for the detector policy, redacted diagnostics, and staged/range scan commands.
+
 Memzoi is designed for project memory, not secret storage. Do not commit API keys, credentials, private personal data, raw chat logs, or temporary task progress into repo-shared memory records.
 
 If you discover a security issue, please avoid posting sensitive details publicly. Open a minimal issue or contact the maintainer with enough context to coordinate a fix.

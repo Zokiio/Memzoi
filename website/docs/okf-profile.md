@@ -23,9 +23,13 @@ This page describes the target authored-memory shape. Runtime indexes are derive
 
 ~/.memzoi/
   config.toml        # optional user-global workflow policy
-  projects/<project-key>/
-    memory.db
-    exports/
+  projects/<repository-key>/
+    config.toml
+    shared.db
+    repo-lifecycle.lock
+    worktrees/<worktree-key>/
+      index.db
+      exports/
 ```
 
 Rules:
@@ -34,8 +38,9 @@ Rules:
 - `.memzoi/proposals/pending/*.md` is the review packet shape for proposed memory mutations before they become canonical records.
 - `.memzoi/config.toml` can set repo workflow policy, such as `[workflow] proposal_approval = "manual"`. It overrides the user-global `${MEMZOI_HOME:-~/.memzoi}/config.toml`.
 - Proposal files are schema-defined review packets. The current CLI/MCP proposal inbox is still DB-local workflow state until a later lifecycle slice wires file proposals into commands.
-- `~/.memzoi/projects/<project-key>/memory.db` is derived runtime state for canonical records, plus current CLI/MCP proposal state. `memzoi rebuild` refuses to discard readable open proposals; if the existing DB is corrupt or unreadable, rebuild treats it as derived-cache recovery and may discard DB-local proposal state.
-- `~/.memzoi/projects/<project-key>/exports/` contains generated projections such as OKF exports and agent instruction files. Do not author canonical records there.
+- `~/.memzoi/projects/<repository-key>/shared.db` is the durable local authority for local/session memory and current CLI/MCP proposal state. Linked worktrees share it. Rebuild does not discard it and fails closed if it is unreadable.
+- `~/.memzoi/projects/<repository-key>/worktrees/<worktree-key>/index.db` is a disposable projection of that checkout's canonical records plus shared runtime mirrors. `memzoi rebuild` replaces this index while preserving `shared.db`, including open proposals.
+- `~/.memzoi/projects/<repository-key>/worktrees/<worktree-key>/exports/` contains generated projections such as OKF exports and agent instruction files. Do not author canonical records there.
 
 ## Path concept IDs
 
@@ -310,5 +315,5 @@ Use this boundary when deciding where to edit:
 | --- | --- |
 | Add a proposed memory | DB-local proposal workflow (`memzoi propose`) |
 | Apply an approved memory | `.memzoi/records/*.md` through the apply/importer flow |
-| Rebuild search/context indexes | Runtime `memory.db` via importer/rebuild |
-| Refresh agent-facing projections | Runtime `exports/*` via export commands |
+| Rebuild search/context indexes | Per-worktree `index.db` via importer/rebuild |
+| Refresh agent-facing projections | Per-worktree `exports/*` via export commands |

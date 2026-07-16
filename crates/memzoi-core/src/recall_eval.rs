@@ -562,8 +562,10 @@ pub fn run_recall_eval(corpus_path: impl AsRef<Path>) -> Result<RecallEvalReport
     validate_corpus(&loaded.corpus)?;
 
     let temp = TempDir::new().context("failed to create isolated recall evaluation state")?;
-    let project_root = temp
-        .path()
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&project_root)
+        .context("failed to create isolated recall evaluation project")?;
+    let project_root = project_root
         .canonicalize()
         .context("failed to canonicalize isolated recall evaluation root")?;
     let paths =
@@ -576,7 +578,7 @@ pub fn run_recall_eval(corpus_path: impl AsRef<Path>) -> Result<RecallEvalReport
         &paths.records_dir(),
     )?;
 
-    MemoryService::rebuild_paths(paths.clone())?;
+    MemoryService::rebuild_paths_for_trusted_recall_eval(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)
         .context("invalid recall evaluation evaluated_at")?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
@@ -587,7 +589,8 @@ pub fn run_recall_eval(corpus_path: impl AsRef<Path>) -> Result<RecallEvalReport
         &loaded.corpus.proposal_fixtures,
     )?;
 
-    service.rebuild()?;
+    drop(service);
+    MemoryService::rebuild_paths_for_trusted_recall_eval(paths.clone())?;
     let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
     let runtime_records = seed_runtime_fixtures(&service, &loaded.corpus.runtime_fixtures)?;
     let catalog = load_record_catalog(&paths.records_dir(), runtime_records)?;
@@ -1812,6 +1815,7 @@ fn evaluate_case(
                     source_kind: Some("eval".to_owned()),
                     source_ref: Some("fixture://write-gate".to_owned()),
                     sensitivity: *sensitivity,
+                    content_class: crate::RepositoryContentClass::GeneralRepoKnowledge,
                     confidence: 1.0,
                 },
                 ProposeOptions {

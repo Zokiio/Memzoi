@@ -1021,6 +1021,6 @@ Valid `memzoi export <format>` values:
 - Source installs require a Rust/Cargo-capable environment; release binaries do not.
 - Search is text/FTS-first, not vector or semantic recall.
 - Memory is repo-local; global, personal, team, and org sync are future work.
-- `memzoi rebuild` restores approved records from `.memzoi/records/`. Current proposals are DB-local; rebuild refuses to discard readable open proposals and should be unblocked with `memzoi proposals list --status open`, `memzoi proposals apply --all-approved`, or `memzoi reject <proposal-id> --reason "..."`. A corrupt unreadable DB causes rebuild to fail before deleting local or session runtime rows.
+- `memzoi rebuild` restores canonical records from `.memzoi/records/` into the current worktree's disposable `index.db`. Repository-wide local/session memory and proposal state remain authoritative in `shared.db`, so open proposals do not block rebuild. An unreadable `shared.db` fails closed before the worktree index is replaced.
 - MCP is intentionally minimal and safe-by-default. It can create proposals under the effective approval policy, but it cannot apply canonical records.
 - Homebrew and package-manager installers are not available yet.

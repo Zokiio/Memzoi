@@ -352,6 +352,7 @@ mod tests {
             source_kind: Some("test".to_owned()),
             source_ref: None,
             sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+            content_class: crate::RepositoryContentClass::GeneralRepoKnowledge,
             confidence: 0.9,
         }
     }

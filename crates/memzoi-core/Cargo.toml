@@ -21,6 +21,7 @@ blake3.workspace = true
 fastembed = { workspace = true, optional = true }
 ignore.workspace = true
 rusqlite.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_json_canonicalizer.workspace = true
@@ -31,12 +32,16 @@ thiserror.workspace = true
 time.workspace = true
 toml.workspace = true
 uuid.workspace = true
+url.workspace = true
 
 [build-dependencies]
 blake3.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 criterion = "0.8.2"

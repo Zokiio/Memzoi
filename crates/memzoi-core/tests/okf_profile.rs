@@ -914,6 +914,7 @@ fn memory_draft(title: &str, body: &str, tags: Vec<String>) -> MemoryDraft {
         source_kind: Some("test".to_owned()),
         source_ref: Some("okf-profile-test".to_owned()),
         sensitivity: memzoi_core::OkfProposalSensitivity::RepoSafe,
+        content_class: memzoi_core::RepositoryContentClass::GeneralRepoKnowledge,
         confidence: 0.9,
     }
 }
@@ -933,9 +934,11 @@ fn attach_memory_path(
 }
 
 fn initialized_service(temp: &TempDir) -> anyhow::Result<MemoryService> {
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&project_root)?;
     let paths = MemoryPaths::with_runtime_home(
-        temp.path().canonicalize()?,
-        temp.path().join(".memzoi-runtime"),
+        project_root.canonicalize()?,
+        temp.path().join("runtime-home"),
     );
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
     MemoryService::open_paths(paths)

@@ -34,13 +34,13 @@ thresholds:
   min_case_pass_rate: 1.0
   review_burden:
     proposed: 25
-    accepted: 11
+    accepted: 6
     rejected: 9
-    edited: 1
+    edited: 6
     deferred: 4
     duplicates: 5
     conflicts: 4
-    needs_review: 8
+    needs_review: 14
   max_plan_payload_bytes: 2093056
   max_p95_latency_ms: 5000.0
 cases:
@@ -61,7 +61,7 @@ cases:
         profile: markdown-deterministic
     expected:
       status: ready
-      data_class: repo_safe
+      data_class: private
       candidates:
         - id: deterministic-fact
           memory:
@@ -81,9 +81,9 @@ cases:
               span: {byte_start: 22, byte_end: 111, line_start: 3, line_end: 5}
               heading_path: [Capture evaluation, "Fact: Deterministic capture plans"]
               section_kind: fact
-          destination: repo
-          sensitivity: repo-safe
-          action: {kind: create_proposal}
+          destination: needs_review
+          sensitivity: unknown
+          action: {kind: no_write, reason_code: needs_review}
         - id: review-procedure
           memory:
             type: procedure
@@ -102,11 +102,22 @@ cases:
               span: {byte_start: 111, byte_end: 206, line_start: 6, line_end: 7}
               heading_path: [Capture evaluation, "Procedure: Review capture candidates"]
               section_kind: procedure
-          destination: repo
-          sensitivity: repo-safe
-          action: {kind: create_proposal}
+          destination: needs_review
+          sensitivity: unknown
+          action: {kind: no_write, reason_code: needs_review}
     review_outcomes:
-      - {candidate: deterministic-fact, outcome: accept}
+      - candidate: deterministic-fact
+        outcome: edit
+        reason_code: explicit-contextual-classification
+        memory:
+          type: fact
+          lane: semantic
+          title: Deterministic capture plans
+          body: Identical sources produce identical capture plans.
+          scope: {kind: repo, id: null, paths: [notes/typed.md]}
+          tags: []
+        requested_destination: repo
+        content_class: general_repo_knowledge
       - {candidate: review-procedure, outcome: reject}
 
   - id: unsupported-regions-do-not-overproduce
@@ -123,7 +134,7 @@ cases:
       extractor: {profile: markdown-deterministic}
     expected:
       status: ready
-      data_class: repo_safe
+      data_class: private
       diagnostic_codes: [unsupported_markdown_content, unsupported_markdown_content]
       candidates:
         - id: supported-fact
@@ -141,9 +152,9 @@ cases:
               span: {byte_start: 24, byte_end: 105, line_start: 3, line_end: 5}
               heading_path: ["Fact: Supported capture candidate"]
               section_kind: fact
-          destination: repo
-          sensitivity: repo-safe
-          action: {kind: create_proposal}
+          destination: needs_review
+          sensitivity: unknown
+          action: {kind: no_write, reason_code: needs_review}
       forbidden_candidates:
         - id: temporary-implementation-chatter
           memory:
@@ -154,7 +165,18 @@ cases:
             scope: {kind: repo, id: null, paths: [notes/mixed.md]}
             tags: []
     review_outcomes:
-      - {candidate: supported-fact, outcome: accept}
+      - candidate: supported-fact
+        outcome: edit
+        reason_code: explicit-contextual-classification
+        memory:
+          type: fact
+          lane: semantic
+          title: Supported capture candidate
+          body: Only the typed section becomes a candidate.
+          scope: {kind: repo, id: null, paths: [notes/mixed.md]}
+          tags: []
+        requested_destination: repo
+        content_class: general_repo_knowledge
 
   - id: earlier-candidate-duplicates-and-conflicts
     coverage: [duplicate, conflict]
@@ -187,9 +209,9 @@ cases:
               span: {byte_start: 0, byte_end: 57, line_start: 1, line_end: 3}
               heading_path: ["Fact: Exact candidate"]
               section_kind: fact
-          destination: repo
-          sensitivity: repo-safe
-          action: {kind: create_proposal}
+          destination: needs_review
+          sensitivity: unknown
+          action: {kind: no_write, reason_code: needs_review}
         - id: exact-duplicate
           memory:
             type: fact
@@ -205,8 +227,8 @@ cases:
               span: {byte_start: 57, byte_end: 114, line_start: 4, line_end: 6}
               heading_path: ["Fact: Exact candidate"]
               section_kind: fact
-          destination: repo
-          sensitivity: repo-safe
+          destination: needs_review
+          sensitivity: unknown
           action:
             kind: duplicate
             match_count: 1
@@ -226,9 +248,9 @@ cases:
               span: {byte_start: 114, byte_end: 174, line_start: 7, line_end: 9}
               heading_path: ["Decision: Conflicting candidate"]
               section_kind: decision
-          destination: repo
-          sensitivity: repo-safe
-          action: {kind: create_proposal}
+          destination: needs_review
+          sensitivity: unknown
+          action: {kind: no_write, reason_code: needs_review}
         - id: decision-conflict
           memory:
             type: decision
@@ -245,15 +267,37 @@ cases:
               heading_path: ["Decision: Conflicting candidate"]
               section_kind: decision
           destination: needs_review
-          sensitivity: repo-safe
+          sensitivity: unknown
           action:
             kind: conflict
             match_count: 1
             match_kinds: [earlier_candidate]
     review_outcomes:
-      - {candidate: exact-first, outcome: accept}
+      - candidate: exact-first
+        outcome: edit
+        reason_code: explicit-contextual-classification
+        memory:
+          type: fact
+          lane: semantic
+          title: Exact candidate
+          body: Identical evidence-backed body.
+          scope: {kind: repo, id: null, paths: [notes/matches.md]}
+          tags: []
+        requested_destination: repo
+        content_class: general_repo_knowledge
       - {candidate: exact-duplicate, outcome: reject}
-      - {candidate: decision-first, outcome: accept}
+      - candidate: decision-first
+        outcome: edit
+        reason_code: explicit-contextual-classification
+        memory:
+          type: decision
+          lane: semantic
+          title: Conflicting candidate
+          body: First proposed decision.
+          scope: {kind: repo, id: null, paths: [notes/matches.md]}
+          tags: []
+        requested_destination: repo
+        content_class: general_repo_knowledge
       - {candidate: decision-conflict, outcome: defer}
 
   - id: canonical-inventory-duplicate
@@ -272,7 +316,7 @@ cases:
       extractor: {profile: markdown-deterministic}
     expected:
       status: ready
-      data_class: repo_safe
+      data_class: private
       candidates:
         - id: inventory-duplicate
           memory:
@@ -289,8 +333,8 @@ cases:
               span: {byte_start: 0, byte_end: 84, line_start: 1, line_end: 2}
               heading_path: ["Fact: Existing inventory memory"]
               section_kind: fact
-          destination: repo
-          sensitivity: repo-safe
+          destination: needs_review
+          sensitivity: unknown
           action:
             kind: duplicate
             match_count: 1
@@ -312,7 +356,7 @@ cases:
       extractor: {profile: markdown-deterministic}
     expected:
       status: ready
-      data_class: repo_safe
+      data_class: private
       candidates:
         - id: stale-warning
           memory:
@@ -329,11 +373,22 @@ cases:
               span: {byte_start: 0, byte_end: 84, line_start: 1, line_end: 2}
               heading_path: ["Warning: Revalidate source bytes"]
               section_kind: warning
-          destination: repo
-          sensitivity: repo-safe
-          action: {kind: create_proposal}
+          destination: needs_review
+          sensitivity: unknown
+          action: {kind: no_write, reason_code: needs_review}
     review_outcomes:
-      - {candidate: stale-warning, outcome: accept}
+      - candidate: stale-warning
+        outcome: edit
+        reason_code: explicit-contextual-classification
+        memory:
+          type: warning
+          lane: semantic
+          title: Revalidate source bytes
+          body: Capture apply must reject stale source evidence.
+          scope: {kind: repo, id: null, paths: [notes/stale.md]}
+          tags: []
+        requested_destination: repo
+        content_class: general_repo_knowledge
     stale_check:
       kind: project_path
       path: notes/stale.md

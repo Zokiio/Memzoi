@@ -49,6 +49,7 @@ pub fn append_event(conn: &Connection, input: AppendEvent) -> CoreResult<MemoryE
     Ok(event)
 }
 
+#[cfg(test)]
 pub(crate) fn for_each_event(
     conn: &Connection,
     mut visit: impl FnMut(MemoryEvent) -> anyhow::Result<()>,
@@ -67,6 +68,118 @@ pub(crate) fn for_each_event(
     Ok(())
 }
 
+pub(crate) fn for_each_merged_event(
+    first: &Connection,
+    second: &Connection,
+    mut visit: impl FnMut(MemoryEvent) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    const ORDERED_EVENTS: &str =
+        "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
+         FROM event_log
+         ORDER BY created_at ASC, id ASC";
+
+    let mut first_stmt = first.prepare(ORDERED_EVENTS)?;
+    let mut second_stmt = second.prepare(ORDERED_EVENTS)?;
+    let mut second_ids = second.prepare("SELECT EXISTS(SELECT 1 FROM event_log WHERE id = ?1)")?;
+    let mut first_rows = first_stmt.query([])?;
+    let mut second_rows = second_stmt.query([])?;
+    let mut first_event = next_encoded_event(&mut first_rows)?;
+    let mut second_event = next_encoded_event(&mut second_rows)?;
+
+    loop {
+        match (first_event.take(), second_event.take()) {
+            (Some(left), Some(right)) => {
+                let left_key = (left.created_at.as_str(), left.id.as_str());
+                let right_key = (right.created_at.as_str(), right.id.as_str());
+                match left_key.cmp(&right_key) {
+                    std::cmp::Ordering::Less => {
+                        second_event = Some(right);
+                        let mirrored_in_second: bool =
+                            second_ids.query_row([left.id.as_str()], |row| row.get(0))?;
+                        if !mirrored_in_second {
+                            visit(left.into_event()?)?;
+                        }
+                        first_event = next_encoded_event(&mut first_rows)?;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        first_event = Some(left);
+                        visit(right.into_event()?)?;
+                        second_event = next_encoded_event(&mut second_rows)?;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        visit(right.into_event()?)?;
+                        first_event = next_encoded_event(&mut first_rows)?;
+                        second_event = next_encoded_event(&mut second_rows)?;
+                    }
+                }
+            }
+            (Some(event), None) => {
+                let mirrored_in_second: bool =
+                    second_ids.query_row([event.id.as_str()], |row| row.get(0))?;
+                if !mirrored_in_second {
+                    visit(event.into_event()?)?;
+                }
+                first_event = next_encoded_event(&mut first_rows)?;
+            }
+            (None, Some(event)) => {
+                visit(event.into_event()?)?;
+                second_event = next_encoded_event(&mut second_rows)?;
+            }
+            (None, None) => return Ok(()),
+        }
+    }
+}
+
+fn next_encoded_event(rows: &mut rusqlite::Rows<'_>) -> anyhow::Result<Option<EncodedMemoryEvent>> {
+    rows.next()?
+        .map(EncodedMemoryEvent::from_row)
+        .transpose()
+        .map_err(Into::into)
+}
+
+struct EncodedMemoryEvent {
+    id: String,
+    event_type: String,
+    actor: String,
+    payload_json: String,
+    record_id: Option<String>,
+    proposal_id: Option<String>,
+    created_at: String,
+}
+
+impl EncodedMemoryEvent {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            event_type: row.get(1)?,
+            actor: row.get(2)?,
+            payload_json: row.get(3)?,
+            record_id: row.get(4)?,
+            proposal_id: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    }
+
+    fn into_event(self) -> rusqlite::Result<MemoryEvent> {
+        let payload = serde_json::from_str(&self.payload_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        Ok(MemoryEvent {
+            id: self.id,
+            event_type: self.event_type,
+            actor: self.actor,
+            payload,
+            record_id: self.record_id,
+            proposal_id: self.proposal_id,
+            created_at: self.created_at,
+        })
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn list_events(conn: &Connection) -> anyhow::Result<Vec<MemoryEvent>> {
     let mut events = Vec::new();
@@ -77,20 +190,9 @@ pub(crate) fn list_events(conn: &Connection) -> anyhow::Result<Vec<MemoryEvent>>
     Ok(events)
 }
 
+#[cfg(test)]
 fn memory_event_from_row(row: &Row<'_>) -> rusqlite::Result<MemoryEvent> {
-    let payload_json: String = row.get(3)?;
-    let payload = serde_json::from_str(&payload_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
-    })?;
-    Ok(MemoryEvent {
-        id: row.get(0)?,
-        event_type: row.get(1)?,
-        actor: row.get(2)?,
-        payload,
-        record_id: row.get(4)?,
-        proposal_id: row.get(5)?,
-        created_at: row.get(6)?,
-    })
+    EncodedMemoryEvent::from_row(row)?.into_event()
 }
 
 pub(crate) fn now_utc() -> CoreResult<String> {
@@ -103,7 +205,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        events::{AppendEvent, append_event, for_each_event, list_events},
+        events::{AppendEvent, append_event, for_each_event, for_each_merged_event, list_events},
         init_database, open_database,
     };
 
@@ -223,6 +325,84 @@ mod tests {
     }
 
     #[test]
+    fn merged_event_stream_is_ordered_deduplicated_and_stops_early() -> anyhow::Result<()> {
+        let (_first_temp, first) = initialized_database()?;
+        let (_second_temp, second) = initialized_database()?;
+        insert_test_event(&first, "evt-first", "first", "2026-07-14T00:00:00Z")?;
+        insert_test_event(&first, "evt-shared", "shared", "2026-07-14T00:01:00Z")?;
+        insert_test_event(&second, "evt-shared", "index", "2026-07-14T00:01:30Z")?;
+        insert_test_event(&first, "evt-equal", "shared-equal", "2026-07-14T00:01:45Z")?;
+        insert_test_event(&second, "evt-equal", "index-equal", "2026-07-14T00:01:45Z")?;
+        insert_test_event(&second, "evt-last", "last", "2026-07-14T00:02:00Z")?;
+        second.pragma_update(None, "ignore_check_constraints", "ON")?;
+        second.execute(
+            "INSERT INTO event_log (
+               id, event_type, actor, payload_json, record_id, proposal_id, created_at
+             ) VALUES (
+               'evt-malformed', 'test.event', 'malformed', '{', NULL, NULL,
+               '2026-07-14T00:03:00Z'
+             )",
+            [],
+        )?;
+        second.pragma_update(None, "ignore_check_constraints", "OFF")?;
+
+        let mut merged = Vec::new();
+        for_each_merged_event(&first, &second, |event| {
+            merged.push((event.id, event.actor));
+            Ok(())
+        })
+        .expect_err("a full traversal should eventually decode the malformed fixture");
+        assert_eq!(
+            merged,
+            vec![
+                ("evt-first".to_owned(), "first".to_owned()),
+                ("evt-shared".to_owned(), "index".to_owned()),
+                ("evt-equal".to_owned(), "index-equal".to_owned()),
+                ("evt-last".to_owned(), "last".to_owned()),
+            ]
+        );
+
+        let mut observed = Vec::new();
+        let error = for_each_merged_event(&first, &second, |event| {
+            observed.push(event.id);
+            Err(anyhow::anyhow!("stop merged traversal"))
+        })
+        .expect_err("the consumer error should stop the merged traversal");
+        assert_eq!(observed, vec!["evt-first"]);
+        assert_eq!(error.to_string(), "stop merged traversal");
+        Ok(())
+    }
+
+    #[test]
+    fn merged_event_stream_does_not_decode_an_unvisited_later_head() -> anyhow::Result<()> {
+        let (_first_temp, first) = initialized_database()?;
+        let (_second_temp, second) = initialized_database()?;
+        insert_test_event(&first, "evt-first", "first", "2026-07-14T00:00:00Z")?;
+        second.pragma_update(None, "ignore_check_constraints", "ON")?;
+        second.execute(
+            "INSERT INTO event_log (
+               id, event_type, actor, payload_json, record_id, proposal_id, created_at
+             ) VALUES (
+               'evt-malformed', 'test.event', 'malformed', '{', NULL, NULL,
+               '2026-07-14T00:01:00Z'
+             )",
+            [],
+        )?;
+        second.pragma_update(None, "ignore_check_constraints", "OFF")?;
+
+        let mut observed = Vec::new();
+        let error = for_each_merged_event(&first, &second, |event| {
+            observed.push(event.id);
+            Err(anyhow::anyhow!("stop before later malformed event"))
+        })
+        .expect_err("the visitor should stop before the later event is decoded");
+
+        assert_eq!(observed, vec!["evt-first"]);
+        assert_eq!(error.to_string(), "stop before later malformed event");
+        Ok(())
+    }
+
+    #[test]
     fn appending_events_never_replaces_an_existing_event() -> anyhow::Result<()> {
         let (_temp, conn) = initialized_database()?;
 
@@ -276,5 +456,20 @@ mod tests {
         let conn = open_database(&db_path)?;
         init_database(&conn)?;
         Ok((temp, conn))
+    }
+
+    fn insert_test_event(
+        conn: &rusqlite::Connection,
+        id: &str,
+        actor: &str,
+        created_at: &str,
+    ) -> anyhow::Result<()> {
+        conn.execute(
+            "INSERT INTO event_log (
+               id, event_type, actor, payload_json, record_id, proposal_id, created_at
+             ) VALUES (?1, 'test.event', ?2, '{}', NULL, NULL, ?3)",
+            rusqlite::params![id, actor, created_at],
+        )?;
+        Ok(())
     }
 }
