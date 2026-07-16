@@ -2401,6 +2401,7 @@ fn schema_ready(db_path: &Path) -> Result<bool> {
         "proposal",
         "memory_tag",
         "memory_capture",
+        "runtime_mirror_state",
         "read_audit",
         "memory_fts",
     ];

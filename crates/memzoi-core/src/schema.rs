@@ -7,13 +7,16 @@ pub fn init(conn: &Connection) -> Result<()> {
     ensure_memory_lane_column(conn)?;
     ensure_memory_destination_column(conn)?;
     ensure_memory_proposal_id_column(conn)?;
+    conn.execute_batch(RUNTIME_MIRROR_TRIGGERS)
+        .context("failed to initialize runtime mirror revision triggers")?;
     conn.execute_batch(
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);",
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (6);",
     )
-    .context("failed to record schema migrations 2 through 5")?;
+    .context("failed to record schema migrations 2 through 6")?;
     Ok(())
 }
 
@@ -168,6 +171,13 @@ CREATE TABLE IF NOT EXISTS memory_capture (
   provenance_json TEXT NOT NULL CHECK (json_valid(provenance_json))
 );
 
+CREATE TABLE IF NOT EXISTS runtime_mirror_state (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  revision TEXT NOT NULL CHECK (
+    length(revision) = 32 AND revision NOT GLOB '*[^0-9a-f]*'
+  )
+);
+
 CREATE TABLE IF NOT EXISTS read_audit (
   id TEXT PRIMARY KEY,
   operation TEXT NOT NULL,
@@ -206,4 +216,150 @@ CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_memory_capture_record_id ON memory_capture(record_id);
 
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
+"#;
+
+const RUNTIME_MIRROR_TRIGGERS: &str = r#"
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_record_ai
+AFTER INSERT ON memory_record
+WHEN NEW.destination IN ('local', 'session')
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_record_au
+AFTER UPDATE ON memory_record
+WHEN OLD.destination IN ('local', 'session') OR NEW.destination IN ('local', 'session')
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_record_ad
+AFTER DELETE ON memory_record
+WHEN OLD.destination IN ('local', 'session')
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_tag_ai
+AFTER INSERT ON memory_tag
+WHEN EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id = NEW.record_id AND destination IN ('local', 'session')
+)
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_tag_au
+AFTER UPDATE ON memory_tag
+WHEN EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id IN (OLD.record_id, NEW.record_id) AND destination IN ('local', 'session')
+)
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_tag_ad
+AFTER DELETE ON memory_tag
+WHEN EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id = OLD.record_id AND destination IN ('local', 'session')
+)
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_path_ai
+AFTER INSERT ON memory_path
+WHEN EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id = NEW.record_id AND destination IN ('local', 'session')
+)
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_path_au
+AFTER UPDATE ON memory_path
+WHEN EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id IN (OLD.record_id, NEW.record_id) AND destination IN ('local', 'session')
+)
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_path_ad
+AFTER DELETE ON memory_path
+WHEN EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id = OLD.record_id AND destination IN ('local', 'session')
+)
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_capture_ai
+AFTER INSERT ON memory_capture
+WHEN EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id = NEW.record_id AND destination IN ('local', 'session')
+)
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_capture_au
+AFTER UPDATE ON memory_capture
+WHEN EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id IN (OLD.record_id, NEW.record_id) AND destination IN ('local', 'session')
+)
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_capture_ad
+AFTER DELETE ON memory_capture
+WHEN EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id = OLD.record_id AND destination IN ('local', 'session')
+)
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_proposal_ai
+AFTER INSERT ON proposal
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_proposal_au
+AFTER UPDATE ON proposal
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_proposal_ad
+AFTER DELETE ON proposal
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
 "#;

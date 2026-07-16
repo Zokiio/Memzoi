@@ -989,6 +989,20 @@ fn shared_proposals_are_authoritative_during_reads_and_open() -> anyhow::Result<
 }
 
 #[test]
+fn unchanged_search_does_not_open_the_repository_lifecycle_lock() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let _lifecycle_lock = RepoLifecycleLock::acquire(&service.paths)?;
+
+    let results = service.search_memory(SearchInput {
+        query: "absent mirror freshness sentinel".to_owned(),
+        ..SearchInput::default()
+    })?;
+
+    assert!(results.is_empty());
+    Ok(())
+}
+
+#[test]
 fn legacy_lifecycle_rejects_runtime_targets_without_canonical_leaks() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let local = service.create_local_memory(

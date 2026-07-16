@@ -134,6 +134,13 @@ impl<'a> RuntimeRecords<'a> {
         preservation::runtime_record_snapshots(self.conn)
     }
 
+    pub(super) fn snapshots_for_ids(
+        &self,
+        record_ids: &BTreeSet<String>,
+    ) -> Result<Vec<RuntimeRecordSnapshot>> {
+        preservation::runtime_record_snapshots_for_ids(self.conn, record_ids)
+    }
+
     pub(super) fn tags(&self, record_id: &str) -> Result<Vec<String>> {
         preservation::record_tags(self.conn, record_id)
     }

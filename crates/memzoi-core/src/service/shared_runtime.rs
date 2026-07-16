@@ -28,6 +28,7 @@ const SHARED_SYNC_JOURNAL_SCHEMA: &str = "memzoi/shared-sync-v1";
 const SHARED_SYNC_JOURNAL_FILE: &str = "shared-sync-v1.json";
 const SHARED_SYNC_MARKER_EVENT: &str = "memzoi.shared_sync.index_committed";
 const SHARED_SYNC_MARKER_ACTOR: &str = "system:shared-sync";
+const RUNTIME_MIRROR_STATE_SINGLETON: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ProposalRow {
@@ -472,6 +473,9 @@ pub(super) fn refresh_index_mirrors(
     shared: &Connection,
     index: &Connection,
 ) -> Result<()> {
+    if !shared_sync_journal_entry_exists(paths)? && runtime_mirror_revisions_match(shared, index)? {
+        return Ok(());
+    }
     let _lifecycle_lock = RepoLifecycleLock::acquire(paths)?;
     refresh_index_mirrors_locked(paths, shared, index)
 }
@@ -482,6 +486,10 @@ pub(super) fn refresh_index_mirrors_locked(
     index: &Connection,
 ) -> Result<()> {
     recover_pending_shared_sync_locked(paths, shared)?;
+    if runtime_mirror_revisions_match(shared, index)? {
+        return Ok(());
+    }
+    let shared_revision = ensure_runtime_mirror_revision(shared)?;
     let shared_records = RuntimeRecords::new(shared).snapshots()?;
     let indexed_records = RuntimeRecords::new(index).snapshots()?;
     let non_runtime_ids = RuntimeRecords::new(index)
@@ -506,9 +514,6 @@ pub(super) fn refresh_index_mirrors_locked(
 
     let shared_proposals = read_proposals(shared)?;
     let indexed_proposals = read_proposals(index)?;
-    if shared_records == indexed_records && shared_proposals == indexed_proposals {
-        return Ok(());
-    }
 
     let tx = index.unchecked_transaction()?;
     if shared_records != indexed_records {
@@ -521,7 +526,56 @@ pub(super) fn refresh_index_mirrors_locked(
     if shared_proposals != indexed_proposals {
         replace_proposals(&tx, &shared_proposals)?;
     }
+    let current_shared_revision = runtime_mirror_revision(shared)?
+        .context("shared runtime mirror revision disappeared during reconciliation")?;
+    if current_shared_revision != shared_revision {
+        bail!("shared runtime mirror revision changed during reconciliation");
+    }
+    set_runtime_mirror_revision(&tx, &shared_revision)?;
     tx.commit()?;
+    Ok(())
+}
+
+fn shared_sync_journal_entry_exists(paths: &MemoryPaths) -> Result<bool> {
+    let path = shared_sync_journal_path(paths);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect shared-sync journal {}", path.display())),
+    }
+}
+
+fn runtime_mirror_revision(conn: &Connection) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT revision FROM runtime_mirror_state WHERE singleton = ?1",
+        [RUNTIME_MIRROR_STATE_SINGLETON],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn runtime_mirror_revisions_match(shared: &Connection, index: &Connection) -> Result<bool> {
+    let shared_revision = runtime_mirror_revision(shared)?;
+    Ok(shared_revision.is_some() && shared_revision == runtime_mirror_revision(index)?)
+}
+
+fn ensure_runtime_mirror_revision(conn: &Connection) -> Result<String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO runtime_mirror_state(singleton, revision)
+         VALUES (?1, lower(hex(randomblob(16))))",
+        [RUNTIME_MIRROR_STATE_SINGLETON],
+    )?;
+    runtime_mirror_revision(conn)?.context("runtime mirror revision was not initialized")
+}
+
+fn set_runtime_mirror_revision(conn: &Connection, revision: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO runtime_mirror_state(singleton, revision) VALUES (?1, ?2)
+         ON CONFLICT(singleton) DO UPDATE SET revision = excluded.revision",
+        rusqlite::params![RUNTIME_MIRROR_STATE_SINGLETON, revision],
+    )?;
     Ok(())
 }
 
@@ -531,11 +585,7 @@ pub(super) fn prepare_runtime_sync_journal(
     record_ids: &[String],
 ) -> Result<()> {
     let record_ids = record_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let records = RuntimeRecords::new(index)
-        .snapshots()?
-        .into_iter()
-        .filter(|snapshot| record_ids.contains(snapshot.record().id.as_str()))
-        .collect::<Vec<_>>();
+    let records = RuntimeRecords::new(index).snapshots_for_ids(&record_ids)?;
     if records.len() != record_ids.len() {
         let found = records
             .iter()
@@ -972,8 +1022,12 @@ fn apply_shared_sync_payload(shared: &Connection, payload: &SharedSyncPayload) -
     let tx = shared.unchecked_transaction()?;
     match payload {
         SharedSyncPayload::RuntimeRecords { records, events } => {
+            let record_ids = records
+                .iter()
+                .map(|snapshot| snapshot.record().id.clone())
+                .collect::<BTreeSet<_>>();
             let existing = RuntimeRecords::new(&tx)
-                .snapshots()?
+                .snapshots_for_ids(&record_ids)?
                 .into_iter()
                 .map(|snapshot| (snapshot.record().id.clone(), snapshot))
                 .collect::<BTreeMap<_, _>>();
@@ -1022,8 +1076,12 @@ fn shared_sync_payload_is_applied(
     payload: &SharedSyncPayload,
 ) -> Result<bool> {
     let records_match = |expected: &[RuntimeRecordSnapshot]| -> Result<bool> {
+        let record_ids = expected
+            .iter()
+            .map(|snapshot| snapshot.record().id.clone())
+            .collect::<BTreeSet<_>>();
         let current = RuntimeRecords::new(shared)
-            .snapshots()?
+            .snapshots_for_ids(&record_ids)?
             .into_iter()
             .map(|snapshot| (snapshot.record().id.clone(), snapshot))
             .collect::<BTreeMap<_, _>>();
@@ -3058,6 +3116,8 @@ mod tests {
         db::init_database(&shared)?;
         let index = db::open_database(&paths.index_db_path)?;
         db::init_database(&index)?;
+        refresh_index_mirrors(&paths, &shared, &index)?;
+        assert!(runtime_mirror_revisions_match(&shared, &index)?);
 
         let record_id = {
             let _lock = RepoLifecycleLock::acquire(&paths)?;
@@ -3086,6 +3146,101 @@ mod tests {
         )?;
         assert_eq!(shared_count, 0);
         assert!(!shared_sync_journal_path(&paths).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_sync_journal_snapshots_only_requested_records() -> Result<()> {
+        let project = TempDir::new()?;
+        let runtime_home = TempDir::new()?;
+        let paths = MemoryPaths::with_runtime_home(
+            project.path().canonicalize()?,
+            runtime_home.path().to_path_buf(),
+        );
+        MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
+        let index = db::open_database(&paths.index_db_path)?;
+        db::init_database(&index)?;
+        let records = RuntimeRecords::new(&index);
+        let target = records.create_local(
+            "agent:targeted-snapshot-test",
+            &LocalMemoryInput {
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                title: "Journal target".to_owned(),
+                body: "Only this runtime record belongs in the sync journal.".to_owned(),
+            },
+            "2026-07-16T12:00:00Z",
+        )?;
+        let unrelated = records.create_local(
+            "agent:targeted-snapshot-test",
+            &LocalMemoryInput {
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                title: "Unrelated malformed capture".to_owned(),
+                body: "Targeted snapshotting must not inspect this record.".to_owned(),
+            },
+            "2026-07-16T12:00:00Z",
+        )?;
+        index.execute(
+            "INSERT INTO memory_capture(record_id, provenance_json) VALUES (?1, '{}')",
+            [&unrelated.id],
+        )?;
+
+        prepare_runtime_sync_journal(&paths, &index, std::slice::from_ref(&target.id))?;
+
+        assert!(shared_sync_journal_path(&paths).is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn mirror_revision_detects_shared_runtime_and_child_changes() -> Result<()> {
+        let project = TempDir::new()?;
+        let runtime_home = TempDir::new()?;
+        let paths = MemoryPaths::with_runtime_home(
+            project.path().canonicalize()?,
+            runtime_home.path().to_path_buf(),
+        );
+        MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
+        let shared = db::open_database(&paths.shared_db_path)?;
+        db::init_database(&shared)?;
+        let index = db::open_database(&paths.index_db_path)?;
+        db::init_database(&index)?;
+        refresh_index_mirrors(&paths, &shared, &index)?;
+        assert!(runtime_mirror_revisions_match(&shared, &index)?);
+
+        let record = RuntimeRecords::new(&shared).create_local(
+            "agent:mirror-revision-test",
+            &LocalMemoryInput {
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                title: "Revision-tracked runtime".to_owned(),
+                body: "Shared runtime mutations must invalidate worktree mirrors.".to_owned(),
+            },
+            "2026-07-16T12:00:00Z",
+        )?;
+        assert!(!runtime_mirror_revisions_match(&shared, &index)?);
+
+        refresh_index_mirrors(&paths, &shared, &index)?;
+        assert!(runtime_mirror_revisions_match(&shared, &index)?);
+        assert_eq!(
+            RuntimeRecords::new(&index)
+                .get(&record.id)?
+                .context("refreshed runtime record is missing")?,
+            record
+        );
+
+        shared.execute(
+            "INSERT INTO memory_tag(record_id, tag) VALUES (?1, 'revision-tracked')",
+            [&record.id],
+        )?;
+        assert!(!runtime_mirror_revisions_match(&shared, &index)?);
+
+        refresh_index_mirrors(&paths, &shared, &index)?;
+        assert!(runtime_mirror_revisions_match(&shared, &index)?);
+        assert_eq!(
+            RuntimeRecords::new(&index).tags(&record.id)?,
+            vec!["revision-tracked"]
+        );
         Ok(())
     }
 

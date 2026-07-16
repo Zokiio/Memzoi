@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Result, bail};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::{MemoryPath, MemoryRecord};
+use crate::{MemoryDestination, MemoryPath, MemoryRecord};
 
 use super::{
     query::record_by_id,
@@ -27,16 +29,40 @@ pub(in crate::service) struct RuntimeRecordSnapshot {
 pub(super) fn runtime_record_snapshots(conn: &Connection) -> Result<Vec<RuntimeRecordSnapshot>> {
     records_for_runtime_preservation(conn)?
         .into_iter()
-        .map(|record| {
-            let tags = record_tags(conn, &record.id)?;
-            let paths = runtime_record_paths(conn, &record.id)?;
-            Ok(RuntimeRecordSnapshot {
-                record,
-                tags,
-                paths,
-            })
-        })
+        .map(|record| runtime_record_snapshot(conn, record))
         .collect()
+}
+
+pub(super) fn runtime_record_snapshots_for_ids(
+    conn: &Connection,
+    record_ids: &BTreeSet<String>,
+) -> Result<Vec<RuntimeRecordSnapshot>> {
+    let mut snapshots = Vec::with_capacity(record_ids.len());
+    for record_id in record_ids {
+        let Some(record) = record_by_id(conn, record_id)? else {
+            continue;
+        };
+        if matches!(
+            record.destination,
+            MemoryDestination::Local | MemoryDestination::Session
+        ) {
+            snapshots.push(runtime_record_snapshot(conn, record)?);
+        }
+    }
+    Ok(snapshots)
+}
+
+fn runtime_record_snapshot(
+    conn: &Connection,
+    record: MemoryRecord,
+) -> Result<RuntimeRecordSnapshot> {
+    let tags = record_tags(conn, &record.id)?;
+    let paths = runtime_record_paths(conn, &record.id)?;
+    Ok(RuntimeRecordSnapshot {
+        record,
+        tags,
+        paths,
+    })
 }
 
 fn runtime_record_paths(conn: &Connection, record_id: &str) -> Result<Vec<MemoryPath>> {
