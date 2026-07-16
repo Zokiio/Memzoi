@@ -25,8 +25,8 @@ use serde_json::json;
 use crate::{
     cli::{
         CaptureCommands, CheckpointCommands, Cli, Commands, DraftCommand, EvalCommands,
-        EventCommands, ImportCommands, IntegrateCommands, LocalCommands, McpCommands,
-        ProposalCommands, ProposalFileCommands, SafetyCommands,
+        EventCommands, ImportCommands, IntegrateCommands, LocalCommands, MaterializeCommands,
+        McpCommands, ProposalCommands, ProposalFileCommands, SafetyCommands,
     },
     eval, integrate, mcp,
     output::{print_json, print_jsonl_row},
@@ -34,6 +34,7 @@ use crate::{
 };
 
 mod capture;
+mod materialize;
 mod proposal_files;
 
 const NON_UTF8_GIT_PATH_SENTINEL: &str = ".memzoi/memory/<non-utf8-git-path>";
@@ -735,6 +736,37 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 plan_id,
                 review_id,
                 actor,
+                as_json: json,
+            }),
+        },
+        Commands::Materialize { command } => match command {
+            MaterializeCommands::Plan {
+                candidate_file,
+                output,
+                json,
+            } => materialize::plan_command(candidate_file, output, json),
+            MaterializeCommands::Decide {
+                candidate_file,
+                plan_file,
+                decision_at,
+                output,
+                json,
+            } => materialize::decide_command(candidate_file, plan_file, decision_at, output, json),
+            MaterializeCommands::Apply {
+                candidate_file,
+                plan_file,
+                decision_file,
+                candidate_id,
+                plan_id,
+                decision_id,
+                json,
+            } => materialize::apply_command(materialize::ApplyCommand {
+                candidate_file,
+                plan_file,
+                decision_file,
+                candidate_id,
+                plan_id,
+                decision_id,
                 as_json: json,
             }),
         },

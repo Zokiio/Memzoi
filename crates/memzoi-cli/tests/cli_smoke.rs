@@ -8,7 +8,10 @@ use std::{
 };
 
 use assert_cmd::Command;
-use memzoi_core::{MemoryDestination, MemoryPaths, TWO_PLANE_MEMORY_POLICY};
+use memzoi_core::{
+    MemoryDestination, MemoryPaths, TWO_PLANE_MEMORY_POLICY, parse_okf_record_file,
+    render_okf_record_markdown,
+};
 use predicates::prelude::*;
 use rusqlite::Connection;
 use semver::Version;
@@ -4933,8 +4936,12 @@ fn applied_replay_repairs_fts_only_drift_and_doctor_reports_it() {
         )
         .expect("delete only the full-text index entry");
     }
-    let missing_search = run_json_command(repo.path(), &["search", "proposal body", "--json"]);
-    assert!(record_ids_from_json(&missing_search).is_empty());
+    let missing_search =
+        run_command_failure_stderr(repo.path(), &["search", "proposal body", "--json"]);
+    assert!(
+        missing_search.contains("fts_out_of_sync=true"),
+        "search must refuse an out-of-sync derived index: {missing_search}"
+    );
     let stale_doctor = run_json_command(repo.path(), &["doctor", "--json"]);
     assert_check_status(&stale_doctor, "repo_index", "warning");
     assert!(
@@ -6256,7 +6263,7 @@ fn reject_json_prevents_apply_from_creating_active_record() {
 }
 
 #[test]
-fn search_json_filters_scope_type_path_limit_and_excludes_inactive_records() {
+fn search_json_filters_type_path_limit_and_excludes_inactive_records() {
     let repo = initialized_temp_repo();
     let repo = repo.path();
 
@@ -6277,15 +6284,6 @@ fn search_json_filters_scope_type_path_limit_and_excludes_inactive_records() {
         "This fact matches the text and path but should be excluded by --type decision.",
     );
     attach_memory_path(repo, &wrong_type, "crates/search/src/lib.rs");
-
-    let wrong_scope = create_applied_memory(
-        repo,
-        "decision",
-        "team",
-        "Zircon CLI search team decision",
-        "This decision matches the text and path but should be excluded by --scope repo.",
-    );
-    attach_memory_path(repo, &wrong_scope, "crates/search/src/lib.rs");
 
     let wrong_path = create_applied_memory(
         repo,
@@ -6320,8 +6318,6 @@ fn search_json_filters_scope_type_path_limit_and_excludes_inactive_records() {
         &[
             "search",
             "zircon",
-            "--scope",
-            "repo",
             "--type",
             "decision",
             "--path",
@@ -6336,12 +6332,9 @@ fn search_json_filters_scope_type_path_limit_and_excludes_inactive_records() {
     assert_eq!(
         ids,
         vec![matching.as_str()],
-        "search JSON should return only the active record that survives scope/type/path filters and limit: {search}"
+        "search JSON should return only the active record that survives type/path filters and limit: {search}"
     );
-    assert_json_does_not_reference_records(
-        &search,
-        &[wrong_type, wrong_scope, wrong_path, tombstoned],
-    );
+    assert_json_does_not_reference_records(&search, &[wrong_type, wrong_path, tombstoned]);
 }
 
 #[test]
@@ -6354,13 +6347,7 @@ fn expiry_command_shows_records_excluded_from_normal_search_and_explains_why() {
         "Expired CLI diagnostic memory",
         "The expirydiagnostic token should be hidden from normal search.",
     );
-    let conn = Connection::open(memory_db_path(repo.path())).expect("open runtime database");
-    conn.execute(
-        "UPDATE memory_record SET expires_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
-        [record_id.as_str()],
-    )
-    .expect("set expired diagnostic fixture");
-    drop(conn);
+    set_record_expiry(repo.path(), &record_id, "2000-01-01T00:00:00Z");
 
     let search = run_json_command(repo.path(), &["search", "expirydiagnostic", "--json"]);
     assert!(record_ids_from_json(&search).is_empty());
@@ -9120,6 +9107,26 @@ fn create_applied_memory_with_visibility(
 ) -> String {
     let policy_supported =
         matches!(scope_kind, "repo" | "project") && matches!(visibility, "repo" | "public");
+    if !policy_supported {
+        let local = run_json_command(
+            repo,
+            &[
+                "local",
+                "add",
+                "--type",
+                memory_type,
+                "--title",
+                title,
+                "--body",
+                body,
+                "--actor",
+                "agent:cli-search-context-tests",
+                "--json",
+            ],
+        );
+        return json_string(&local, "record_id").to_owned();
+    }
+
     let applied = run_json_command(
         repo,
         &[
@@ -9128,9 +9135,9 @@ fn create_applied_memory_with_visibility(
             "--type",
             memory_type,
             "--scope-kind",
-            if policy_supported { scope_kind } else { "repo" },
+            scope_kind,
             "--visibility",
-            if policy_supported { visibility } else { "repo" },
+            visibility,
             "--sensitivity",
             "repo-safe",
             "--content-class",
@@ -9147,36 +9154,48 @@ fn create_applied_memory_with_visibility(
 
     assert_eq!(json_string(&applied, "record_status"), "active");
     assert_eq!(applied.get("applied").and_then(Value::as_bool), Some(true));
-    let record_id = json_string(&applied, "record_id").to_owned();
-    if !policy_supported {
-        let conn = Connection::open(memory_db_path(repo))
-            .expect("open memory db for legacy read-filter fixture");
-        conn.execute(
-            "UPDATE memory_record SET scope_kind = ?1, visibility = ?2 WHERE id = ?3",
-            rusqlite::params![scope_kind, visibility, record_id],
-        )
-        .expect("seed legacy unsupported metadata fixture");
-    }
-    record_id
+    json_string(&applied, "record_id").to_owned()
 }
 
 fn attach_memory_path(repo: &Path, record_id: &str, path: &str) {
-    let conn = Connection::open(memory_db_path(repo)).expect("open memory db for path fixture");
-    conn.execute(
-        "INSERT INTO memory_path(id, record_id, path, line_start, line_end)
-         VALUES (?1, ?2, ?3, 1, 12)",
-        rusqlite::params![format!("path-{record_id}"), record_id, path],
-    )
-    .expect("attach path metadata");
+    mutate_canonical_record(repo, record_id, |record| {
+        if !record.applies_to.iter().any(|existing| existing == path) {
+            record.applies_to.push(path.to_owned());
+        }
+    });
 }
 
 fn update_record_source_ref(repo: &Path, record_id: &str, source_ref: &str) {
-    let conn = Connection::open(memory_db_path(repo)).expect("open memory db for source fixture");
-    conn.execute(
-        "UPDATE memory_record SET source_ref = ?1 WHERE id = ?2",
-        rusqlite::params![source_ref, record_id],
+    mutate_canonical_record(repo, record_id, |record| {
+        record.draft.source_ref = Some(source_ref.to_owned());
+    });
+}
+
+fn set_record_expiry(repo: &Path, record_id: &str, expires_at: &str) {
+    mutate_canonical_record(repo, record_id, |record| {
+        record.expires_at = Some(expires_at.to_owned());
+    });
+}
+
+fn mutate_canonical_record(
+    repo: &Path,
+    record_id: &str,
+    mutate: impl FnOnce(&mut memzoi_core::OkfRecordFile),
+) {
+    let paths = test_paths(repo);
+    let records = paths.records_dir();
+    let path = records.join(format!("{record_id}.md"));
+    let mut record = parse_okf_record_file(&records, &path)
+        .unwrap_or_else(|error| panic!("parse canonical record {record_id}: {error:#}"))
+        .unwrap_or_else(|| panic!("canonical record {record_id} must exist"));
+    mutate(&mut record);
+    fs::write(
+        &path,
+        render_okf_record_markdown(&record)
+            .unwrap_or_else(|error| panic!("render canonical record {record_id}: {error:#}")),
     )
-    .expect("update source_ref fixture");
+    .unwrap_or_else(|error| panic!("write canonical record {record_id}: {error}"));
+    run_json_command(repo, &["rebuild", "--json"]);
 }
 
 fn memory_db_path(repo: &Path) -> std::path::PathBuf {

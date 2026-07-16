@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, path::Path, process::Command};
 
 use memzoi_core::{
     InitRequest, MemoryPaths, MemoryService, parse_import_document, read_okf_proposal_files,
@@ -61,6 +61,21 @@ fn initialized_service(temp: &TempDir) -> anyhow::Result<MemoryService> {
     MemoryService::open_paths(paths)
 }
 
+fn initialized_git_service(temp: &TempDir) -> anyhow::Result<MemoryService> {
+    let project_root = temp.path().join("project");
+    let output = Command::new("git")
+        .args(["init", "-q"])
+        .arg(&project_root)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to initialize classified-import Git test repository: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+    initialized_service(temp)
+}
+
 fn candidate(plan: &Value, index: usize) -> &Value {
     &plan["candidates"][index]
 }
@@ -85,7 +100,7 @@ fn file_names(dir: &Path) -> anyhow::Result<Vec<String>> {
 #[test]
 fn mixed_manifest_is_review_first_and_respects_all_destination_boundaries() -> anyhow::Result<()> {
     let temp = tempdir()?;
-    let service = initialized_service(&temp)?;
+    let service = initialized_git_service(&temp)?;
     let document = parse_import_document(MIXED_MANIFEST)?;
 
     let plan = service.plan_import("test", document.clone())?;
@@ -375,7 +390,7 @@ candidates:
 fn mixed_unsafe_repo_manifest_omits_sources_but_keeps_local_and_session_writes()
 -> anyhow::Result<()> {
     let temp = tempdir()?;
-    let service = initialized_service(&temp)?;
+    let service = initialized_git_service(&temp)?;
     let manifest = r#"
 version: memzoi/import-v1
 sources:
@@ -430,6 +445,10 @@ candidates:
     assert_eq!(service.list_local_memory()?.len(), 1);
     assert_eq!(service.list_checkpoints()?.len(), 1);
     assert!(read_okf_proposal_files(service.paths().proposals_dir().join("pending"))?.is_empty());
+    assert!(
+        file_names(&service.paths().records_dir())?.is_empty(),
+        "unsafe, local, and session import candidates must not create canonical records",
+    );
     Ok(())
 }
 

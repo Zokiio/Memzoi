@@ -14,6 +14,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi propose` | Propose a new memory record. Built-in default auto-approves valid proposals but does not apply them. |
 | `memzoi proposals` | List, show, and bulk-apply proposal inbox state. |
 | `memzoi proposal-files` | List, show, validate, and apply OKF proposal files under `.memzoi/proposals/pending/`. |
+| `memzoi materialize` | Plan, explicitly decide, and apply one repository-safe candidate as an unstaged canonical Git change; it never stages, commits, pushes, or opens a pull request. |
 | `memzoi local` | Add, list, and search local-only runtime memory records. |
 | `memzoi checkpoint` | Add and list runtime session checkpoints. |
 | `memzoi events` | Export runtime event-log rows. |
@@ -55,6 +56,9 @@ Run `memzoi <command> --help` for exact options.
 | `proposal-files validate` | `--json` |
 | `proposal-files apply` | `<proposal-id>`, `--actor`, `--json` |
 | `proposal-files reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
+| `materialize plan` | `--candidate-file`, `--output`, `--json` |
+| `materialize decide` | `--candidate-file`, `--plan-file`, `--decision-at`, `--output`, `--json` |
+| `materialize apply` | `--candidate-file`, `--plan-file`, `--decision-file`, `--candidate-id`, `--plan-id`, `--decision-id`, `--json` |
 | `local add` | `--type`, `--title`, `--body`, `--actor`, `--json` |
 | `local list` | `--json` |
 | `local search` | `<query>`, `--limit`, `--json` |
@@ -704,6 +708,11 @@ The policy mapping is:
 | `session` | `runtime` | `runtime_session` | `no_review` |
 | `discard` | `null` (no plane) | `no_write` | `no_review` |
 | `needs_review` | `null` (no plane) | `no_write` | `human_decision` |
+
+This mapping is the normal destination-policy contract. During the compatibility
+period, direct `memzoi materialize` uses a separate explicit structured-candidate
+decision and the `materialization` repository-write route; it does not expand
+`MemoryDestination::policy()` or grant other callers direct Git-write authority.
 
 `team` and `cloud` are future-only destination labels; they are not accepted serialized values in the current policy. Recalled records can have only the plane-backed destinations `repo`, `local`, or `session`. See [Destination classification in the lifecycle policy](./memory-lifecycle.md#destination-plane-lane-and-provenance) for destination behavior and lifecycle commands; this reference page intentionally does not duplicate that command matrix.
 

@@ -1,6 +1,11 @@
 create_authorized_repository_projection|private|content,delegated|authorized|verified
 remove_pinned_named_file|private|delete,rename|unauthorized|unverified
 cleanup_created_file|private|delegated|unauthorized|unverified
+create_restrictive_repository_temporary|private|content|unauthorized|unverified
+persist_restrictive_repository_temporary|private|content|unauthorized|unverified
+cleanup_restrictive_repository_temporary|private|delegated|unauthorized|unverified
+install_authorized_repository_projection|pub(crate)|rename|authorized|verified
+remove_installed_repository_projection|pub(crate)|delegated|authorized|verified
 rollback_repository_batch|private|delegated|authorized|unverified
 install_transaction_file_no_replace|pub(crate)|delegated|authorized|verified
 backup_repository_file|pub(crate)|content,delegated|authorized|verified

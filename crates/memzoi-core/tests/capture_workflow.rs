@@ -1131,7 +1131,7 @@ fn linked_worktree_standalone_plan_and_review_use_shared_runtime_inventory() -> 
 #[test]
 fn complete_review_routes_only_accepted_or_edited_candidates_and_preserves_provenance()
 -> anyhow::Result<()> {
-    let fixture = CaptureFixture::new()?;
+    let fixture = CaptureFixture::new_git()?;
     fixture.write_source(
         "mixed.md",
         concat!(
@@ -1439,6 +1439,12 @@ impl CaptureFixture {
         MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
         drop(MemoryService::open_paths(paths.clone())?);
         Ok(Self { temp, paths })
+    }
+
+    fn new_git() -> anyhow::Result<Self> {
+        let fixture = Self::new()?;
+        run_git(&fixture.paths.project_root, &["init", "-q"])?;
+        Ok(fixture)
     }
 
     fn write_source(&self, relative: &str, content: &str) -> anyhow::Result<()> {

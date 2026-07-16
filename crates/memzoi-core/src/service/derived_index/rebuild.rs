@@ -6,19 +6,26 @@ use crate::{MemoryPaths, db, okf};
 
 use super::{
     super::{
-        runtime_records::RuntimeRecordSnapshot,
-        safe_files::{RepoLifecycleLock, ensure_safe_directory},
-        shared_runtime,
+        runtime_records::RuntimeRecordSnapshot, safe_files::RepoLifecycleLock, shared_runtime,
     },
     RebuildResult,
+    admission::{RepositoryRecordAdmission, read_admitted_repository_record_snapshots},
 };
 
 pub(super) fn rebuild(paths: MemoryPaths) -> Result<RebuildResult> {
-    rebuild_with_options(paths, || Ok(()), true)
+    rebuild_with_options(
+        paths,
+        || Ok(()),
+        RepositoryRecordAdmission::EnforceForRepositoryReads,
+    )
 }
 
 pub(super) fn rebuild_for_trusted_recall_eval(paths: MemoryPaths) -> Result<RebuildResult> {
-    rebuild_with_options(paths, || Ok(()), false)
+    rebuild_with_options(
+        paths,
+        || Ok(()),
+        RepositoryRecordAdmission::TrustedRecallEvaluationBypass,
+    )
 }
 
 #[cfg(test)]
@@ -26,13 +33,17 @@ pub(super) fn rebuild_with_snapshot_hook(
     paths: MemoryPaths,
     after_snapshot: impl FnOnce() -> Result<()>,
 ) -> Result<RebuildResult> {
-    rebuild_with_options(paths, after_snapshot, true)
+    rebuild_with_options(
+        paths,
+        after_snapshot,
+        RepositoryRecordAdmission::EnforceForRepositoryReads,
+    )
 }
 
 fn rebuild_with_options(
     paths: MemoryPaths,
     after_snapshot: impl FnOnce() -> Result<()>,
-    validate_repository_safety: bool,
+    admission: RepositoryRecordAdmission,
 ) -> Result<RebuildResult> {
     shared_runtime::migrate_legacy_runtime_if_needed(&paths)?;
     let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
@@ -50,17 +61,7 @@ fn rebuild_with_options(
     })?;
     shared_runtime::complete_pending_shared_sync_locked(&paths, &shared)?;
     let records_root = paths.records_dir();
-    ensure_safe_directory(
-        &paths.project_root,
-        &records_root,
-        false,
-        "canonical record root",
-    )?;
-    let snapshots = okf::read_okf_record_snapshots(&records_root)?;
-    after_snapshot()?;
-    if validate_repository_safety {
-        validate_canonical_record_snapshots_for_rebuild(&paths, &snapshots)?;
-    }
+    let snapshots = read_admitted_repository_record_snapshots(&paths, admission, after_snapshot)?;
     let records = snapshots
         .into_iter()
         .map(|snapshot| snapshot.record)
@@ -80,35 +81,6 @@ fn rebuild_with_options(
             .map(|record| record.concept_id)
             .collect(),
     })
-}
-
-fn validate_canonical_record_snapshots_for_rebuild(
-    paths: &MemoryPaths,
-    snapshots: &[okf::OkfRecordSnapshot],
-) -> Result<()> {
-    for snapshot in snapshots {
-        let relative = snapshot
-            .path
-            .strip_prefix(&paths.project_root)
-            .context("canonical record escaped the project root during rebuild")?;
-        let report = crate::scan_managed_repository_blob(
-            paths.project_root.as_os_str().as_encoded_bytes(),
-            relative,
-            &snapshot.bytes,
-        );
-        if !report.allowed {
-            let findings = report
-                .findings
-                .iter()
-                .map(|finding| format!("{}:{}", finding.code.as_str(), finding.fingerprint))
-                .collect::<Vec<_>>()
-                .join(",");
-            bail!(
-                "rebuild refused because a canonical record failed repository safety validation ({findings})"
-            );
-        }
-    }
-    Ok(())
 }
 
 fn guard_no_runtime_record_id_collisions(

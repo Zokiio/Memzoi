@@ -109,6 +109,12 @@ pub(crate) enum Commands {
         command: CaptureCommands,
     },
 
+    /// Plan, decide, and apply direct Git-native record materialization.
+    Materialize {
+        #[command(subcommand)]
+        command: MaterializeCommands,
+    },
+
     /// Inspect OKF proposal files under .memzoi/proposals/pending.
     ProposalFiles {
         #[command(subcommand)]
@@ -676,6 +682,66 @@ pub(crate) enum CaptureCommands {
         #[arg(long, default_value = "cli")]
         actor: String,
         /// Emit the versioned apply result as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MaterializeCommands {
+    /// Derive a deterministic materialization plan from one candidate artifact.
+    Plan {
+        /// Complete repository-materialization-candidate-v1 JSON artifact.
+        #[arg(long = "candidate-file")]
+        candidate_file: PathBuf,
+        /// Explicit destination for the complete JSON plan artifact.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Emit the versioned plan as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Bind the repository materialization policy to a reviewed plan.
+    Decide {
+        /// Complete repository-materialization-candidate-v1 JSON artifact.
+        #[arg(long = "candidate-file")]
+        candidate_file: PathBuf,
+        /// Complete repository-materialization-plan-v1 JSON artifact.
+        #[arg(long = "plan-file")]
+        plan_file: PathBuf,
+        /// Explicit RFC 3339 decision timestamp.
+        #[arg(long = "decision-at")]
+        decision_at: String,
+        /// Explicit destination for the complete JSON decision artifact.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Emit the versioned decision as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Install one fully pinned canonical record without staging or committing it.
+    Apply {
+        /// Complete repository-materialization-candidate-v1 JSON artifact.
+        #[arg(long = "candidate-file")]
+        candidate_file: PathBuf,
+        /// Complete repository-materialization-plan-v1 JSON artifact.
+        #[arg(long = "plan-file")]
+        plan_file: PathBuf,
+        /// Complete repository-materialization-decision-v1 JSON artifact.
+        #[arg(long = "decision-file")]
+        decision_file: PathBuf,
+        /// BLAKE3 identity expected in the candidate artifact.
+        #[arg(long = "candidate-id")]
+        candidate_id: String,
+        /// BLAKE3 identity expected in the plan artifact.
+        #[arg(long = "plan-id")]
+        plan_id: String,
+        /// BLAKE3 identity expected in the decision artifact.
+        #[arg(long = "decision-id")]
+        decision_id: String,
+        /// Emit the core result and changed record summary as machine-readable JSON.
         #[arg(long)]
         json: bool,
     },

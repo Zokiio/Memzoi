@@ -1,10 +1,14 @@
-use std::{collections::BTreeSet, fs};
+use std::{collections::BTreeSet, fs, process::Command};
 
 use super::*;
 use crate::repository_io;
 use crate::{
-    MemoryLane, MemoryStatus, MemoryType, ProposalStatus, ScopeKind, SessionEndCandidate,
-    SessionEndCandidateStatus, Visibility,
+    CanonicalRevision, ExpectedPriorRevision, MaterializationTarget, MemoryLane, MemoryStatus,
+    MemoryType, ProposalStatus, RepositoryMaterializationCandidate,
+    RepositoryMaterializationCandidateRecord, ScopeKind, SessionEndCandidate,
+    SessionEndCandidateStatus, Visibility, build_repository_materialization_candidate,
+    build_repository_materialization_decision, build_repository_materialization_plan,
+    repository_materialization_candidate_plan, repository_materialization_policy,
 };
 use tempfile::TempDir;
 
@@ -1077,12 +1081,24 @@ fn legacy_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Resul
     let private_error = service
         .tombstone_record(&private.id, "agent:red-tests", "must stay private")
         .expect_err("private targets must not be rewritten canonically");
-    assert!(private_error.to_string().contains("visibility private"));
+    assert!(
+        private_error.to_string().contains("visibility private"),
+        "{private_error:#}"
+    );
     assert_eq!(fs::read(&private_path)?, private_before);
     assert_eq!(
-        service.inspect_expiry(&private.id)?.record.status,
+        RuntimeRecords::new(&service.conn)
+            .get(&private.id)?
+            .context("private record must remain indexed")?
+            .status,
         MemoryStatus::Active
     );
+    // Restore the deliberately stale test fixture before exercising a second
+    // public lifecycle route, which now requires a current repository index.
+    service.conn.execute(
+        "UPDATE memory_record SET visibility = 'repo' WHERE id = ?1",
+        [&private.id],
+    )?;
 
     let active = apply_test_record(
         &service,
@@ -1107,7 +1123,10 @@ fn legacy_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Resul
     assert!(inactive_error.to_string().contains("status superseded"));
     assert_eq!(fs::read(&active_path)?, active_before);
     assert_eq!(
-        service.inspect_expiry(&active.id)?.record.status,
+        RuntimeRecords::new(&service.conn)
+            .get(&active.id)?
+            .context("inactive record must remain indexed")?
+            .status,
         MemoryStatus::Superseded
     );
     Ok(())
@@ -1370,6 +1389,477 @@ fn session_end_runtime_records_and_events_commit_to_shared_authority() -> anyhow
     )?;
     assert_eq!(indexed_count, 1);
     Ok(())
+}
+
+#[test]
+fn materialization_create_installs_one_pinned_canonical_record() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let candidate = materialization_candidate("materialized-create", "Materialized create")?;
+    let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+
+    let result = service.apply_repository_materialization(&plan, &decision, &candidate)?;
+
+    assert_eq!(
+        result.outputs[0].outcome,
+        crate::MaterializationOutputOutcome::Written
+    );
+    let path = service.paths.records_dir().join("materialized-create.md");
+    let markdown = fs::read_to_string(&path)?;
+    let record = okf::parse_okf_record_markdown(service.paths.records_dir(), &path, &markdown)?
+        .context("materialization create must write a canonical record")?;
+    assert_eq!(record.concept_id, candidate.record.concept_id);
+    assert_eq!(
+        record.materialization.as_ref().map(|value| &value.plan_id),
+        Some(&plan.plan_id)
+    );
+    Ok(())
+}
+
+#[test]
+fn deleting_materialized_worktree_bytes_removes_them_on_rebuild_without_hidden_state()
+-> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let paths = service.paths.clone();
+    let candidate = materialization_candidate("materialized-deleted", "Deleted materialization")?;
+    let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+    service.apply_repository_materialization(&plan, &decision, &candidate)?;
+    let path = paths.records_dir().join("materialized-deleted.md");
+    assert!(path.exists());
+
+    assert_eq!(
+        service
+            .search_memory(SearchInput {
+                query: "Deleted materialization".to_owned(),
+                limit: 10,
+                ..SearchInput::default()
+            })?
+            .len(),
+        1,
+        "a completed materialization must be locally active before rebuild"
+    );
+    fs::remove_file(&path)?;
+    let stale_error = service
+        .search_memory(SearchInput {
+            query: "Deleted materialization".to_owned(),
+            limit: 10,
+            ..SearchInput::default()
+        })
+        .expect_err("deleted canonical bytes must make repository reads unavailable until rebuild");
+    assert!(format!("{stale_error:#}").contains("repository derived index is stale"));
+
+    drop(service);
+    let rebuilt = MemoryService::rebuild_paths(paths.clone())?;
+    assert!(rebuilt.record_ids.is_empty());
+    let reopened = MemoryService::open_paths(paths)?;
+    assert!(
+        reopened
+            .search_memory(SearchInput {
+                query: "Deleted materialization".to_owned(),
+                limit: 10,
+                ..SearchInput::default()
+            })?
+            .is_empty(),
+        "rebuild must not restore deleted materialized bytes from hidden approval state"
+    );
+    Ok(())
+}
+
+#[test]
+fn materialization_update_refuses_stale_prior_revision_without_writing() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let original = materialization_candidate("materialized-stale", "Original materialized record")?;
+    let (create_plan, create_decision) = materialization_plan_and_decision(&original)?;
+    service.apply_repository_materialization(&create_plan, &create_decision, &original)?;
+    let path = service.paths.records_dir().join("materialized-stale.md");
+    let before = fs::read(&path)?;
+
+    let mut replacement_record = original.record.clone();
+    replacement_record.draft.body =
+        "Changed bytes with a deliberately stale prior revision.".to_owned();
+    let stale_prior = CanonicalRevision {
+        schema: crate::CANONICAL_REVISION_SCHEMA.to_owned(),
+        revision_hash: format!("blake3:{}", "f".repeat(64)),
+    };
+    let replacement = build_repository_materialization_candidate(
+        replacement_record,
+        crate::MaterializationAction::Update,
+        ExpectedPriorRevision::Revision(stale_prior),
+        None,
+        None,
+    )?;
+    let (update_plan, update_decision) = materialization_plan_and_decision(&replacement)?;
+
+    let error = service
+        .apply_repository_materialization(&update_plan, &update_decision, &replacement)
+        .expect_err("stale updates must not install canonical bytes");
+
+    assert!(format!("{error:#}").contains("materialization_update_stale"));
+    assert_eq!(fs::read(path)?, before);
+    Ok(())
+}
+
+#[test]
+fn materialization_retries_identical_final_bytes_idempotently() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let candidate =
+        materialization_candidate("materialized-idempotent", "Idempotent materialization")?;
+    let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+    service.apply_repository_materialization(&plan, &decision, &candidate)?;
+
+    let retry = service.apply_repository_materialization(&plan, &decision, &candidate)?;
+
+    assert_eq!(
+        retry.outputs[0].outcome,
+        crate::MaterializationOutputOutcome::AlreadyCurrent
+    );
+    Ok(())
+}
+
+#[test]
+fn materialization_rejects_unsafe_local_and_private_candidates() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let valid = materialization_candidate("materialized-local", "Local materialization")?;
+    let (plan, decision) = materialization_plan_and_decision(&valid)?;
+    let mut local = valid.clone();
+    local.record.draft.scope_kind = ScopeKind::Personal;
+    let mut unsafe_candidate = valid.clone();
+    unsafe_candidate.record.draft.sensitivity = crate::OkfProposalSensitivity::Sensitive;
+    let mut private = valid.clone();
+    private.record.draft.visibility = Visibility::Private;
+
+    for candidate in [local, unsafe_candidate, private] {
+        let error = service
+            .apply_repository_materialization(&plan, &decision, &candidate)
+            .expect_err("non-repository candidates must fail before install");
+        assert!(
+            format!("{error:#}").contains("repository materialization candidate"),
+            "unexpected materialization candidate error: {error:#}"
+        );
+        assert!(
+            !service
+                .paths
+                .records_dir()
+                .join(format!("{}.md", candidate.record.concept_id))
+                .exists()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn materialization_rejects_malformed_capture_before_writing() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let mut record =
+        materialization_candidate_record("materialized-malformed-capture", "Malformed capture");
+    record.capture = Some(materialization_capture());
+    let mut candidate = build_repository_materialization_candidate(
+        record,
+        crate::MaterializationAction::Create,
+        ExpectedPriorRevision::Absent,
+        None,
+        None,
+    )?;
+    let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+    candidate
+        .record
+        .capture
+        .as_mut()
+        .expect("valid materialization fixture has capture provenance")
+        .confidence = "not-a-number".to_owned();
+    let path = service
+        .paths
+        .records_dir()
+        .join("materialized-malformed-capture.md");
+
+    let error = service
+        .apply_repository_materialization(&plan, &decision, &candidate)
+        .expect_err("malformed capture provenance must fail before a canonical write");
+
+    assert!(
+        format!("{error:#}").contains("capture provenance confidence is invalid"),
+        "unexpected malformed capture error: {error:#}"
+    );
+    assert!(
+        !path.exists(),
+        "malformed capture provenance wrote a canonical record before failing"
+    );
+    Ok(())
+}
+
+#[test]
+fn materialization_rejects_a_plan_not_derived_from_its_direct_candidate() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let candidate =
+        materialization_candidate("materialized-candidate-plan", "Candidate plan mismatch")?;
+    let (derived_plan, _) = materialization_plan_and_decision(&candidate)?;
+    let plan = build_repository_materialization_plan(
+        format!("blake3:{}", "a".repeat(64)),
+        derived_plan.outputs,
+    )?;
+    let decision = build_repository_materialization_decision(
+        &plan,
+        "2026-07-16T00:00:00Z".to_owned(),
+        repository_materialization_policy(),
+        crate::MaterializationAuthorizationCapability::ExplicitCli,
+    )?;
+
+    let error = service
+        .apply_repository_materialization(&plan, &decision, &candidate)
+        .expect_err("a direct candidate must pin its derived plan");
+
+    assert!(format!("{error:#}").contains("materialization_candidate_plan_mismatch"));
+    Ok(())
+}
+
+#[test]
+fn materialization_rejects_a_decision_pinned_to_another_plan() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let candidate = materialization_candidate("materialized-decision", "Decision mismatch")?;
+    let (plan, _) = materialization_plan_and_decision(&candidate)?;
+    let alternate_plan = build_repository_materialization_plan(
+        format!("blake3:{}", "e".repeat(64)),
+        plan.outputs.clone(),
+    )?;
+    let decision = build_repository_materialization_decision(
+        &alternate_plan,
+        "2026-07-16T00:00:00Z".to_owned(),
+        repository_materialization_policy(),
+        crate::MaterializationAuthorizationCapability::ExplicitCli,
+    )?;
+
+    let error = service
+        .apply_repository_materialization(&plan, &decision, &candidate)
+        .expect_err("a decision for another plan must not authorize materialization");
+
+    assert!(format!("{error:#}").contains("materialization_plan_decision_identity_mismatch"));
+    assert!(
+        !service
+            .paths
+            .records_dir()
+            .join("materialized-decision.md")
+            .exists()
+    );
+    Ok(())
+}
+
+#[test]
+fn materialization_rejects_a_decision_with_a_noncanonical_policy() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let candidate = materialization_candidate("materialized-policy", "Policy mismatch")?;
+    let (plan, _) = materialization_plan_and_decision(&candidate)?;
+    let decision = build_repository_materialization_decision(
+        &plan,
+        "2026-07-16T00:00:00Z".to_owned(),
+        crate::MaterializationPolicy {
+            policy_id: "untrusted-policy".to_owned(),
+            safety_contract: "untrusted-contract".to_owned(),
+        },
+        crate::MaterializationAuthorizationCapability::ExplicitCli,
+    )?;
+
+    let error = service
+        .apply_repository_materialization(&plan, &decision, &candidate)
+        .expect_err("a caller-provided policy must not authorize materialization");
+
+    assert!(format!("{error:#}").contains("materialization_policy_mismatch"));
+    assert!(
+        !service
+            .paths
+            .records_dir()
+            .join("materialized-policy.md")
+            .exists()
+    );
+    Ok(())
+}
+
+#[test]
+fn materialization_rejects_git_ignored_targets() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    fs::write(
+        service.paths.project_root.join(".gitignore"),
+        ".memzoi/records/*.md\n",
+    )?;
+    let candidate = materialization_candidate("materialized-ignored", "Ignored materialization")?;
+    let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+
+    let error = service
+        .apply_repository_materialization(&plan, &decision, &candidate)
+        .expect_err("ignored materialization targets must fail closed");
+
+    assert!(format!("{error:#}").contains("materialization_git_review_visibility_required"));
+    assert!(
+        !service
+            .paths
+            .records_dir()
+            .join("materialized-ignored.md")
+            .exists()
+    );
+    Ok(())
+}
+
+#[test]
+fn materialization_requires_a_multi_record_transaction_for_lifecycle_actions() -> anyhow::Result<()>
+{
+    let (_temp, service) = initialized_git_service()?;
+    let transaction_artifacts_before = crate::lifecycle_transaction_artifact_count(&service.paths)?;
+    let revision = CanonicalRevision {
+        schema: crate::CANONICAL_REVISION_SCHEMA.to_owned(),
+        revision_hash: format!("blake3:{}", "f".repeat(64)),
+    };
+    let target = MaterializationTarget {
+        record_id: "prior-record".to_owned(),
+        expected_revision: revision,
+    };
+    let mut record =
+        materialization_candidate_record("materialized-supersede", "Unsupported lifecycle");
+    record.supersedes_id = Some(target.record_id.clone());
+    let candidate = build_repository_materialization_candidate(
+        record,
+        crate::MaterializationAction::Supersede,
+        ExpectedPriorRevision::Absent,
+        Some(target),
+        Some("requires a paired lifecycle transaction".to_owned()),
+    )?;
+    let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+
+    let error = service
+        .apply_repository_materialization(&plan, &decision, &candidate)
+        .expect_err("single-record lifecycle materialization must fail before writes");
+
+    assert!(format!("{error:#}").contains("multi_record_transaction_required"));
+    assert!(
+        !service
+            .paths
+            .records_dir()
+            .join("materialized-supersede.md")
+            .exists()
+    );
+    assert_eq!(
+        crate::lifecycle_transaction_artifact_count(&service.paths)?,
+        transaction_artifacts_before
+    );
+    Ok(())
+}
+
+fn initialized_git_service() -> anyhow::Result<(TempDir, MemoryService)> {
+    let temp = TempDir::new()?;
+    let project_root = temp.path().join("project");
+    let output = Command::new("git")
+        .args(["init", "-q"])
+        .arg(&project_root)
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "failed to initialize materialization Git test repository: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let paths = MemoryPaths::with_runtime_home(
+        project_root.canonicalize()?,
+        temp.path().join("runtime-home"),
+    );
+    MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
+    let service = MemoryService::open_paths(paths)?;
+    Ok((temp, service))
+}
+
+fn materialization_candidate_record(
+    concept_id: &str,
+    title: &str,
+) -> RepositoryMaterializationCandidateRecord {
+    RepositoryMaterializationCandidateRecord {
+        concept_id: concept_id.to_owned(),
+        draft: sample_memory_draft(title, "A compact shared canonical record."),
+        status: MemoryStatus::Active,
+        applies_to: Vec::new(),
+        created: "2026-07-16T00:00:00Z".to_owned(),
+        updated: None,
+        supersedes_id: None,
+        expires_at: None,
+        proposal_id: None,
+        capture: None,
+    }
+}
+
+fn materialization_capture() -> crate::CaptureProvenance {
+    crate::CaptureProvenance {
+        schema: crate::CAPTURE_PROVENANCE_SCHEMA.to_owned(),
+        plan_id: "capture-plan".to_owned(),
+        review_id: "capture-review".to_owned(),
+        claim_id: "capture-claim".to_owned(),
+        reviewed_claim_id: "reviewed-capture-claim".to_owned(),
+        candidate_id: "capture-candidate".to_owned(),
+        reviewed_candidate_id: "reviewed-capture-candidate".to_owned(),
+        extraction: crate::CaptureExtractorIdentity {
+            kind: "markdown".to_owned(),
+            id: "markdown-v1".to_owned(),
+            version: "1".to_owned(),
+            configuration_hash: "blake3:configuration".to_owned(),
+        },
+        evidence: vec![crate::CaptureEvidence {
+            source_id: "source-1".to_owned(),
+            locator: crate::CaptureSourceLocator::ProjectPath {
+                path: "notes.md".to_owned(),
+            },
+            source_content_hash: "blake3:source".to_owned(),
+            span: crate::CaptureEvidenceSpan {
+                byte_start: 0,
+                byte_end: 12,
+                line_start: 1,
+                line_end: 1,
+            },
+            evidence_content_hash: "blake3:evidence".to_owned(),
+            text: None,
+            heading_path: vec!["Capture".to_owned()],
+            section_kind: "fact".to_owned(),
+            semantic_location: None,
+        }],
+        confidence: "0.82".to_owned(),
+        classification: crate::CaptureClassification {
+            destination: crate::MemoryDestination::Repo,
+            destination_reason: "repository-safe evidence".to_owned(),
+            sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+            sensitivity_reason: "reviewed".to_owned(),
+            content_class: crate::RepositoryContentClass::GeneralRepoKnowledge,
+            policy: crate::MemoryDestination::Repo.policy(),
+        },
+        destination: crate::MemoryDestination::Repo,
+        sensitivity: crate::OkfProposalSensitivity::RepoSafe,
+        review_outcome: crate::CaptureReviewOutcome::Accept,
+        review_reason_code: None,
+        reviewed_by: "reviewer".to_owned(),
+        reviewed_at: "2026-07-16T12:00:00Z".to_owned(),
+        routed_by: "test".to_owned(),
+    }
+}
+
+fn materialization_candidate(
+    concept_id: &str,
+    title: &str,
+) -> anyhow::Result<RepositoryMaterializationCandidate> {
+    build_repository_materialization_candidate(
+        materialization_candidate_record(concept_id, title),
+        crate::MaterializationAction::Create,
+        ExpectedPriorRevision::Absent,
+        None,
+        None,
+    )
+}
+
+fn materialization_plan_and_decision(
+    candidate: &RepositoryMaterializationCandidate,
+) -> anyhow::Result<(
+    crate::RepositoryMaterializationPlan,
+    crate::RepositoryMaterializationDecision,
+)> {
+    let plan = repository_materialization_candidate_plan(candidate)?;
+    let decision = build_repository_materialization_decision(
+        &plan,
+        "2026-07-16T00:00:00Z".to_owned(),
+        repository_materialization_policy(),
+        crate::MaterializationAuthorizationCapability::ExplicitCli,
+    )?;
+    Ok((plan, decision))
 }
 
 fn initialized_service() -> anyhow::Result<(TempDir, MemoryService)> {

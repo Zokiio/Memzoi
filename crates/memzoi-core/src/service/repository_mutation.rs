@@ -56,6 +56,19 @@ impl CreatedRepositoryFile {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct InstalledRepositoryProjection(repository_io::InstalledRepositoryProjection);
+
+impl InstalledRepositoryProjection {
+    pub(super) fn old_identity(&self) -> Option<RepositoryFileIdentity> {
+        self.0.old_identity
+    }
+
+    pub(super) fn new_identity(&self) -> RepositoryFileIdentity {
+        self.0.new_identity
+    }
+}
+
 impl AuthorizedRepositoryProjectionBatch {
     pub(super) fn digest(&self) -> String {
         self.capability.digest()
@@ -345,6 +358,145 @@ pub(super) fn remove_created_repository_file(
     )
 }
 
+pub(super) fn capture_authorized_existing_repository_projection_identity(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    destination: &Path,
+) -> Result<RepositoryFileIdentity> {
+    let relative = destination
+        .strip_prefix(&paths.project_root)
+        .context("repository predecessor is outside the project root")?;
+    let projection_index = select_unique_projection_index(
+        mutation.projections,
+        relative,
+        RepositoryProjectionPurpose::Existing,
+        "repository predecessor capture",
+    )?;
+    let projection = &mutation.projections[projection_index];
+    let expected_revision = projection
+        .target_revision
+        .as_deref()
+        .context("authorized repository predecessor is missing its target revision")?;
+    if blake3::hash(&projection.bytes).to_hex().as_str() != expected_revision {
+        bail!("authorized repository predecessor revision does not match its bytes");
+    }
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    repository_io::verify_repository_batch(
+        &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+    )?;
+    let Some((bytes, identity)) = repository_io::read_repository_file_with_identity_if_exists(
+        &paths.project_root,
+        relative,
+        projection.bytes.len() as u64,
+        "authorized repository predecessor",
+    )?
+    else {
+        bail!("authorized repository predecessor is missing");
+    };
+    if bytes != projection.bytes {
+        bail!("authorized repository predecessor bytes changed after authorization");
+    }
+    Ok(identity)
+}
+
+pub(super) fn install_authorized_repository_projection(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    destination: &Path,
+    expected_existing_identity: Option<RepositoryFileIdentity>,
+) -> Result<InstalledRepositoryProjection> {
+    let relative = destination
+        .strip_prefix(&paths.project_root)
+        .context("repository install destination is outside the project root")?;
+    let projection_index = select_unique_projection_index(
+        mutation.projections,
+        relative,
+        RepositoryProjectionPurpose::Write,
+        "repository atomic install",
+    )?;
+    let projection = &mutation.projections[projection_index];
+    let expected_target = match projection.target_revision.as_deref() {
+        Some(expected_revision) => {
+            let expected_identity = expected_existing_identity
+                .context("replacement install is missing its captured predecessor identity")?;
+            let expected_projection_index = select_authorized_projection_index(
+                mutation.projections,
+                relative,
+                expected_revision,
+                RepositoryProjectionPurpose::Existing,
+            )?;
+            Some((expected_projection_index, expected_identity))
+        }
+        None => {
+            if expected_existing_identity.is_some() {
+                bail!("create install must not carry a predecessor identity");
+            }
+            None
+        }
+    };
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    repository_io::install_authorized_repository_projection(
+        &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+        projection_index,
+        expected_target,
+    )
+    .map(InstalledRepositoryProjection)
+}
+
+pub(super) fn rollback_authorized_repository_projection(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    installed: &InstalledRepositoryProjection,
+) -> Result<()> {
+    let relative = installed
+        .0
+        .path
+        .strip_prefix(&paths.project_root)
+        .context("installed repository projection is outside the project root")?;
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    if installed.old_identity().is_none() {
+        return repository_io::remove_installed_repository_projection(
+            &paths.project_root,
+            mutation.route,
+            &mutation.authorization.policy_context_digest,
+            &mutation.authorization.capability,
+            &borrowed,
+            &installed.0,
+        );
+    }
+
+    let expected_projection_index = select_unique_projection_index(
+        mutation.projections,
+        relative,
+        RepositoryProjectionPurpose::Write,
+        "repository replacement rollback",
+    )?;
+    let restore_projection_index = select_unique_projection_index(
+        mutation.projections,
+        relative,
+        RepositoryProjectionPurpose::Existing,
+        "repository replacement restoration",
+    )?;
+    repository_io::install_authorized_repository_projection(
+        &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+        restore_projection_index,
+        Some((expected_projection_index, installed.new_identity())),
+    )
+    .map(|_| ())
+}
+
 pub(super) fn explicit_repository_provenance(
     content_class: RepositoryContentClass,
     source_identity: &str,
@@ -536,6 +688,28 @@ fn install_verified_staged_projection_no_replace(
         staged,
     )
     .map(CreatedRepositoryFile)
+}
+
+fn select_unique_projection_index(
+    projections: &[OwnedRepositoryProjection],
+    relative_path: &Path,
+    expected_purpose: RepositoryProjectionPurpose,
+    operation: &str,
+) -> Result<usize> {
+    let mut matches = projections
+        .iter()
+        .enumerate()
+        .filter(|(_, projection)| {
+            projection.purpose == expected_purpose && projection.relative_path == relative_path
+        })
+        .map(|(index, _)| index);
+    let Some(projection_index) = matches.next() else {
+        bail!("{operation} must select exactly one authorized path and purpose projection");
+    };
+    if matches.next().is_some() {
+        bail!("{operation} must select exactly one authorized path and purpose projection");
+    }
+    Ok(projection_index)
 }
 
 fn select_authorized_projection_index(

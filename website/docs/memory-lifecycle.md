@@ -18,12 +18,12 @@ Memzoi deliberately separates shared Git truth from local runtime continuity:
 | **Git** | Reviewed, durable, repo-shared project knowledge: facts, decisions, procedures, warnings, risks, and failed attempts that belong in the repository. | `.memzoi/records/*.md` is the canonical source. These compact Markdown records are diffable and are restored into runtime indexes by `memzoi rebuild`. |
 | **Runtime** | Fast local recall, private preferences, task continuity, checkpoints, proposals, and derived operational state. | `${MEMZOI_HOME:-~/.memzoi}/projects/<repository-key>/shared.db` is the local authority for runtime memory and proposal state shared by linked worktrees. Each `worktrees/<worktree-key>/index.db` is a disposable projection. Runtime state is not Git truth. |
 
-The Git plane may also contain a pending file-backed proposal at
-`.memzoi/proposals/pending/<proposal-id>.md` when it is intentionally being
-reviewed in Git and is `sensitivity: repo-safe`. A pending proposal is a review
-packet, not a canonical record. Applying it explicitly creates the compact
-record under `.memzoi/records/`; the pending file is not itself the durable
-memory source.
+Legacy repository integrations may still create a pending file-backed proposal at
+`.memzoi/proposals/pending/<proposal-id>.md` during the RFC 0002 compatibility
+period. That packet is a review artifact, not a canonical record. New direct
+repository materialization does not require or create a proposal packet: an
+explicitly authorized structured candidate becomes an ordinary working-tree
+change under `.memzoi/records/`.
 
 Runtime rows are not a second canonical source for repo memory. Rebuild reads
 the Git records and recreates only the current worktree's derived index while
@@ -47,11 +47,17 @@ The current destination set is exactly the five values in
 
 | Destination | Plane | Write route | Review requirement | Meaning |
 | --- | --- | --- | --- | --- |
-| `repo` | `git` | `file_backed_proposal` | `proposal_review` | Repo-shared durable knowledge; write a pending file-backed proposal before a canonical record. |
+| `repo` | `git` | `file_backed_proposal` for compatibility integrations; `materialization` for an explicit structured candidate | `proposal_review` for compatibility integrations; a pinned explicit decision for direct materialization | Repo-shared durable knowledge. The legacy route writes a pending proposal; direct materialization writes one reviewed canonical working-tree change. |
 | `local` | `runtime` | `runtime_local` | `no_review` | Private local runtime memory; never a repo record by this route. |
 | `session` | `runtime` | `runtime_session` | `no_review` | Task continuity/checkpoint state; never a repo record by this route. |
 | `discard` | none | `no_write` | `no_review` | Do not retain the candidate. |
 | `needs_review` | none | `no_write` | `human_decision` | Do not write it yet; a human must decide the sharing boundary. |
+
+`MemoryDestination::policy()` describes the normal destination-routed flow and
+therefore retains `file_backed_proposal` / `proposal_review` for `repo` during
+the compatibility period. It does not grant direct write authority. Direct
+materialization is a separate, explicitly authorized structured-candidate
+contract described in [Git-native materialization and Git review](#git-native-materialization-and-git-review).
 
 `team` and `cloud` are future-only labels. They are not accepted
 `MemoryDestination` values, do not have a current plane or write route, and
@@ -61,9 +67,12 @@ plane, hosted storage, or sync implementation in this MVP.
 ## Git-plane responsibilities and exclusions
 
 Git-plane memory must be human-readable, reviewable, scoped to the repository,
-and safe to share with repository collaborators. A repo candidate is eligible
-for the Git plane only after the proposal review boundary and, for OKF proposal
-files, with `sensitivity: repo-safe`.
+and safe to share with repository collaborators. A direct candidate reaches the
+Git plane only after immutable planning, an explicit decision, a current-target
+check, and the shared repository-write safety gate. It must have repository
+scope and visibility, `sensitivity: repo-safe`, and
+`content_class: general_repo_knowledge`. Legacy proposal adapters keep their
+own documented compatibility review path.
 
 The following categories are excluded from canonical repo records:
 
@@ -128,12 +137,14 @@ command's JSON output, event, or database row does not change what it writes.
 
 | Boundary | Commands | What is written (or not written) |
 | --- | --- | --- |
-| **Canonical Git record writers** | `memzoi apply <proposal-id>`; `memzoi proposals apply --all-approved` | Apply approved, explicitly `repo-safe` DB proposals and write canonical `.memzoi/records/*.md`. |
+| **Git-native materialization** | `memzoi materialize plan`; `memzoi materialize decide` | Parse and validate a strict structured candidate, then produce a deterministic plan or explicit decision. These commands do not write `.memzoi/records/`, runtime state, proposal packets, or Git state. An optional caller-selected artifact path is outside `.memzoi`. |
+|  | `memzoi materialize apply` | Revalidates the candidate, plan, decision, exact supplied identities, current target revision, Git visibility, and the shared safety gate; then atomically creates or updates one `.memzoi/records/*.md` working-tree file. It does not stage, commit, push, open a pull request, merge, switch branches, or change Git configuration. |
+| **Canonical Git record writers — legacy compatibility** | `memzoi apply <proposal-id>`; `memzoi proposals apply --all-approved` | Apply approved, explicitly `repo-safe` DB proposals and write canonical `.memzoi/records/*.md`. |
 |  | `memzoi propose --apply --sensitivity repo-safe` | Create, validate, approve, and then explicitly apply one proposal. The flag supplies an `auto` per-call approval override and writes a canonical record only because `--apply` was requested; `--manual --apply` is invalid. Auto-approval cannot bypass sensitivity. |
 |  | `memzoi proposal-files apply <proposal-id>` | Explicitly apply one valid repo-safe OKF proposal, update the runtime search index in the same operation, and move the packet from `pending/` to `resolved/applied/`. |
 |  | `memzoi supersede <record-id> --sensitivity repo-safe`; `memzoi tombstone <record-id>` | Explicitly update an active, non-private repo record and its derived row as one staged transaction. Supersede replacements must remain in the target's scope and require an explicit repo-safe classification; local/session, private, and inactive targets are rejected before canonical writes. |
 |  | `memzoi quickstart --apply-sample` | Explicitly creates the quickstart sample as a canonical repo record (and also generates an export). |
-| **Pending file proposal writers** | `memzoi session-end --from-file <path>`; `memzoi session-end --from-checkpoint <id>` with a `repo` candidate | Write `.memzoi/proposals/pending/*.md` review packets. They do **not** write `.memzoi/records/*.md`; review and an explicit proposal-file apply are separate steps. |
+| **Pending file proposal writers — legacy compatibility** | `memzoi session-end --from-file <path>`; `memzoi session-end --from-checkpoint <id>` with a `repo` candidate | Write `.memzoi/proposals/pending/*.md` review packets. They do **not** write `.memzoi/records/*.md`; review and an explicit proposal-file apply are separate steps. |
 |  | `memzoi capture apply ...` with an accepted or edited `repo`/`repo-safe` candidate | Write a pending evidence-backed proposal packet after validating pinned plan/review identities and current preconditions. Capture apply never writes the candidate directly to `.memzoi/records/*.md`. |
 | **DB proposal-state writers (not file/canonical writers)** | `memzoi propose`; `memzoi approve <proposal-id>`; `memzoi reject <proposal-id>` | Create or change proposal state in the runtime database. `propose` without `--apply` never writes a canonical record; approval alone never writes one. |
 | **Runtime local/session writers** | `memzoi local add`; `memzoi checkpoint add`; `memzoi session-end ...` with `local` or `session` candidates | Write private runtime rows under the project runtime directory. Session candidates become checkpoints and require `type: episode` plus `lane: session`; neither route writes a Git record. |
@@ -150,11 +161,92 @@ exports. Those projections are not canonical records. If a generated file is
 copied into a repository instruction file, that copy is an explicit
 integration/documentation change, not an implicit memory write.
 
-## Approval, review, and promotion
 
-The effective DB-proposal approval policy is resolved from the built-in
-default (`auto`), then the user-global config, repo config, and a per-call CLI
-override. Configure it as:
+## Git-native materialization and Git review
+
+Direct materialization consumes one complete
+`memzoi/repository-materialization-candidate-v1` JSON file. The candidate is
+the caller's explicit structured input; it carries the typed canonical content,
+classification, provenance, action, and current-record precondition. It is not
+an inbox packet, and planning does not retain it under `.memzoi`.
+
+```bash
+# Both artifacts are explicit, user-owned files outside .memzoi.
+memzoi materialize plan \
+  --candidate-file materialization-candidate.json \
+  --output materialization-plan.json
+
+memzoi materialize decide \
+  --candidate-file materialization-candidate.json \
+  --plan-file materialization-plan.json \
+  --decision-at 2026-07-16T12:00:00Z \
+  --output materialization-decision.json
+
+# Review the candidate, plan, and decision before authorizing a filesystem write.
+${EDITOR:-vi} materialization-candidate.json
+${EDITOR:-vi} materialization-plan.json
+${EDITOR:-vi} materialization-decision.json
+
+memzoi materialize apply \
+  --candidate-file materialization-candidate.json \
+  --plan-file materialization-plan.json \
+  --decision-file materialization-decision.json \
+  --candidate-id "$(jq -r .candidate_id materialization-candidate.json)" \
+  --plan-id "$(jq -r .plan_id materialization-plan.json)" \
+  --decision-id "$(jq -r .decision_id materialization-decision.json)"
+```
+
+`apply` creates an **unstaged** canonical file or updates an existing canonical
+file. It reports each repository-relative path, the action, record ID,
+semantic revision, and an action-aware narrow review command. For a tracked
+path, inspect the ordinary working-tree diff:
+
+```bash
+git diff -- .memzoi/records/<record-id>.md
+```
+
+For an untracked create, use a no-index diff so the new file is displayed:
+
+```bash
+git diff --no-index -- /dev/null .memzoi/records/<record-id>.md
+```
+
+`git diff --no-index` exits with status 1 when it finds a difference; that is
+the expected review result. Git—not Memzoi—remains responsible for acceptance:
+
+```bash
+# Revise the ordinary working-tree change, then rebuild its disposable index.
+${EDITOR:-vi} .memzoi/records/<record-id>.md
+memzoi rebuild
+
+# Discard an untracked create, or restore a tracked path from HEAD.
+rm .memzoi/records/<record-id>.md
+git restore --worktree -- .memzoi/records/<record-id>.md
+memzoi rebuild
+
+# Stage, commit, push, and open/review a pull request using normal project tools.
+git add -- .memzoi/records/<record-id>.md
+git commit -m "docs(memory): record <record-id>"
+git push
+gh pr create
+
+# Roll back a committed memory change through Git, then rebuild the local index.
+git revert <commit>
+memzoi rebuild
+```
+
+Choose either `rm` for an untracked create or `git restore` for an existing
+tracked path; do not run both for the same path. Manual editing or deletion
+does not retain a hidden Memzoi approval: admission validates the current
+working-tree bytes on the next rebuild/read. An invalid, unsafe, ignored
+untracked, or stale-attested record is excluded with diagnostics instead of
+being silently repaired or restored.
+
+## Legacy proposal approval and compatibility
+
+The effective DB-proposal approval policy is resolved from the built-in default
+(`auto`), then the user-global config, repo config, and a per-call CLI override.
+Configure it as:
 
 ```toml
 [workflow]
@@ -333,7 +425,7 @@ may still write private runtime records. The document-wide source locators are o
 from the plan because they cannot be safely attributed to a partial destination subset.
 
 After reviewing an imported repo proposal, use the separate explicit proposal
-review/apply workflow described in [Approval, review, and promotion](#approval-review-and-promotion),
+review/apply workflow described in [Legacy proposal approval and compatibility](#legacy-proposal-approval-and-compatibility),
 including `memzoi proposal-files apply <proposal-id>` to create the canonical
 `.memzoi/records/*.md` record and update derived runtime search state in the
 same operation. A plan may contain local or private candidates and must not be

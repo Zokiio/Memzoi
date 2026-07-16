@@ -297,7 +297,8 @@ pub fn run_recall_v3_eval(path: impl AsRef<Path>) -> Result<RecallV3Report> {
     stage_records(&loaded.root, &loaded.corpus, &paths.records_dir())?;
     MemoryService::rebuild_paths_for_trusted_recall_eval(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)?;
-    let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
+    let service =
+        MemoryService::open_paths_with_clock_for_trusted_recall_eval(paths.clone(), clock)?;
     let runtime_records = seed_runtime_fixtures(&service, &loaded.corpus.runtime_fixtures)?;
     let record_files = crate::read_okf_record_files(paths.records_dir())?;
     let record_paths = recall_record_paths(&record_files);
@@ -380,7 +381,8 @@ pub fn run_recall_v3_eval_with_candidates(
     stage_records(&loaded.root, &loaded.corpus, &paths.records_dir())?;
     MemoryService::rebuild_paths_for_trusted_recall_eval(paths.clone())?;
     let clock = FixedClock::from_rfc3339(&loaded.corpus.evaluated_at)?;
-    let service = MemoryService::open_paths_with_clock(paths.clone(), clock)?;
+    let service =
+        MemoryService::open_paths_with_clock_for_trusted_recall_eval(paths.clone(), clock)?;
     let runtime_records = seed_runtime_fixtures(&service, &loaded.corpus.runtime_fixtures)?;
     let record_files = crate::read_okf_record_files(paths.records_dir())?;
     let record_paths = recall_record_paths(&record_files);

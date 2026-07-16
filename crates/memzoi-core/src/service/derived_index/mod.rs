@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{MemoryPaths, MemoryRecord, okf};
 
+mod admission;
 mod drift;
 mod rebuild;
 #[cfg(test)]
@@ -37,6 +38,13 @@ impl RepoIndexDrift {
 
 pub(super) fn inspect(paths: &MemoryPaths, conn: &Connection) -> Result<RepoIndexDrift> {
     drift::inspect(paths, conn)
+}
+
+pub(super) fn inspect_for_trusted_recall_eval(
+    paths: &MemoryPaths,
+    conn: &Connection,
+) -> Result<RepoIndexDrift> {
+    drift::inspect_for_trusted_recall_eval(paths, conn)
 }
 
 pub(super) fn rebuild(paths: MemoryPaths) -> Result<RebuildResult> {

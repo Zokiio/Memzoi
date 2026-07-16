@@ -27,6 +27,25 @@ pub(crate) struct CreatedRepositoryFile {
     file: fs::File,
 }
 
+/// A single authorized projection installed atomically at its canonical path.
+///
+/// `old_identity` is `None` for a no-replace create and identifies the verified
+/// predecessor for a replacement. `new_identity` always identifies the installed
+/// canonical file.
+#[derive(Debug)]
+pub(crate) struct InstalledRepositoryProjection {
+    pub(crate) path: PathBuf,
+    pub(crate) old_identity: Option<RepositoryFileIdentity>,
+    pub(crate) new_identity: RepositoryFileIdentity,
+    projection_index: usize,
+    #[cfg(unix)]
+    directory: std::os::fd::OwnedFd,
+    #[cfg(unix)]
+    file_name: std::ffi::OsString,
+    #[cfg(unix)]
+    file: fs::File,
+}
+
 #[cfg(unix)]
 fn repository_file_identity(file: &fs::File, label: &str) -> Result<RepositoryFileIdentity> {
     use std::os::unix::fs::MetadataExt;
@@ -81,6 +100,30 @@ pub(crate) fn inject_repository_create_failure(failure: InjectedCreateFileFailur
 #[cfg(test)]
 fn take_repository_create_failure() -> Option<InjectedCreateFileFailure> {
     INJECTED_CREATE_FILE_FAILURE.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InjectedAtomicInstallFailure {
+    WriteTemporary,
+    SyncTemporary,
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED_ATOMIC_INSTALL_FAILURE: std::cell::Cell<Option<InjectedAtomicInstallFailure>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_repository_atomic_install_failure(failure: InjectedAtomicInstallFailure) {
+    INJECTED_ATOMIC_INSTALL_FAILURE.with(|injected| injected.set(Some(failure)));
+}
+
+#[cfg(test)]
+fn take_repository_atomic_install_failure() -> Option<InjectedAtomicInstallFailure> {
+    INJECTED_ATOMIC_INSTALL_FAILURE.with(std::cell::Cell::take)
 }
 
 #[cfg(test)]
@@ -570,6 +613,374 @@ fn cleanup_created_file(
     label: &str,
 ) -> Result<()> {
     remove_pinned_named_file(directory, file_name, opened, None, label)
+}
+
+#[cfg(unix)]
+fn create_restrictive_repository_temporary(
+    directory: &std::os::fd::OwnedFd,
+    label: &str,
+) -> Result<(std::ffi::OsString, fs::File)> {
+    use rustix::{
+        fs::{Mode, OFlags, openat},
+        io::Errno,
+    };
+
+    let mode = Mode::RUSR | Mode::WUSR;
+    for _ in 0..16 {
+        let file_name =
+            std::ffi::OsString::from(format!(".memzoi-install-{}.tmp", uuid::Uuid::now_v7()));
+        match openat(
+            directory,
+            &file_name,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode,
+        ) {
+            Ok(file) => return Ok((file_name, fs::File::from(file))),
+            Err(Errno::EXIST) => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to create restrictive temporary {label}"));
+            }
+        }
+    }
+    bail!("failed to allocate a unique restrictive temporary {label}")
+}
+
+#[cfg(unix)]
+fn persist_restrictive_repository_temporary(
+    file: &mut fs::File,
+    expected: &[u8],
+    label: &str,
+) -> Result<()> {
+    #[cfg(test)]
+    let persist_result = match take_repository_atomic_install_failure() {
+        Some(InjectedAtomicInstallFailure::WriteTemporary) => {
+            let partial_len = expected.len().min(1);
+            file.write_all(&expected[..partial_len])
+                .and_then(|_| Err(std::io::Error::other("injected temporary write failure")))
+        }
+        Some(InjectedAtomicInstallFailure::SyncTemporary) => file
+            .write_all(expected)
+            .and_then(|_| Err(std::io::Error::other("injected temporary sync failure"))),
+        None => match take_repository_create_failure() {
+            Some(InjectedCreateFileFailure::Write) => {
+                let partial_len = expected.len().min(1);
+                file.write_all(&expected[..partial_len])
+                    .and_then(|_| Err(std::io::Error::other("injected repository write failure")))
+            }
+            Some(InjectedCreateFileFailure::Sync) => file
+                .write_all(expected)
+                .and_then(|_| Err(std::io::Error::other("injected repository sync failure"))),
+            None => file.write_all(expected).and_then(|_| file.sync_all()),
+        },
+    };
+    #[cfg(not(test))]
+    let persist_result = file.write_all(expected).and_then(|_| file.sync_all());
+
+    persist_result
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("failed to persist restrictive temporary {label}"))?;
+    ensure_pinned_file_bytes(file, expected, label)
+}
+
+#[cfg(unix)]
+fn ensure_repository_destination_absent(
+    directory: &std::os::fd::OwnedFd,
+    file_name: &std::ffi::OsStr,
+) -> Result<()> {
+    use rustix::{
+        fs::{AtFlags, statat},
+        io::Errno,
+    };
+
+    match statat(directory, file_name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => Ok(()),
+        Ok(_) => bail!("repository destination already exists"),
+        Err(error) => Err(error).context("failed to revalidate repository destination absence"),
+    }
+}
+
+#[cfg(unix)]
+fn revalidate_expected_repository_target(
+    directory: &std::os::fd::OwnedFd,
+    file_name: &std::ffi::OsStr,
+    expected: &RepositoryProjection<'_>,
+    expected_identity: RepositoryFileIdentity,
+) -> Result<RepositoryFileIdentity> {
+    let (file, bytes) = read_regular_at(
+        directory,
+        file_name,
+        expected.bytes.len() as u64,
+        "expected repository destination",
+    )
+    .context("repository destination changed before replacement")?;
+    if bytes != expected.bytes {
+        bail!("repository destination bytes changed before replacement");
+    }
+    let actual_identity = repository_file_identity(&file, "expected repository destination")?;
+    if actual_identity != expected_identity {
+        bail!("repository destination identity changed before replacement");
+    }
+    ensure_pinned_file_bytes(
+        &file,
+        expected.bytes,
+        "expected repository destination before replacement",
+    )?;
+    if !named_file_still_matches(directory, file_name, &file)? {
+        bail!("repository destination changed before replacement");
+    }
+    Ok(actual_identity)
+}
+
+#[cfg(unix)]
+fn cleanup_restrictive_repository_temporary(
+    directory: &std::os::fd::OwnedFd,
+    temporary_name: &std::ffi::OsStr,
+    temporary: &fs::File,
+    primary_error: anyhow::Error,
+) -> anyhow::Error {
+    match cleanup_created_file(
+        directory,
+        temporary_name,
+        temporary,
+        "incomplete restrictive repository temporary",
+    ) {
+        Ok(()) => primary_error,
+        Err(cleanup_error) => primary_error.context(format!(
+            "additionally failed to clean restrictive repository temporary: {cleanup_error:#}"
+        )),
+    }
+}
+
+/// Atomically installs one exact authorized projection through a pinned parent descriptor.
+///
+/// `expected_target` selects the exact authorized predecessor and its captured identity for a
+/// replacement. `None` performs a no-replace create. The caller must capture replacement
+/// identities through the same authorized projection batch before calling this seam.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn install_authorized_repository_projection(
+    project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
+    projection_index: usize,
+    expected_target: Option<(usize, RepositoryFileIdentity)>,
+) -> Result<InstalledRepositoryProjection> {
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            project_root,
+            expected_route,
+            expected_policy_context_digest,
+            authorization,
+            projections,
+            projection_index,
+            expected_target,
+        );
+        bail!("secure atomic repository installation is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{RenameFlags, fsync, renameat_with};
+
+        verify_repository_batch(
+            project_root,
+            expected_route,
+            expected_policy_context_digest,
+            authorization,
+            projections,
+        )?;
+        let projection = projections
+            .get(projection_index)
+            .context("authorized repository projection index is out of bounds")?;
+        let expected = expected_target
+            .map(|(index, identity)| {
+                projections
+                    .get(index)
+                    .map(|projection| (projection, identity))
+                    .context("authorized expected repository projection index is out of bounds")
+            })
+            .transpose()?;
+        if let Some((expected, _)) = expected
+            && expected.path != projection.path
+        {
+            bail!("replacement target does not match the authorized projection path");
+        }
+
+        let (directory, file_name, project_identity) =
+            open_repository_parent(project_root, projection.path)?;
+        verify_repository_batch_for_identity(
+            &project_identity,
+            expected_route,
+            expected_policy_context_digest,
+            authorization,
+            projections,
+        )?;
+
+        let (temporary_name, mut temporary) =
+            create_restrictive_repository_temporary(&directory, "repository projection")?;
+        if let Err(error) = persist_restrictive_repository_temporary(
+            &mut temporary,
+            projection.bytes,
+            "repository projection",
+        ) {
+            return Err(cleanup_restrictive_repository_temporary(
+                &directory,
+                &temporary_name,
+                &temporary,
+                error,
+            ));
+        }
+
+        let old_identity = match expected {
+            Some((expected, identity)) => {
+                match revalidate_expected_repository_target(
+                    &directory, &file_name, expected, identity,
+                ) {
+                    Ok(actual_identity) => Some(actual_identity),
+                    Err(error) => {
+                        return Err(cleanup_restrictive_repository_temporary(
+                            &directory,
+                            &temporary_name,
+                            &temporary,
+                            error,
+                        ));
+                    }
+                }
+            }
+            None => {
+                if let Err(error) = ensure_repository_destination_absent(&directory, &file_name) {
+                    return Err(cleanup_restrictive_repository_temporary(
+                        &directory,
+                        &temporary_name,
+                        &temporary,
+                        error,
+                    ));
+                }
+                None
+            }
+        };
+
+        let rename_flags = if old_identity.is_some() {
+            RenameFlags::empty()
+        } else {
+            RenameFlags::NOREPLACE
+        };
+        if let Err(error) = renameat_with(
+            &directory,
+            &temporary_name,
+            &directory,
+            &file_name,
+            rename_flags,
+        )
+        .context("failed to atomically install authorized repository projection")
+        {
+            return Err(cleanup_restrictive_repository_temporary(
+                &directory,
+                &temporary_name,
+                &temporary,
+                error,
+            ));
+        }
+
+        if !named_file_still_matches(&directory, &file_name, &temporary)? {
+            bail!("installed repository projection changed before parent sync");
+        }
+        ensure_pinned_file_bytes(
+            &temporary,
+            projection.bytes,
+            "installed authorized repository projection",
+        )?;
+        fsync(&directory).context("failed to sync installed repository projection parent")?;
+        let new_identity =
+            repository_file_identity(&temporary, "installed authorized repository projection")?;
+        Ok(InstalledRepositoryProjection {
+            path: project_root.join(projection.path),
+            old_identity,
+            new_identity,
+            projection_index,
+            directory,
+            file_name,
+            file: temporary,
+        })
+    }
+}
+
+/// Removes an installed no-replace projection only when it still names the pinned new file.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn remove_installed_repository_projection(
+    project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
+    installed: &InstalledRepositoryProjection,
+) -> Result<()> {
+    if installed.old_identity.is_some() {
+        bail!("replaced repository projections must be restored, not removed");
+    }
+    verify_repository_batch(
+        project_root,
+        expected_route,
+        expected_policy_context_digest,
+        authorization,
+        projections,
+    )?;
+    let projection = projections
+        .get(installed.projection_index)
+        .context("installed repository projection index is out of bounds")?;
+    if installed.path != project_root.join(projection.path) {
+        bail!("installed repository projection does not match its authorized path");
+    }
+
+    #[cfg(not(unix))]
+    {
+        bail!("secure installed repository cleanup is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::fstat;
+
+        let (directory, file_name, project_identity) =
+            open_repository_parent(project_root, projection.path)?;
+        verify_repository_batch_for_identity(
+            &project_identity,
+            expected_route,
+            expected_policy_context_digest,
+            authorization,
+            projections,
+        )?;
+        let installed_parent =
+            fstat(&installed.directory).context("failed to inspect installed projection parent")?;
+        let current_parent =
+            fstat(&directory).context("failed to inspect current projection parent")?;
+        if installed.file_name != file_name
+            || installed_parent.st_dev != current_parent.st_dev
+            || installed_parent.st_ino != current_parent.st_ino
+        {
+            bail!("installed repository projection is no longer at its authorized path");
+        }
+        if repository_file_identity(&installed.file, "installed repository projection")?
+            != installed.new_identity
+        {
+            bail!("installed repository projection identity changed");
+        }
+        ensure_pinned_file_bytes(
+            &installed.file,
+            projection.bytes,
+            "installed repository projection",
+        )?;
+        remove_pinned_named_file(
+            &installed.directory,
+            &installed.file_name,
+            &installed.file,
+            Some(projection.bytes),
+            "installed repository projection",
+        )
+    }
 }
 
 #[cfg(unix)]
@@ -1200,6 +1611,20 @@ mod tests {
         project_root: &Path,
         projections: &[RepositoryProjection<'a>],
     ) -> ([u8; 32], AuthorizedRepositoryWriteBatch) {
+        let (context_digest, token) = authorize_create_attempt(project_root, projections);
+        (
+            context_digest,
+            token.expect("test repository projection must be authorized"),
+        )
+    }
+
+    fn authorize_create_attempt<'a>(
+        project_root: &Path,
+        projections: &[RepositoryProjection<'a>],
+    ) -> (
+        [u8; 32],
+        std::result::Result<AuthorizedRepositoryWriteBatch, crate::RepositoryWriteBlocked>,
+    ) {
         let project_identity = repository_project_identity(project_root).unwrap();
         let fields = projections
             .iter()
@@ -1232,8 +1657,7 @@ mod tests {
             projections: projections.to_vec(),
         };
         let context_digest = repository_write_policy_context_digest(&request);
-        let token = authorize_repository_write(&request).unwrap();
-        (context_digest, token)
+        (context_digest, authorize_repository_write(&request))
     }
 
     #[test]
@@ -1346,6 +1770,290 @@ mod tests {
                 "changing semantic policy context must invalidate the capability"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_install_creates_and_replaces_with_pinned_identities() {
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let parent = project_root.join(".memzoi/records");
+        fs::create_dir_all(&parent).unwrap();
+        let relative = Path::new(".memzoi/records/record.md");
+        let destination = project_root.join(relative);
+        let created_bytes = b"created canonical bytes";
+        let create_projections = [RepositoryProjection {
+            path: relative,
+            bytes: created_bytes,
+            target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
+        }];
+        let (create_digest, create_token) = authorize_create(&project_root, &create_projections);
+        let created = install_authorized_repository_projection(
+            &project_root,
+            RepositoryWriteRoute::FileProposalCreate,
+            &create_digest,
+            &create_token,
+            &create_projections,
+            0,
+            None,
+        )
+        .expect("authorized create must install atomically");
+
+        assert_eq!(created.old_identity, None);
+        assert_eq!(fs::read(&destination).unwrap(), created_bytes);
+        let replacement_bytes = b"replacement canonical bytes";
+        let previous_revision = blake3::hash(created_bytes).to_hex().to_string();
+        let replacement_projections = [
+            RepositoryProjection {
+                path: relative,
+                bytes: replacement_bytes,
+                target_revision: Some(&previous_revision),
+                purpose: crate::RepositoryProjectionPurpose::Write,
+            },
+            RepositoryProjection {
+                path: relative,
+                bytes: created_bytes,
+                target_revision: Some(&previous_revision),
+                purpose: crate::RepositoryProjectionPurpose::Existing,
+            },
+        ];
+        let (replacement_digest, replacement_token) =
+            authorize_create(&project_root, &replacement_projections);
+        let replaced = install_authorized_repository_projection(
+            &project_root,
+            RepositoryWriteRoute::FileProposalCreate,
+            &replacement_digest,
+            &replacement_token,
+            &replacement_projections,
+            0,
+            Some((1, created.new_identity)),
+        )
+        .expect("authorized replacement must install atomically");
+
+        assert_eq!(replaced.old_identity, Some(created.new_identity));
+        assert_ne!(replaced.new_identity, created.new_identity);
+        assert_eq!(fs::read(&destination).unwrap(), replacement_bytes);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_install_failure_injections_leave_create_or_update_intact() {
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let parent = project_root.join(".memzoi/records");
+        fs::create_dir_all(&parent).unwrap();
+
+        let create_relative = Path::new(".memzoi/records/create.md");
+        let create_projections = [RepositoryProjection {
+            path: create_relative,
+            bytes: b"new canonical bytes",
+            target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
+        }];
+        let (create_digest, create_token) = authorize_create(&project_root, &create_projections);
+        inject_repository_atomic_install_failure(InjectedAtomicInstallFailure::WriteTemporary);
+        install_authorized_repository_projection(
+            &project_root,
+            RepositoryWriteRoute::FileProposalCreate,
+            &create_digest,
+            &create_token,
+            &create_projections,
+            0,
+            None,
+        )
+        .expect_err("a temporary write failure must not create the canonical destination");
+        assert!(!project_root.join(create_relative).exists());
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+
+        let update_relative = Path::new(".memzoi/records/update.md");
+        let update_path = project_root.join(update_relative);
+        let previous = b"previous canonical bytes";
+        let replacement = b"replacement canonical bytes";
+        fs::write(&update_path, previous).unwrap();
+        let previous_revision = blake3::hash(previous).to_hex().to_string();
+        let update_projections = [
+            RepositoryProjection {
+                path: update_relative,
+                bytes: replacement,
+                target_revision: Some(&previous_revision),
+                purpose: crate::RepositoryProjectionPurpose::Write,
+            },
+            RepositoryProjection {
+                path: update_relative,
+                bytes: previous,
+                target_revision: Some(&previous_revision),
+                purpose: crate::RepositoryProjectionPurpose::Existing,
+            },
+        ];
+        let (update_digest, update_token) = authorize_create(&project_root, &update_projections);
+        let (_, previous_identity) = read_repository_file_with_identity_if_exists(
+            &project_root,
+            update_relative,
+            previous.len() as u64,
+            "atomic update predecessor",
+        )
+        .unwrap()
+        .expect("the update predecessor must be present");
+        inject_repository_atomic_install_failure(InjectedAtomicInstallFailure::SyncTemporary);
+        install_authorized_repository_projection(
+            &project_root,
+            RepositoryWriteRoute::FileProposalCreate,
+            &update_digest,
+            &update_token,
+            &update_projections,
+            0,
+            Some((1, previous_identity)),
+        )
+        .expect_err("a temporary sync failure must preserve the previous canonical destination");
+        assert_eq!(fs::read(&update_path).unwrap(), previous);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_update_refuses_a_stale_predecessor_identity() {
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let parent = project_root.join(".memzoi/records");
+        fs::create_dir_all(&parent).unwrap();
+        let relative = Path::new(".memzoi/records/update.md");
+        let destination = project_root.join(relative);
+        let previous = b"previous canonical bytes";
+        let replacement = b"replacement canonical bytes";
+        fs::write(&destination, previous).unwrap();
+        let previous_revision = blake3::hash(previous).to_hex().to_string();
+        let projections = [
+            RepositoryProjection {
+                path: relative,
+                bytes: replacement,
+                target_revision: Some(&previous_revision),
+                purpose: crate::RepositoryProjectionPurpose::Write,
+            },
+            RepositoryProjection {
+                path: relative,
+                bytes: previous,
+                target_revision: Some(&previous_revision),
+                purpose: crate::RepositoryProjectionPurpose::Existing,
+            },
+        ];
+        let (context_digest, token) = authorize_create(&project_root, &projections);
+        let (_, predecessor_identity) = read_repository_file_with_identity_if_exists(
+            &project_root,
+            relative,
+            previous.len() as u64,
+            "captured atomic predecessor",
+        )
+        .unwrap()
+        .expect("the captured predecessor must exist");
+        let recreated = parent.join(".recreated-predecessor.tmp");
+        fs::write(&recreated, previous).unwrap();
+        fs::rename(&recreated, &destination).unwrap();
+
+        let error = install_authorized_repository_projection(
+            &project_root,
+            RepositoryWriteRoute::FileProposalCreate,
+            &context_digest,
+            &token,
+            &projections,
+            0,
+            Some((1, predecessor_identity)),
+        )
+        .expect_err("a recreated predecessor must fail its identity precondition");
+
+        assert!(
+            format!("{error:#}").contains("identity changed before replacement"),
+            "unexpected stale predecessor error: {error:#}"
+        );
+        assert_eq!(fs::read(&destination).unwrap(), previous);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_install_refuses_unsafe_and_symlinked_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let unsafe_relative = Path::new("../escaped.md");
+        let unsafe_projections = [RepositoryProjection {
+            path: unsafe_relative,
+            bytes: b"authorized bytes",
+            target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
+        }];
+        let (_, unsafe_result) = authorize_create_attempt(&project_root, &unsafe_projections);
+        let unsafe_error =
+            unsafe_result.expect_err("unsafe repository-relative paths must be blocked");
+        assert!(unsafe_error.report().findings.iter().any(|finding| {
+            finding.code == crate::RepositoryWriteSafetyReasonCode::UnsafeOutputPath
+        }));
+
+        let relative = Path::new(".memzoi/records/symlinked.md");
+        let destination = project_root.join(relative);
+        let projections = [RepositoryProjection {
+            path: relative,
+            bytes: b"authorized bytes",
+            target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
+        }];
+        let (context_digest, token) = authorize_create(&project_root, &projections);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), b"outside bytes").unwrap();
+        symlink(outside.path(), &destination).unwrap();
+        let symlink_error = install_authorized_repository_projection(
+            &project_root,
+            RepositoryWriteRoute::FileProposalCreate,
+            &context_digest,
+            &token,
+            &projections,
+            0,
+            None,
+        )
+        .expect_err("a symlink destination must fail closed");
+        assert!(format!("{symlink_error:#}").contains("must not be a symlink"));
+        assert_eq!(fs::read(outside.path()).unwrap(), b"outside bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_install_rejects_authorization_mismatch_without_destination() {
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let relative = Path::new(".memzoi/records/authorized.md");
+        let authorized = [RepositoryProjection {
+            path: relative,
+            bytes: b"authorized bytes",
+            target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
+        }];
+        let (context_digest, token) = authorize_create(&project_root, &authorized);
+        let changed = [RepositoryProjection {
+            path: relative,
+            bytes: b"changed bytes",
+            target_revision: None,
+            purpose: crate::RepositoryProjectionPurpose::Write,
+        }];
+
+        let error = install_authorized_repository_projection(
+            &project_root,
+            RepositoryWriteRoute::FileProposalCreate,
+            &context_digest,
+            &token,
+            &changed,
+            0,
+            None,
+        )
+        .expect_err("a mismatched capability must not install a canonical destination");
+
+        assert!(
+            format!("{error:#}").contains("does not match the exact route, project"),
+            "unexpected authorization mismatch error: {error:#}"
+        );
+        assert!(!project_root.join(relative).exists());
     }
 
     #[cfg(unix)]
