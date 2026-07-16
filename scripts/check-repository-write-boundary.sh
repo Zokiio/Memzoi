@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export LC_ALL=C
+
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
