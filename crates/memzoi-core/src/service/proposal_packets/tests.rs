@@ -186,7 +186,7 @@ fn repo_packet_planning_reserves_hash_only_receipt_aliases_and_database_proposal
             if proposal_id == "mem_session_hash-reserved-2"
     ));
 
-    service.conn.execute(
+    service.shared_conn.execute(
         "INSERT INTO proposal (id, operation, payload_json, status, actor)
          VALUES ('mem_import_db-reserved', 'create', '{}', 'pending', 'agent:red-tests')",
         [],
@@ -224,7 +224,7 @@ fn file_create_refuses_to_replace_a_local_runtime_row() -> anyhow::Result<()> {
             .join(format!("{record_id}.md"))
             .exists()
     );
-    let runtime = RuntimeRecords::new(&service.conn)
+    let runtime = RuntimeRecords::new(&service.shared_conn)
         .get(record_id)?
         .context("runtime row survived")?;
     assert_eq!(runtime.destination, MemoryDestination::Local);
@@ -266,7 +266,7 @@ fn file_supersede_runtime_collision_rolls_back_target_and_replacement() -> anyho
             .status,
         MemoryStatus::Active
     );
-    let runtime = RuntimeRecords::new(&service.conn)
+    let runtime = RuntimeRecords::new(&service.shared_conn)
         .get(replacement_id)?
         .context("session collision row survived")?;
     assert_eq!(runtime.destination, MemoryDestination::Session);
@@ -279,7 +279,7 @@ fn file_supersede_runtime_collision_rolls_back_target_and_replacement() -> anyho
 fn file_apply_refuses_database_proposal_identity_collision() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let proposal_id = "mem_db_proposal_collision";
-    service.conn.execute(
+    service.shared_conn.execute(
         "INSERT INTO proposal (id, operation, payload_json, status, actor)
          VALUES (?1, 'create', '{}', 'pending', 'agent:red-tests')",
         [proposal_id],
@@ -938,7 +938,7 @@ fn insert_runtime_record_with_id(
         supersedes_id: None,
         expires_at: None,
     };
-    RuntimeRecords::new(&service.conn).insert_for_test(&record)
+    RuntimeRecords::new(&service.shared_conn).insert_for_test(&record)
 }
 
 fn apply_test_record(service: &MemoryService, draft: MemoryDraft) -> anyhow::Result<MemoryRecord> {

@@ -12,12 +12,16 @@ use super::super::{
         authorize_repository_projection_batch, explicit_repository_provenance,
         okf_proposal_safety_values, repository_transaction_path, stage_authorized_file,
     },
+    runtime_records::RuntimeRecords,
 };
 use super::journal::*;
 use crate::{
-    AuthorizationProof, CaptureMemoryScope, MemoryLane, MemoryPaths, MemoryType,
+    AuthorizationProof, CAPTURE_REQUEST_SCHEMA, CAPTURE_REVIEW_INPUT_SCHEMA,
+    CaptureExtractorRequest, CaptureMemoryScope, CaptureRequest, CaptureReviewDecisionInput,
+    CaptureReviewInput, CaptureReviewOutcome, CaptureSourceLocator, CaptureSourceRequest,
+    MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryLane, MemoryPaths, MemoryType,
     OkfProposalSensitivity, RepositoryContentClass, RepositoryWriteRoute, ScopeKind, Visibility,
-    okf,
+    build_capture_review, okf, plan_capture,
 };
 
 #[test]
@@ -67,6 +71,242 @@ fn capture_apply_rejects_non_repo_proposal_scope() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn committed_capture_fallback_completes_shared_sync_before_success() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let paths = service.paths.clone();
+    fs::write(
+        paths.project_root.join("private-capture.md"),
+        "# Fact: Recovered repository capture\n\nKeep the durable recovery rule in a reviewable proposal.\n\n# Preference: Recovered private capture\n\nKeep the recovery token in local runtime.\n",
+    )?;
+    let request = CaptureRequest {
+        schema: CAPTURE_REQUEST_SCHEMA.to_owned(),
+        sources: vec![CaptureSourceRequest {
+            source_id: "source-1".to_owned(),
+            locator: CaptureSourceLocator::ProjectPath {
+                path: "private-capture.md".to_owned(),
+            },
+            media_type: "text/markdown".to_owned(),
+            git: None,
+        }],
+        extractor: CaptureExtractorRequest {
+            profile: MARKDOWN_EXTRACTOR_PROFILE.to_owned(),
+        },
+    };
+    let plan = plan_capture(&paths, request)?;
+    assert_eq!(plan.candidates.len(), 2);
+    assert!(plan.candidates.iter().any(|candidate| {
+        candidate.memory.title == "Recovered repository capture"
+            && candidate.classification.destination == MemoryDestination::NeedsReview
+    }));
+    assert!(
+        plan.candidates
+            .iter()
+            .any(|candidate| { candidate.classification.destination == MemoryDestination::Local })
+    );
+    let review = build_capture_review(
+        &paths,
+        &plan,
+        CaptureReviewInput {
+            schema: CAPTURE_REVIEW_INPUT_SCHEMA.to_owned(),
+            plan_id: plan.plan_id.clone(),
+            prior_review_id: None,
+            decisions: plan
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    let needs_repo_review =
+                        candidate.classification.destination == MemoryDestination::NeedsReview;
+                    CaptureReviewDecisionInput {
+                        candidate_id: candidate.candidate_id.clone(),
+                        outcome: if needs_repo_review {
+                            CaptureReviewOutcome::Edit
+                        } else {
+                            CaptureReviewOutcome::Accept
+                        },
+                        reason_code: needs_repo_review
+                            .then_some("explicit-contextual-classification".to_owned()),
+                        memory: needs_repo_review.then_some(candidate.memory.clone()),
+                        requested_destination: needs_repo_review.then_some(MemoryDestination::Repo),
+                        content_class: needs_repo_review
+                            .then_some(RepositoryContentClass::GeneralRepoKnowledge),
+                    }
+                })
+                .collect(),
+        },
+        "capture-reviewer",
+        "2026-07-16T12:00:00Z",
+    )?;
+    inject_before_committed_capture_recovery_hook(|| {
+        anyhow::bail!("injected first committed capture recovery interruption")
+    });
+
+    service.apply_capture(
+        "capture-reviewer",
+        plan.clone(),
+        review.clone(),
+        &plan.plan_id,
+        &review.review_id,
+    )?;
+    let record_id: String = service.conn.query_row(
+        "SELECT id FROM memory_record WHERE destination = 'local'",
+        [],
+        |row| row.get(0),
+    )?;
+    let shared_record_count: i64 = service.shared_conn.query_row(
+        "SELECT COUNT(*) FROM memory_record WHERE id = ?1",
+        [&record_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(shared_record_count, 1);
+    assert!(
+        !paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .exists()
+    );
+    drop(service);
+
+    let recovered = MemoryService::open_paths(paths.clone())?;
+    let recovered_record = recovered
+        .list_local_memory()?
+        .into_iter()
+        .find(|record| record.id == record_id)
+        .context("recovered capture runtime record is missing")?;
+    assert!(recovered_record.capture.is_some());
+    let shared_event_count: i64 = recovered.shared_conn.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE record_id = ?1 AND event_type = 'memory.capture_routed'",
+        [&record_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(shared_event_count, 1);
+    assert!(
+        !paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .exists()
+    );
+    drop(recovered);
+
+    let reopened = MemoryService::open_paths(paths)?;
+    let shared_event_count: i64 = reopened.shared_conn.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE record_id = ?1 AND event_type = 'memory.capture_routed'",
+        [&record_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(shared_event_count, 1);
+    Ok(())
+}
+
+#[test]
+fn capture_runtime_id_allocation_skips_an_unindexed_canonical_file_id() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let paths = service.paths.clone();
+    let proposal = service.propose_memory(
+        "agent:unindexed-capture-collision-test",
+        crate::MemoryDraft {
+            memory_type: MemoryType::Fact,
+            lane: MemoryLane::Semantic,
+            scope_kind: ScopeKind::Repo,
+            scope_id: None,
+            visibility: Visibility::Repo,
+            title: "Local unindexed capture collision".to_owned(),
+            body: "This canonical file owns the first capture runtime identifier.".to_owned(),
+            tags: vec!["capture".to_owned()],
+            source_kind: Some("test".to_owned()),
+            source_ref: Some("unindexed-capture-collision".to_owned()),
+            sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
+            confidence: 1.0,
+        },
+    )?;
+    service.validate_proposal(&proposal.id)?;
+    service.approve_proposal(&proposal.id, "reviewer:human")?;
+    let canonical = service.apply_proposal(&proposal.id, "agent:applier")?;
+    assert_eq!(canonical.id, "local-unindexed-capture-collision");
+    assert_eq!(
+        service
+            .conn
+            .execute("DELETE FROM memory_record WHERE id = ?1", [&canonical.id])?,
+        1
+    );
+    assert!(
+        paths
+            .records_dir()
+            .join(format!("{}.md", canonical.id))
+            .is_file()
+    );
+    drop(service);
+
+    fs::write(
+        paths.project_root.join("private-collision.md"),
+        "# Preference: Unindexed capture collision\n\nKeep the unindexed capture collision token in local runtime.\n",
+    )?;
+    let request = CaptureRequest {
+        schema: CAPTURE_REQUEST_SCHEMA.to_owned(),
+        sources: vec![CaptureSourceRequest {
+            source_id: "source-1".to_owned(),
+            locator: CaptureSourceLocator::ProjectPath {
+                path: "private-collision.md".to_owned(),
+            },
+            media_type: "text/markdown".to_owned(),
+            git: None,
+        }],
+        extractor: CaptureExtractorRequest {
+            profile: MARKDOWN_EXTRACTOR_PROFILE.to_owned(),
+        },
+    };
+    let plan = plan_capture(&paths, request)?;
+    assert_eq!(plan.candidates.len(), 1);
+    assert!(matches!(
+        plan.candidates[0].action,
+        crate::CaptureAction::CreateRuntime { .. }
+    ));
+    let review = build_capture_review(
+        &paths,
+        &plan,
+        CaptureReviewInput {
+            schema: CAPTURE_REVIEW_INPUT_SCHEMA.to_owned(),
+            plan_id: plan.plan_id.clone(),
+            prior_review_id: None,
+            decisions: vec![CaptureReviewDecisionInput {
+                candidate_id: plan.candidates[0].candidate_id.clone(),
+                outcome: CaptureReviewOutcome::Accept,
+                reason_code: None,
+                memory: None,
+                requested_destination: None,
+                content_class: None,
+            }],
+        },
+        "capture-reviewer",
+        "2026-07-16T12:00:00Z",
+    )?;
+
+    let service = MemoryService::open_paths(paths.clone())?;
+    let result = service.apply_capture(
+        "capture-reviewer",
+        plan.clone(),
+        review.clone(),
+        &plan.plan_id,
+        &review.review_id,
+    )?;
+    assert_eq!(result.writes.len(), 1);
+    match &result.writes[0] {
+        crate::CaptureWrite::RuntimeRecord { record_id, .. } => {
+            assert_eq!(record_id, "local-unindexed-capture-collision-2")
+        }
+        write => panic!("expected a capture runtime write, got {write:?}"),
+    }
+    assert!(
+        RuntimeRecords::new(&service.shared_conn)
+            .get(&canonical.id)?
+            .is_none()
+    );
+    Ok(())
 }
 
 #[test]

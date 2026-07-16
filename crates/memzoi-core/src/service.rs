@@ -28,7 +28,7 @@ use crate::{
         ProposalApprovalPolicy, discover_existing_paths, discover_paths, load_effective_config,
     },
     context, db,
-    events::{AppendEvent, append_event, for_each_event as stream_events},
+    events::{AppendEvent, append_event, for_each_merged_event},
     expiry::{self, Clock, ExpiryDiagnostic, SystemClock},
     exporters, handoff, okf, precheck, proposals, search,
     session_end::{SessionEndDocument, SessionEndResult},
@@ -43,6 +43,7 @@ mod repository_mutation;
 mod runtime_records;
 mod safe_files;
 mod session_end_route_apply;
+mod shared_runtime;
 #[cfg(test)]
 mod tests;
 
@@ -60,8 +61,8 @@ use self::repository_mutation::{
     explicit_repository_provenance, memory_draft_safety_values, repository_transaction_root,
     safety_value,
 };
-use self::runtime_records::RuntimeRecords;
-use self::safe_files::lifecycle_transaction_artifacts;
+use self::runtime_records::{RuntimeRecords, reserved_runtime_record_ids};
+use self::safe_files::{RepoLifecycleLock, lifecycle_transaction_artifacts};
 use self::session_end_route_apply::SessionEndRouteApply;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +150,7 @@ pub struct ProposeResult {
 pub struct MemoryService {
     paths: MemoryPaths,
     conn: Connection,
+    shared_conn: Connection,
     clock: Arc<dyn Clock>,
 }
 
@@ -167,6 +169,8 @@ impl MemoryService {
     }
 
     pub fn open_paths_with_clock(paths: MemoryPaths, clock: impl Clock + 'static) -> Result<Self> {
+        paths.validate_runtime_identity()?;
+        shared_runtime::migrate_legacy_runtime_if_needed(&paths)?;
         if !paths.config_path.is_file() {
             bail!(
                 "Memzoi bundle is not initialized at {}; run `memzoi init` first",
@@ -174,12 +178,19 @@ impl MemoryService {
             );
         }
 
-        let conn = db::open_database(&paths.db_path)?;
+        let shared_conn = db::open_database(&paths.shared_db_path)?;
+        db::init_database(&shared_conn)?;
+        if !paths.index_db_path.is_file() {
+            derived_index::rebuild(paths.clone())?;
+        }
+        let conn = db::open_database(&paths.index_db_path)?;
         db::init_database(&conn)?;
+        shared_runtime::refresh_index_mirrors(&paths, &shared_conn, &conn)?;
         capture_route_apply::recover_on_open(&paths, &conn)?;
         Ok(Self {
             paths,
             conn,
+            shared_conn,
             clock: Arc::new(clock),
         })
     }
@@ -190,7 +201,9 @@ impl MemoryService {
     }
 
     pub fn initialize_paths(paths: MemoryPaths, request: InitRequest) -> Result<InitResult> {
-        init_bundle(&paths, request.force)?;
+        paths.validate_runtime_identity()?;
+        let migrated = shared_runtime::migrate_legacy_runtime_if_needed(&paths)?;
+        init_bundle_after_migration(&paths, request.force, migrated)?;
         Ok(InitResult { paths })
     }
 
@@ -199,11 +212,15 @@ impl MemoryService {
     }
 
     pub fn for_each_event(&self, visit: impl FnMut(MemoryEvent) -> Result<()>) -> Result<()> {
-        stream_events(&self.conn, visit)
+        for_each_merged_event(&self.shared_conn, &self.conn, visit)
     }
 
     pub fn propose_memory(&self, actor: &str, draft: MemoryDraft) -> Result<Proposal> {
-        proposals::propose_memory(&self.conn, actor, draft)
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let proposal = proposals::propose_memory(&self.shared_conn, actor, draft)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(proposal)
     }
 
     pub fn propose_memory_with_options(
@@ -212,6 +229,8 @@ impl MemoryService {
         draft: MemoryDraft,
         options: ProposeOptions,
     ) -> Result<ProposeResult> {
+        let lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
         let mut policy = load_effective_config(&self.paths)?
             .workflow
             .proposal_approval;
@@ -227,8 +246,13 @@ impl MemoryService {
             );
         }
 
-        let proposal = proposals::propose_memory(&self.conn, actor, draft)?;
+        let proposal = proposals::propose_memory(&self.shared_conn, actor, draft)?;
         if policy == ProposalApprovalPolicy::Manual {
+            shared_runtime::refresh_index_mirrors_locked(
+                &self.paths,
+                &self.shared_conn,
+                &self.conn,
+            )?;
             return Ok(ProposeResult {
                 proposal,
                 record: None,
@@ -237,18 +261,32 @@ impl MemoryService {
             });
         }
 
-        let validation = proposals::validate_proposal(&self.conn, &proposal.id)?;
+        let validation = proposals::validate_proposal_against_records(
+            &self.shared_conn,
+            &self.conn,
+            &proposal.id,
+        )?;
         if !validation.is_valid {
+            shared_runtime::refresh_index_mirrors_locked(
+                &self.paths,
+                &self.shared_conn,
+                &self.conn,
+            )?;
             return Ok(ProposeResult {
-                proposal: proposals::load_proposal_public(&self.conn, &proposal.id)?,
+                proposal: proposals::load_proposal_public(&self.shared_conn, &proposal.id)?,
                 record: None,
                 validation: Some(validation),
                 applied: false,
             });
         }
 
-        let approved = proposals::approve_proposal(&self.conn, &proposal.id, actor)?;
+        let approved = proposals::approve_proposal(&self.shared_conn, &proposal.id, actor)?;
         if !options.apply {
+            shared_runtime::refresh_index_mirrors_locked(
+                &self.paths,
+                &self.shared_conn,
+                &self.conn,
+            )?;
             return Ok(ProposeResult {
                 proposal: approved,
                 record: None,
@@ -257,9 +295,11 @@ impl MemoryService {
             });
         }
 
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        drop(lifecycle_lock);
         let record = self.apply_proposal(&proposal.id, actor)?;
         Ok(ProposeResult {
-            proposal: proposals::load_proposal_public(&self.conn, &proposal.id)?,
+            proposal: proposals::load_proposal_public(&self.shared_conn, &proposal.id)?,
             record: Some(record),
             validation: Some(validation),
             applied: true,
@@ -267,19 +307,23 @@ impl MemoryService {
     }
 
     pub fn list_proposals(&self, filter: ProposalStatusFilter) -> Result<Vec<Proposal>> {
-        proposals::list_proposals(&self.conn, filter)
+        proposals::list_proposals(&self.shared_conn, filter)
     }
 
     pub fn show_proposal(&self, proposal_id: &str) -> Result<Proposal> {
-        proposals::load_proposal_public(&self.conn, proposal_id)
+        proposals::load_proposal_public(&self.shared_conn, proposal_id)
     }
 
     pub fn open_proposal_counts(&self) -> Result<BTreeMap<ProposalStatus, usize>> {
-        proposals::open_proposal_counts(&self.conn)
+        proposals::open_proposal_counts(&self.shared_conn)
     }
 
     pub fn approve_proposal(&self, proposal_id: &str, actor: &str) -> Result<Proposal> {
-        proposals::approve_proposal(&self.conn, proposal_id, actor)
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let proposal = proposals::approve_proposal(&self.shared_conn, proposal_id, actor)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(proposal)
     }
 
     pub fn reject_proposal(
@@ -288,16 +332,29 @@ impl MemoryService {
         actor: &str,
         reason: &str,
     ) -> Result<Proposal> {
-        proposals::reject_proposal(&self.conn, proposal_id, actor, reason)
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let proposal = proposals::reject_proposal(&self.shared_conn, proposal_id, actor, reason)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(proposal)
     }
 
     pub fn validate_proposal(&self, proposal_id: &str) -> Result<ValidationResult> {
-        proposals::validate_proposal(&self.conn, proposal_id)
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let validation = proposals::validate_proposal_against_records(
+            &self.shared_conn,
+            &self.conn,
+            proposal_id,
+        )?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(validation)
     }
 
     pub fn apply_proposal(&self, proposal_id: &str, actor: &str) -> Result<MemoryRecord> {
         let session = CanonicalWriteSession::begin(&self.paths)?;
-        let proposal = proposals::load_proposal_public(&self.conn, proposal_id)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let proposal = proposals::load_proposal_public(&self.shared_conn, proposal_id)?;
         let mut safety_values = memory_draft_safety_values("proposal", &proposal.payload);
         safety_values.push(safety_value(
             "proposal.id".to_owned(),
@@ -337,11 +394,19 @@ impl MemoryService {
             &safety_values,
             &projections,
         )?;
-        session.commit(
+        shared_runtime::prepare_proposal_apply_sync_journal(
+            &self.paths,
+            &tx,
+            &self.shared_conn,
+            proposal_id,
+            &write,
+        )?;
+        session.commit_and_then(
             RepositoryWriteRoute::DatabaseProposalApply,
             &authorization,
             tx,
             &[write],
+            || shared_runtime::complete_pending_shared_sync_locked(&self.paths, &self.shared_conn),
         )?;
         Ok(record)
     }
@@ -368,6 +433,7 @@ impl MemoryService {
         BeforeCommit: FnOnce(&Transaction<'_>) -> Result<()>,
     {
         let session = CanonicalWriteSession::begin(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
         let target = RuntimeRecords::new(&self.conn)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -462,6 +528,7 @@ impl MemoryService {
         reason: &str,
     ) -> Result<MemoryRecord> {
         let session = CanonicalWriteSession::begin(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
         let target = RuntimeRecords::new(&self.conn)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -547,10 +614,12 @@ impl MemoryService {
     }
 
     pub fn search_memory(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         search::search_memory_at(&self.conn, input, self.now())
     }
 
     pub fn inspect_expiry(&self, record_id: &str) -> Result<ExpiryDiagnostic> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         let record = RuntimeRecords::new(&self.conn)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -566,17 +635,28 @@ impl MemoryService {
         actor: &str,
         input: LocalMemoryInput,
     ) -> Result<MemoryRecord> {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let reserved_ids = reserved_runtime_record_ids(&self.paths, &self.conn)?;
         let now = self.now_timestamp()?;
-        RuntimeRecords::new(&self.conn).create_local(actor, &input, &now)
+        let record = RuntimeRecords::new(&self.shared_conn).create_local_avoiding(
+            actor,
+            &input,
+            &now,
+            &reserved_ids,
+        )?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(record)
     }
 
     pub fn list_local_memory(&self) -> Result<Vec<MemoryRecord>> {
-        RuntimeRecords::new(&self.conn).active_for_destination(MemoryDestination::Local, self.now())
+        RuntimeRecords::new(&self.shared_conn)
+            .active_for_destination(MemoryDestination::Local, self.now())
     }
 
     pub fn search_local_memory(&self, query: String, limit: usize) -> Result<Vec<SearchResult>> {
         search::search_memory_at(
-            &self.conn,
+            &self.shared_conn,
             SearchInput {
                 query,
                 destination: Some(MemoryDestination::Local),
@@ -589,16 +669,26 @@ impl MemoryService {
     }
 
     pub fn create_checkpoint(&self, actor: &str, input: CheckpointInput) -> Result<MemoryRecord> {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let reserved_ids = reserved_runtime_record_ids(&self.paths, &self.conn)?;
         let now = self.now_timestamp()?;
-        RuntimeRecords::new(&self.conn).create_checkpoint(actor, &input, &now)
+        let record = RuntimeRecords::new(&self.shared_conn).create_checkpoint_avoiding(
+            actor,
+            &input,
+            &now,
+            &reserved_ids,
+        )?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(record)
     }
 
     pub fn list_checkpoints(&self) -> Result<Vec<MemoryRecord>> {
-        RuntimeRecords::new(&self.conn).active_checkpoints(self.now())
+        RuntimeRecords::new(&self.shared_conn).active_checkpoints(self.now())
     }
 
     pub fn show_checkpoint(&self, record_id: &str) -> Result<MemoryRecord> {
-        RuntimeRecords::new(&self.conn)
+        RuntimeRecords::new(&self.shared_conn)
             .checkpoint(record_id, self.now())?
             .with_context(|| format!("checkpoint not found: {record_id}"))
     }
@@ -608,11 +698,23 @@ impl MemoryService {
         actor: &str,
         document: SessionEndDocument,
     ) -> Result<SessionEndResult> {
-        SessionEndRouteApply::new(&self.paths, &self.conn, self.clock.as_ref())
-            .promote(actor, document)
+        SessionEndRouteApply::new(
+            &self.paths,
+            &self.conn,
+            &self.shared_conn,
+            self.clock.as_ref(),
+        )
+        .promote(actor, document)
     }
     pub fn plan_import(&self, actor: &str, document: ImportDocument) -> Result<ImportPlan> {
-        ImportLifecycle::new(&self.paths, &self.conn, self.clock.as_ref()).plan(actor, document)
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        ImportLifecycle::new(
+            &self.paths,
+            &self.conn,
+            &self.shared_conn,
+            self.clock.as_ref(),
+        )
+        .plan(actor, document)
     }
 
     pub fn apply_import(
@@ -621,11 +723,13 @@ impl MemoryService {
         document: ImportDocument,
         expected_plan_id: &str,
     ) -> Result<ImportApplyResult> {
-        ImportLifecycle::new(&self.paths, &self.conn, self.clock.as_ref()).apply(
-            actor,
-            document,
-            expected_plan_id,
+        ImportLifecycle::new(
+            &self.paths,
+            &self.conn,
+            &self.shared_conn,
+            self.clock.as_ref(),
         )
+        .apply(actor, document, expected_plan_id)
     }
 
     pub fn apply_capture(
@@ -721,31 +825,40 @@ impl MemoryService {
         expected_plan_id: &str,
         expected_review_id: &str,
     ) -> Result<CaptureApplyResult> {
-        capture_route_apply::CaptureRouteApply::new(&self.paths, &self.conn, self.clock.as_ref())
-            .apply(capture_route_apply::CaptureRouteApplyCommand {
-                actor,
-                plan,
-                review,
-                prior_review,
-                source_inputs,
-                expected_plan_id,
-                expected_review_id,
-            })
+        capture_route_apply::CaptureRouteApply::new(
+            &self.paths,
+            &self.conn,
+            &self.shared_conn,
+            self.clock.as_ref(),
+        )
+        .apply(capture_route_apply::CaptureRouteApplyCommand {
+            actor,
+            plan,
+            review,
+            prior_review,
+            source_inputs,
+            expected_plan_id,
+            expected_review_id,
+        })
     }
 
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         context::build_context_pack_at(&self.conn, input, self.now())
     }
 
     pub fn build_handoff_pack(&self, input: HandoffInput) -> Result<HandoffPack> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         handoff::build_handoff_pack_at(&self.conn, input, self.now())
     }
 
     pub fn precheck(&self, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         precheck::precheck_at(&self.conn, input, self.now())
     }
 
     pub fn export(&self, input: ExportInput) -> Result<ExportResult> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         let written_paths = match input.format {
             ExportFormat::Okf => exporters::export_okf_at(
                 &self.conn,
@@ -793,6 +906,7 @@ impl MemoryService {
     }
 
     pub fn rebuild_paths(paths: MemoryPaths) -> Result<RebuildResult> {
+        paths.validate_runtime_identity()?;
         derived_index::rebuild(paths)
     }
 
@@ -840,6 +954,15 @@ fn validate_legacy_canonical_target(target: &MemoryRecord) -> Result<()> {
 }
 
 pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult> {
+    paths.validate_runtime_identity()?;
+    init_bundle_after_migration(paths, force, false)
+}
+
+fn init_bundle_after_migration(
+    paths: &MemoryPaths,
+    force: bool,
+    migrated: bool,
+) -> Result<InitBundleResult> {
     fs::create_dir_all(&paths.memory_dir).with_context(|| {
         format!(
             "failed to create memory directory {}",
@@ -852,10 +975,16 @@ pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult>
             paths.records_dir().display()
         )
     })?;
-    fs::create_dir_all(&paths.runtime_dir).with_context(|| {
+    fs::create_dir_all(&paths.repository_runtime_dir).with_context(|| {
         format!(
-            "failed to create runtime directory {}",
-            paths.runtime_dir.display()
+            "failed to create repository runtime directory {}",
+            paths.repository_runtime_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&paths.worktree_runtime_dir).with_context(|| {
+        format!(
+            "failed to create worktree runtime directory {}",
+            paths.worktree_runtime_dir.display()
         )
     })?;
     fs::create_dir_all(repository_transaction_root(paths)).with_context(|| {
@@ -871,7 +1000,7 @@ pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult>
         )
     })?;
 
-    if paths.config_path.exists() && !force {
+    if paths.config_path.exists() && !force && !migrated {
         bail!(
             "{} already exists; pass --force to overwrite it",
             paths.config_path.display()
@@ -883,8 +1012,10 @@ pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult>
             .with_context(|| format!("failed to write config {}", paths.config_path.display()))?;
     }
 
-    let conn = db::open_database(&paths.db_path)?;
-    db::init_database(&conn)?;
+    let shared = db::open_database(&paths.shared_db_path)?;
+    db::init_database(&shared)?;
+    drop(shared);
+    derived_index::rebuild(paths.clone())?;
 
     Ok(InitBundleResult {
         project_root: paths.project_root.clone(),

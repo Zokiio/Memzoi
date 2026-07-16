@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Result, bail};
 use rusqlite::Connection;
 use serde_json::json;
@@ -18,14 +20,25 @@ pub(super) enum InsertMode {
     RestoreIfAbsent,
 }
 
+#[cfg(test)]
 pub(super) fn create_local_memory(
     conn: &Connection,
     actor: &str,
     input: &LocalMemoryInput,
     now: &str,
 ) -> Result<MemoryRecord> {
+    create_local_memory_avoiding(conn, actor, input, now, &BTreeSet::new())
+}
+
+pub(super) fn create_local_memory_avoiding(
+    conn: &Connection,
+    actor: &str,
+    input: &LocalMemoryInput,
+    now: &str,
+    reserved_ids: &BTreeSet<String>,
+) -> Result<MemoryRecord> {
     validate_local_memory_input(input)?;
-    let id = next_prefixed_record_id(conn, "local", &input.title)?;
+    let id = next_prefixed_record_id(conn, "local", &input.title, reserved_ids)?;
     let body = input.body.trim().to_owned();
     let record = MemoryRecord {
         id,
@@ -69,14 +82,15 @@ pub(super) fn create_local_memory(
     Ok(record)
 }
 
-pub(super) fn create_checkpoint(
+pub(super) fn create_checkpoint_avoiding(
     conn: &Connection,
     actor: &str,
     input: &CheckpointInput,
     now: &str,
+    reserved_ids: &BTreeSet<String>,
 ) -> Result<MemoryRecord> {
     validate_checkpoint_input(input)?;
-    let id = next_prefixed_record_id(conn, "session", &input.task)?;
+    let id = next_prefixed_record_id(conn, "session", &input.task, reserved_ids)?;
     let body = input.note.trim().to_owned();
     let record = MemoryRecord {
         id,
@@ -140,16 +154,21 @@ fn validate_checkpoint_input(input: &CheckpointInput) -> Result<()> {
     Ok(())
 }
 
-fn next_prefixed_record_id(conn: &Connection, prefix: &str, title: &str) -> Result<String> {
+fn next_prefixed_record_id(
+    conn: &Connection,
+    prefix: &str,
+    title: &str,
+    reserved_ids: &BTreeSet<String>,
+) -> Result<String> {
     let slug = proposals::title_to_concept_slug(title)
         .unwrap_or_else(|| format!("memory-{}", Uuid::now_v7()));
     let base = format!("{prefix}-{slug}");
-    if !record_id_exists(conn, &base)? {
+    if !reserved_ids.contains(&base) && !record_id_exists(conn, &base)? {
         return Ok(base);
     }
     for suffix in 2.. {
         let candidate = format!("{base}-{suffix}");
-        if !record_id_exists(conn, &candidate)? {
+        if !reserved_ids.contains(&candidate) && !record_id_exists(conn, &candidate)? {
             return Ok(candidate);
         }
     }
@@ -168,7 +187,7 @@ pub(super) fn insert_memory_record_row(
     conn: &Connection,
     record: &MemoryRecord,
     mode: InsertMode,
-) -> Result<()> {
+) -> Result<bool> {
     let verb = match mode {
         InsertMode::Create => "INSERT INTO",
         InsertMode::RestoreIfAbsent => "INSERT OR IGNORE INTO",
@@ -180,7 +199,7 @@ pub(super) fn insert_memory_record_row(
           supersedes_id, expires_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
     );
-    conn.execute(
+    let inserted = conn.execute(
         &sql,
         rusqlite::params![
             &record.id,
@@ -204,8 +223,10 @@ pub(super) fn insert_memory_record_row(
             &record.expires_at,
         ],
     )?;
-    crate::capture::store_capture_provenance(conn, &record.id, record.capture.as_ref())?;
-    Ok(())
+    if inserted == 1 {
+        crate::capture::store_capture_provenance(conn, &record.id, record.capture.as_ref())?;
+    }
+    Ok(inserted == 1)
 }
 
 pub(super) fn create_capture(
@@ -215,6 +236,7 @@ pub(super) fn create_capture(
     destination: MemoryDestination,
     now: &str,
     provenance: CaptureProvenance,
+    reserved_ids: &BTreeSet<String>,
 ) -> Result<MemoryRecord> {
     if !matches!(
         destination,
@@ -228,7 +250,7 @@ pub(super) fn create_capture(
         _ => unreachable!("destination is checked above"),
     };
     let record = MemoryRecord {
-        id: next_prefixed_record_id(conn, prefix, &candidate.memory.title)?,
+        id: next_prefixed_record_id(conn, prefix, &candidate.memory.title, reserved_ids)?,
         memory_type: candidate.memory.memory_type,
         lane: candidate.memory.lane,
         destination,

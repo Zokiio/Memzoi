@@ -145,7 +145,7 @@ impl ExpiryFixture {
         fs::write(&canonical_path, canonical_record())?;
 
         MemoryService::rebuild_paths(paths.clone())?;
-        insert_runtime_records(&paths.db_path)?;
+        insert_runtime_records(&paths.shared_db_path)?;
         MemoryService::rebuild_paths(paths.clone())?;
 
         Ok(Self {

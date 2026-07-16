@@ -50,6 +50,7 @@ mod tests {
         "proposal",
         "memory_tag",
         "memory_capture",
+        "runtime_mirror_state",
         "read_audit",
         "memory_fts",
     ];
@@ -78,11 +79,11 @@ mod tests {
         }
 
         let migrations: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3, 4, 5)",
+            "SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3, 4, 5, 6)",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(migrations, 5);
+        assert_eq!(migrations, 6);
         let capture_table: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_capture')",
             [],

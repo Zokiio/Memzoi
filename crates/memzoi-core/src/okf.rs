@@ -15,7 +15,7 @@ use crate::{
     proposals::title_to_concept_slug,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OkfRecordFile {
     pub concept_id: String,
     pub draft: MemoryDraft,

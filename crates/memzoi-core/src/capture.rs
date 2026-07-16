@@ -2690,7 +2690,7 @@ fn load_inventory(
 ) -> Result<CaptureInventorySnapshot> {
     let mut inventory = load_file_inventory(paths, control)?;
     let mut runtime_entries = Vec::new();
-    inventory.runtime_available = paths.db_path.try_exists().unwrap_or(false)
+    inventory.runtime_available = paths.shared_db_path.try_exists().unwrap_or(false)
         && load_runtime_inventory(paths, &mut runtime_entries, control).is_ok();
     if inventory.runtime_available {
         inventory.entries.extend(runtime_entries);
@@ -2944,16 +2944,16 @@ fn load_runtime_inventory(
 ) -> Result<()> {
     check_planning_control(control)?;
     if !paths
-        .db_path
+        .shared_db_path
         .try_exists()
         .context("failed to inspect capture runtime inventory")?
     {
         return Ok(());
     }
-    let before = runtime_database_read_state(&paths.db_path)?;
+    let before = runtime_database_read_state(&paths.shared_db_path)?;
     let uri = format!(
         "file:{}?mode=ro&immutable=1",
-        percent_encode_sqlite_uri_path(&paths.db_path)
+        percent_encode_sqlite_uri_path(&paths.shared_db_path)
     );
     let conn = Connection::open_with_flags(
         uri,
@@ -2964,7 +2964,7 @@ fn load_runtime_inventory(
     .context("failed to open capture runtime inventory read-only")?;
     load_runtime_inventory_from_connection(&conn, entries, control)?;
     check_planning_control(control)?;
-    let after = runtime_database_read_state(&paths.db_path)?;
+    let after = runtime_database_read_state(&paths.shared_db_path)?;
     if before != after {
         bail!("capture runtime inventory changed while it was read");
     }

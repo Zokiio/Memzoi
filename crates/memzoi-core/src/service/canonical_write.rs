@@ -21,6 +21,29 @@ use super::{
     },
 };
 
+#[cfg(test)]
+type AfterCanonicalInstallHook = Box<dyn FnOnce()>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_CANONICAL_INSTALL_HOOK: std::cell::RefCell<Option<AfterCanonicalInstallHook>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(super) fn inject_after_canonical_install_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CANONICAL_INSTALL_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_after_canonical_install_hook() {
+    AFTER_CANONICAL_INSTALL_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FileWriteMode {
     CreateNew,
@@ -100,6 +123,21 @@ impl<'a> CanonicalWriteSession<'a> {
         writes: &[CanonicalFileWrite],
     ) -> Result<()> {
         commit_db_and_canonical_writes(self.paths, expected_route, authorization, tx, writes)
+    }
+
+    pub(super) fn commit_and_then<AfterCommit>(
+        self,
+        expected_route: RepositoryWriteRoute,
+        authorization: &AuthorizedRepositoryProjectionBatch,
+        tx: Transaction<'_>,
+        writes: &[CanonicalFileWrite],
+        after_commit: AfterCommit,
+    ) -> Result<()>
+    where
+        AfterCommit: FnOnce() -> Result<()>,
+    {
+        commit_db_and_canonical_writes(self.paths, expected_route, authorization, tx, writes)?;
+        after_commit()
     }
 
     pub(super) fn commit_with_hooks<BeforeInstall, BeforeCommit>(
@@ -511,6 +549,8 @@ where
             "canonical install rollback",
         );
     }
+    #[cfg(test)]
+    run_after_canonical_install_hook();
     if let Err(error) = before_commit(&tx) {
         return attach_cleanup_error(
             error,

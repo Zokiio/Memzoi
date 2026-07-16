@@ -966,6 +966,10 @@ fn init_command(force: bool, as_json: bool) -> Result<()> {
             "project_root": paths.project_root,
             "memory_dir": paths.memory_dir,
             "records_dir": paths.records_dir(),
+            "repository_runtime_dir": paths.repository_runtime_dir,
+            "worktree_runtime_dir": paths.worktree_runtime_dir,
+            "shared_db_path": paths.shared_db_path,
+            "index_db_path": paths.index_db_path,
             "runtime_dir": paths.runtime_dir,
             "config_path": paths.config_path,
             "db_path": paths.db_path,
@@ -1912,6 +1916,56 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         "ok",
         paths.project_root.display().to_string(),
     ));
+    let legacy_runtime_dirs = paths
+        .legacy_runtime_dirs
+        .iter()
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    if !legacy_runtime_dirs.is_empty() {
+        if paths
+            .repository_runtime_dir
+            .join("migration-v1.json")
+            .is_file()
+        {
+            checks.push(check(
+                "legacy_worktree_runtime",
+                "ok",
+                format!(
+                    "{} legacy path-keyed runtime {} retained after verified migration",
+                    legacy_runtime_dirs.len(),
+                    if legacy_runtime_dirs.len() == 1 {
+                        "directory"
+                    } else {
+                        "directories"
+                    }
+                ),
+            ));
+        } else {
+            checks.push(check(
+                "legacy_worktree_runtime",
+                "warning",
+                format!(
+                    "{} fragmented path-keyed runtime {} detected; the next normal Memzoi open will merge durable state without deleting legacy data",
+                    legacy_runtime_dirs.len(),
+                    if legacy_runtime_dirs.len() == 1 {
+                        "directory"
+                    } else {
+                        "directories"
+                    }
+                ),
+            ));
+            push_next_step(
+                &mut next_steps,
+                "run memzoi context --task \"verify migrated worktree memory\"",
+            );
+        }
+    } else {
+        checks.push(check(
+            "legacy_worktree_runtime",
+            "ok",
+            "no legacy path-keyed runtime directories detected",
+        ));
+    }
     if paths.records_dir().is_dir() {
         checks.push(check(
             "records",
@@ -1927,12 +1981,97 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         push_next_step(&mut next_steps, "memzoi init");
     }
 
-    let proposal_inventory = if paths.config_path.is_file() && paths.db_path.is_file() {
-        MemoryService::open_paths(paths.clone())
-            .and_then(|service| service.validate_file_proposal_inventory())
+    let shared_schema_is_ready = if paths.shared_db_path.is_file() {
+        checks.push(check(
+            "shared_database",
+            "ok",
+            paths.shared_db_path.display().to_string(),
+        ));
+        match schema_ready(&paths.shared_db_path) {
+            Ok(true) => {
+                checks.push(check(
+                    "shared_schema",
+                    "ok",
+                    "shared runtime schema is initialized",
+                ));
+                true
+            }
+            Ok(false) => {
+                checks.push(check(
+                    "shared_schema",
+                    "warning",
+                    "shared runtime schema is missing tables",
+                ));
+                false
+            }
+            Err(error) => {
+                checks.push(check("shared_schema", "warning", error.to_string()));
+                false
+            }
+        }
     } else {
-        scan_file_proposal_inventory(&paths)
+        checks.push(check(
+            "shared_database",
+            "warning",
+            format!("{} missing", paths.shared_db_path.display()),
+        ));
+        checks.push(check(
+            "shared_schema",
+            "skip",
+            "shared database missing; run init first",
+        ));
+        false
     };
+
+    let schema_is_ready = if paths.index_db_path.is_file() {
+        checks.push(check(
+            "database",
+            "ok",
+            paths.index_db_path.display().to_string(),
+        ));
+        match schema_ready(&paths.index_db_path) {
+            Ok(true) => {
+                checks.push(check(
+                    "schema",
+                    "ok",
+                    "worktree index schema is initialized",
+                ));
+                true
+            }
+            Ok(false) => {
+                checks.push(check(
+                    "schema",
+                    "warning",
+                    "worktree index schema is missing tables",
+                ));
+                false
+            }
+            Err(error) => {
+                checks.push(check("schema", "warning", error.to_string()));
+                false
+            }
+        }
+    } else {
+        checks.push(check(
+            "database",
+            "warning",
+            format!("{} missing", paths.index_db_path.display()),
+        ));
+        checks.push(check(
+            "schema",
+            "skip",
+            "worktree index missing; run init first",
+        ));
+        false
+    };
+
+    let proposal_inventory =
+        if paths.config_path.is_file() && shared_schema_is_ready && schema_is_ready {
+            MemoryService::open_paths(paths.clone())
+                .and_then(|service| service.validate_file_proposal_inventory())
+        } else {
+            scan_file_proposal_inventory(&paths)
+        };
     match proposal_inventory {
         Ok(inventory) => {
             let invalid = inventory.errors.len();
@@ -2030,37 +2169,7 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         push_next_step(&mut next_steps, "memzoi init");
     }
 
-    let schema_is_ready = if paths.db_path.is_file() {
-        checks.push(check("database", "ok", paths.db_path.display().to_string()));
-        match schema_ready(&paths.db_path) {
-            Ok(true) => {
-                checks.push(check("schema", "ok", "memory schema is initialized"));
-                true
-            }
-            Ok(false) => {
-                checks.push(check(
-                    "schema",
-                    "warning",
-                    "memory schema is missing tables",
-                ));
-                false
-            }
-            Err(error) => {
-                checks.push(check("schema", "warning", error.to_string()));
-                false
-            }
-        }
-    } else {
-        checks.push(check(
-            "database",
-            "warning",
-            format!("{} missing", paths.db_path.display()),
-        ));
-        checks.push(check("schema", "skip", "database missing; run init first"));
-        false
-    };
-
-    if paths.db_path.is_file() && schema_is_ready {
+    if shared_schema_is_ready && schema_is_ready {
         match MemoryService::open_paths(paths.clone())
             .and_then(|service| service.open_proposal_counts())
         {
@@ -2282,15 +2391,40 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
     }
 }
 
-fn schema_ready(db_path: &PathBuf) -> Result<bool> {
+fn schema_ready(db_path: &Path) -> Result<bool> {
+    const REQUIRED_TABLES: &[&str] = &[
+        "schema_migrations",
+        "event_log",
+        "memory_record",
+        "scope_binding",
+        "memory_path",
+        "proposal",
+        "memory_tag",
+        "memory_capture",
+        "runtime_mirror_state",
+        "read_audit",
+        "memory_fts",
+    ];
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("failed to open database {}", db_path.display()))?;
-    let exists = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'memory_record')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
-    Ok(exists)
+    let quick_check: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        bail!(
+            "database integrity check failed for {}: {quick_check}",
+            db_path.display()
+        );
+    }
+    for table in REQUIRED_TABLES {
+        let exists = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn check(name: &str, status: &str, message: impl Into<String>) -> serde_json::Value {

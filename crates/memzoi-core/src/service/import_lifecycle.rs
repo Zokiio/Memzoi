@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 
@@ -19,19 +21,33 @@ use super::{
         explicit_repository_provenance, okf_proposal_safety_values, remove_created_repository_file,
         safety_value,
     },
-    runtime_records::{CheckpointInput, LocalMemoryInput, RuntimeRecords},
+    runtime_records::{
+        CheckpointInput, LocalMemoryInput, RuntimeRecords, reserved_runtime_record_ids,
+    },
     safe_files::{RepoLifecycleLock, ensure_safe_directory},
+    shared_runtime,
 };
 
 pub(super) struct ImportLifecycle<'a> {
     paths: &'a MemoryPaths,
     conn: &'a Connection,
+    shared_conn: &'a Connection,
     clock: &'a dyn Clock,
 }
 
 impl<'a> ImportLifecycle<'a> {
-    pub(super) fn new(paths: &'a MemoryPaths, conn: &'a Connection, clock: &'a dyn Clock) -> Self {
-        Self { paths, conn, clock }
+    pub(super) fn new(
+        paths: &'a MemoryPaths,
+        conn: &'a Connection,
+        shared_conn: &'a Connection,
+        clock: &'a dyn Clock,
+    ) -> Self {
+        Self {
+            paths,
+            conn,
+            shared_conn,
+            clock,
+        }
     }
 
     pub(super) fn plan(&self, actor: &str, mut document: ImportDocument) -> Result<ImportPlan> {
@@ -113,7 +129,7 @@ impl<'a> ImportLifecycle<'a> {
                 candidate.sensitivity = OkfProposalSensitivity::Unknown;
             }
         }
-        let proposal_packets = ProposalPacketLifecycle::new(self.paths, self.conn);
+        let proposal_packets = ProposalPacketLifecycle::new(self.paths, self.shared_conn);
         let (inventory, reserved_proposal_ids) = proposal_packets.planning_inventory()?;
         let existing = self.load_duplicates(&inventory.pending)?;
         import::build_plan(
@@ -135,10 +151,19 @@ impl<'a> ImportLifecycle<'a> {
             .candidates
             .iter()
             .any(|candidate| candidate.destination == MemoryDestination::Repo);
-        let _lifecycle_lock = has_repo_candidates
+        let has_runtime_candidates = document.candidates.iter().any(|candidate| {
+            matches!(
+                candidate.destination,
+                MemoryDestination::Local | MemoryDestination::Session
+            )
+        });
+        let _lifecycle_lock = (has_repo_candidates || has_runtime_candidates)
             .then(|| RepoLifecycleLock::acquire(self.paths))
             .transpose()?;
-        let proposal_packets = ProposalPacketLifecycle::new(self.paths, self.conn);
+        if has_repo_candidates || has_runtime_candidates {
+            shared_runtime::refresh_index_mirrors_locked(self.paths, self.shared_conn, self.conn)?;
+        }
+        let proposal_packets = ProposalPacketLifecycle::new(self.paths, self.shared_conn);
         if has_repo_candidates {
             proposal_packets.preflight_pending_root()?;
         }
@@ -227,6 +252,11 @@ impl<'a> ImportLifecycle<'a> {
                 )
             })
             .transpose()?;
+        let reserved_runtime_ids = if has_runtime_candidates {
+            reserved_runtime_record_ids(self.paths, self.conn)?
+        } else {
+            BTreeSet::new()
+        };
         let mut writes = Vec::new();
         let mut created = Vec::new();
         let result = (|| -> Result<()> {
@@ -262,7 +292,7 @@ impl<'a> ImportLifecycle<'a> {
                 debug_assert_eq!(created_file.path(), proposal.path);
             }
 
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = self.shared_conn.unchecked_transaction()?;
             for candidate in &plan.candidates {
                 let import::ImportCandidateAction::CreateRuntime { route } = candidate.action
                 else {
@@ -270,7 +300,7 @@ impl<'a> ImportLifecycle<'a> {
                 };
                 let record = match route {
                     crate::MemoryWriteRoute::RuntimeLocal => RuntimeRecords::new(&tx)
-                        .create_local(
+                        .create_local_avoiding(
                             actor,
                             &LocalMemoryInput {
                                 memory_type: candidate.memory_type,
@@ -279,15 +309,17 @@ impl<'a> ImportLifecycle<'a> {
                                 body: candidate.body.clone(),
                             },
                             &timestamp,
+                            &reserved_runtime_ids,
                         )?,
                     crate::MemoryWriteRoute::RuntimeSession => RuntimeRecords::new(&tx)
-                        .create_checkpoint(
+                        .create_checkpoint_avoiding(
                             actor,
                             &CheckpointInput {
                                 task: candidate.title.clone(),
                                 note: candidate.body.clone(),
                             },
                             &timestamp,
+                            &reserved_runtime_ids,
                         )?,
                     _ => bail!("import runtime candidate has invalid route {route}"),
                 };
@@ -319,6 +351,10 @@ impl<'a> ImportLifecycle<'a> {
                 );
             }
             return Err(error);
+        }
+        if has_runtime_candidates {
+            shared_runtime::refresh_index_mirrors_locked(self.paths, self.shared_conn, self.conn)
+                .context("import runtime writes committed but worktree index refresh failed")?;
         }
         writes.sort_by_key(|write| match write {
             crate::ImportWrite::ProposalFile { index, .. }
@@ -354,7 +390,7 @@ impl<'a> ImportLifecycle<'a> {
                 hash: import::content_hash(&entry.proposal.body),
             });
         }
-        let runtime_records = RuntimeRecords::new(self.conn).records_for_preservation()?;
+        let runtime_records = RuntimeRecords::new(self.shared_conn).records_for_preservation()?;
         let now = self.clock.now_utc();
         let mut runtime = Vec::new();
         for record in runtime_records {

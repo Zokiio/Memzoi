@@ -1,4 +1,4 @@
-use std::fs;
+use std::{collections::BTreeSet, fs};
 
 use super::*;
 use crate::repository_io;
@@ -7,6 +7,42 @@ use crate::{
     SessionEndCandidateStatus, Visibility,
 };
 use tempfile::TempDir;
+
+#[test]
+fn unresolved_git_identity_blocks_service_lifecycles_before_writes() -> anyhow::Result<()> {
+    for operation in ["open", "initialize", "rebuild"] {
+        let temp = TempDir::new()?;
+        let project = temp.path().join("project");
+        fs::create_dir_all(project.join(".git"))?;
+        let paths = MemoryPaths::with_runtime_home(
+            project.canonicalize()?,
+            temp.path().join("runtime-home"),
+        );
+
+        let result = match operation {
+            "open" => MemoryService::open_paths(paths.clone()).map(|_| ()),
+            "initialize" => {
+                MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })
+                    .map(|_| ())
+            }
+            "rebuild" => MemoryService::rebuild_paths(paths.clone()).map(|_| ()),
+            _ => unreachable!(),
+        };
+        let error = result
+            .err()
+            .with_context(|| format!("{operation} should fail closed"))?;
+
+        assert!(
+            format!("{error:#}").contains("Git repository identity"),
+            "{operation} returned the wrong error: {error:#}"
+        );
+        assert!(
+            !paths.repository_runtime_dir.exists(),
+            "{operation} created runtime state despite unresolved Git identity"
+        );
+    }
+    Ok(())
+}
 
 #[cfg(unix)]
 #[test]
@@ -256,6 +292,503 @@ fn propose_with_options_apply_writes_canonical_record_file() -> anyhow::Result<(
 }
 
 #[test]
+fn open_recovers_applied_proposal_and_event_from_shared_sync_journal() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let paths = service.paths.clone();
+    let proposal = service.propose_memory(
+        "agent:shared-sync-test",
+        sample_memory_draft(
+            "Recover committed proposal apply",
+            "The shared proposal transition must survive an interrupted post-commit sync.",
+        ),
+    )?;
+    service.validate_proposal(&proposal.id)?;
+    service.approve_proposal(&proposal.id, "reviewer:shared-sync-test")?;
+    shared_runtime::inject_before_shared_sync_recovery_hook(|| {
+        anyhow::bail!("injected post-commit shared-sync interruption")
+    });
+
+    let error = service
+        .apply_proposal(&proposal.id, "agent:shared-sync-test")
+        .expect_err("injected shared-sync interruption must surface after canonical commit");
+    assert!(format!("{error:#}").contains("injected post-commit shared-sync interruption"));
+    assert_eq!(
+        proposals::load_proposal_public(&service.shared_conn, &proposal.id)?.status,
+        ProposalStatus::Approved
+    );
+    let (record_id, indexed_status): (String, String) = service.conn.query_row(
+        "SELECT id, status FROM memory_record WHERE proposal_id = ?1",
+        [&proposal.id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(indexed_status, "active");
+    assert!(
+        paths
+            .records_dir()
+            .join(format!("{record_id}.md"))
+            .is_file()
+    );
+    assert!(
+        paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .is_file()
+    );
+    drop(service);
+
+    let recovered = MemoryService::open_paths(paths.clone())?;
+    assert_eq!(
+        recovered.show_proposal(&proposal.id)?.status,
+        ProposalStatus::Applied
+    );
+    let shared_apply_events: i64 = recovered.shared_conn.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE proposal_id = ?1 AND event_type = 'memory.applied'",
+        [&proposal.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(shared_apply_events, 1);
+    assert!(
+        !paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .exists()
+    );
+    drop(recovered);
+
+    let reopened = MemoryService::open_paths(paths)?;
+    let shared_apply_events: i64 = reopened.shared_conn.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE proposal_id = ?1 AND event_type = 'memory.applied'",
+        [&proposal.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(shared_apply_events, 1);
+    Ok(())
+}
+
+#[test]
+fn open_finishes_proposal_sync_after_marker_cleanup_interruption() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let paths = service.paths.clone();
+    let proposal = service.propose_memory(
+        "agent:shared-sync-test",
+        sample_memory_draft(
+            "Recover marker cleanup interruption",
+            "An already-applied shared payload must make journal cleanup idempotent.",
+        ),
+    )?;
+    service.validate_proposal(&proposal.id)?;
+    service.approve_proposal(&proposal.id, "reviewer:shared-sync-test")?;
+    shared_runtime::inject_after_shared_sync_marker_cleanup_hook(|| {
+        anyhow::bail!("injected interruption after shared-sync marker cleanup")
+    });
+
+    let error = service
+        .apply_proposal(&proposal.id, "agent:shared-sync-test")
+        .expect_err("the cleanup interruption must surface after the shared payload is applied");
+    assert!(format!("{error:#}").contains("injected interruption"));
+    assert_eq!(
+        proposals::load_proposal_public(&service.shared_conn, &proposal.id)?.status,
+        ProposalStatus::Applied
+    );
+    let marker_count: i64 = service.conn.query_row(
+        "SELECT COUNT(*) FROM event_log WHERE event_type = ?1",
+        ["memzoi.shared_sync.index_committed"],
+        |row| row.get(0),
+    )?;
+    assert_eq!(marker_count, 0);
+    assert!(
+        paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .is_file()
+    );
+    drop(service);
+
+    let recovered = MemoryService::open_paths(paths.clone())?;
+    assert_eq!(
+        recovered.show_proposal(&proposal.id)?.status,
+        ProposalStatus::Applied
+    );
+    let indexed_record_count: i64 = recovered.conn.query_row(
+        "SELECT COUNT(*) FROM memory_record WHERE proposal_id = ?1",
+        [&proposal.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(indexed_record_count, 1);
+    let shared_apply_events: i64 = recovered.shared_conn.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE proposal_id = ?1 AND event_type = 'memory.applied'",
+        [&proposal.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(shared_apply_events, 1);
+    assert!(
+        !paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .exists()
+    );
+    Ok(())
+}
+
+#[test]
+fn reject_recovers_interrupted_apply_before_mutating_shared_proposal() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let proposal = service.propose_memory(
+        "agent:shared-sync-test",
+        sample_memory_draft(
+            "Reject after interrupted apply",
+            "Recovery must publish the committed apply before a reject is evaluated.",
+        ),
+    )?;
+    service.validate_proposal(&proposal.id)?;
+    service.approve_proposal(&proposal.id, "reviewer:shared-sync-test")?;
+    shared_runtime::inject_before_shared_sync_recovery_hook(|| {
+        anyhow::bail!("injected post-commit shared-sync interruption")
+    });
+    service
+        .apply_proposal(&proposal.id, "agent:shared-sync-test")
+        .expect_err("injected shared-sync interruption must surface");
+
+    let error = service
+        .reject_proposal(
+            &proposal.id,
+            "reviewer:shared-sync-test",
+            "must not replace a committed apply",
+        )
+        .expect_err("the recovered applied proposal cannot be rejected");
+    assert!(format!("{error:#}").contains("applied proposal"));
+    assert_eq!(
+        service.show_proposal(&proposal.id)?.status,
+        ProposalStatus::Applied
+    );
+    assert!(
+        !service
+            .paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .exists()
+    );
+    Ok(())
+}
+
+#[test]
+fn refresh_refuses_shared_id_owned_by_inactive_repo_record() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let repo_record = apply_test_record(
+        &service,
+        sample_memory_draft(
+            "Inactive repository collision",
+            "An inactive repository row still owns its identifier.",
+        ),
+    )?;
+    service.conn.execute(
+        "UPDATE memory_record SET status = 'superseded' WHERE id = ?1",
+        [&repo_record.id],
+    )?;
+    let mut local_record = repo_record.clone();
+    local_record.destination = MemoryDestination::Local;
+    local_record.scope_kind = ScopeKind::Personal;
+    local_record.visibility = Visibility::Private;
+    local_record.status = MemoryStatus::Active;
+    local_record.title = "Colliding local runtime".to_owned();
+    RuntimeRecords::new(&service.shared_conn).insert_for_test(&local_record)?;
+
+    let error =
+        shared_runtime::refresh_index_mirrors(&service.paths, &service.shared_conn, &service.conn)
+            .expect_err("inactive repository identifiers must remain collision-protected");
+    assert!(format!("{error:#}").contains(&repo_record.id));
+    assert_eq!(
+        RuntimeRecords::new(&service.conn)
+            .get(&repo_record.id)?
+            .context("repository record disappeared")?
+            .destination,
+        MemoryDestination::Repo
+    );
+    Ok(())
+}
+
+#[test]
+fn shared_runtime_id_allocation_skips_repo_owned_local_and_session_candidates() -> anyhow::Result<()>
+{
+    let (_temp, service) = initialized_service()?;
+    let repo_local = apply_test_record(
+        &service,
+        sample_memory_draft(
+            "Local runtime collision",
+            "This canonical record owns the first local runtime candidate identifier.",
+        ),
+    )?;
+    let repo_session = apply_test_record(
+        &service,
+        sample_memory_draft(
+            "Session runtime collision",
+            "This canonical record owns the first session runtime candidate identifier.",
+        ),
+    )?;
+    assert_eq!(repo_local.id, "local-runtime-collision");
+    assert_eq!(repo_session.id, "session-runtime-collision");
+
+    let local = service.create_local_memory(
+        "agent:collision-test",
+        LocalMemoryInput {
+            memory_type: MemoryType::Preference,
+            lane: MemoryLane::Semantic,
+            title: "Runtime collision".to_owned(),
+            body: "The local write must select the next repository-safe identifier.".to_owned(),
+        },
+    )?;
+    let checkpoint = service.create_checkpoint(
+        "agent:collision-test",
+        CheckpointInput {
+            task: "Runtime collision".to_owned(),
+            note: "The session write must select the next repository-safe identifier.".to_owned(),
+        },
+    )?;
+
+    assert_eq!(local.id, "local-runtime-collision-2");
+    assert_eq!(checkpoint.id, "session-runtime-collision-2");
+    for (repo, runtime) in [(&repo_local, &local), (&repo_session, &checkpoint)] {
+        assert_eq!(
+            RuntimeRecords::new(&service.conn)
+                .get(&repo.id)?
+                .context("canonical record disappeared during runtime allocation")?
+                .destination,
+            MemoryDestination::Repo
+        );
+        assert_eq!(
+            RuntimeRecords::new(&service.shared_conn)
+                .get(&runtime.id)?
+                .context("runtime record was not committed to shared authority")?
+                .destination,
+            runtime.destination
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn direct_runtime_id_allocation_skips_unindexed_canonical_file_ids() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let canonical_local = apply_test_record(
+        &service,
+        sample_memory_draft(
+            "Local unindexed canonical collision",
+            "This canonical file owns the first local runtime candidate identifier.",
+        ),
+    )?;
+    let canonical_session = apply_test_record(
+        &service,
+        sample_memory_draft(
+            "Session unindexed canonical collision",
+            "This canonical file owns the first session runtime candidate identifier.",
+        ),
+    )?;
+    assert_eq!(canonical_local.id, "local-unindexed-canonical-collision");
+    assert_eq!(
+        canonical_session.id,
+        "session-unindexed-canonical-collision"
+    );
+
+    for canonical in [&canonical_local, &canonical_session] {
+        assert_eq!(
+            service
+                .conn
+                .execute("DELETE FROM memory_record WHERE id = ?1", [&canonical.id])?,
+            1
+        );
+        assert!(
+            service
+                .paths
+                .records_dir()
+                .join(format!("{}.md", canonical.id))
+                .is_file()
+        );
+        assert!(
+            RuntimeRecords::new(&service.conn)
+                .get(&canonical.id)?
+                .is_none()
+        );
+    }
+
+    let local = service.create_local_memory(
+        "agent:unindexed-collision-test",
+        LocalMemoryInput {
+            memory_type: MemoryType::Preference,
+            lane: MemoryLane::Semantic,
+            title: "Unindexed canonical collision".to_owned(),
+            body: "The local write must reserve identifiers from canonical Markdown.".to_owned(),
+        },
+    )?;
+    let checkpoint = service.create_checkpoint(
+        "agent:unindexed-collision-test",
+        CheckpointInput {
+            task: "Unindexed canonical collision".to_owned(),
+            note: "The session write must reserve identifiers from canonical Markdown.".to_owned(),
+        },
+    )?;
+
+    assert_eq!(local.id, "local-unindexed-canonical-collision-2");
+    assert_eq!(checkpoint.id, "session-unindexed-canonical-collision-2");
+    let canonical_ids = okf::read_okf_record_files(service.paths.records_dir())?
+        .into_iter()
+        .map(|record| record.concept_id)
+        .collect::<BTreeSet<_>>();
+    assert!(canonical_ids.contains(&canonical_local.id));
+    assert!(canonical_ids.contains(&canonical_session.id));
+    assert!(
+        RuntimeRecords::new(&service.shared_conn)
+            .get(&canonical_local.id)?
+            .is_none()
+    );
+    assert!(
+        RuntimeRecords::new(&service.shared_conn)
+            .get(&canonical_session.id)?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn open_rolls_forward_exact_canonical_create_after_precommit_crash() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let paths = service.paths.clone();
+    let proposal = service.propose_memory(
+        "agent:markerless-recovery-test",
+        sample_memory_draft(
+            "Markerless canonical recovery",
+            "Exact durable canonical bytes authorize source-index roll-forward.",
+        ),
+    )?;
+    service.validate_proposal(&proposal.id)?;
+    service.approve_proposal(&proposal.id, "reviewer:markerless-recovery-test")?;
+    canonical_write::inject_after_canonical_install_hook(|| {
+        panic!("injected crash after canonical install before index commit")
+    });
+
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        service.apply_proposal(&proposal.id, "agent:markerless-recovery-test")
+    }));
+    assert!(crashed.is_err(), "the crash hook must unwind the apply");
+    assert_eq!(
+        service.show_proposal(&proposal.id)?.status,
+        ProposalStatus::Approved
+    );
+    let indexed_record_count: i64 = service.conn.query_row(
+        "SELECT COUNT(*) FROM memory_record WHERE proposal_id = ?1",
+        [&proposal.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(indexed_record_count, 0);
+    let canonical = okf::read_okf_record_files(paths.records_dir())?;
+    assert_eq!(canonical.len(), 1);
+    assert_eq!(
+        canonical[0].proposal_id.as_deref(),
+        Some(proposal.id.as_str())
+    );
+    assert!(
+        paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .is_file()
+    );
+    drop(service);
+
+    let recovered = MemoryService::open_paths(paths.clone())?;
+    assert_eq!(
+        recovered.show_proposal(&proposal.id)?.status,
+        ProposalStatus::Applied
+    );
+    let recovered_record_count: i64 = recovered.conn.query_row(
+        "SELECT COUNT(*) FROM memory_record WHERE proposal_id = ?1",
+        [&proposal.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(recovered_record_count, 1);
+    let apply_event_count: i64 = recovered.shared_conn.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE proposal_id = ?1 AND event_type = 'memory.applied'",
+        [&proposal.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(apply_event_count, 1);
+    assert!(
+        !paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .exists()
+    );
+    drop(recovered);
+
+    let reopened = MemoryService::open_paths(paths)?;
+    let apply_event_count: i64 = reopened.shared_conn.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE proposal_id = ?1 AND event_type = 'memory.applied'",
+        [&proposal.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(apply_event_count, 1);
+    Ok(())
+}
+
+#[test]
+fn markerless_recovery_rejects_substituted_canonical_bytes() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let paths = service.paths.clone();
+    let proposal = service.propose_memory(
+        "agent:markerless-recovery-test",
+        sample_memory_draft(
+            "Substituted markerless canonical",
+            "Only the exact authorized canonical bytes may roll the index forward.",
+        ),
+    )?;
+    service.validate_proposal(&proposal.id)?;
+    service.approve_proposal(&proposal.id, "reviewer:markerless-recovery-test")?;
+    canonical_write::inject_after_canonical_install_hook(|| {
+        panic!("injected crash after canonical install before index commit")
+    });
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        service.apply_proposal(&proposal.id, "agent:markerless-recovery-test")
+    }));
+    assert!(crashed.is_err(), "the crash hook must unwind the apply");
+
+    let canonical_path = fs::read_dir(paths.records_dir())?
+        .next()
+        .context("crashed apply did not install a canonical record")??
+        .path();
+    let mut substituted = fs::read(&canonical_path)?;
+    substituted[0] ^= 1;
+    fs::write(&canonical_path, substituted)?;
+    drop(service);
+
+    let error = MemoryService::open_paths(paths.clone())
+        .err()
+        .context("substituted canonical bytes must block markerless recovery")?;
+    assert!(
+        format!("{error:#}").contains("bytes do not match the authorized projection"),
+        "unexpected recovery error: {error:#}"
+    );
+    assert!(
+        paths
+            .repository_runtime_dir
+            .join("shared-sync-v1.json")
+            .is_file(),
+        "failed-closed recovery must retain its journal"
+    );
+    let index = db::open_database(&paths.index_db_path)?;
+    db::init_database(&index)?;
+    let indexed_record_count: i64 = index.query_row(
+        "SELECT COUNT(*) FROM memory_record WHERE proposal_id = ?1",
+        [&proposal.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(indexed_record_count, 0);
+    Ok(())
+}
+
+#[test]
 fn evidence_provenance_and_proposal_lineage_survive_rebuild_and_export() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let paths = service.paths.clone();
@@ -412,6 +945,60 @@ fn duplicate_propose_with_apply_remains_unapproved_and_unapplied() -> anyhow::Re
         ProposalStatus::Pending
     );
 
+    Ok(())
+}
+
+#[test]
+fn shared_proposals_are_authoritative_during_reads_and_open() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let read_only_proposal = proposals::propose_memory(
+        &service.conn,
+        "agent:index-fixture",
+        sample_memory_draft("Index-only proposal", "Disposable index state"),
+    )?;
+
+    service.search_memory(SearchInput {
+        query: "unrelated".to_owned(),
+        ..SearchInput::default()
+    })?;
+
+    assert!(
+        proposals::load_proposal_public(&service.shared_conn, &read_only_proposal.id).is_err(),
+        "a read path must not promote an index-only proposal into shared state"
+    );
+    assert!(
+        proposals::load_proposal_public(&service.conn, &read_only_proposal.id).is_err(),
+        "shared state must overwrite stale disposable proposal mirrors"
+    );
+
+    let startup_proposal = proposals::propose_memory(
+        &service.conn,
+        "agent:index-fixture",
+        sample_memory_draft("Startup index-only proposal", "Disposable startup state"),
+    )?;
+    let paths = service.paths.clone();
+    drop(service);
+
+    let reopened = MemoryService::open_paths(paths)?;
+    assert!(reopened.show_proposal(&startup_proposal.id).is_err());
+    assert!(
+        proposals::load_proposal_public(&reopened.conn, &startup_proposal.id).is_err(),
+        "opening must refresh from shared state without copying index proposals back"
+    );
+    Ok(())
+}
+
+#[test]
+fn unchanged_search_does_not_open_the_repository_lifecycle_lock() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let _lifecycle_lock = RepoLifecycleLock::acquire(&service.paths)?;
+
+    let results = service.search_memory(SearchInput {
+        query: "absent mirror freshness sentinel".to_owned(),
+        ..SearchInput::default()
+    })?;
+
+    assert!(results.is_empty());
     Ok(())
 }
 
@@ -739,6 +1326,49 @@ fn blocked_session_end_result_redacts_task_and_every_candidate_title() -> anyhow
             "blocked result leaked {sentinel}: {rendered}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn session_end_runtime_records_and_events_commit_to_shared_authority() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let result = service.promote_session_end(
+        "agent:shared-runtime-test",
+        SessionEndDocument {
+            task: "Preserve shared session-end runtime".to_owned(),
+            candidates: vec![SessionEndCandidate {
+                destination: MemoryDestination::Local,
+                memory_type: MemoryType::Preference,
+                lane: MemoryLane::Semantic,
+                title: "Shared session-end preference".to_owned(),
+                body: "Session-end runtime writes and events belong in shared authority."
+                    .to_owned(),
+                sensitivity: OkfProposalSensitivity::LocalOnly,
+                content_class: RepositoryContentClass::LocalOnlyState,
+                reason: Some("private runtime continuity".to_owned()),
+                scope: None,
+                tags: Vec::new(),
+            }],
+        },
+    )?;
+    assert_eq!(
+        result.candidates[0].status,
+        SessionEndCandidateStatus::Written
+    );
+    let record_id = service.list_local_memory()?[0].id.clone();
+    let shared_event_count: i64 = service.shared_conn.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE record_id = ?1 AND event_type = 'memory.local_created'",
+        [&record_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(shared_event_count, 1);
+    let indexed_count: i64 = service.conn.query_row(
+        "SELECT COUNT(*) FROM memory_record WHERE id = ?1",
+        [&record_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(indexed_count, 1);
     Ok(())
 }
 

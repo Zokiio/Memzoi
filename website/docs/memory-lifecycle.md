@@ -16,7 +16,7 @@ Memzoi deliberately separates shared Git truth from local runtime continuity:
 | Plane | Responsibility | Canonical location and authority |
 | --- | --- | --- |
 | **Git** | Reviewed, durable, repo-shared project knowledge: facts, decisions, procedures, warnings, risks, and failed attempts that belong in the repository. | `.memzoi/records/*.md` is the canonical source. These compact Markdown records are diffable and are restored into runtime indexes by `memzoi rebuild`. |
-| **Runtime** | Fast local recall, private preferences, task continuity, checkpoints, and derived operational state. | `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/` contains the project runtime state, including `memory.db` and generated exports. It is noncanonical and must not be treated as Git truth. |
+| **Runtime** | Fast local recall, private preferences, task continuity, checkpoints, proposals, and derived operational state. | `${MEMZOI_HOME:-~/.memzoi}/projects/<repository-key>/shared.db` is the local authority for runtime memory and proposal state shared by linked worktrees. Each `worktrees/<worktree-key>/index.db` is a disposable projection. Runtime state is not Git truth. |
 
 The Git plane may also contain a pending file-backed proposal at
 `.memzoi/proposals/pending/<proposal-id>.md` when it is intentionally being
@@ -26,10 +26,10 @@ record under `.memzoi/records/`; the pending file is not itself the durable
 memory source.
 
 Runtime rows are not a second canonical source for repo memory. Rebuild reads
-the Git records, recreates derived runtime state, and preserves compatible
-local/session runtime rows; it does not promote runtime rows or make SQLite
-canonical. See [Exports and files](./exports-and-files.md) for file layout and
-commit guidance.
+the Git records and recreates only the current worktree's derived index while
+preserving repository-shared local/session rows and proposals in `shared.db`.
+It does not promote runtime rows into Git memory. See
+[Exports and files](./exports-and-files.md) for file layout and commit guidance.
 
 ## Destination, plane, lane, and provenance
 

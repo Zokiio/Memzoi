@@ -2,8 +2,10 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
+use anyhow::Context;
 use memzoi_core::{
     CAPTURE_MAX_INVENTORY_FILE_BYTES, CAPTURE_MAX_SOURCE_BYTES, CAPTURE_REQUEST_SCHEMA,
     CAPTURE_REVIEW_INPUT_SCHEMA, CaptureAction, CaptureDataClass, CaptureExtractorRequest,
@@ -13,6 +15,7 @@ use memzoi_core::{
     MemoryPaths, MemoryService, SearchInput, build_capture_review, build_capture_review_with_prior,
     plan_capture, read_okf_proposal_files, read_okf_record_files,
 };
+use rusqlite::Connection;
 use tempfile::TempDir;
 
 const REVIEWED_AT: &str = "2026-07-10T12:00:00Z";
@@ -584,8 +587,8 @@ fn missing_runtime_inventory_warns_and_forces_private_routes_to_no_write() -> an
         temp.path().join("runtime-home"),
     );
     MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
-    if paths.db_path.exists() {
-        fs::remove_file(&paths.db_path)?;
+    if paths.shared_db_path.exists() {
+        fs::remove_file(&paths.shared_db_path)?;
     }
     fs::write(
         paths.project_root.join("private.md"),
@@ -595,7 +598,7 @@ fn missing_runtime_inventory_warns_and_forces_private_routes_to_no_write() -> an
     let plan = plan_capture(&paths, capture_request("private.md"))?;
 
     assert!(
-        !paths.db_path.exists(),
+        !paths.shared_db_path.exists(),
         "planning must not create runtime state"
     );
     assert_eq!(plan.data_class, CaptureDataClass::Private);
@@ -1013,6 +1016,119 @@ fn repeated_private_capture_is_planned_as_an_idempotent_runtime_duplicate() -> a
 }
 
 #[test]
+fn linked_worktree_standalone_plan_and_review_use_shared_runtime_inventory() -> anyhow::Result<()> {
+    if Command::new("git").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TempDir::new()?;
+    let main = temp.path().join("main");
+    let linked = temp.path().join("linked");
+    let runtime_home = temp.path().join("runtime-home");
+    fs::create_dir_all(&main)?;
+    run_git(&main, &["init", "-q"])?;
+    run_git(&main, &["config", "user.email", "fixture@example.test"])?;
+    run_git(&main, &["config", "user.name", "Fixture"])?;
+    fs::write(
+        main.join("shared-private.md"),
+        concat!(
+            "# Preference: Linked shared duplicate\n\n",
+            "The linkedsharedduplicatetoken remains local.\n",
+        ),
+    )?;
+    run_git(&main, &["add", "shared-private.md"])?;
+    run_git(&main, &["commit", "-qm", "base"])?;
+    run_git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked
+                .to_str()
+                .context("linked worktree path must be UTF-8")?,
+        ],
+    )?;
+
+    let main_paths = MemoryPaths::with_runtime_home(main.canonicalize()?, runtime_home.clone());
+    let linked_paths = MemoryPaths::with_runtime_home(linked.canonicalize()?, runtime_home.clone());
+    MemoryService::initialize_paths(main_paths.clone(), InitRequest { force: false })?;
+    fs::create_dir_all(linked_paths.records_dir())?;
+
+    let request = capture_request("shared-private.md");
+    let linked_before = plan_capture(&linked_paths, request.clone())?;
+    assert!(matches!(
+        linked_before.candidates[0].action,
+        CaptureAction::CreateRuntime { .. }
+    ));
+
+    let main_plan = plan_capture(&main_paths, request.clone())?;
+    let main_review = build_capture_review(
+        &main_paths,
+        &main_plan,
+        review_input(&main_plan, vec![accept(&main_plan.candidates[0])]),
+        "capture-reviewer",
+        REVIEWED_AT,
+    )?;
+    let service = MemoryService::open_paths(main_paths)?;
+    service.apply_capture(
+        "capture-reviewer",
+        main_plan.clone(),
+        main_review.clone(),
+        &main_plan.plan_id,
+        &main_review.review_id,
+    )?;
+    drop(service);
+
+    let linked_duplicate = plan_capture(&linked_paths, request)?;
+    assert_eq!(linked_duplicate.summary.duplicates, 1);
+    match &linked_duplicate.candidates[0].action {
+        CaptureAction::Duplicate { matches } => {
+            assert_eq!(matches.len(), 1);
+            assert_eq!(
+                matches[0].kind,
+                memzoi_core::CaptureMatchKind::RuntimeRecord
+            );
+            assert_eq!(matches[0].destination, Some(MemoryDestination::Local));
+        }
+        action => panic!("expected a shared runtime duplicate, got {action:?}"),
+    }
+
+    let stale_error = build_capture_review(
+        &linked_paths,
+        &linked_before,
+        review_input(&linked_before, vec![accept(&linked_before.candidates[0])]),
+        "capture-reviewer",
+        REVIEWED_AT,
+    )
+    .expect_err("review must notice the runtime duplicate created in another worktree");
+    assert!(stale_error.to_string().contains("stale capture plan"));
+
+    let duplicate_review = build_capture_review(
+        &linked_paths,
+        &linked_duplicate,
+        review_input(
+            &linked_duplicate,
+            vec![decision(
+                &linked_duplicate.candidates[0],
+                CaptureReviewOutcome::Reject,
+                Some("lifecycle-resolution-required"),
+                None,
+                None,
+            )],
+        ),
+        "capture-reviewer",
+        REVIEWED_AT,
+    )?;
+    assert_eq!(
+        duplicate_review.decisions[0].outcome,
+        CaptureReviewOutcome::Reject
+    );
+    Ok(())
+}
+
+#[test]
 fn complete_review_routes_only_accepted_or_edited_candidates_and_preserves_provenance()
 -> anyhow::Result<()> {
     let fixture = CaptureFixture::new()?;
@@ -1196,6 +1312,13 @@ fn complete_review_routes_only_accepted_or_edited_candidates_and_preserves_prove
     assert_eq!(session.len(), 1);
     assert_eq!(session[0].record.title, "Session capture route");
     assert!(session[0].record.capture.is_some());
+    let shared = Connection::open(&fixture.paths.shared_db_path)?;
+    let shared_capture_events: i64 = shared.query_row(
+        "SELECT COUNT(*) FROM event_log WHERE event_type = 'memory.capture_routed'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(shared_capture_events, 3);
 
     assert!(search(&service, "rejectedcapturetoken", MemoryDestination::Repo)?.is_empty());
     assert!(search(&service, "deferredcapturetoken", MemoryDestination::Repo)?.is_empty());
@@ -1347,6 +1470,39 @@ fn capture_request(path: &str) -> CaptureRequest {
             profile: MARKDOWN_EXTRACTOR_PROFILE.to_owned(),
         },
     }
+}
+
+fn run_git(directory: &Path, args: &[&str]) -> anyhow::Result<()> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(directory);
+    for key in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_QUARANTINE_PATH",
+    ] {
+        command.env_remove(key);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Git fixture command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
 }
 
 fn review_input(

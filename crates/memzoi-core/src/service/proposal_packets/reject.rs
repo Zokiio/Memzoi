@@ -68,6 +68,7 @@ impl MemoryService {
             bail!("proposal-file rejection reason cannot be empty");
         }
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
         let snapshot = self.load_pending_file_proposal_snapshot(proposal_path)?;
         let mut proposal = snapshot.proposal.clone();
         let original_values = okf_proposal_safety_values("proposal", &proposal);

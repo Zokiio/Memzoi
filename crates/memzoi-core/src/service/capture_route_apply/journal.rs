@@ -138,9 +138,19 @@ struct CaptureRecoveryAuthorization {
 type AfterCaptureRecoveryBackupHook = Box<dyn FnOnce() -> Result<()>>;
 
 #[cfg(test)]
+type BeforeCommittedCaptureRecoveryHook = Box<dyn FnOnce() -> Result<()>>;
+
+#[cfg(test)]
 thread_local! {
     static AFTER_CAPTURE_RECOVERY_BACKUP_HOOK: std::cell::RefCell<
         Option<AfterCaptureRecoveryBackupHook>,
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_COMMITTED_CAPTURE_RECOVERY_HOOK: std::cell::RefCell<
+        Option<BeforeCommittedCaptureRecoveryHook>,
     > = std::cell::RefCell::new(None);
 }
 
@@ -156,6 +166,23 @@ pub(super) fn inject_after_capture_recovery_backup_hook(
 #[cfg(test)]
 fn run_after_capture_recovery_backup_hook() -> Result<()> {
     AFTER_CAPTURE_RECOVERY_BACKUP_HOOK.with(|slot| {
+        let hook = slot.borrow_mut().take();
+        hook.map_or(Ok(()), |hook| hook())
+    })
+}
+
+#[cfg(test)]
+pub(super) fn inject_before_committed_capture_recovery_hook(
+    hook: impl FnOnce() -> Result<()> + 'static,
+) {
+    BEFORE_COMMITTED_CAPTURE_RECOVERY_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_committed_capture_recovery_hook() -> Result<()> {
+    BEFORE_COMMITTED_CAPTURE_RECOVERY_HOOK.with(|slot| {
         let hook = slot.borrow_mut().take();
         hook.map_or(Ok(()), |hook| hook())
     })
@@ -1140,6 +1167,8 @@ where
     let committed = recovery_authorization.is_some();
 
     if let Some(recovery_authorization) = recovery_authorization.as_ref() {
+        #[cfg(test)]
+        run_before_committed_capture_recovery_hook()?;
         ProposalPacketLifecycle::new(paths, conn).prepare_pending_root()?;
         let mutation = RepositoryMutationAuthorization {
             route: RepositoryWriteRoute::CaptureApply,

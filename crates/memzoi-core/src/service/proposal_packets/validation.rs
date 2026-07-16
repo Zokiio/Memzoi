@@ -8,6 +8,7 @@ use super::*;
 
 impl MemoryService {
     pub fn validate_file_proposal(&self, proposal: &OkfProposalFile) -> Result<()> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         let inventory = scan_file_proposal_inventory(&self.paths)?;
         require_clean_file_proposal_inventory(&inventory)?;
         self.build_file_proposal_apply_plan(proposal, &expiry::format_timestamp(self.now())?)?;
@@ -19,6 +20,7 @@ impl MemoryService {
     }
 
     pub fn validate_file_proposal_inventory(&self) -> Result<FileProposalInventory> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         let mut inventory = scan_file_proposal_inventory(&self.paths)?;
         let resolved_at = expiry::format_timestamp(self.now())?;
         let mut valid = Vec::with_capacity(inventory.pending.len());
@@ -76,6 +78,7 @@ impl MemoryService {
     ) -> Result<FileProposalResolutionResult> {
         validate_resolution_actor(actor)?;
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
         let inventory = scan_file_proposal_inventory(&self.paths)?;
         require_clean_file_proposal_inventory(&inventory)?;
 
@@ -188,7 +191,7 @@ impl MemoryService {
             bail!("pending proposal identity token {token} is already resolved");
         }
         let proposal_tokens = okf::proposal_identity_tokens(proposal);
-        if let Some(token) = db_proposal_identity_tokens(&self.conn)?
+        if let Some(token) = db_proposal_identity_tokens(&self.shared_conn)?
             .intersection(&proposal_tokens)
             .next()
         {

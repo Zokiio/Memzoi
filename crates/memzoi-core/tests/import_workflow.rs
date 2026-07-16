@@ -3,6 +3,7 @@ use std::{fs, path::Path};
 use memzoi_core::{
     InitRequest, MemoryPaths, MemoryService, parse_import_document, read_okf_proposal_files,
 };
+use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
@@ -173,6 +174,14 @@ fn mixed_manifest_is_review_first_and_respects_all_destination_boundaries() -> a
         session[0].body,
         "Resume the import review in the next session."
     );
+    let shared = Connection::open(&service.paths().shared_db_path)?;
+    let shared_runtime_events: i64 = shared.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE event_type IN ('memory.local_created', 'memory.checkpoint_created')",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(shared_runtime_events, 2);
     Ok(())
 }
 

@@ -17,6 +17,7 @@ use super::{
         explicit_repository_provenance, okf_proposal_safety_values,
     },
     safe_files::RepoLifecycleLock,
+    shared_runtime,
 };
 
 mod journal;
@@ -30,11 +31,12 @@ use self::journal::{
     write_capture_apply_journal,
 };
 use self::runtime::capture_provenance;
-use super::runtime_records::RuntimeRecords;
+use super::runtime_records::{RuntimeRecords, reserved_runtime_record_ids};
 
 pub(super) struct CaptureRouteApply<'a> {
     paths: &'a MemoryPaths,
     conn: &'a Connection,
+    shared_conn: &'a Connection,
     clock: &'a dyn Clock,
 }
 
@@ -49,8 +51,18 @@ pub(super) struct CaptureRouteApplyCommand<'a> {
 }
 
 impl<'a> CaptureRouteApply<'a> {
-    pub(super) fn new(paths: &'a MemoryPaths, conn: &'a Connection, clock: &'a dyn Clock) -> Self {
-        Self { paths, conn, clock }
+    pub(super) fn new(
+        paths: &'a MemoryPaths,
+        conn: &'a Connection,
+        shared_conn: &'a Connection,
+        clock: &'a dyn Clock,
+    ) -> Self {
+        Self {
+            paths,
+            conn,
+            shared_conn,
+            clock,
+        }
     }
 
     pub(super) fn apply(
@@ -77,6 +89,7 @@ impl<'a> CaptureRouteApply<'a> {
         if review.plan_id != plan.plan_id {
             bail!("capture review does not match the supplied plan");
         }
+        shared_runtime::refresh_index_mirrors(self.paths, self.shared_conn, self.conn)?;
         crate::capture::validate_capture_plan_live_state(
             self.paths,
             Some(self.conn),
@@ -166,6 +179,7 @@ impl<'a> CaptureRouteApply<'a> {
         let _lifecycle_lock = (has_repo_writes || has_runtime_writes)
             .then(|| RepoLifecycleLock::acquire(self.paths))
             .transpose()?;
+        shared_runtime::refresh_index_mirrors_locked(self.paths, self.shared_conn, self.conn)?;
         recover_capture_apply(self.paths, self.conn)
             .context("failed to recover an interrupted capture apply")?;
 
@@ -177,6 +191,12 @@ impl<'a> CaptureRouteApply<'a> {
             None,
         )
         .context("stale capture plan after lifecycle lock")?;
+
+        let reserved_runtime_ids = if has_runtime_writes {
+            reserved_runtime_record_ids(self.paths, self.conn)?
+        } else {
+            Default::default()
+        };
 
         let timestamp = expiry::format_timestamp(self.clock.now_utc())?;
         let pending_root = self.paths.proposals_dir().join("pending");
@@ -270,6 +290,7 @@ impl<'a> CaptureRouteApply<'a> {
             .transpose()?;
 
         let mut writes = Vec::new();
+        let mut runtime_record_ids = Vec::new();
         let result = (|| -> Result<()> {
             let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
             crate::capture::validate_capture_plan_live_state(
@@ -296,7 +317,7 @@ impl<'a> CaptureRouteApply<'a> {
                 bail!("stale capture review at write boundary");
             }
             if !planned.is_empty() {
-                let proposal_packets = ProposalPacketLifecycle::new(self.paths, &tx);
+                let proposal_packets = ProposalPacketLifecycle::new(self.paths, self.shared_conn);
                 proposal_packets.prepare_pending_root()?;
                 proposal_packets
                     .ensure_planned_available(planned.iter().map(|(_, proposal)| proposal))?;
@@ -351,15 +372,20 @@ impl<'a> CaptureRouteApply<'a> {
                     destination,
                     &timestamp,
                     provenance,
+                    &reserved_runtime_ids,
                 )?;
                 writes.push(CaptureWrite::RuntimeRecord {
                     candidate_id: candidate.candidate_id.clone(),
-                    record_id: record.id,
+                    record_id: record.id.clone(),
                     destination,
                 });
+                runtime_record_ids.push(record.id);
             }
             if let Some(journal) = journal.as_ref() {
                 append_capture_apply_commit_marker(&tx, journal, actor, &timestamp)?;
+            }
+            if has_runtime_writes {
+                shared_runtime::prepare_runtime_sync_journal(self.paths, &tx, &runtime_record_ids)?;
             }
             tx.commit()?;
             if journal.is_some() {
@@ -368,11 +394,26 @@ impl<'a> CaptureRouteApply<'a> {
                     bail!("capture apply committed without a recoverable journal marker");
                 }
             }
+            if has_runtime_writes {
+                shared_runtime::complete_pending_shared_sync_locked(self.paths, self.shared_conn)?;
+            }
             Ok(())
         })();
         if let Err(error) = result {
             match recover_capture_apply(self.paths, self.conn) {
-                Ok(CaptureApplyRecoveryOutcome::Committed) => {}
+                Ok(CaptureApplyRecoveryOutcome::Committed) => {
+                    if has_runtime_writes
+                        && let Err(shared_error) =
+                            shared_runtime::complete_pending_shared_sync_locked(
+                                self.paths,
+                                self.shared_conn,
+                            )
+                    {
+                        return Err(error).context(format!(
+                            "capture apply shared-sync recovery also failed: {shared_error:#}"
+                        ));
+                    }
+                }
                 Ok(CaptureApplyRecoveryOutcome::NoJournal)
                 | Ok(CaptureApplyRecoveryOutcome::RolledBack) => return Err(error),
                 Err(recovery_error) => {

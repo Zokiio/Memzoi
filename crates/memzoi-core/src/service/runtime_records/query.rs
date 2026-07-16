@@ -24,6 +24,17 @@ pub(super) fn indexed_active_records_for_destination(
     Ok(records)
 }
 
+pub(super) fn indexed_non_runtime_record_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id
+         FROM memory_record
+         WHERE destination NOT IN ('local', 'session')
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub(super) fn active_records_for_destination(
     conn: &Connection,
     destination: MemoryDestination,

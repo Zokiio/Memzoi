@@ -1,14 +1,14 @@
 use std::{collections::BTreeSet, fs, io::ErrorKind, path::Path};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OpenFlags};
 
 use crate::{MemoryPaths, db, okf};
 
 use super::{
     super::{
-        runtime_records::{RuntimeRecordSnapshot, RuntimeRecords},
+        runtime_records::RuntimeRecordSnapshot,
         safe_files::{RepoLifecycleLock, ensure_safe_directory},
+        shared_runtime,
     },
     RebuildResult,
 };
@@ -34,7 +34,21 @@ fn rebuild_with_options(
     after_snapshot: impl FnOnce() -> Result<()>,
     validate_repository_safety: bool,
 ) -> Result<RebuildResult> {
+    shared_runtime::migrate_legacy_runtime_if_needed(&paths)?;
     let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
+    let shared = db::open_database(&paths.shared_db_path).with_context(|| {
+        format!(
+            "local/session runtime memory could not be preserved: failed to open shared database {} before index rebuild",
+            paths.shared_db_path.display()
+        )
+    })?;
+    db::init_database(&shared).with_context(|| {
+        format!(
+            "local/session runtime memory could not be preserved: failed to initialize shared database {} before index rebuild",
+            paths.shared_db_path.display()
+        )
+    })?;
+    shared_runtime::complete_pending_shared_sync_locked(&paths, &shared)?;
     let records_root = paths.records_dir();
     ensure_safe_directory(
         &paths.project_root,
@@ -51,17 +65,16 @@ fn rebuild_with_options(
         .into_iter()
         .map(|snapshot| snapshot.record)
         .collect::<Vec<_>>();
-    let runtime_records = load_runtime_records_for_rebuild(&paths.db_path)?;
-    guard_no_open_proposals(&paths.db_path)?;
+    let runtime_records = shared_runtime::load_runtime_snapshots(&paths.shared_db_path)?;
     guard_no_runtime_record_id_collisions(&records, &runtime_records)?;
-    remove_database_files(&paths.db_path)?;
-    let conn = db::open_database(&paths.db_path)?;
+    remove_database_files(&paths.index_db_path)?;
+    let conn = db::open_database(&paths.index_db_path)?;
     db::init_database(&conn)?;
     okf::import_okf_records(&conn, &records)?;
-    RuntimeRecords::new(&conn).restore_snapshots(&runtime_records)?;
+    shared_runtime::refresh_index_mirrors_locked(&paths, &shared, &conn)?;
     Ok(RebuildResult {
         records_root,
-        db_path: paths.db_path,
+        db_path: paths.index_db_path,
         record_ids: records
             .into_iter()
             .map(|record| record.concept_id)
@@ -98,27 +111,6 @@ fn validate_canonical_record_snapshots_for_rebuild(
     Ok(())
 }
 
-fn load_runtime_records_for_rebuild(db_path: &Path) -> Result<Vec<RuntimeRecordSnapshot>> {
-    if !db_path.exists() {
-        return Ok(Vec::new());
-    }
-    let conn = db::open_database(db_path).with_context(|| {
-        format!(
-            "rebuild refused because local/session runtime memory could not be preserved from {}",
-            db_path.display()
-        )
-    })?;
-    db::init_database(&conn).with_context(|| {
-        format!(
-            "rebuild refused because local/session runtime memory could not be migrated before preservation from {}",
-            db_path.display()
-        )
-    })?;
-    RuntimeRecords::new(&conn).snapshots().context(
-        "rebuild refused because local/session runtime memory could not be loaded for preservation",
-    )
-}
-
 fn guard_no_runtime_record_id_collisions(
     records: &[okf::OkfRecordFile],
     runtime_records: &[RuntimeRecordSnapshot],
@@ -150,52 +142,6 @@ fn guard_no_runtime_record_id_collisions(
         if collisions.len() == 1 { "" } else { "s" },
         collisions.join(", ")
     );
-}
-
-fn guard_no_open_proposals(db_path: &Path) -> Result<()> {
-    if !db_path.exists() {
-        return Ok(());
-    }
-
-    let open_proposals = open_proposal_summaries(db_path).with_context(|| {
-        format!(
-            "rebuild refused because open proposals could not be inspected in {}",
-            db_path.display()
-        )
-    })?;
-    if !open_proposals.is_empty() {
-        let count = open_proposals.len();
-        let summaries = open_proposals
-            .into_iter()
-            .map(|(id, status)| format!("{id} ({status})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            "rebuild refused because {count} open proposal{} would be discarded: {summaries}. Run `memzoi proposals list --status open`, `memzoi proposals apply --all-approved`, or `memzoi reject <proposal-id> --reason \"...\"` before rebuilding.",
-            if count == 1 { "" } else { "s" }
-        );
-    }
-    Ok(())
-}
-
-fn open_proposal_summaries(db_path: &Path) -> rusqlite::Result<Vec<(String, String)>> {
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let has_proposal_table: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'proposal')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_proposal_table {
-        return Ok(Vec::new());
-    }
-    let mut stmt = conn.prepare(
-        "SELECT id, status
-         FROM proposal
-         WHERE status IN ('pending', 'validated', 'approved')
-         ORDER BY created_at ASC, id ASC",
-    )?;
-    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    rows.collect()
 }
 
 fn remove_database_files(db_path: &Path) -> Result<()> {

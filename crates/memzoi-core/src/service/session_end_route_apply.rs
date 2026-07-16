@@ -23,19 +23,33 @@ use super::{
         create_authorized_repository_batch, explicit_repository_provenance,
         okf_proposal_safety_values, remove_created_repository_file, safety_value,
     },
-    runtime_records::{CheckpointInput, LocalMemoryInput, RuntimeRecords},
+    runtime_records::{
+        CheckpointInput, LocalMemoryInput, RuntimeRecords, reserved_runtime_record_ids,
+    },
     safe_files::RepoLifecycleLock,
+    shared_runtime,
 };
 
 pub(super) struct SessionEndRouteApply<'a> {
     paths: &'a MemoryPaths,
     conn: &'a Connection,
+    shared_conn: &'a Connection,
     clock: &'a dyn Clock,
 }
 
 impl<'a> SessionEndRouteApply<'a> {
-    pub(super) fn new(paths: &'a MemoryPaths, conn: &'a Connection, clock: &'a dyn Clock) -> Self {
-        Self { paths, conn, clock }
+    pub(super) fn new(
+        paths: &'a MemoryPaths,
+        conn: &'a Connection,
+        shared_conn: &'a Connection,
+        clock: &'a dyn Clock,
+    ) -> Self {
+        Self {
+            paths,
+            conn,
+            shared_conn,
+            clock,
+        }
     }
 
     pub(super) fn promote(
@@ -107,10 +121,19 @@ impl<'a> SessionEndRouteApply<'a> {
             .candidates
             .iter()
             .any(|candidate| candidate.destination == MemoryDestination::Repo);
-        let _lifecycle_lock = has_repo_writes
+        let has_runtime_writes = document.candidates.iter().any(|candidate| {
+            matches!(
+                candidate.destination,
+                MemoryDestination::Local | MemoryDestination::Session
+            )
+        });
+        let _lifecycle_lock = (has_repo_writes || has_runtime_writes)
             .then(|| RepoLifecycleLock::acquire(self.paths))
             .transpose()?;
-        let proposal_packets = ProposalPacketLifecycle::new(self.paths, self.conn);
+        if has_repo_writes || has_runtime_writes {
+            shared_runtime::refresh_index_mirrors_locked(self.paths, self.shared_conn, self.conn)?;
+        }
+        let proposal_packets = ProposalPacketLifecycle::new(self.paths, self.shared_conn);
         let timestamp = expiry::format_timestamp(self.clock.now_utc())?;
         let pending_root = self.paths.proposals_dir().join("pending");
         let mut reserved_proposal_ids = if has_repo_writes {
@@ -170,6 +193,11 @@ impl<'a> SessionEndRouteApply<'a> {
                 )
             })
             .transpose()?;
+        let reserved_runtime_ids = if has_runtime_writes {
+            reserved_runtime_record_ids(self.paths, self.conn)?
+        } else {
+            BTreeSet::new()
+        };
 
         let mut repo_writes = vec![None::<(String, PathBuf)>; document.candidates.len()];
         let mut runtime_writes =
@@ -200,11 +228,11 @@ impl<'a> SessionEndRouteApply<'a> {
                         Some((plan.proposal_id.clone(), created_file.path().to_path_buf()));
                 }
             }
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = self.shared_conn.unchecked_transaction()?;
             for (index, candidate) in document.candidates.iter().enumerate() {
                 match candidate.destination {
                     MemoryDestination::Local => {
-                        let record = RuntimeRecords::new(&tx).create_local(
+                        let record = RuntimeRecords::new(&tx).create_local_avoiding(
                             actor,
                             &LocalMemoryInput {
                                 memory_type: candidate.memory_type,
@@ -213,17 +241,19 @@ impl<'a> SessionEndRouteApply<'a> {
                                 body: candidate.body.clone(),
                             },
                             &timestamp,
+                            &reserved_runtime_ids,
                         )?;
                         runtime_writes[index] = Some((record.id, MemoryDestination::Local));
                     }
                     MemoryDestination::Session => {
-                        let record = RuntimeRecords::new(&tx).create_checkpoint(
+                        let record = RuntimeRecords::new(&tx).create_checkpoint_avoiding(
                             actor,
                             &CheckpointInput {
                                 task: candidate.title.clone(),
                                 note: candidate.body.clone(),
                             },
                             &timestamp,
+                            &reserved_runtime_ids,
                         )?;
                         runtime_writes[index] = Some((record.id, MemoryDestination::Session));
                     }
@@ -256,6 +286,10 @@ impl<'a> SessionEndRouteApply<'a> {
                 );
             }
             return Err(error);
+        }
+        if has_runtime_writes {
+            shared_runtime::refresh_index_mirrors_locked(self.paths, self.shared_conn, self.conn)
+                .context("session-end runtime writes committed but worktree index refresh failed")?;
         }
 
         let mut results = Vec::with_capacity(document.candidates.len());

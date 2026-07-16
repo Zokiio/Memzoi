@@ -75,11 +75,14 @@ Use this when you want the command sequence before letting Memzoi write a sample
 
 - `.memzoi/records/`
 
-It also creates local runtime state under `~/.memzoi/projects/<project-key>/`:
+It also creates local runtime state under `~/.memzoi/projects/<repository-key>/`:
 
 - `config.toml`
-- `memory.db`
-- `exports/`
+- `shared.db` for local/session memory and DB-local proposals shared by linked worktrees
+- `worktrees/<worktree-key>/index.db` for the active worktree's disposable canonical index
+- `worktrees/<worktree-key>/exports/`
+
+The repository key is derived from Git's canonical common directory and is therefore stable across linked worktrees. Each worktree receives its own index and generated exports. Opening a newly linked worktree builds its index from that checkout's `.memzoi/records/`; it does not require another `memzoi init`.
 
 Project root discovery prefers an ancestor with `.memzoi/records/`, then an ancestor Git root, then the current directory.
 
@@ -89,4 +92,4 @@ Project root discovery prefers an ancestor with `.memzoi/records/`, then an ance
 memzoi doctor --json
 ```
 
-`doctor` checks the project root, records directory, runtime config, database, schema, exports directory, and whether `memzoi-mcp` is available on `PATH`. Missing records, config, or database usually means the repo has not run `memzoi init` yet.
+`doctor` checks the project root, records directory, shared runtime, current worktree index, legacy path-keyed runtimes, exports directory, and whether `memzoi-mcp` is available on `PATH`. Missing canonical records and missing shared runtime are reported separately.

@@ -870,7 +870,7 @@ memzoi local list
 memzoi local search <query>
 ```
 
-Local records are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output.
+Local records are stored in the repository-shared runtime database under `${MEMZOI_HOME:-~/.memzoi}/projects/<repository-key>/shared.db`. They are visible from every linked worktree and are marked as `destination: local`, `visibility: private`, and `source_kind: memzoi-local` in JSON output.
 
 Local records are not written to `.memzoi/records/**`, are not returned by global `memzoi search`, and are not exported into repo-shared agent files. `memzoi context` is repo-only by default and includes local records only with `--include-local`. Use later proposal workflows to promote local memory into repo-shared memory.
 
@@ -884,7 +884,7 @@ memzoi checkpoint add --task "..." --from-file notes.md
 memzoi checkpoint list
 ```
 
-Checkpoints are stored in the runtime project database under `${MEMZOI_HOME:-~/.memzoi}/projects/<project-key>/memory.db`. They are marked as `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output.
+Checkpoints are stored in the repository-shared runtime database under `${MEMZOI_HOME:-~/.memzoi}/projects/<repository-key>/shared.db`. They are visible from every linked worktree and are marked as `destination: session`, `lane: session`, `type: episode`, `visibility: private`, and `source_kind: memzoi-checkpoint` in JSON output.
 
 Checkpoints store only explicit `--note` or `--from-file` content. They are not written to `.memzoi/records/**`, are not returned by global `memzoi search`, and are not exported into repo-shared agent files. `memzoi context` is repo-only by default and includes checkpoints only with `--include-session`. Use later session-end proposal workflows to promote durable findings into repo memory.
 
@@ -1021,6 +1021,6 @@ Valid `memzoi export <format>` values:
 - Source installs require a Rust/Cargo-capable environment; release binaries do not.
 - Search is text/FTS-first, not vector or semantic recall.
 - Memory is repo-local; global, personal, team, and org sync are future work.
-- `memzoi rebuild` restores approved records from `.memzoi/records/`. Current proposals are DB-local; rebuild refuses to discard readable open proposals and should be unblocked with `memzoi proposals list --status open`, `memzoi proposals apply --all-approved`, or `memzoi reject <proposal-id> --reason "..."`. A corrupt unreadable DB causes rebuild to fail before deleting local or session runtime rows.
+- `memzoi rebuild` restores canonical records from `.memzoi/records/` into the current worktree's disposable `index.db`. Repository-wide local/session memory and proposal state remain authoritative in `shared.db`, so open proposals do not block rebuild. An unreadable `shared.db` fails closed before the worktree index is replaced.
 - MCP is intentionally minimal and safe-by-default. It can create proposals under the effective approval policy, but it cannot apply canonical records.
 - Homebrew and package-manager installers are not available yet.
