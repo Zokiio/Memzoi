@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
@@ -15,7 +15,7 @@ use memzoi_core::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
-use super::open_service;
+use super::{normalize_absolute_path, open_service};
 use crate::output::print_json;
 
 const MATERIALIZATION_ARTIFACT_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -296,22 +296,6 @@ fn materialization_artifact_destination(destination: &Path) -> Result<PathBuf> {
         bail!("materialization artifacts cannot be saved inside .memzoi");
     }
     Ok(resolved)
-}
-
-fn normalize_absolute_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(value) => normalized.push(value),
-        }
-    }
-    normalized
 }
 
 fn resolve_materialization_boundary(path: &Path) -> Result<PathBuf> {

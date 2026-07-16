@@ -37,6 +37,28 @@ mod capture;
 mod materialize;
 mod proposal_files;
 
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) =>
+            {
+                normalized.pop();
+            }
+            Component::ParentDir => {}
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized
+}
+
 const NON_UTF8_GIT_PATH_SENTINEL: &str = ".memzoi/memory/<non-utf8-git-path>";
 const MAX_SAFETY_SCAN_GIT_DIFF_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SAFETY_SCAN_BLOBS: usize = 4_096;
@@ -2665,5 +2687,38 @@ mod safety_scan_limit_tests {
         };
 
         assert!(error.to_string().contains("more than 4096 managed blobs"));
+    }
+}
+
+#[cfg(test)]
+mod path_normalization_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::normalize_absolute_path;
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_absolute_path_preserves_the_unix_root() {
+        assert_eq!(
+            normalize_absolute_path(Path::new("/directory/../artifact.json")),
+            PathBuf::from("/artifact.json")
+        );
+        assert_eq!(
+            normalize_absolute_path(Path::new("/../artifact.json")),
+            PathBuf::from("/artifact.json")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_absolute_path_preserves_the_drive_root() {
+        assert_eq!(
+            normalize_absolute_path(Path::new(r"C:\directory\..\artifact.json")),
+            PathBuf::from(r"C:\artifact.json")
+        );
+        assert_eq!(
+            normalize_absolute_path(Path::new(r"C:\..\artifact.json")),
+            PathBuf::from(r"C:\artifact.json")
+        );
     }
 }
