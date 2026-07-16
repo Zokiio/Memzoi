@@ -5,6 +5,7 @@ use crate::{
 use rusqlite::{Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -78,9 +79,13 @@ pub(crate) fn for_each_merged_event(
          FROM event_log
          ORDER BY created_at ASC, id ASC";
 
+    let second_ids = {
+        let mut stmt = second.prepare("SELECT id FROM event_log")?;
+        let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        ids.collect::<rusqlite::Result<HashSet<_>>>()?
+    };
     let mut first_stmt = first.prepare(ORDERED_EVENTS)?;
     let mut second_stmt = second.prepare(ORDERED_EVENTS)?;
-    let mut second_ids = second.prepare("SELECT EXISTS(SELECT 1 FROM event_log WHERE id = ?1)")?;
     let mut first_rows = first_stmt.query([])?;
     let mut second_rows = second_stmt.query([])?;
     let mut first_event = next_encoded_event(&mut first_rows)?;
@@ -94,9 +99,7 @@ pub(crate) fn for_each_merged_event(
                 match left_key.cmp(&right_key) {
                     std::cmp::Ordering::Less => {
                         second_event = Some(right);
-                        let mirrored_in_second: bool =
-                            second_ids.query_row([left.id.as_str()], |row| row.get(0))?;
-                        if !mirrored_in_second {
+                        if !second_ids.contains(&left.id) {
                             visit(left.into_event()?)?;
                         }
                         first_event = next_encoded_event(&mut first_rows)?;
@@ -114,9 +117,7 @@ pub(crate) fn for_each_merged_event(
                 }
             }
             (Some(event), None) => {
-                let mirrored_in_second: bool =
-                    second_ids.query_row([event.id.as_str()], |row| row.get(0))?;
-                if !mirrored_in_second {
+                if !second_ids.contains(&event.id) {
                     visit(event.into_event()?)?;
                 }
                 first_event = next_encoded_event(&mut first_rows)?;

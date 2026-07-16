@@ -1931,12 +1931,12 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                 "legacy_worktree_runtime",
                 "ok",
                 format!(
-                    "{} legacy path-keyed runtime director{} retained after verified migration",
+                    "{} legacy path-keyed runtime {} retained after verified migration",
                     legacy_runtime_dirs.len(),
                     if legacy_runtime_dirs.len() == 1 {
-                        "y"
+                        "directory"
                     } else {
-                        "ies"
+                        "directories"
                     }
                 ),
             ));
@@ -1945,9 +1945,13 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                 "legacy_worktree_runtime",
                 "warning",
                 format!(
-                    "{} fragmented path-keyed runtime director{} detected; the next normal Memzoi open will merge durable state without deleting legacy data",
+                    "{} fragmented path-keyed runtime {} detected; the next normal Memzoi open will merge durable state without deleting legacy data",
                     legacy_runtime_dirs.len(),
-                    if legacy_runtime_dirs.len() == 1 { "y" } else { "ies" }
+                    if legacy_runtime_dirs.len() == 1 {
+                        "directory"
+                    } else {
+                        "directories"
+                    }
                 ),
             ));
             push_next_step(
