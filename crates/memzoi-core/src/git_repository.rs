@@ -34,9 +34,9 @@ impl GitReviewVisibility {
 /// The Git command whose result could not establish record review visibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GitReviewVisibilityCommand {
-    WorktreeCheck,
-    TrackedCheck,
-    IgnoreCheck,
+    Worktree,
+    Tracked,
+    Ignore,
 }
 
 /// Fail-closed errors from [`git_review_visibility`].
@@ -86,7 +86,7 @@ pub(crate) fn git_review_visibility(
 
     let worktree = run_git_review_command(
         project_root,
-        GitReviewVisibilityCommand::WorktreeCheck,
+        GitReviewVisibilityCommand::Worktree,
         &[OsStr::new("rev-parse"), OsStr::new("--is-inside-work-tree")],
     )?;
     if !worktree.status.success() || worktree.stdout != b"true\n" {
@@ -95,7 +95,7 @@ pub(crate) fn git_review_visibility(
 
     let tracked = run_git_review_command(
         project_root,
-        GitReviewVisibilityCommand::TrackedCheck,
+        GitReviewVisibilityCommand::Tracked,
         &[
             OsStr::new("ls-files"),
             OsStr::new("--cached"),
@@ -106,7 +106,7 @@ pub(crate) fn git_review_visibility(
     )?;
     if !tracked.status.success() {
         return Err(git_review_command_failed(
-            GitReviewVisibilityCommand::TrackedCheck,
+            GitReviewVisibilityCommand::Tracked,
             tracked,
         ));
     }
@@ -121,13 +121,13 @@ pub(crate) fn git_review_visibility(
         return Ok(GitReviewVisibility::Tracked);
     } else {
         return Err(GitReviewVisibilityError::UnexpectedOutput {
-            operation: GitReviewVisibilityCommand::TrackedCheck,
+            operation: GitReviewVisibilityCommand::Tracked,
         });
     }
 
     let ignored = run_git_review_command(
         project_root,
-        GitReviewVisibilityCommand::IgnoreCheck,
+        GitReviewVisibilityCommand::Ignore,
         &[
             OsStr::new("check-ignore"),
             OsStr::new("--quiet"),
@@ -140,7 +140,7 @@ pub(crate) fn git_review_visibility(
         Some(0) => Ok(GitReviewVisibility::IgnoredUntracked),
         Some(1) => Ok(GitReviewVisibility::UntrackedAndNotIgnored),
         _ => Err(git_review_command_failed(
-            GitReviewVisibilityCommand::IgnoreCheck,
+            GitReviewVisibilityCommand::Ignore,
             ignored,
         )),
     }
