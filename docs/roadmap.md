@@ -1,7 +1,7 @@
 # Memzoi roadmap
 
 Status: active
-Updated: 2026-07-12
+Updated: 2026-07-17
 Shipped baseline: v0.5.0
 
 ## Product outcome
@@ -18,16 +18,16 @@ explicit evidence
   -> evaluation, recovery, and audit
 ```
 
-The v0.4 release combines the governed memory kernel with explicit evidence-backed capture and checked-in recall and capture evaluation gates. v0.5.0 adds the candidate-neutral recall evaluation foundation; semantic recall remains an eval-gated, opt-in decision rather than shipped product behavior. The roadmap now builds from that measurable local loop toward lifecycle maintenance and a hardened provider surface.
+The v0.4 release combines the governed memory kernel with explicit evidence-backed capture and checked-in recall and capture evaluation gates. v0.5.0 adds the candidate-neutral recall evaluation foundation. On 2026-07-17, the maintainer closed v0.5 as a lexical-first foundation release and deferred the locked semantic-recall ship decision until semantic retrieval becomes an explicit product priority. Post-release work added the shared repository-write safety boundary and explicit Git-native materialization as groundwork for lifecycle maintenance and a hardened provider surface.
 
 ## Current baseline
 
-| Capability | v0.4 reality | Roadmap implication |
+| Capability | Current reality | Roadmap implication |
 | --- | --- | --- |
 | Canonical truth | Reviewed Markdown records are canonical; SQLite indexes and exports are disposable | Preserve this differentiator across every new feature |
-| Governance | Typed proposals, explicit apply, provenance, privacy planes, and pre-action warnings exist | Close route-parity and correctness gaps before expanding writes |
+| Governance | Typed proposals, explicit apply, provenance, privacy planes, pre-action warnings, a shared repository-write safety boundary, and explicit Git-native materialization exist | Reuse the common safety and materialization contracts across lifecycle work before expanding write authority |
 | Memory formation | Deterministic Markdown, instruction-file, ADR, explicit diff, and immutable Git-range adapters form reviewable candidates from named sources | Expand only through explicit, eval-gated adapters |
-| Retrieval | FTS5/BM25 plus scope, type, lane, confidence, and path reranking | Establish evals, then add semantic recall only if it wins measurably |
+| Retrieval | FTS5/BM25 plus scope, type, lane, confidence, and path reranking; semantic retrieval remains unapproved and deferred | Preserve the recall-v3 foundation and reactivate semantic evaluation only as an explicit product priority |
 | Consolidation | Exact duplicate suppression and manual supersede/tombstone exist | Add review-first near-duplicate, contradiction, staleness, and retention planning |
 | Evaluation | File-native recall v2 and capture v1 suites enforce deterministic baselines, provenance, safety, quality, latency, and review-burden gates in CI | Use measured regressions to govern future retrieval and capture work |
 | Provider surface | CLI, eight safe MCP tools, integrations, and deterministic exports exist | Stabilize contracts and harden operations after capture, recall, and lifecycle are proven |
@@ -124,27 +124,22 @@ Issues:
 - [#67 Gate v0.4 on capture quality, safety, and review burden](https://github.com/Zokiio/Memzoi/issues/67)
 - [#68 Prepare and release v0.4.0](https://github.com/Zokiio/Memzoi/issues/68)
 
-### v0.5 - Trustworthy Hybrid Recall (evaluation foundation shipped 2026-07-12)
+### v0.5 - Trustworthy Recall Evaluation Foundation (shipped 2026-07-12; closed 2026-07-17)
 
-Outcome: decide whether semantic retrieval should ship and add it only if it materially improves the same corpus while preserving deterministic fallback, citations, scope, lifecycle suppression, and latency.
+Outcome: establish a candidate-neutral foundation capable of deciding whether semantic retrieval should ship while keeping lexical recall as the complete product behavior.
 
-The first deliverable is [#56 RFC: Decide whether eval-gated semantic recall should ship](https://github.com/Zokiio/Memzoi/issues/56). It freezes the recall-v3 benchmark and candidate evaluation process before recording a no-go, conditional-go, or full-go decision. Architecture-specific implementation issues are created only for accepted scope after the locked evaluation, avoiding commitment to a vector stack before the evidence exists.
+v0.5.0 shipped the recall-v3 evaluation, candidate-validation, operational-validation, and competitor-harness foundations. It did not record a D56-4 `no_go`, `conditional_go`, or `full_go` decision and did not enable semantic retrieval in normal product operation.
 
-The ratified initial boundary is repository memory, one explicitly installed offline profile per project, exact vector search unless it misses the approved performance gate, and opt-in behavior for v0.5.0. Local/session indexing, remote providers, multiple active profiles, semantic prechecks, and default promotion are deferred. Any future default promotion requires a separate post-release decision and preserves lexical-only mode.
+On 2026-07-17, the maintainer deferred [#56](https://github.com/Zokiio/Memzoi/issues/56) and the locked decision in [#80](https://github.com/Zokiio/Memzoi/issues/80). The real competitor bakeoff in [#79](https://github.com/Zokiio/Memzoi/issues/79) was also deferred because comparative benchmarking is not a current priority. Closing these issues is a roadmap-priority decision, not an empirical semantic-recall `no_go`; no embedding model, vector stack, fusion method, or semantic product scope is selected.
 
-v0.5.0 ships the evaluation, candidate-validation, operational-validation, and
-competitor-report foundations only. It does not record a D56-4 ship decision or
-enable semantic retrieval in normal product operation.
+The checked-in foundation remains available for future work. Reactivating semantic recall requires an explicit maintainer priority, a freshly scoped decision issue whose dependencies match the intended evidence, verification of all frozen inputs and digests, and a locked run without post-result tuning. Any accepted profile remains repository-only, offline, single-profile, and opt-in unless a later decision changes those boundaries. Lexical-only operation and deterministic fallback remain mandatory.
 
-Exit criteria:
+Completed scope:
 
-- The RFC records a no-go, conditional-go, or full-go decision from a locked recall-v3 evaluation while recall v2 remains the immutable trust gate.
-- Any accepted semantic method clears a documented material-improvement threshold over lexical recall; a no-go publishes the findings and keeps Memzoi lexical.
-- There is zero regression in stale, expired, scope, or private-memory leakage.
-- Every result exposes lexical, semantic, fusion, and suppression signals with original citations.
-- Lexical recall remains available without network, credentials, or an embedding index.
-- Any accepted v0.5.0 semantic profile remains opt-in; a full-go result does not authorize default promotion.
-- The target hybrid p95 is below 200 ms at 10,000 records unless the eval-backed RFC revises it.
+- Recall v3 provides candidate-neutral schemas, deterministic development evaluation, frozen candidate manifests, operational validation, and synthetic competitor-contract validation.
+- Recall v2 remains the immutable shipped trust gate.
+- Normal search, context, handoff, and precheck behavior remains lexical and requires no model, embedding index, network, or credentials.
+- Semantic and hybrid productization, the locked D56-4 decision, and default promotion remain explicitly unapproved.
 
 ### v0.6 - Memory Quality and Lifecycle
 
@@ -194,7 +189,7 @@ flowchart LR
     trusteval --> captureeval["Capture runner and quality gate #55, #64, #67"]
     sources --> captureeval
     captureeval --> release["v0.4 release readiness #68"]
-    captureeval --> hybrid["Hybrid recall RFC #56"]
+    captureeval --> hybrid["Recall-v3 foundation #56 (semantic deferred)"]
     trust --> lifecycle["Lifecycle RFC #50"]
     trusteval --> lifecycle
     hybrid --> hardening["Provider hardening RFC #57"]
@@ -224,4 +219,4 @@ flowchart LR
 
 ## Backlog policy
 
-The roadmap is concrete through v0.4. Later milestones begin with evidence-driven RFCs and create implementation issues only after their contracts and go/no-go gates are accepted. This keeps the backlog independently grabbable and prevents speculative architecture from becoming accidental commitment.
+The roadmap is concrete through the shipped v0.5 evaluation foundation and accepted Git-native v0.6 groundwork. Remaining milestone work begins with evidence-driven RFCs and creates implementation issues only after their contracts and go/no-go gates are accepted. This keeps the backlog independently grabbable and prevents speculative architecture from becoming accidental commitment.
