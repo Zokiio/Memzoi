@@ -1416,6 +1416,58 @@ fn materialization_create_installs_one_pinned_canonical_record() -> anyhow::Resu
 }
 
 #[test]
+fn materialization_rolls_back_file_and_index_when_index_commit_fails() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_git_service()?;
+    let candidate =
+        materialization_candidate("materialized-commit-failure", "Failed materialization")?;
+    let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+    let path = service
+        .paths
+        .records_dir()
+        .join("materialized-commit-failure.md");
+    service.conn.execute_batch(
+        "CREATE TABLE materialization_commit_parent (id INTEGER PRIMARY KEY);
+         CREATE TABLE materialization_commit_guard (
+             record_id TEXT NOT NULL,
+             parent_id INTEGER NOT NULL,
+             FOREIGN KEY (parent_id) REFERENCES materialization_commit_parent(id)
+                 DEFERRABLE INITIALLY DEFERRED
+         );
+         CREATE TRIGGER materialization_commit_failure
+         AFTER INSERT ON memory_record
+         WHEN NEW.id = 'materialized-commit-failure'
+         BEGIN
+             INSERT INTO materialization_commit_guard (record_id, parent_id)
+             VALUES (NEW.id, 1);
+         END;",
+    )?;
+
+    let error = service
+        .apply_repository_materialization(&plan, &decision, &candidate)
+        .expect_err("a failed derived-index commit must fail materialization");
+
+    assert!(
+        format!("{error:#}").contains("FOREIGN KEY constraint failed"),
+        "unexpected materialization commit error: {error:#}"
+    );
+    assert!(
+        !path.exists(),
+        "a failed derived-index commit must roll back the canonical file"
+    );
+    let indexed: bool = service.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM memory_record WHERE id = ?1)",
+        [&candidate.record.concept_id],
+        |row| row.get(0),
+    )?;
+    assert!(
+        !indexed,
+        "a failed derived-index commit must roll back its row"
+    );
+    assert!(service.repo_index_drift()?.is_current());
+    Ok(())
+}
+
+#[test]
 fn deleting_materialized_worktree_bytes_removes_them_on_rebuild_without_hidden_state()
 -> anyhow::Result<()> {
     let (_temp, service) = initialized_git_service()?;

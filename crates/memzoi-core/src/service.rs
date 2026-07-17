@@ -661,16 +661,20 @@ impl MemoryService {
     }
 
     fn ensure_repository_index_current(&self) -> Result<()> {
+        self.ensure_repository_index_current_with_conn(&self.conn)
+    }
+
+    fn ensure_repository_index_current_with_conn(&self, conn: &Connection) -> Result<()> {
         let drift = if self.trusted_recall_evaluation {
-            derived_index::inspect_for_trusted_recall_eval(&self.paths, &self.conn)?
+            derived_index::inspect_for_trusted_recall_eval(&self.paths, conn)?
         } else {
-            derived_index::inspect(&self.paths, &self.conn)?
+            derived_index::inspect(&self.paths, conn)?
         };
         if drift.is_current() {
             return Ok(());
         }
         bail!(
-            "repository derived index is stale (missing={}, stale={}, changed={}, fts_out_of_sync={}); run `memzoi rebuild` before reading repository memory",
+            "repository derived index is stale (missing={}, stale={}, changed={}, fts_out_of_sync={}); run `memzoi rebuild` before accessing repository memory",
             drift.missing_from_index.len(),
             drift.stale_in_index.len(),
             drift.changed_in_index.len(),

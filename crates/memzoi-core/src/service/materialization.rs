@@ -25,7 +25,8 @@ use super::{
         OwnedRepositoryProjection, RepositoryMutationAuthorization,
         authorize_repository_projection_batch,
         capture_authorized_existing_repository_projection_identity, explicit_repository_provenance,
-        install_authorized_repository_projection, memory_draft_safety_values, safety_value,
+        install_authorized_repository_projection, memory_draft_safety_values,
+        rollback_authorized_repository_projection, safety_value,
     },
     safe_files::RepoLifecycleLock,
 };
@@ -45,8 +46,8 @@ struct ExistingCanonicalRecord {
 impl MemoryService {
     /// Atomically installs one fully pinned canonical record after explicit materialization review.
     ///
-    /// This is the sole mutating materialization entry point. It deliberately does
-    /// not rebuild derived state; a later read-admission flow owns that refresh.
+    /// This is the sole mutating materialization entry point. It refreshes the
+    /// installed record in the derived index without performing a full rebuild.
     pub fn apply_repository_materialization(
         &self,
         plan: &RepositoryMaterializationPlan,
@@ -162,15 +163,33 @@ impl MemoryService {
         } else {
             None
         };
-        install_authorized_repository_projection(
+        let tx = self.conn.unchecked_transaction()?;
+        okf::import_okf_records(&tx, std::slice::from_ref(&prepared.record))
+            .context("failed to prepare derived repository index after materialization")?;
+        let installed = install_authorized_repository_projection(
             &self.paths,
             mutation,
             &destination,
             expected_existing_identity,
         )?;
-        okf::import_okf_records(&self.conn, std::slice::from_ref(&prepared.record))
-            .context("failed to refresh derived repository index after materialization")?;
-        self.ensure_repository_index_current()?;
+        let finalize_result = match self.ensure_repository_index_current_with_conn(&tx) {
+            Ok(()) => tx
+                .commit()
+                .context("failed to commit derived repository index after materialization"),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = finalize_result {
+            return match rollback_authorized_repository_projection(
+                &self.paths,
+                mutation,
+                &installed,
+            ) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(error).context(format!(
+                    "additionally failed to roll back materialized repository projection: {rollback_error:#}"
+                )),
+            };
+        }
 
         materialization_result(
             &prepared,
