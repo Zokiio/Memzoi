@@ -7,6 +7,7 @@ updated: "2026-07-10T05:56:13Z"
 status: active
 scope: repo
 visibility: repo
+content_class: general_repo_knowledge
 confidence: 1
 source: cli
 source_ref: prop_019f4a86-cd01-7993-8ff1-57a513dba32f

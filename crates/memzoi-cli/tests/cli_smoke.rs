@@ -3762,6 +3762,38 @@ fn proposals_list_show_and_bulk_apply_report_proposal_state() {
 }
 
 #[test]
+fn checked_in_repository_records_allow_fresh_proposals_list_startup() {
+    let repo = initialized_temp_repo();
+    let checked_records = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.memzoi/records");
+    let fixture_records = repo.path().join(".memzoi/records");
+    fs::create_dir_all(&fixture_records).expect("create fixture records directory");
+
+    let mut copied = 0;
+    for entry in fs::read_dir(&checked_records).expect("read checked-in repository records") {
+        let entry = entry.expect("read checked-in repository record entry");
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        fs::copy(entry.path(), fixture_records.join(entry.file_name()))
+            .expect("copy checked-in repository record into startup fixture");
+        copied += 1;
+    }
+    assert!(copied > 0, "expected checked-in repository records");
+
+    let paths = test_paths(repo.path());
+    fs::remove_file(&paths.index_db_path).expect("remove disposable derived index");
+
+    let listed = run_json_command(
+        repo.path(),
+        &["proposals", "list", "--status", "open", "--json"],
+    );
+    assert!(
+        proposals_from_json(&listed).is_empty(),
+        "fresh startup should list the empty proposal inbox: {listed}"
+    );
+}
+
+#[test]
 fn proposal_files_list_show_and_validate_valid_pending_files() {
     let repo = initialized_temp_repo();
     write_pending_proposal_file(repo.path(), "valid-proposal.md", valid_proposal_markdown());
