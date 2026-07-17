@@ -10,6 +10,7 @@ mod exporters;
 mod git_repository;
 mod handoff;
 mod import;
+mod materialization;
 mod memory_policy;
 mod models;
 mod okf;
@@ -72,6 +73,26 @@ pub use import::{
     ImportDocument, ImportDuplicate, ImportDuplicateKind, ImportPlan, ImportPlanCandidate,
     ImportPlanSummary, ImportScope, ImportWrite, parse_import_document,
 };
+pub use materialization::{
+    CANONICAL_REVISION_SCHEMA, CanonicalLifecycleProjection, CanonicalRecordSemanticContent,
+    CanonicalRevision, CanonicalRevisionProjection, ExpectedPriorRevision,
+    MATERIALIZATION_METADATA_SCHEMA, MAX_MATERIALIZATION_REASON_BYTES, MaterializationAction,
+    MaterializationAuthorizationCapability, MaterializationCounterpartRelationship,
+    MaterializationMetadata, MaterializationOutputIntent, MaterializationOutputOutcome,
+    MaterializationOutputResult, MaterializationOutputRole, MaterializationPolicy,
+    MaterializationTarget, REPOSITORY_MATERIALIZATION_CANDIDATE_SCHEMA,
+    REPOSITORY_MATERIALIZATION_DECISION_SCHEMA, REPOSITORY_MATERIALIZATION_PLAN_SCHEMA,
+    REPOSITORY_MATERIALIZATION_RESULT_SCHEMA, RepositoryMaterializationCandidate,
+    RepositoryMaterializationCandidateRecord, RepositoryMaterializationDecision,
+    RepositoryMaterializationPlan, RepositoryMaterializationResult,
+    build_repository_materialization_candidate, build_repository_materialization_decision,
+    build_repository_materialization_plan, canonical_revision_for_okf_record,
+    canonical_revision_for_projection, repository_materialization_candidate_id,
+    repository_materialization_candidate_plan, repository_materialization_candidate_to_okf_record,
+    repository_materialization_decision_id, repository_materialization_plan_id,
+    repository_materialization_policy, validate_canonical_record_id,
+    validate_materialization_identity, validate_repository_relative_path,
+};
 pub use memory_policy::{
     MemoryDestinationPolicy, MemoryPlane, MemoryReviewRequirement, MemoryWriteRoute,
     RepoMemoryExclusion, TWO_PLANE_MEMORY_POLICY, TwoPlaneMemoryPolicy,
@@ -90,6 +111,7 @@ pub use okf::{
     parse_okf_proposal_file, parse_okf_proposal_markdown, parse_okf_record_file,
     parse_okf_record_markdown, preflight_okf_proposal_file, preflight_okf_proposal_markdown,
     read_okf_proposal_files, read_okf_record_files, redacted_okf_proposal_path,
+    render_okf_record_markdown,
 };
 pub use precheck::PrecheckInput;
 pub use proposals::{

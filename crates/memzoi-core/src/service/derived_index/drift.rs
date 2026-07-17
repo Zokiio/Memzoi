@@ -5,18 +5,39 @@ use rusqlite::Connection;
 
 use crate::{MemoryDestination, MemoryPaths, MemoryRecord, MemoryStatus, okf};
 
-use super::super::safe_files::ensure_safe_directory;
-use super::{super::runtime_records::RuntimeRecords, RepoIndexDrift};
+use super::{
+    super::runtime_records::RuntimeRecords,
+    RepoIndexDrift,
+    admission::{RepositoryRecordAdmission, read_admitted_repository_record_snapshots},
+};
 
 pub(super) fn inspect(paths: &MemoryPaths, conn: &Connection) -> Result<RepoIndexDrift> {
-    ensure_safe_directory(
-        &paths.project_root,
-        &paths.records_dir(),
-        false,
-        "canonical record root",
-    )?;
-    let canonical = okf::read_okf_record_files(paths.records_dir())?
+    inspect_with_admission(
+        paths,
+        conn,
+        RepositoryRecordAdmission::EnforceForRepositoryReads,
+    )
+}
+
+pub(super) fn inspect_for_trusted_recall_eval(
+    paths: &MemoryPaths,
+    conn: &Connection,
+) -> Result<RepoIndexDrift> {
+    inspect_with_admission(
+        paths,
+        conn,
+        RepositoryRecordAdmission::TrustedRecallEvaluationBypass,
+    )
+}
+
+fn inspect_with_admission(
+    paths: &MemoryPaths,
+    conn: &Connection,
+    admission: RepositoryRecordAdmission,
+) -> Result<RepoIndexDrift> {
+    let canonical = read_admitted_repository_record_snapshots(paths, admission, || Ok(()))?
         .into_iter()
+        .map(|snapshot| snapshot.record)
         .filter(|record| record.status == MemoryStatus::Active)
         .map(|record| (record.concept_id.clone(), record))
         .collect::<BTreeMap<_, _>>();

@@ -38,6 +38,7 @@ mod canonical_write;
 mod capture_route_apply;
 mod derived_index;
 mod import_lifecycle;
+mod materialization;
 mod proposal_packets;
 mod repository_mutation;
 mod runtime_records;
@@ -152,6 +153,7 @@ pub struct MemoryService {
     conn: Connection,
     shared_conn: Connection,
     clock: Arc<dyn Clock>,
+    trusted_recall_evaluation: bool,
 }
 
 impl MemoryService {
@@ -169,6 +171,23 @@ impl MemoryService {
     }
 
     pub fn open_paths_with_clock(paths: MemoryPaths, clock: impl Clock + 'static) -> Result<Self> {
+        Self::open_paths_with_clock_and_admission(paths, clock, false)
+    }
+
+    /// Opens an isolated recall-evaluation fixture whose canonical inputs were
+    /// deliberately staged through the explicit trusted-evaluation boundary.
+    pub(crate) fn open_paths_with_clock_for_trusted_recall_eval(
+        paths: MemoryPaths,
+        clock: impl Clock + 'static,
+    ) -> Result<Self> {
+        Self::open_paths_with_clock_and_admission(paths, clock, true)
+    }
+
+    fn open_paths_with_clock_and_admission(
+        paths: MemoryPaths,
+        clock: impl Clock + 'static,
+        trusted_recall_evaluation: bool,
+    ) -> Result<Self> {
         paths.validate_runtime_identity()?;
         shared_runtime::migrate_legacy_runtime_if_needed(&paths)?;
         if !paths.config_path.is_file() {
@@ -181,7 +200,11 @@ impl MemoryService {
         let shared_conn = db::open_database(&paths.shared_db_path)?;
         db::init_database(&shared_conn)?;
         if !paths.index_db_path.is_file() {
-            derived_index::rebuild(paths.clone())?;
+            if trusted_recall_evaluation {
+                derived_index::rebuild_for_trusted_recall_eval(paths.clone())?;
+            } else {
+                derived_index::rebuild(paths.clone())?;
+            }
         }
         let conn = db::open_database(&paths.index_db_path)?;
         db::init_database(&conn)?;
@@ -192,6 +215,7 @@ impl MemoryService {
             conn,
             shared_conn,
             clock: Arc::new(clock),
+            trusted_recall_evaluation,
         })
     }
 
@@ -342,6 +366,7 @@ impl MemoryService {
     pub fn validate_proposal(&self, proposal_id: &str) -> Result<ValidationResult> {
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
         let validation = proposals::validate_proposal_against_records(
             &self.shared_conn,
             &self.conn,
@@ -354,6 +379,7 @@ impl MemoryService {
     pub fn apply_proposal(&self, proposal_id: &str, actor: &str) -> Result<MemoryRecord> {
         let session = CanonicalWriteSession::begin(&self.paths)?;
         shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
         let proposal = proposals::load_proposal_public(&self.shared_conn, proposal_id)?;
         let mut safety_values = memory_draft_safety_values("proposal", &proposal.payload);
         safety_values.push(safety_value(
@@ -447,6 +473,7 @@ impl MemoryService {
                 draft.scope_id.as_deref().unwrap_or("-")
             );
         }
+        self.ensure_repository_index_current()?;
         let mut safety_values = memory_draft_safety_values("replacement", &draft);
         safety_values.push(safety_value(
             "target_record_id".to_owned(),
@@ -533,6 +560,7 @@ impl MemoryService {
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
         validate_legacy_canonical_target(&target)?;
+        self.ensure_repository_index_current()?;
         let safety_values = vec![
             safety_value(
                 "target_record_id".to_owned(),
@@ -615,11 +643,13 @@ impl MemoryService {
 
     pub fn search_memory(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
         search::search_memory_at(&self.conn, input, self.now())
     }
 
     pub fn inspect_expiry(&self, record_id: &str) -> Result<ExpiryDiagnostic> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
         let record = RuntimeRecords::new(&self.conn)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -628,6 +658,28 @@ impl MemoryService {
 
     pub fn repo_index_drift(&self) -> Result<RepoIndexDrift> {
         derived_index::inspect(&self.paths, &self.conn)
+    }
+
+    fn ensure_repository_index_current(&self) -> Result<()> {
+        self.ensure_repository_index_current_with_conn(&self.conn)
+    }
+
+    fn ensure_repository_index_current_with_conn(&self, conn: &Connection) -> Result<()> {
+        let drift = if self.trusted_recall_evaluation {
+            derived_index::inspect_for_trusted_recall_eval(&self.paths, conn)?
+        } else {
+            derived_index::inspect(&self.paths, conn)?
+        };
+        if drift.is_current() {
+            return Ok(());
+        }
+        bail!(
+            "repository derived index is stale (missing={}, stale={}, changed={}, fts_out_of_sync={}); run `memzoi rebuild` before accessing repository memory",
+            drift.missing_from_index.len(),
+            drift.stale_in_index.len(),
+            drift.changed_in_index.len(),
+            drift.fts_out_of_sync,
+        );
     }
 
     pub fn create_local_memory(
@@ -698,6 +750,7 @@ impl MemoryService {
         actor: &str,
         document: SessionEndDocument,
     ) -> Result<SessionEndResult> {
+        self.ensure_repository_index_current()?;
         SessionEndRouteApply::new(
             &self.paths,
             &self.conn,
@@ -708,6 +761,7 @@ impl MemoryService {
     }
     pub fn plan_import(&self, actor: &str, document: ImportDocument) -> Result<ImportPlan> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
         ImportLifecycle::new(
             &self.paths,
             &self.conn,
@@ -723,6 +777,7 @@ impl MemoryService {
         document: ImportDocument,
         expected_plan_id: &str,
     ) -> Result<ImportApplyResult> {
+        self.ensure_repository_index_current()?;
         ImportLifecycle::new(
             &self.paths,
             &self.conn,
@@ -844,21 +899,25 @@ impl MemoryService {
 
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
         context::build_context_pack_at(&self.conn, input, self.now())
     }
 
     pub fn build_handoff_pack(&self, input: HandoffInput) -> Result<HandoffPack> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
         handoff::build_handoff_pack_at(&self.conn, input, self.now())
     }
 
     pub fn precheck(&self, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
         precheck::precheck_at(&self.conn, input, self.now())
     }
 
     pub fn export(&self, input: ExportInput) -> Result<ExportResult> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
         let written_paths = match input.format {
             ExportFormat::Okf => exporters::export_okf_at(
                 &self.conn,

@@ -1,8 +1,10 @@
+use std::fs;
+
 use memzoi_core::{
-    ContextPackInput, InitRequest, MemoryPaths, MemoryService, MemoryStatus, MemoryType,
-    PrecheckInput, ScopeKind, SearchInput, Visibility,
+    ContextPackInput, InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryService,
+    MemoryStatus, MemoryType, OkfProposalSensitivity, OkfRecordFile, PrecheckInput,
+    RepositoryContentClass, ScopeKind, SearchInput, Visibility, render_okf_record_markdown,
 };
-use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 #[test]
@@ -108,12 +110,10 @@ impl EvalFixture {
             temp.path().canonicalize()?,
             temp.path().join(".memzoi-runtime"),
         );
-        let init = MemoryService::initialize_paths(paths.clone(), InitRequest { force: true })?;
-        let conn = Connection::open(&init.paths.db_path)?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        MemoryService::initialize_paths(paths.clone(), InitRequest { force: true })?;
 
-        insert_record(
-            &conn,
+        write_record(
+            &paths,
             FixtureRecord {
                 id: "target-routing-decision".to_owned(),
                 memory_type: MemoryType::Decision,
@@ -123,8 +123,8 @@ impl EvalFixture {
                 path: "crates/memzoi-core/src/context.rs".to_owned(),
             },
         )?;
-        insert_record(
-            &conn,
+        write_record(
+            &paths,
             FixtureRecord {
                 id: "target-precheck-risk".to_owned(),
                 memory_type: MemoryType::Risk,
@@ -134,8 +134,8 @@ impl EvalFixture {
                 path: "crates/memzoi-core/src/precheck.rs".to_owned(),
             },
         )?;
-        insert_record(
-            &conn,
+        write_record(
+            &paths,
             FixtureRecord {
                 id: "target-precheck-fact".to_owned(),
                 memory_type: MemoryType::Fact,
@@ -163,8 +163,8 @@ impl EvalFixture {
             } else {
                 format!("apps/frontend/src/module_{index}.tsx")
             };
-            insert_record(
-                &conn,
+            write_record(
+                &paths,
                 FixtureRecord {
                     id: format!("distractor-{index}"),
                     memory_type,
@@ -177,8 +177,8 @@ impl EvalFixture {
                 },
             )?;
         }
-        drop(conn);
 
+        MemoryService::rebuild_paths(paths.clone())?;
         let service = MemoryService::open_paths(paths)?;
         Ok(Self {
             _temp: temp,
@@ -196,28 +196,45 @@ struct FixtureRecord {
     path: String,
 }
 
-fn insert_record(conn: &Connection, record: FixtureRecord) -> anyhow::Result<()> {
-    conn.execute(
-        "INSERT INTO memory_record(
-            id, type, scope_kind, visibility, title, body, status, confidence,
-            source_kind, source_ref, content_hash, expires_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0.91, 'eval', ?8, ?9, NULL)",
-        params![
-            record.id,
-            record.memory_type.as_str(),
-            ScopeKind::Repo.as_str(),
-            Visibility::Repo.as_str(),
-            record.title,
-            record.body,
-            record.status.as_str(),
-            format!("eval://{}", record.path),
-            format!("hash-{}", record.id),
-        ],
-    )?;
-    conn.execute(
-        "INSERT INTO memory_path(id, record_id, path, line_start, line_end)
-         VALUES (?1, ?2, ?3, 1, 12)",
-        params![format!("path-{}", record.id), record.id, record.path],
+fn write_record(paths: &MemoryPaths, record: FixtureRecord) -> anyhow::Result<()> {
+    let FixtureRecord {
+        id,
+        memory_type,
+        status,
+        title,
+        body,
+        path,
+    } = record;
+    let record = OkfRecordFile {
+        concept_id: id.clone(),
+        draft: MemoryDraft {
+            memory_type,
+            lane: MemoryLane::Semantic,
+            scope_kind: ScopeKind::Repo,
+            scope_id: None,
+            visibility: Visibility::Repo,
+            title,
+            body,
+            tags: vec!["eval".to_owned()],
+            source_kind: Some("eval".to_owned()),
+            source_ref: Some(format!("eval://{path}")),
+            sensitivity: OkfProposalSensitivity::RepoSafe,
+            content_class: RepositoryContentClass::GeneralRepoKnowledge,
+            confidence: 0.91,
+        },
+        status,
+        applies_to: vec![path],
+        created: "2026-07-16T00:00:00Z".to_owned(),
+        updated: None,
+        supersedes_id: None,
+        expires_at: None,
+        proposal_id: None,
+        capture: None,
+        materialization: None,
+    };
+    fs::write(
+        paths.records_dir().join(format!("{id}.md")),
+        render_okf_record_markdown(&record)?,
     )?;
     Ok(())
 }

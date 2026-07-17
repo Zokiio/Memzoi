@@ -7,7 +7,7 @@ use memzoi_core::{
     InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryService, MemoryStatus, MemoryType,
     OkfProposalAction, OkfProposalSensitivity, OkfProposalStatus, ScopeKind, Visibility,
     parse_okf_proposal_markdown, parse_okf_record_file, parse_okf_record_markdown,
-    read_okf_proposal_files, read_okf_record_files,
+    read_okf_proposal_files, read_okf_record_files, render_okf_record_markdown,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -609,7 +609,8 @@ fn apply_refuses_to_overwrite_existing_canonical_file_outside_db() -> anyhow::Re
         .expect_err("apply should not overwrite an existing canonical file")
         .to_string();
     assert!(
-        error.contains("canonical memory record already exists"),
+        error.contains("canonical memory record already exists")
+            || error.contains("repository-record admission refused: typed-record"),
         "got {error}"
     );
     assert_eq!(
@@ -637,6 +638,7 @@ fn supersede_writes_previous_record_with_current_updated_timestamp() -> anyhow::
     let service = initialized_service(&temp)?;
     let records = service.paths().records_dir();
     let db_path = service.paths().db_path.clone();
+    let paths = service.paths().clone();
 
     let proposal = service.propose_memory(
         "agent:red-tests",
@@ -649,12 +651,14 @@ fn supersede_writes_previous_record_with_current_updated_timestamp() -> anyhow::
     service.approve_proposal(&proposal.id, "reviewer:human")?;
     let applied = service.apply_proposal(&proposal.id, "agent:applier")?;
     let old_updated = "2000-01-01T00:00:00Z";
-    let conn = Connection::open(&db_path)?;
-    conn.execute(
-        "UPDATE memory_record SET updated_at = ?1 WHERE id = ?2",
-        (old_updated, applied.id.as_str()),
-    )?;
-    drop(conn);
+    let previous_path = records.join(format!("{}.md", applied.id));
+    let mut canonical =
+        parse_okf_record_file(&records, &previous_path)?.expect("applied record parses");
+    canonical.updated = Some(old_updated.to_owned());
+    fs::write(&previous_path, render_okf_record_markdown(&canonical)?)?;
+    drop(service);
+    MemoryService::rebuild_paths(paths.clone())?;
+    let service = MemoryService::open_paths(paths)?;
 
     service.supersede_record(
         &applied.id,
@@ -672,7 +676,6 @@ fn supersede_writes_previous_record_with_current_updated_timestamp() -> anyhow::
         [&applied.id],
         |row| row.get(0),
     )?;
-    let previous_path = records.join(format!("{}.md", applied.id));
     let parsed = parse_okf_record_file(&records, &previous_path)?.expect("previous record parses");
 
     assert_ne!(db_updated, old_updated);
@@ -717,7 +720,8 @@ fn supersede_refuses_existing_replacement_file_before_rewriting_previous() -> an
         .expect_err("supersede should fail before rewriting previous file")
         .to_string();
     assert!(
-        error.contains("canonical memory record already exists"),
+        error.contains("canonical memory record already exists")
+            || error.contains("repository-record admission refused: typed-record"),
         "got {error}"
     );
 
@@ -769,7 +773,8 @@ fn apply_rolls_back_db_state_when_canonical_file_write_fails() -> anyhow::Result
         .expect_err("apply should fail when canonical record path cannot be written")
         .to_string();
     assert!(
-        error.contains("failed to inspect canonical memory record"),
+        error.contains("failed to inspect canonical memory record")
+            || error.contains("repository-record admission refused: canonical-root"),
         "got {error}"
     );
 

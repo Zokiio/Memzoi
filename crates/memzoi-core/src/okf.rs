@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CaptureProvenance, MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus,
     MemoryType, RepositoryContentClass, ScopeKind, Visibility, capture, expiry,
+    materialization::{MaterializationMetadata, canonical_revision_for_okf_record},
     proposals::title_to_concept_slug,
 };
 
@@ -27,6 +28,8 @@ pub struct OkfRecordFile {
     pub expires_at: Option<String>,
     pub proposal_id: Option<String>,
     pub capture: Option<CaptureProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialization: Option<MaterializationMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -768,7 +771,7 @@ pub fn parse_okf_record_markdown(
     }
     let body = body_without_matching_h1(body, &title)?;
 
-    Ok(Some(OkfRecordFile {
+    let record = OkfRecordFile {
         concept_id: concept_id.clone(),
         draft: MemoryDraft {
             memory_type,
@@ -793,7 +796,27 @@ pub fn parse_okf_record_markdown(
         expires_at,
         proposal_id,
         capture: frontmatter.capture,
-    }))
+        materialization: frontmatter.materialization,
+    };
+    validate_record_materialization(&record)?;
+    Ok(Some(record))
+}
+
+fn validate_record_materialization(record: &OkfRecordFile) -> Result<()> {
+    let Some(metadata) = record.materialization.as_ref() else {
+        return Ok(());
+    };
+    metadata
+        .validate()
+        .with_context(|| format!("invalid materialization metadata for {}", record.concept_id))?;
+    let expected_revision = canonical_revision_for_okf_record(record)?;
+    if metadata.revision != expected_revision {
+        bail!(
+            "materialization revision does not match semantic record content for {}",
+            record.concept_id
+        );
+    }
+    Ok(())
 }
 
 pub fn parse_okf_proposal_markdown(
@@ -1102,6 +1125,89 @@ pub(crate) fn render_memory_record_markdown(
     render_memory_record(record, tags, applies_to)
 }
 
+/// Renders one fully typed canonical record, including optional materialization attestation.
+pub fn render_okf_record_markdown(record: &OkfRecordFile) -> Result<String> {
+    validate_record_materialization(record)?;
+
+    let draft = &record.draft;
+    let mut output = String::new();
+    output.push_str("---\n");
+    push_yaml_string(&mut output, "type", draft.memory_type.as_str());
+    push_yaml_string(&mut output, "lane", draft.lane.as_str());
+    push_yaml_string(&mut output, "title", &draft.title);
+    push_yaml_string(
+        &mut output,
+        "description",
+        first_non_empty_line(&draft.body),
+    );
+    push_yaml_string(&mut output, "timestamp", &record.created);
+    if let Some(updated) = &record.updated {
+        push_yaml_string(&mut output, "updated", updated);
+    }
+    push_yaml_string(&mut output, "status", record.status.as_str());
+    push_yaml_string(&mut output, "scope", draft.scope_kind.as_str());
+    if let Some(scope_id) = &draft.scope_id {
+        push_yaml_string(&mut output, "scope_id", scope_id);
+    }
+    push_yaml_string(&mut output, "visibility", draft.visibility.as_str());
+    push_yaml_string(&mut output, "content_class", draft.content_class.as_str());
+    output.push_str(&format!("confidence: {}\n", draft.confidence));
+    if let Some(source_kind) = &draft.source_kind {
+        push_yaml_string(&mut output, "source", source_kind);
+    }
+    if let Some(source_ref) = &draft.source_ref {
+        push_yaml_string(&mut output, "source_ref", source_ref);
+    }
+    if let Some(proposal_id) = &record.proposal_id {
+        push_yaml_string(&mut output, "proposal_id", proposal_id);
+    }
+    if let Some(capture) = &record.capture {
+        output.push_str("capture:\n");
+        let yaml = serde_yaml::to_string(capture)
+            .context("failed to serialize capture provenance for canonical record")?;
+        for line in yaml.lines() {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !draft.tags.is_empty() {
+        output.push_str("tags:\n");
+        for tag in &draft.tags {
+            output.push_str("  - ");
+            output.push_str(&quote_yaml_string(tag));
+            output.push('\n');
+        }
+    }
+    if !record.applies_to.is_empty() {
+        output.push_str("applies_to:\n");
+        for path in &record.applies_to {
+            output.push_str("  - ");
+            output.push_str(&quote_yaml_string(path));
+            output.push('\n');
+        }
+    }
+    if let Some(supersedes_id) = &record.supersedes_id {
+        push_yaml_string(&mut output, "supersedes", supersedes_id);
+    }
+    if let Some(expires_at) = &record.expires_at {
+        push_yaml_string(&mut output, "expires", expires_at);
+    }
+    if let Some(materialization) = &record.materialization {
+        output.push_str("materialization:\n");
+        let yaml = serde_yaml::to_string(materialization)
+            .context("failed to serialize materialization metadata for canonical record")?;
+        for line in yaml.lines() {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push_str("---\n\n");
+    output.push_str(&format!("# {}\n\n{}\n", draft.title, draft.body.trim()));
+    Ok(output)
+}
+
 pub(crate) fn repo_apply_sensitivity_guidance(sensitivity: OkfProposalSensitivity) -> &'static str {
     match sensitivity {
         OkfProposalSensitivity::RepoSafe => "repo-safe proposals may be applied after review",
@@ -1216,6 +1322,7 @@ struct OkfFrontmatter {
     applies_to: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     capture: Option<CaptureProvenance>,
+    materialization: Option<MaterializationMetadata>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2063,8 +2170,10 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind,
-        Visibility,
+        CANONICAL_REVISION_SCHEMA, CanonicalRevision, MATERIALIZATION_METADATA_SCHEMA,
+        MaterializationAction, MaterializationMetadata, MemoryDestination, MemoryLane,
+        MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
+        canonical_revision_for_okf_record,
     };
 
     const EXAMPLE_MEMORY: &str = include_str!("../../../examples/example-memory.md");
@@ -2492,6 +2601,62 @@ Do not import this.
                 EXAMPLE_MEMORY,
             )?
             .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typed_record_renderer_round_trips_materialization_attestation() -> anyhow::Result<()> {
+        let root = Path::new("/bundle/records");
+        let path = root.join("team/install-risk.md");
+        let mut record =
+            super::parse_okf_record_markdown(root, &path, &record_markdown("semantic", "risk"))?
+                .expect("base record should parse");
+        assert_eq!(
+            record.materialization, None,
+            "legacy records stay unattested"
+        );
+
+        record.materialization = Some(MaterializationMetadata {
+            schema: MATERIALIZATION_METADATA_SCHEMA.to_owned(),
+            action: MaterializationAction::Create,
+            plan_id: format!("blake3:{}", "1".repeat(64)),
+            candidate_id: format!("blake3:{}", "2".repeat(64)),
+            decision_id: format!("blake3:{}", "3".repeat(64)),
+            decision_at: "2026-07-16T12:00:00Z".to_owned(),
+            safety_contract: "memzoi/repository-write-safety-v1".to_owned(),
+            revision: CanonicalRevision {
+                schema: CANONICAL_REVISION_SCHEMA.to_owned(),
+                revision_hash: format!("blake3:{}", "4".repeat(64)),
+            },
+            target: None,
+            reason: None,
+        });
+        let revision = canonical_revision_for_okf_record(&record)?;
+        record
+            .materialization
+            .as_mut()
+            .expect("test record has metadata")
+            .revision = revision;
+
+        let rendered = super::render_okf_record_markdown(&record)?;
+        assert!(rendered.contains("materialization:\n"), "{rendered}");
+        let reparsed = super::parse_okf_record_markdown(root, &path, &rendered)?
+            .expect("rendered record should parse");
+        assert_eq!(reparsed, record);
+
+        let unsupported_schema = rendered.replacen(
+            MATERIALIZATION_METADATA_SCHEMA,
+            "memzoi/repository-materialization-v2",
+            1,
+        );
+        let error = super::parse_okf_record_markdown(root, &path, &unsupported_schema)
+            .expect_err("unknown required materialization schemas must fail closed");
+        assert!(
+            error.chain().any(|cause| cause
+                .to_string()
+                .starts_with("unsupported materialization metadata schema")),
+            "unexpected error: {error:#}"
         );
         Ok(())
     }

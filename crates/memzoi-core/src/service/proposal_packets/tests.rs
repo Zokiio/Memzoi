@@ -101,7 +101,11 @@ fn canonical_readers_refuse_symlinked_records_root_before_reading_outside() -> a
             _ => unreachable!(),
         };
         let rendered = format!("{error:#}");
-        assert!(rendered.contains("must be a real directory"), "{rendered}");
+        assert!(
+            rendered.contains("must be a real directory")
+                || rendered.contains("repository-record admission refused: canonical-root"),
+            "{rendered}"
+        );
         assert!(!rendered.contains(sentinel), "{rendered}");
     }
     Ok(())

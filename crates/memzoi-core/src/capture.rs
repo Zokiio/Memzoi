@@ -4655,7 +4655,7 @@ pub(crate) fn load_capture_provenance(
     .transpose()
 }
 
-fn validate_capture_provenance(provenance: &CaptureProvenance) -> Result<()> {
+pub(crate) fn validate_capture_provenance(provenance: &CaptureProvenance) -> Result<()> {
     if provenance.schema != CAPTURE_PROVENANCE_SCHEMA
         || provenance.plan_id.trim().is_empty()
         || provenance.review_id.trim().is_empty()

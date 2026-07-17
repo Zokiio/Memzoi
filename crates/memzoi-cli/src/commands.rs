@@ -25,8 +25,8 @@ use serde_json::json;
 use crate::{
     cli::{
         CaptureCommands, CheckpointCommands, Cli, Commands, DraftCommand, EvalCommands,
-        EventCommands, ImportCommands, IntegrateCommands, LocalCommands, McpCommands,
-        ProposalCommands, ProposalFileCommands, SafetyCommands,
+        EventCommands, ImportCommands, IntegrateCommands, LocalCommands, MaterializeCommands,
+        McpCommands, ProposalCommands, ProposalFileCommands, SafetyCommands,
     },
     eval, integrate, mcp,
     output::{print_json, print_jsonl_row},
@@ -34,7 +34,30 @@ use crate::{
 };
 
 mod capture;
+mod materialize;
 mod proposal_files;
+
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) =>
+            {
+                normalized.pop();
+            }
+            Component::ParentDir => {}
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized
+}
 
 const NON_UTF8_GIT_PATH_SENTINEL: &str = ".memzoi/memory/<non-utf8-git-path>";
 const MAX_SAFETY_SCAN_GIT_DIFF_BYTES: usize = 4 * 1024 * 1024;
@@ -735,6 +758,37 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 plan_id,
                 review_id,
                 actor,
+                as_json: json,
+            }),
+        },
+        Commands::Materialize { command } => match command {
+            MaterializeCommands::Plan {
+                candidate_file,
+                output,
+                json,
+            } => materialize::plan_command(candidate_file, output, json),
+            MaterializeCommands::Decide {
+                candidate_file,
+                plan_file,
+                decision_at,
+                output,
+                json,
+            } => materialize::decide_command(candidate_file, plan_file, decision_at, output, json),
+            MaterializeCommands::Apply {
+                candidate_file,
+                plan_file,
+                decision_file,
+                candidate_id,
+                plan_id,
+                decision_id,
+                json,
+            } => materialize::apply_command(materialize::ApplyCommand {
+                candidate_file,
+                plan_file,
+                decision_file,
+                candidate_id,
+                plan_id,
+                decision_id,
                 as_json: json,
             }),
         },
@@ -2633,5 +2687,38 @@ mod safety_scan_limit_tests {
         };
 
         assert!(error.to_string().contains("more than 4096 managed blobs"));
+    }
+}
+
+#[cfg(test)]
+mod path_normalization_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::normalize_absolute_path;
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_absolute_path_preserves_the_unix_root() {
+        assert_eq!(
+            normalize_absolute_path(Path::new("/directory/../artifact.json")),
+            PathBuf::from("/artifact.json")
+        );
+        assert_eq!(
+            normalize_absolute_path(Path::new("/../artifact.json")),
+            PathBuf::from("/artifact.json")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_absolute_path_preserves_the_drive_root() {
+        assert_eq!(
+            normalize_absolute_path(Path::new(r"C:\directory\..\artifact.json")),
+            PathBuf::from(r"C:\artifact.json")
+        );
+        assert_eq!(
+            normalize_absolute_path(Path::new(r"C:\..\artifact.json")),
+            PathBuf::from(r"C:\artifact.json")
+        );
     }
 }
