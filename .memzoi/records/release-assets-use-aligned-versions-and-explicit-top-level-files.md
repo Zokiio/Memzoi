@@ -1,10 +1,10 @@
 ---
 type: procedure
-lane: semantic
+lane: procedural
 title: "Release assets use aligned versions and explicit top-level files"
 description: "A Memzoi release tag, workspace package version, and internal memzoi-core dependency versions must agree so installed binaries and the updater report the released version. After artifact download, release upload enumerates top-level regular files explicitly; it must not pass artifact directories or a broad dist glob to GitHub release upload."
 timestamp: "2026-07-17T23:24:52.158207Z"
-updated: "2026-07-17T23:24:52.158207Z"
+updated: "2026-07-18T00:09:16Z"
 status: active
 scope: repo
 visibility: repo

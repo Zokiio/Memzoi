@@ -1,10 +1,10 @@
 ---
 type: procedure
-lane: semantic
+lane: procedural
 title: "Runtime index updates atomically after file proposal resolution"
 description: "File-backed proposal apply and reject synchronize canonical or resolved packet state with relational and full-text recall before returning. A successful proposal-files apply is immediately searchable and does not require a routine memzoi rebuild. Use rebuild only for recovery, canonical re-import, or verified derived-index drift repair."
 timestamp: "2026-07-17T23:26:26.278642Z"
-updated: "2026-07-17T23:26:26.278642Z"
+updated: "2026-07-18T00:09:16Z"
 status: active
 scope: repo
 visibility: repo

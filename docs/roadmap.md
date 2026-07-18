@@ -143,17 +143,27 @@ Completed scope:
 
 ### v0.6 - Memory Quality and Lifecycle
 
-Outcome: Memzoi can identify memory-quality problems and propose safe maintenance without silently rewriting canonical truth.
+Outcome: Memzoi can detect memory-quality problems, enforce lane-aware
+retention, and produce safely authorized lifecycle effects without silently
+rewriting private or repository truth.
 
-The first deliverable is [#50 RFC: Define review-first maintenance and lane retention policy](https://github.com/Zokiio/Memzoi/issues/50). It will generate implementation slices for mutation-free maintenance planning, consolidation proposals, lane-aware retention, local/session privacy operations, and lifecycle health evals.
+The accepted contract from [#50](https://github.com/Zokiio/Memzoi/issues/50)
+is implemented through [#119](https://github.com/Zokiio/Memzoi/issues/119)–[#126](https://github.com/Zokiio/Memzoi/issues/126).
 
 Exit criteria:
 
-- Maintenance planning detects near duplicates, contradictions, staleness, expiry, and renewal candidates without writes.
-- Accepted repo changes use create, supersede, or tombstone proposals.
-- Session state expires aggressively, episodes may decay, and durable decisions/procedures persist until reviewed or superseded.
-- False consolidation, stale leakage, retention behavior, and review burden are measured.
-- Local/session deletion, redaction, expiry, and export controls do not leak private content into Git artifacts.
+- Maintenance planning is immutable, snapshot-bound, and mutation-free.
+- Authorized repository actions materialize as unstaged OKF create, supersede,
+  or tombstone changes through [#99](https://github.com/Zokiio/Memzoi/issues/99)–[#101](https://github.com/Zokiio/Memzoi/issues/101), without a hidden proposal inbox or automatic Git acceptance.
+- Private maintenance is report-only by default. A separate maintenance grant
+  may apply only reversible, rebuildable conflict-suppression state; expiry
+  remains an always-on read invariant.
+- Session recall uses a 24-hour continuation lease within a seven-day absolute
+  cap; episodic recall uses 30/90-day horizons; semantic and procedural records
+  have no age-based TTL.
+- Exact owner authority is required for renewal, retention changes,
+  supersession, consolidation, redaction, deletion, and promotion.
+- Lifecycle release passes severity-tiered, non-compensating gates.
 
 ### v0.7 - Provider Experience and Hardening
 
