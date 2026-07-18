@@ -238,10 +238,10 @@ fn materialize_plan_and_decide_only_write_explicit_artifacts() {
         before,
         "plan and decide must not alter records, proposal packets, or runtime state"
     );
-    assert_eq!(plan["schema"], "memzoi/repository-materialization-plan-v2");
+    assert_eq!(plan["schema"], "memzoi/repository-materialization-plan");
     assert_eq!(
         decision["schema"],
-        "memzoi/repository-materialization-decision-v2"
+        "memzoi/repository-materialization-decision"
     );
     assert_eq!(read_json(&plan_path), plan);
     assert_eq!(read_json(&decision_path), decision);
@@ -305,7 +305,7 @@ fn materialize_apply_writes_an_unstaged_canonical_record_and_reports_review_data
     let applied = run_json(repo.path(), home.path(), &apply_args);
     assert_eq!(
         applied["schema"],
-        "memzoi/repository-materialization-apply-report-v2"
+        "memzoi/repository-materialization-apply-report"
     );
     let record_path = paths.records_dir().join(format!("{concept_id}.md"));
     assert!(
@@ -314,7 +314,7 @@ fn materialize_apply_writes_an_unstaged_canonical_record_and_reports_review_data
     );
     assert_eq!(
         applied["result"]["schema"],
-        "memzoi/repository-materialization-result-v2"
+        "memzoi/repository-materialization-result"
     );
     assert_eq!(
         applied["result"]["outputs"][0]["path"],

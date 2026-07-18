@@ -221,7 +221,6 @@ struct FixtureRecord {
 
 fn insert_record(conn: &Connection, record: FixtureRecord) -> anyhow::Result<()> {
     let retention = RetentionFacts {
-        policy_version: "memzoi/lane-retention-v1".to_owned(),
         occurred_at: None,
         started_at: None,
         last_continued_at: None,

@@ -335,7 +335,7 @@ fn open_recovers_applied_proposal_and_event_from_shared_sync_journal() -> anyhow
     assert!(
         paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .is_file()
     );
     drop(service);
@@ -355,7 +355,7 @@ fn open_recovers_applied_proposal_and_event_from_shared_sync_journal() -> anyhow
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     drop(recovered);
@@ -405,7 +405,7 @@ fn open_finishes_proposal_sync_after_marker_cleanup_interruption() -> anyhow::Re
     assert!(
         paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .is_file()
     );
     drop(service);
@@ -431,7 +431,7 @@ fn open_finishes_proposal_sync_after_marker_cleanup_interruption() -> anyhow::Re
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     Ok(())
@@ -472,7 +472,7 @@ fn reject_recovers_interrupted_apply_before_mutating_shared_proposal() -> anyhow
         !service
             .paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     Ok(())
@@ -695,7 +695,7 @@ fn open_rolls_forward_exact_canonical_create_after_precommit_crash() -> anyhow::
     assert!(
         paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .is_file()
     );
     drop(service);
@@ -721,7 +721,7 @@ fn open_rolls_forward_exact_canonical_create_after_precommit_crash() -> anyhow::
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     drop(recovered);
@@ -777,7 +777,7 @@ fn markerless_recovery_rejects_substituted_canonical_bytes() -> anyhow::Result<(
     assert!(
         paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .is_file(),
         "failed-closed recovery must retain its journal"
     );

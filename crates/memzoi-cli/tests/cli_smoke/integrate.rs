@@ -244,7 +244,7 @@ fn import_human_mode_keeps_tabular_review_without_json_envelope() {
     let manifest_path = repo.path().join("human-import.yml");
     fs::write(
         &manifest_path,
-        r#"version: memzoi/import-v2
+        r#"schema: memzoi/import
 origin_key: test-import:integrate-human
 sources:
   - path: imports/human-source.yml

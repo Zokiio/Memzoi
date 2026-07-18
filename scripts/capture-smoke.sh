@@ -65,7 +65,7 @@ import os
 out = os.environ['CAPTURE_SMOKE_OUT']
 with open(os.path.join(out, 'cli-plan.json')) as fh:
     plan = json.load(fh)
-assert plan['schema'] == 'memzoi/capture-plan-v2'
+assert plan['schema'] == 'memzoi/capture-plan'
 assert plan['status'] == 'ready'
 assert plan['data_class'] == 'private'
 assert len(plan['candidates']) == 1
@@ -128,7 +128,7 @@ messages = [
         'params': {
             'name': 'plan_capture_v1',
             'arguments': {
-                'schema': 'memzoi/capture-request-v2',
+                'schema': 'memzoi/capture-request',
                 'sources': [{
                     'source_id': 'capture-smoke',
                     'locator': {'kind': 'project_path', 'path': 'notes/capture.md'},

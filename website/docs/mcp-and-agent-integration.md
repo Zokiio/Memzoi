@@ -61,7 +61,7 @@ The CLI-only `memzoi handoff` command is not exposed as a separate MCP tool in t
 
 ```json
 {
-  "schema": "memzoi/capture-request-v2",
+  "schema": "memzoi/capture-request",
   "sources": [
     {
       "source_id": "session-findings",

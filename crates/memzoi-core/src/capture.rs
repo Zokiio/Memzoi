@@ -23,12 +23,12 @@ use crate::{
 mod adapters;
 mod sources;
 
-pub const CAPTURE_REQUEST_SCHEMA: &str = "memzoi/capture-request-v2";
-pub const CAPTURE_PLAN_SCHEMA: &str = "memzoi/capture-plan-v2";
-pub const CAPTURE_REVIEW_INPUT_SCHEMA: &str = "memzoi/capture-review-input-v2";
-pub const CAPTURE_REVIEW_SCHEMA: &str = "memzoi/capture-review-v2";
-pub const CAPTURE_APPLY_RESULT_SCHEMA: &str = "memzoi/capture-apply-result-v2";
-pub const CAPTURE_PROVENANCE_SCHEMA: &str = "memzoi/capture-provenance-v2";
+pub const CAPTURE_REQUEST_SCHEMA: &str = "memzoi/capture-request";
+pub const CAPTURE_PLAN_SCHEMA: &str = "memzoi/capture-plan";
+pub const CAPTURE_REVIEW_INPUT_SCHEMA: &str = "memzoi/capture-review-input";
+pub const CAPTURE_REVIEW_SCHEMA: &str = "memzoi/capture-review";
+pub const CAPTURE_APPLY_RESULT_SCHEMA: &str = "memzoi/capture-apply-result";
+pub const CAPTURE_PROVENANCE_SCHEMA: &str = "memzoi/capture-provenance";
 pub const MARKDOWN_EXTRACTOR_PROFILE: &str = "markdown-deterministic";
 pub const MARKDOWN_EXTRACTOR_VERSION: &str = "1.0.0";
 pub const INSTRUCTION_EXTRACTOR_PROFILE: &str = "instruction-deterministic";
@@ -3843,7 +3843,7 @@ fn candidate(
     sensitivity_reason: &str,
 ) -> Result<CaptureCandidate> {
     let claim_payload = canonical_json_bytes(&(&memory, &evidence, extractor))?;
-    let claim_id = domain_id("claim", "memzoi/capture-claim-v1", &claim_payload);
+    let claim_id = domain_id("claim", "memzoi/capture-claim", &claim_payload);
     let classification = CaptureClassification {
         destination,
         destination_reason: destination_reason.to_owned(),
@@ -3854,11 +3854,7 @@ fn candidate(
     };
     let action = preliminary_action(&classification);
     let candidate_payload = canonical_json_bytes(&(&claim_id, 1.0f64, &classification, &action))?;
-    let candidate_id = domain_id(
-        "candidate",
-        "memzoi/capture-candidate-v1",
-        &candidate_payload,
-    );
+    let candidate_id = domain_id("candidate", "memzoi/capture-candidate", &candidate_payload);
     Ok(CaptureCandidate {
         claim_id,
         candidate_id,
@@ -4121,8 +4117,7 @@ fn classify_actions_with_reserved(
                 &candidate.classification,
                 &candidate.action,
             ))?;
-            candidate.candidate_id =
-                domain_id("candidate", "memzoi/capture-candidate-v2", &payload);
+            candidate.candidate_id = domain_id("candidate", "memzoi/capture-candidate", &payload);
             continue;
         }
         let exact_key = draft_key(&candidate.memory)?;
@@ -4194,7 +4189,7 @@ fn classify_actions_with_reserved(
             &candidate.classification,
             &candidate.action,
         ))?;
-        candidate.candidate_id = domain_id("candidate", "memzoi/capture-candidate-v2", &payload);
+        candidate.candidate_id = domain_id("candidate", "memzoi/capture-candidate", &payload);
         earlier.push(InventoryEntry {
             kind: CaptureMatchKind::EarlierCandidate,
             id: candidate.candidate_id.clone(),
@@ -4705,7 +4700,7 @@ fn draft_key(memory: &CaptureMemoryDraft) -> Result<String> {
         &memory.scope,
     );
     Ok(domain_hash(
-        "memzoi/capture-exact-draft-v1",
+        "memzoi/capture-exact-draft",
         &canonical_json_bytes(&normalized)?,
     ))
 }

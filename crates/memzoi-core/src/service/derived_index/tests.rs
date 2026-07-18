@@ -132,7 +132,7 @@ fn rebuild_refuses_when_the_shared_runtime_cannot_be_read() -> anyhow::Result<()
 }
 
 #[test]
-fn rebuild_validates_shared_proposals_before_replacing_the_index() -> anyhow::Result<()> {
+fn rebuild_rejects_incompatible_shared_schema_before_replacing_the_index() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let pending = service.propose_memory_with_options(
         "agent:red-tests",
@@ -156,9 +156,9 @@ fn rebuild_validates_shared_proposals_before_replacing_the_index() -> anyhow::Re
     drop(shared);
 
     let error = MemoryService::rebuild_paths(paths.clone())
-        .expect_err("rebuild should inspect shared proposals before replacing the index");
+        .expect_err("rebuild should inspect the shared schema before replacing the index");
     assert!(
-        format!("{error:#}").contains("shared database proposals"),
+        format!("{error:#}").contains("database does not match the current Memzoi format"),
         "unexpected rebuild error: {error:#}"
     );
 

@@ -341,11 +341,11 @@ same identity they would have against an empty runtime inventory.
 
 ### Instruction, ADR, and Git-change profiles
 
-Extension profiles use a complete `memzoi/capture-request-v2` artifact. For
+Extension profiles use a complete `memzoi/capture-request` artifact. For
 example, this request captures one explicitly named agent instruction file:
 
 ```yaml
-schema: memzoi/capture-request-v2
+schema: memzoi/capture-request
 sources:
   - source_id: agent-rules
     locator:
@@ -455,7 +455,7 @@ accepts one candidate:
 
 ```json
 {
-  "schema": "memzoi/capture-review-input-v2",
+  "schema": "memzoi/capture-review-input",
   "plan_id": "capture_...",
   "decisions": [
     {
@@ -475,7 +475,7 @@ explicit RFC 3339 time. The resulting `review_id` pins the plan, reviewer, time,
 set, and any reviewed candidate edits.
 
 A later review may replace deferred decisions only. Set `prior_review_id` in the next
-`capture-review-input-v2` artifact and pass the complete predecessor with
+`capture-review-input` artifact and pass the complete predecessor with
 `--prior-review-file <capture-review.json>`. Core verifies the prior review identity, requires the
 same plan, preserves every terminal decision byte-for-byte after normalization, and binds the new
 review ID to its predecessor. Applying that later review also requires the immediate predecessor
@@ -505,7 +505,7 @@ Proposal-file and runtime writes are one crash-recoverable guarded operation. A 
 fsynced journal and a SQLite commit marker let the next service open roll back an interrupted
 uncommitted batch or finish a committed proposal install without exposing private bodies in the
 journal. The result uses schema
-`memzoi/capture-apply-result-v2` and lists each proposal file or runtime record written.
+`memzoi/capture-apply-result` and lists each proposal file or runtime record written.
 
 Capture provenance records the plan/review, original and reviewed candidate identities, extractor,
 evidence locator/spans/hashes, confidence, destination, sensitivity, and review outcome. Pending
@@ -541,12 +541,12 @@ object instead of the human-readable summary. `plan` is the review step and is
 mutation-free. `apply` recomputes the plan from the manifest and current memory state,
 then requires the supplied `--plan-id` to match before it writes anything.
 
-### Manifest (`memzoi/import-v2`)
+### Manifest (`memzoi/import`)
 
 The YAML document has exactly these top-level keys; unknown keys are rejected:
 
 ```yaml
-version: memzoi/import-v2
+schema: memzoi/import
 origin_key: integration:event:123
 sources:
   - path: imports/source.yml       # or url: https://… or ref: issue://123
@@ -595,7 +595,7 @@ Inference is deliberately narrow and deterministic:
 
 ### Plan and apply semantics
 
-`import plan` returns schema `memzoi/import-plan-v2`, a deterministic `plan_id`, the
+`import plan` returns schema `memzoi/import-plan`, a deterministic `plan_id`, the
 normalized `sources`, a `summary`, and one normalized result per candidate. With `--json`,
 the plan envelope also includes `mode: "plan"`, the effective `actor`, and the manifest
 `source_file`; the plan envelope has no `writes` field.

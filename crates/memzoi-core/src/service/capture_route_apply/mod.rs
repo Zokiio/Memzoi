@@ -650,9 +650,7 @@ fn validate_capture_proposal_projection_values(
 }
 
 pub(super) fn recover_on_open(paths: &MemoryPaths, conn: &Connection) -> Result<()> {
-    if journal::capture_apply_journal_exists(paths)?
-        || journal::legacy_capture_apply_journal_exists(paths)?
-    {
+    if journal::capture_apply_journal_exists(paths)? {
         let _lifecycle_lock = RepoLifecycleLock::acquire(paths)?;
         recover_capture_apply(paths, conn)
             .context("failed to recover an interrupted capture apply")?;

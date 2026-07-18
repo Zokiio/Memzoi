@@ -42,7 +42,7 @@ fn safety_record_markdown(body: &str, content_class: Option<&str>) -> String {
         .map(|value| format!("content_class: {value}\n"))
         .unwrap_or_default();
     format!(
-        "---\nid: safety-fixture\nkind: memory\nversion: okf/v0.2\nprofile: memzoi/v1\nretention:\n  policy_version: memzoi/lane-retention-v1\norigin:\n  version: memzoi/origin-v1\n  origin_key: test-safety:safety-fixture\n  route: repository_materialization\ntype: fact\nlane: semantic\ntitle: Safety fixture\ntimestamp: 2026-07-14T00:00:00Z\nupdated: 2026-07-14T00:00:00Z\nstatus: active\nscope: repo\nvisibility: repo\n{content_class}confidence: 1\nsource: test\nsource_ref: fixture://safety\n---\n\n# Safety fixture\n\n{body}\n"
+        "---\nid: safety-fixture\nkind: memory\nprofile: memzoi\nretention: {{}}\norigin:\n  origin_key: test-safety:safety-fixture\n  route: repository_materialization\ntype: fact\nlane: semantic\ntitle: Safety fixture\ntimestamp: 2026-07-14T00:00:00Z\nupdated: 2026-07-14T00:00:00Z\nstatus: active\nscope: repo\nvisibility: repo\n{content_class}confidence: 1\nsource: test\nsource_ref: fixture://safety\n---\n\n# Safety fixture\n\n{body}\n"
     )
 }
 

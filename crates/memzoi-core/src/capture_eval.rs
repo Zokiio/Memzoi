@@ -4226,7 +4226,7 @@ mod tests {
             r#"
 id: forged-policy-read
 request:
-  schema: memzoi/capture-request-v2
+  schema: memzoi/capture-request
   sources:
     - source_id: source-1
       locator: {kind: project_path, path: notes/source.md}
@@ -4260,7 +4260,7 @@ expected_policy_inputs:
     engine_version: memzoi/git-unified-renderer-v1+git-
     engine_match: prefix
 request:
-  schema: memzoi/capture-request-v2
+  schema: memzoi/capture-request
   sources:
     - source_id: source-1
       locator:

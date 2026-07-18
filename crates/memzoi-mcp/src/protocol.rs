@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "memzoi";
 const DEFAULT_ACTOR: &str = "mcp";
-const INVALID_CAPTURE_REQUEST: &str = "invalid memzoi/capture-request-v2 request";
+const INVALID_CAPTURE_REQUEST: &str = "invalid memzoi/capture-request request";
 const CAPTURE_PLANNING_FAILED: &str = "capture planning failed safely";
 const PRIVATE_CAPTURE_DENIED: &str = "private capture plans are not available to this MCP client";
 const MAX_JSONRPC_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -690,7 +690,7 @@ fn tools_list_result() -> Value {
                     "properties": {
                         "schema": {
                             "type": "string",
-                            "const": "memzoi/capture-request-v2"
+                            "const": "memzoi/capture-request"
                         },
                         "sources": {
                             "type": "array",
@@ -833,7 +833,7 @@ fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
         tool["outputSchema"] = json!({
             "type": "object",
             "properties": {
-                "schema": { "const": "memzoi/capture-plan-v2" },
+                "schema": { "const": "memzoi/capture-plan" },
                 "plan_id": { "type": "string" },
                 "status": { "enum": ["ready", "blocked"] },
                 "data_class": { "enum": ["repo_safe", "private", "blocked"] },
@@ -1280,7 +1280,7 @@ mod tests {
 
     fn capture_arguments(path: &str) -> Value {
         json!({
-            "schema": "memzoi/capture-request-v2",
+            "schema": "memzoi/capture-request",
             "sources": [
                 {
                     "source_id": "mcp-source",
@@ -1774,7 +1774,7 @@ mod tests {
         let schema = &capture_tool["inputSchema"];
         assert_eq!(
             capture_tool["outputSchema"]["properties"]["schema"]["const"],
-            "memzoi/capture-plan-v2"
+            "memzoi/capture-plan"
         );
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
@@ -1783,7 +1783,7 @@ mod tests {
         );
         assert_eq!(
             schema["properties"]["schema"]["const"],
-            "memzoi/capture-request-v2"
+            "memzoi/capture-request"
         );
         let sources = &schema["properties"]["sources"];
         assert_eq!(sources["minItems"], 1);
@@ -2018,7 +2018,7 @@ mod tests {
         let result = &response["result"];
         assert_eq!(result["isError"], false);
         let structured = &result["structuredContent"];
-        assert_eq!(structured["schema"], "memzoi/capture-plan-v2");
+        assert_eq!(structured["schema"], "memzoi/capture-plan");
         assert_eq!(structured["status"], "blocked");
         assert_eq!(structured["data_class"], "blocked");
         assert_eq!(structured["candidates"], json!([]));
@@ -2352,8 +2352,7 @@ mod tests {
             r#"---
 id: expired-mcp-diagnostic
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 type: fact
 lane: semantic
 title: Expired MCP diagnostic
@@ -2365,10 +2364,8 @@ confidence: 1.0
 scope: repo
 source: test
 retention:
-  policy_version: memzoi/lane-retention-v1
   explicit_expires_at: 2000-01-01T00:00:00Z
 origin:
-  version: memzoi/origin-v1
   origin_key: test:expired-mcp-diagnostic
   route: repository_materialization
 ---

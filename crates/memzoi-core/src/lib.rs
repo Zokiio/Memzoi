@@ -116,9 +116,9 @@ pub use okf::{
     render_okf_record_markdown,
 };
 pub use origin::{
-    ORIGIN_IDENTITY_VERSION, OriginDescriptor, OriginIdentity, OriginLookup, OriginOutcome,
-    OriginOutcomeKind, OriginPreparation, OriginRoute, PreparedOrigin, RecordLineage,
-    RecordLineageKind, finalize_origin, lookup_origin, origin_input_fingerprint, prepare_origin,
+    OriginDescriptor, OriginIdentity, OriginLookup, OriginOutcome, OriginOutcomeKind,
+    OriginPreparation, OriginRoute, PreparedOrigin, RecordLineage, RecordLineageKind,
+    finalize_origin, lookup_origin, origin_input_fingerprint, prepare_origin,
     record_origin_outcome,
 };
 pub use precheck::PrecheckInput;
@@ -158,9 +158,8 @@ pub use repository_write_safety::{
 };
 pub use retention::{
     CurrentAssertionDecision, CurrentAssertionExclusion, EpisodicRetentionExtension,
-    RETENTION_POLICY_VERSION, RetentionDecision, RetentionFacts, RetentionReason, RetentionState,
-    SQL_RETENTION_STATE, evaluate_current_assertion, evaluate_retention,
-    retention_facts_for_creation,
+    RetentionDecision, RetentionFacts, RetentionReason, RetentionState, SQL_RETENTION_STATE,
+    evaluate_current_assertion, evaluate_retention, retention_facts_for_creation,
 };
 pub use search::SearchInput;
 pub use service::{

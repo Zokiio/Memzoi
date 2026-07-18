@@ -5,7 +5,6 @@ use time::{Duration, OffsetDateTime, UtcOffset, format_description::well_known::
 
 use crate::models::{MemoryLane, MemoryStatus};
 
-pub const RETENTION_POLICY_VERSION: &str = "memzoi/lane-retention-v1";
 pub const SQL_RETENTION_STATE: &str = "memzoi_retention_state";
 
 const SESSION_INACTIVITY_HOURS: i64 = 24;
@@ -16,7 +15,6 @@ const EPISODIC_MAXIMUM_DAYS: i64 = 90;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionFacts {
-    pub policy_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurred_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40,7 +38,6 @@ pub struct EpisodicRetentionExtension {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionDecision {
-    pub policy_version: String,
     pub state: RetentionState,
     pub effective_boundary: Option<String>,
     pub reason: RetentionReason,
@@ -84,30 +81,15 @@ pub struct CurrentAssertionDecision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CurrentAssertionExclusion {
-    LifecycleStatus {
-        status: MemoryStatus,
-    },
-    Retention {
-        reason: RetentionReason,
-    },
-    Applicability {
-        policy_version: String,
-        reason: String,
-    },
-    UnresolvedConflict {
-        policy_version: String,
-    },
-    Quarantine {
-        policy_version: String,
-        reason: String,
-    },
-    Safety {
-        policy_version: String,
-        reason: String,
-    },
+    LifecycleStatus { status: MemoryStatus },
+    Retention { reason: RetentionReason },
+    Applicability { reason: String },
+    UnresolvedConflict,
+    Quarantine { reason: String },
+    Safety { reason: String },
 }
 
-/// Evaluate only the versioned lane-retention policy.
+/// Evaluate only the current lane-retention policy.
 ///
 /// Invalid facts are errors rather than a third retention state. Every error
 /// includes `record_id` so a caller can identify the artifact that must be
@@ -170,7 +152,6 @@ pub fn retention_facts_for_creation(
         parse_timestamp(value, "explicit_expires_at")?;
     }
     let mut facts = RetentionFacts {
-        policy_version: RETENTION_POLICY_VERSION.to_owned(),
         occurred_at: None,
         started_at: None,
         last_continued_at: None,
@@ -258,12 +239,6 @@ fn evaluate_retention_inner(
     facts: &RetentionFacts,
     evaluated_at: OffsetDateTime,
 ) -> Result<RetentionDecision> {
-    ensure!(
-        facts.policy_version == RETENTION_POLICY_VERSION,
-        "unsupported retention policy version {:?}; expected {RETENTION_POLICY_VERSION}",
-        facts.policy_version
-    );
-
     let explicit = facts
         .explicit_expires_at
         .as_deref()
@@ -286,7 +261,6 @@ fn evaluate_retention_inner(
     };
 
     Ok(RetentionDecision {
-        policy_version: facts.policy_version.clone(),
         state,
         effective_boundary,
         reason,
@@ -520,7 +494,6 @@ mod tests {
 
     fn facts() -> RetentionFacts {
         RetentionFacts {
-            policy_version: RETENTION_POLICY_VERSION.to_owned(),
             occurred_at: None,
             started_at: None,
             last_continued_at: None,
@@ -693,9 +666,7 @@ mod tests {
             MemoryLane::Episodic,
             &facts,
             instant("2026-02-01T00:00:00Z")?,
-            vec![CurrentAssertionExclusion::UnresolvedConflict {
-                policy_version: "memzoi/conflict-v1".to_owned(),
-            }],
+            vec![CurrentAssertionExclusion::UnresolvedConflict],
         )?;
 
         assert!(!decision.is_current);

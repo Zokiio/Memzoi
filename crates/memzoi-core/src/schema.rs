@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
 pub const UNSUPPORTED_SCHEMA_ERROR_PREFIX: &str = "unsupported SQLite schema";
 
 pub fn is_unsupported_schema_error(error: &anyhow::Error) -> bool {
@@ -11,91 +10,82 @@ pub fn is_unsupported_schema_error(error: &anyhow::Error) -> bool {
 }
 
 pub fn init(conn: &Connection) -> Result<()> {
-    validate_schema_cutover(conn)?;
-    conn.execute_batch(SCHEMA)
-        .context("failed to initialize SQLite schema")?;
-    validate_current_schema(conn)?;
-    conn.execute_batch(RUNTIME_MIRROR_TRIGGERS)
-        .context("failed to initialize runtime mirror revision triggers")?;
+    if database_has_no_application_objects(conn)? {
+        conn.execute_batch(CURRENT_SCHEMA)
+            .context("failed to initialize SQLite schema")?;
+        conn.execute_batch(RUNTIME_MIRROR_TRIGGERS)
+            .context("failed to initialize runtime mirror revision triggers")?;
+    }
+    validate_exact_current_schema(conn)?;
     Ok(())
 }
 
-fn validate_schema_cutover(conn: &Connection) -> Result<()> {
-    let has_migrations: bool = conn.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sqlite_master
-           WHERE type = 'table' AND name = 'schema_migrations'
+pub(crate) fn validate_existing(conn: &Connection) -> Result<()> {
+    if database_has_no_application_objects(conn)? {
+        return Ok(());
+    }
+    validate_exact_current_schema(conn)
+}
+
+fn database_has_no_application_objects(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT NOT EXISTS(
+           SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'
          )",
         [],
         |row| row.get(0),
-    )?;
-    if !has_migrations {
-        let has_existing_schema: bool = conn.query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM sqlite_master
-               WHERE name NOT LIKE 'sqlite_%'
-             )",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_existing_schema {
-            bail!(
-                "unsupported SQLite schema: database predates schema version {CURRENT_SCHEMA_VERSION}; recreate it from current-format sources"
-            );
-        }
-        return Ok(());
-    }
+    )
+    .context("failed to inspect SQLite schema")
+}
 
-    let mut statement = conn.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
-    let versions = statement
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if versions != [CURRENT_SCHEMA_VERSION] {
+fn validate_exact_current_schema(conn: &Connection) -> Result<()> {
+    let expected = Connection::open_in_memory()
+        .context("failed to create current-schema validation database")?;
+    expected
+        .execute_batch(CURRENT_SCHEMA)
+        .context("failed to create current-schema validation tables")?;
+    expected
+        .execute_batch(RUNTIME_MIRROR_TRIGGERS)
+        .context("failed to create current-schema validation triggers")?;
+
+    if schema_snapshot(conn)? != schema_snapshot(&expected)? {
         bail!(
-            "unsupported SQLite schema versions {versions:?}; expected only version {CURRENT_SCHEMA_VERSION}; manually remove or upgrade the database"
+            "unsupported SQLite schema: database does not match the current Memzoi format; manually upgrade or remove it"
         );
     }
     Ok(())
 }
 
-fn validate_current_schema(conn: &Connection) -> Result<()> {
-    for (table, column) in [
-        ("memory_record", "retention_json"),
-        ("memory_record", "origin_json"),
-        ("memory_record", "lineage_json"),
-    ] {
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
-             )",
-            [table, column],
-            |row| row.get(0),
-        )?;
-        if !exists {
-            bail!(
-                "invalid SQLite schema version {CURRENT_SCHEMA_VERSION}: missing {table}.{column}"
-            );
-        }
-    }
-    let has_origin_registry: bool = conn.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sqlite_master
-           WHERE type = 'table' AND name = 'origin_outcome'
-         )",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_origin_registry {
-        bail!("invalid SQLite schema version {CURRENT_SCHEMA_VERSION}: missing origin_outcome");
-    }
-    Ok(())
+#[derive(Debug, PartialEq, Eq)]
+struct SchemaObject {
+    object_type: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
 }
 
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_migrations (
-  version INTEGER PRIMARY KEY,
-  applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+fn schema_snapshot(conn: &Connection) -> Result<Vec<SchemaObject>> {
+    let mut statement = conn.prepare(
+        "SELECT type, name, tbl_name, sql
+         FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%'
+         ORDER BY type, name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(SchemaObject {
+            object_type: row.get(0)?,
+            name: row.get(1)?,
+            table_name: row.get(2)?,
+            sql: row
+                .get::<_, Option<String>>(3)?
+                .map(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" ")),
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to read SQLite schema definition")
+}
+
+const CURRENT_SCHEMA: &str = r#"
 
 CREATE TABLE IF NOT EXISTS event_log (
   id TEXT PRIMARY KEY,
@@ -135,7 +125,6 @@ CREATE TABLE IF NOT EXISTS memory_record (
 CREATE TABLE IF NOT EXISTS origin_outcome (
   repository_key TEXT NOT NULL CHECK (length(trim(repository_key)) > 0),
   origin_key TEXT NOT NULL CHECK (length(trim(origin_key)) > 0),
-  origin_version TEXT NOT NULL CHECK (length(trim(origin_version)) > 0),
   route TEXT NOT NULL CHECK (length(trim(route)) > 0),
   input_fingerprint TEXT NOT NULL CHECK (
     length(input_fingerprint) = 64
@@ -252,8 +241,6 @@ CREATE INDEX IF NOT EXISTS idx_memory_path_path ON memory_path(path);
 CREATE INDEX IF NOT EXISTS idx_proposal_id_status ON proposal(id, status);
 CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_memory_capture_record_id ON memory_capture(record_id);
-
-INSERT OR IGNORE INTO schema_migrations(version) VALUES (7);
 "#;
 
 const RUNTIME_MIRROR_TRIGGERS: &str = r#"

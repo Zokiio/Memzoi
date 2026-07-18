@@ -13,6 +13,7 @@ pub fn open_database(path: &Path) -> Result<Connection> {
 
     let conn = Connection::open(path)
         .with_context(|| format!("failed to open SQLite database {}", path.display()))?;
+    schema::validate_existing(&conn)?;
     configure_connection(&conn)?;
     Ok(conn)
 }
@@ -42,7 +43,6 @@ mod tests {
     use tempfile::TempDir;
 
     const EXPECTED_TABLES: &[&str] = &[
-        "schema_migrations",
         "event_log",
         "memory_record",
         "origin_outcome",
@@ -71,8 +71,8 @@ mod tests {
                 "rec-existing",
                 "Existing memory",
                 "This row must survive a second schema init.",
-                r#"{"policy_version":"memzoi/lane-retention-v1"}"#,
-                r#"{"version":"memzoi/origin-v1","origin_key":"test:rec-existing","route":"local_memory"}"#,
+                r#"{}"#,
+                r#"{"origin_key":"test:rec-existing","route":"local_memory"}"#,
                 "hash-existing"
             ],
         )?;
@@ -82,12 +82,6 @@ mod tests {
             assert!(table_exists(&conn, table)?, "missing table {table}");
         }
 
-        let migrations: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 7",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(migrations, 1);
         let capture_table: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_capture')",
             [],
@@ -120,17 +114,12 @@ mod tests {
     }
 
     #[test]
-    fn init_database_rejects_pre_v7_databases_without_migrating_them() -> anyhow::Result<()> {
+    fn open_database_rejects_any_non_current_schema_without_modifying_it() -> anyhow::Result<()> {
         let temp = TempDir::new()?;
         let db_path = temp.path().join("memory.db");
-        let conn = open_database(&db_path)?;
+        let conn = Connection::open(&db_path)?;
         conn.execute_batch(
             r#"
-            CREATE TABLE schema_migrations (
-              version INTEGER PRIMARY KEY,
-              applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            );
-            INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5), (6);
             CREATE TABLE memory_record (
               rowid INTEGER PRIMARY KEY,
               id TEXT NOT NULL UNIQUE,
@@ -154,17 +143,18 @@ mod tests {
             VALUES ('legacy-record', 'decision', 'repo', 'Legacy record', 'Legacy body', 'active', 'legacy-hash');
             "#,
         )?;
+        drop(conn);
 
-        let error = init_database(&conn).expect_err("legacy schema must be rejected");
+        let error = open_database(&db_path).expect_err("non-current schema must be rejected");
         let message = format!("{error:#}");
-        assert!(message.contains("unsupported SQLite schema versions"));
-        assert!(message.contains("expected only version 7"));
+        assert!(message.contains("database does not match the current Memzoi format"));
 
-        let versions: Vec<i64> = conn
-            .prepare("SELECT version FROM schema_migrations ORDER BY version")?
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+        let conn = Connection::open(&db_path)?;
+        let journal_mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        assert_eq!(journal_mode, "delete");
+        let records: i64 =
+            conn.query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
+        assert_eq!(records, 1);
 
         Ok(())
     }
@@ -210,8 +200,8 @@ mod tests {
                 "rec-active",
                 "Searchable setup note",
                 "The zircon token must be findable through the FTS index.",
-                r#"{"policy_version":"memzoi/lane-retention-v1"}"#,
-                r#"{"version":"memzoi/origin-v1","origin_key":"test:rec-active","route":"local_memory"}"#,
+                r#"{}"#,
+                r#"{"origin_key":"test:rec-active","route":"local_memory"}"#,
                 "hash-active"
             ],
         )?;

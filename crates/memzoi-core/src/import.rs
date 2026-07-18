@@ -17,7 +17,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportDocument {
-    pub version: String,
+    pub schema: String,
     pub origin_key: String,
     pub sources: Vec<OkfProposalSource>,
     pub candidates: Vec<ImportCandidateInput>,
@@ -231,8 +231,8 @@ pub fn parse_import_document(input: &str) -> Result<ImportDocument> {
 }
 
 pub(crate) fn validate_document(doc: &ImportDocument) -> Result<()> {
-    if doc.version != "memzoi/import-v2" {
-        bail!("unsupported import manifest version {:?}", doc.version);
+    if doc.schema != "memzoi/import" {
+        bail!("artifact does not match the current Memzoi import format");
     }
     if doc.origin_key.trim().is_empty() || doc.origin_key != doc.origin_key.trim() {
         bail!("import manifest origin_key must be a non-empty trimmed string");
@@ -633,7 +633,7 @@ pub(crate) fn build_plan(
     }
 
     let mut plan = ImportPlan {
-        schema: "memzoi/import-plan-v2".to_owned(),
+        schema: "memzoi/import-plan".to_owned(),
         plan_id: String::new(),
         origin_key: doc.origin_key.clone(),
         sources,

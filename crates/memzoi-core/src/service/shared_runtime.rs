@@ -19,9 +19,8 @@ use super::{
     safe_files::{RepoLifecycleLock, sync_directory},
 };
 
-const MIGRATION_RECEIPT_FILE: &str = "migration-v1.json";
-const SHARED_SYNC_JOURNAL_SCHEMA: &str = "memzoi/shared-sync-v2";
-const SHARED_SYNC_JOURNAL_FILE: &str = "shared-sync-v1.json";
+const SHARED_SYNC_JOURNAL_SCHEMA: &str = "memzoi/shared-sync";
+const SHARED_SYNC_JOURNAL_FILE: &str = "shared-sync.json";
 const SHARED_SYNC_MARKER_EVENT: &str = "memzoi.shared_sync.index_committed";
 const SHARED_SYNC_MARKER_ACTOR: &str = "system:shared-sync";
 const RUNTIME_MIRROR_STATE_SINGLETON: i64 = 1;
@@ -137,14 +136,9 @@ pub(super) fn reject_unsupported_runtime_layout(paths: &MemoryPaths) -> Result<(
             || path.join("memory.db").is_file()
             || path.join("shared.db").is_file()
     });
-    if paths
-        .repository_runtime_dir
-        .join(MIGRATION_RECEIPT_FILE)
-        .is_file()
-        || retained_legacy_sources
-    {
+    if retained_legacy_sources {
         bail!(
-            "unsupported pre-v1 runtime layout; manually remove or upgrade legacy runtime databases and migration receipts"
+            "unsupported runtime layout; manually remove or upgrade incompatible runtime databases"
         );
     }
     Ok(())
@@ -1651,15 +1645,15 @@ mod tests {
     }
 
     #[test]
-    fn initialize_rejects_legacy_runtime_without_translating_or_mutating_it() -> Result<()> {
+    fn initialize_rejects_incompatible_runtime_without_translating_or_mutating_it() -> Result<()> {
         let (_temp, paths, _local_id, _proposal_id) = legacy_git_fixture()?;
         let legacy_database = paths.legacy_runtime_dirs[0].join("memory.db");
         let before = fs::read(&legacy_database)?;
 
         let error = MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })
-            .expect_err("pre-v1 runtime layouts must be rejected");
+            .expect_err("incompatible runtime layouts must be rejected");
         assert!(
-            format!("{error:#}").contains("unsupported pre-v1 runtime layout"),
+            format!("{error:#}").contains("unsupported runtime layout"),
             "{error:#}"
         );
         assert_eq!(fs::read(&legacy_database)?, before);

@@ -22,7 +22,7 @@ use super::{
     },
 };
 
-const JOURNAL_SCHEMA: &str = "memzoi/import-origin-journal-v1";
+const JOURNAL_SCHEMA: &str = "memzoi/import-origin-journal";
 const JOURNAL_PREFIX: &str = ".import-origin-";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,7 +347,7 @@ mod tests {
     use super::*;
     use crate::{
         MemoryLane, MemoryType, OkfProposalSensitivity, OriginDescriptor, RepositoryContentClass,
-        RetentionFacts, ScopeKind, retention::RETENTION_POLICY_VERSION,
+        RetentionFacts, ScopeKind,
     };
 
     #[test]
@@ -383,7 +383,6 @@ mod tests {
                 content_class: RepositoryContentClass::GeneralRepoKnowledge,
                 capture: None,
                 retention: RetentionFacts {
-                    policy_version: RETENTION_POLICY_VERSION.to_owned(),
                     occurred_at: None,
                     started_at: None,
                     last_continued_at: None,

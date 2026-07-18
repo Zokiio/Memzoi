@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::{
     CaptureCandidate, CaptureProvenance, MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus,
-    MemoryType, OriginDescriptor, OriginRoute, RETENTION_POLICY_VERSION, RecordLineage,
-    RetentionFacts, ScopeKind, Visibility,
+    MemoryType, OriginDescriptor, OriginRoute, RecordLineage, RetentionFacts, ScopeKind,
+    Visibility,
     events::{AppendEvent, append_event},
     proposals,
 };
@@ -376,7 +376,6 @@ pub(super) fn create_capture(
 
 fn retention_facts_for_lane(lane: MemoryLane, now: &str) -> RetentionFacts {
     RetentionFacts {
-        policy_version: RETENTION_POLICY_VERSION.to_owned(),
         occurred_at: (lane == MemoryLane::Episodic).then(|| now.to_owned()),
         started_at: (lane == MemoryLane::Session).then(|| now.to_owned()),
         last_continued_at: None,

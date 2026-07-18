@@ -240,7 +240,6 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     if let Some(kind) = &entry.proposal.kind {
         println!("kind:\t{kind}");
     }
-    println!("version:\t{}", entry.proposal.version);
     println!("profile:\t{}", entry.proposal.profile);
     println!("status:\t{}", entry.proposal.status.as_str());
     println!("action:\t{}", entry.proposal.proposal.action.as_str());
@@ -360,7 +359,6 @@ fn proposal_file_json(entry: &ProposalFileEntry, include_body: bool) -> serde_js
         "file_id": &proposal.file_id,
         "path": &entry.display_path,
         "kind": &proposal.kind,
-        "version": &proposal.version,
         "profile": &proposal.profile,
         "type": proposal.memory_type.as_str(),
         "lane": proposal.lane.as_str(),

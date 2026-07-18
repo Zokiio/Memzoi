@@ -4,7 +4,7 @@ title: OKF Profile
 
 # Memzoi OKF Profile
 
-Memzoi uses the `okf/v0.2` format with the `memzoi/v1` profile for reviewable, file-native memory. The profile defines where records live, which frontmatter fields Memzoi understands, and which files are reserved for human navigation or logs.
+Memzoi uses ordinary OKF Markdown with the unversioned `memzoi` profile for reviewable, file-native memory. The profile defines where records live, which frontmatter fields Memzoi understands, and which files are reserved for human navigation or logs. Per-file OKF version declarations are not part of the profile.
 
 Before Memzoi 1.0, format changes are hard cutovers. Older artifacts are rejected and must be manually upgraded or removed; Memzoi does not provide legacy readers, inferred defaults, dual writes, or automatic migrations.
 
@@ -85,8 +85,7 @@ A canonical record is a Markdown file with YAML frontmatter followed by the huma
 ---
 id: use-react-query-in-apps-active
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 type: decision
 lane: semantic
 title: Use React Query in apps/active
@@ -103,10 +102,8 @@ source: human
 source_ref: issue://123
 supersedes: old-data-client
 retention:
-  policy_version: memzoi/lane-retention-v1
   explicit_expires_at: 2027-01-01T00:00:00Z
 origin:
-  version: memzoi/origin-v1
   origin_key: issue:123:accepted-decision
   route: repository_materialization
 ---
@@ -130,8 +127,8 @@ These fields define the current Memzoi profile:
 | `source_ref` | Optional durable reference for provenance, such as `issue://123`, `pr://45`, a commit SHA, or a URL. |
 | `proposal_id` | Optional ID of the review packet that approved the record. This is proposal lineage, not evidence provenance, and is kept separate from `source`/`source_ref`. |
 | `supersedes` | Optional record ID replaced by this record. Prefer this over mutating old records in place. |
-| `retention` | Required versioned retention facts. Semantic/procedural records need only `policy_version`; episodic records require `occurred_at`; session records require `started_at`. Optional `explicit_expires_at` must be RFC 3339. |
-| `origin` | Required content-free source-event identity containing `version`, repository-scoped `origin_key`, and `route`. Exact source replay uses this identity independently of record expiry. |
+| `retention` | Required current-format retention facts. Semantic/procedural records use an empty object unless explicitly expiring; episodic records require `occurred_at`; session records require `started_at`. Optional `explicit_expires_at` must be RFC 3339. |
+| `origin` | Required content-free source-event identity containing repository-scoped `origin_key` and `route`. Exact source replay uses this identity independently of record expiry. |
 | `lineage` | Optional renewal or session-successor relationship containing `kind` and `predecessor_id`. It is separate from `supersedes`. |
 
 `source` and `source_ref` are independently optional. Memzoi preserves missing
@@ -175,12 +172,9 @@ The initial proposal status is always `proposed`. Do not confuse file proposal s
 ---
 id: mem_2026_07_06_auth_001
 kind: proposal
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: issue:123:proposal
   route: repository_proposal
 type: decision

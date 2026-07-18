@@ -7,8 +7,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::MemoryDestination;
 
-pub const ORIGIN_IDENTITY_VERSION: &str = "memzoi/origin-v1";
-const ORIGIN_FINGERPRINT_DOMAIN: &[u8] = b"memzoi/origin-input-fingerprint/v1\0";
+const ORIGIN_FINGERPRINT_DOMAIN: &[u8] = b"memzoi/origin-input-fingerprint\0";
 
 /// Portable source-event identity stored with a record or repository artifact.
 ///
@@ -17,7 +16,6 @@ const ORIGIN_FINGERPRINT_DOMAIN: &[u8] = b"memzoi/origin-input-fingerprint/v1\0"
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OriginDescriptor {
-    pub version: String,
     pub origin_key: String,
     pub route: OriginRoute,
 }
@@ -25,7 +23,6 @@ pub struct OriginDescriptor {
 impl OriginDescriptor {
     pub fn new(origin_key: impl Into<String>, route: OriginRoute) -> Self {
         Self {
-            version: ORIGIN_IDENTITY_VERSION.to_owned(),
             origin_key: origin_key.into(),
             route,
         }
@@ -36,7 +33,6 @@ impl OriginDescriptor {
     }
 
     pub fn validate(&self) -> Result<()> {
-        validate_origin_version(&self.version)?;
         require_non_empty("origin_key", &self.origin_key)?;
         if self.origin_key == "owner-command:" {
             bail!("owner command operation_id must not be empty");
@@ -49,7 +45,6 @@ impl OriginDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OriginIdentity {
-    pub version: String,
     pub repository_key: String,
     pub origin_key: String,
     pub route: OriginRoute,
@@ -58,7 +53,6 @@ pub struct OriginIdentity {
 impl OriginIdentity {
     pub fn new(repository_key: impl Into<String>, descriptor: OriginDescriptor) -> Self {
         Self {
-            version: descriptor.version,
             repository_key: repository_key.into(),
             origin_key: descriptor.origin_key,
             route: descriptor.route,
@@ -67,7 +61,6 @@ impl OriginIdentity {
 
     pub fn descriptor(&self) -> OriginDescriptor {
         OriginDescriptor {
-            version: self.version.clone(),
             origin_key: self.origin_key.clone(),
             route: self.route,
         }
@@ -298,7 +291,7 @@ pub fn lookup_origin(
 
     let stored = conn
         .query_row(
-            "SELECT origin_version, route, input_fingerprint, state, outcome_kind,
+            "SELECT route, input_fingerprint, state, outcome_kind,
                     destination, record_id, proposal_id, lifecycle_event_id,
                     prepared_at, recorded_at
              FROM origin_outcome
@@ -306,17 +299,16 @@ pub fn lookup_origin(
             params![identity.repository_key, identity.origin_key],
             |row| {
                 Ok(StoredOrigin {
-                    version: row.get(0)?,
-                    route: row.get(1)?,
-                    input_fingerprint: row.get(2)?,
-                    state: row.get(3)?,
-                    outcome_kind: row.get(4)?,
-                    destination: row.get(5)?,
-                    record_id: row.get(6)?,
-                    proposal_id: row.get(7)?,
-                    lifecycle_event_id: row.get(8)?,
-                    prepared_at: row.get(9)?,
-                    recorded_at: row.get(10)?,
+                    route: row.get(0)?,
+                    input_fingerprint: row.get(1)?,
+                    state: row.get(2)?,
+                    outcome_kind: row.get(3)?,
+                    destination: row.get(4)?,
+                    record_id: row.get(5)?,
+                    proposal_id: row.get(6)?,
+                    lifecycle_event_id: row.get(7)?,
+                    prepared_at: row.get(8)?,
+                    recorded_at: row.get(9)?,
                 })
             },
         )
@@ -326,10 +318,7 @@ pub fn lookup_origin(
     let Some(stored) = stored else {
         return Ok(OriginLookup::Unseen);
     };
-    if stored.version != identity.version
-        || stored.route != identity.route.as_str()
-        || stored.input_fingerprint != input_fingerprint
-    {
+    if stored.route != identity.route.as_str() || stored.input_fingerprint != input_fingerprint {
         bail!(
             "origin_reuse_mismatch: origin key {:?} is already bound to different typed input",
             identity.origin_key
@@ -364,13 +353,12 @@ pub fn prepare_origin(
     let inserted = conn
         .execute(
             "INSERT OR IGNORE INTO origin_outcome(
-               repository_key, origin_key, origin_version, route, input_fingerprint,
+               repository_key, origin_key, route, input_fingerprint,
                state, prepared_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'prepared', ?6)",
+             ) VALUES (?1, ?2, ?3, ?4, 'prepared', ?5)",
             params![
                 identity.repository_key,
                 identity.origin_key,
-                identity.version,
                 identity.route.as_str(),
                 input_fingerprint,
                 prepared_at,
@@ -440,14 +428,13 @@ pub fn record_origin_outcome(conn: &Connection, outcome: &OriginOutcome) -> Resu
     let inserted = conn
         .execute(
             "INSERT OR IGNORE INTO origin_outcome(
-               repository_key, origin_key, origin_version, route, input_fingerprint,
+               repository_key, origin_key, route, input_fingerprint,
                state, outcome_kind, destination, record_id, proposal_id,
                lifecycle_event_id, prepared_at, recorded_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'finalized', ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+             ) VALUES (?1, ?2, ?3, ?4, 'finalized', ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
             params![
                 outcome.identity.repository_key,
                 outcome.identity.origin_key,
-                outcome.identity.version,
                 outcome.identity.route.as_str(),
                 outcome.input_fingerprint,
                 outcome.outcome.as_str(),
@@ -479,7 +466,7 @@ pub(crate) fn finalized_origin_outcomes(
 ) -> Result<Vec<OriginOutcome>> {
     require_non_empty("repository_key", repository_key)?;
     let mut statement = conn.prepare(
-        "SELECT origin_version, origin_key, route, input_fingerprint
+        "SELECT origin_key, route, input_fingerprint
          FROM origin_outcome
          WHERE repository_key = ?1 AND state = 'finalized'
          ORDER BY origin_key",
@@ -489,14 +476,12 @@ pub(crate) fn finalized_origin_outcomes(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
         ))
     })?;
     let mut outcomes = Vec::new();
     for row in rows {
-        let (version, origin_key, route, fingerprint) = row?;
+        let (origin_key, route, fingerprint) = row?;
         let identity = OriginIdentity {
-            version,
             repository_key: repository_key.to_owned(),
             origin_key,
             route: route.parse()?,
@@ -512,18 +497,8 @@ pub(crate) fn finalized_origin_outcomes(
 }
 
 fn validate_identity(identity: &OriginIdentity) -> Result<()> {
-    validate_origin_version(&identity.version)?;
     require_non_empty("repository_key", &identity.repository_key)?;
     identity.descriptor().validate()
-}
-
-fn validate_origin_version(version: &str) -> Result<()> {
-    if version != ORIGIN_IDENTITY_VERSION {
-        bail!(
-            "unsupported origin identity version {version:?}; expected {ORIGIN_IDENTITY_VERSION:?}"
-        );
-    }
-    Ok(())
 }
 
 fn validate_fingerprint(value: &str) -> Result<()> {
@@ -568,7 +543,6 @@ fn validate_timestamp(label: &str, value: &str) -> Result<()> {
 }
 
 struct StoredOrigin {
-    version: String,
     route: String,
     input_fingerprint: String,
     state: String,
@@ -660,7 +634,6 @@ mod tests {
         let identity = identity("private-local-repository-key", "event-1");
         let portable = serde_json::to_value(identity.descriptor())?;
 
-        assert_eq!(portable["version"], ORIGIN_IDENTITY_VERSION);
         assert_eq!(portable["origin_key"], "event-1");
         assert_eq!(portable["route"], "checkpoint_close");
         assert!(portable.get("repository_key").is_none());

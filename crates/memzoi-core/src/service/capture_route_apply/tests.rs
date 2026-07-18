@@ -164,7 +164,7 @@ fn committed_capture_fallback_completes_shared_sync_before_success() -> anyhow::
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     drop(service);
@@ -186,7 +186,7 @@ fn committed_capture_fallback_completes_shared_sync_before_success() -> anyhow::
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     drop(recovered);
@@ -716,49 +716,35 @@ fn open_rolls_back_journal_written_before_proposal_staging() -> anyhow::Result<(
 }
 
 #[test]
-fn open_fails_closed_for_legacy_capture_destination_without_ownership() -> anyhow::Result<()> {
+fn open_rejects_an_incompatible_capture_journal_without_mutating_artifacts() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let paths = service.paths.clone();
     ProposalPacketLifecycle::new(&paths, &service.conn).prepare_pending_root()?;
-    let proposal_id = "mem_legacy_capture_rollback";
+    let proposal_id = "mem_incompatible_capture_rollback";
     let contents = b"Authorization: Bearer deterministic-test-fixture\n";
     let destination = paths
         .proposals_dir()
         .join("pending")
         .join(format!("{proposal_id}.md"));
     fs::write(&destination, contents)?;
-    let legacy_journal = serde_json::json!({
-        "schema": "memzoi/capture-apply-journal-v1",
-        "journal_id": Uuid::now_v7().to_string(),
-        "plan_id": "capture_legacy_test",
-        "review_id": "review_legacy_test",
-        "entries": [{
-            "proposal_id": proposal_id,
-            "content_bytes": contents.len(),
-            "content_hash": blake3::hash(contents).to_hex().to_string(),
-        }],
-    });
+    let mut incompatible_journal = test_capture_apply_journal(&paths, proposal_id, contents);
+    incompatible_journal.schema = "incompatible/capture-apply-journal".to_owned();
     fs::write(
-        paths.runtime_dir.join("capture-apply-journal-v1.json"),
-        serde_json::to_vec_pretty(&legacy_journal)?,
+        capture_apply_journal_path(&paths),
+        serde_json::to_vec_pretty(&incompatible_journal)?,
     )?;
     drop(service);
 
     let error = MemoryService::open_paths(paths.clone())
         .err()
-        .context("legacy recovery without ownership must block startup")?;
+        .context("incompatible recovery without ownership must block startup")?;
 
     assert!(
         format!("{error:#}").contains("unsupported capture apply journal schema"),
         "{error:#}"
     );
     assert_eq!(fs::read(&destination)?, contents);
-    assert!(
-        paths
-            .runtime_dir
-            .join("capture-apply-journal-v1.json")
-            .exists()
-    );
+    assert!(capture_apply_journal_path(&paths).exists());
     Ok(())
 }
 
@@ -945,7 +931,7 @@ fn authorized_test_capture_apply(
     .to_string();
     let entry = &mut journal.entries[0];
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi.capture.projection.v1\0");
+    hasher.update(b"memzoi.capture.projection\0");
     hasher.update(destination.as_os_str().as_encoded_bytes());
     hasher.update(b"\0");
     hasher.update(contents);

@@ -229,7 +229,6 @@ fn write_record(paths: &MemoryPaths, record: FixtureRecord) -> anyhow::Result<()
         updated: None,
         supersedes_id: None,
         retention: RetentionFacts {
-            policy_version: "memzoi/lane-retention-v1".to_owned(),
             occurred_at: None,
             started_at: None,
             last_continued_at: None,

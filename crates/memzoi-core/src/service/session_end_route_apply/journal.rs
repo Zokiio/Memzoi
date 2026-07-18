@@ -17,7 +17,7 @@ use super::super::{
 };
 use super::CheckpointPromotion;
 
-const JOURNAL_SCHEMA: &str = "memzoi/session-end-origin-journal-v1";
+const JOURNAL_SCHEMA: &str = "memzoi/session-end-origin-journal";
 const JOURNAL_PREFIX: &str = ".session-end-origin-";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

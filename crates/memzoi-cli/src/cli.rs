@@ -619,7 +619,7 @@ pub(crate) enum CaptureCommands {
             required_unless_present = "request_file"
         )]
         source: Option<String>,
-        /// Complete capture-request-v2 JSON or YAML artifact for an extension profile.
+        /// Complete capture-request JSON or YAML artifact for an extension profile.
         #[arg(long = "request-file", conflicts_with = "source")]
         request_file: Option<PathBuf>,
         /// Explicit supplied-bytes transport path, or '-' for explicitly selected stdin.
@@ -631,20 +631,20 @@ pub(crate) enum CaptureCommands {
         /// Explicit destination for the complete JSON plan artifact.
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Emit the versioned plan as machine-readable JSON.
+        /// Emit the complete plan as machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
 
     /// Bind reviewed decisions to an immutable capture plan.
     Review {
-        /// Complete capture-plan-v2 JSON artifact.
+        /// Complete capture-plan JSON artifact.
         #[arg(long = "plan-file")]
         plan_file: PathBuf,
-        /// Strict capture-review-input-v2 JSON artifact.
+        /// Strict capture-review-input JSON artifact.
         #[arg(long = "decisions-file")]
         decisions_file: PathBuf,
-        /// Prior capture-review-v2 artifact when replacing deferred decisions.
+        /// Prior capture-review artifact when replacing deferred decisions.
         #[arg(long = "prior-review-file")]
         prior_review_file: Option<PathBuf>,
         /// Exact supplied bytes used by the plan, or '-' for explicitly selected stdin.
@@ -659,17 +659,17 @@ pub(crate) enum CaptureCommands {
         /// Explicit destination for the complete JSON review artifact.
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Emit the versioned review as machine-readable JSON.
+        /// Emit the complete review as machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
 
     /// Route one complete, pinned capture plan and review.
     Apply {
-        /// Complete capture-plan-v2 JSON artifact.
+        /// Complete capture-plan JSON artifact.
         #[arg(long = "plan-file")]
         plan_file: PathBuf,
-        /// Complete capture-review-v2 JSON artifact.
+        /// Complete capture-review JSON artifact.
         #[arg(long = "review-file")]
         review_file: PathBuf,
         /// Immediate predecessor review when applying a later deferred-decision review.
@@ -687,7 +687,7 @@ pub(crate) enum CaptureCommands {
         /// Actor recorded on routed writes.
         #[arg(long, default_value = "cli")]
         actor: String,
-        /// Emit the versioned apply result as machine-readable JSON.
+        /// Emit the complete apply result as machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
@@ -697,23 +697,23 @@ pub(crate) enum CaptureCommands {
 pub(crate) enum MaterializeCommands {
     /// Derive a deterministic materialization plan from one candidate artifact.
     Plan {
-        /// Complete repository-materialization-candidate-v1 JSON artifact.
+        /// Complete repository-materialization-candidate JSON artifact.
         #[arg(long = "candidate-file")]
         candidate_file: PathBuf,
         /// Explicit destination for the complete JSON plan artifact.
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Emit the versioned plan as machine-readable JSON.
+        /// Emit the complete plan as machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
 
     /// Bind the repository materialization policy to a reviewed plan.
     Decide {
-        /// Complete repository-materialization-candidate-v1 JSON artifact.
+        /// Complete repository-materialization-candidate JSON artifact.
         #[arg(long = "candidate-file")]
         candidate_file: PathBuf,
-        /// Complete repository-materialization-plan-v1 JSON artifact.
+        /// Complete repository-materialization-plan JSON artifact.
         #[arg(long = "plan-file")]
         plan_file: PathBuf,
         /// Explicit RFC 3339 decision timestamp.
@@ -722,20 +722,20 @@ pub(crate) enum MaterializeCommands {
         /// Explicit destination for the complete JSON decision artifact.
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Emit the versioned decision as machine-readable JSON.
+        /// Emit the complete decision as machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
 
     /// Install one fully pinned canonical record without staging or committing it.
     Apply {
-        /// Complete repository-materialization-candidate-v1 JSON artifact.
+        /// Complete repository-materialization-candidate JSON artifact.
         #[arg(long = "candidate-file")]
         candidate_file: PathBuf,
-        /// Complete repository-materialization-plan-v1 JSON artifact.
+        /// Complete repository-materialization-plan JSON artifact.
         #[arg(long = "plan-file")]
         plan_file: PathBuf,
-        /// Complete repository-materialization-decision-v1 JSON artifact.
+        /// Complete repository-materialization-decision JSON artifact.
         #[arg(long = "decision-file")]
         decision_file: PathBuf,
         /// BLAKE3 identity expected in the candidate artifact.

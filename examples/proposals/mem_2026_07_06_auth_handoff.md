@@ -1,13 +1,10 @@
 ---
 id: mem_2026_07_06_auth_handoff
 kind: proposal
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 retention:
-  policy_version: memzoi/lane-retention-v1
   occurred_at: 2026-07-06T00:15:00Z
 origin:
-  version: memzoi/origin-v1
   origin_key: repository-proposal:mem_2026_07_06_auth_handoff
   route: repository_proposal
 type: episode

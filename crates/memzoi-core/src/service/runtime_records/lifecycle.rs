@@ -28,7 +28,7 @@ pub(super) fn checkpoint_for_lifecycle(conn: &Connection, record_id: &str) -> Re
 pub(super) fn checkpoint_record_version(record: &MemoryRecord) -> Result<String> {
     ensure_checkpoint_shape(record)?;
     let encoded = serde_json::to_vec(&json!({
-        "schema": "memzoi/checkpoint-record-version-v1",
+        "schema": "memzoi/checkpoint-record-version",
         "record_id": &record.id,
         "status": record.status.as_str(),
         "destination": record.destination.as_str(),
@@ -41,7 +41,7 @@ pub(super) fn checkpoint_record_version(record: &MemoryRecord) -> Result<String>
         "lineage": &record.lineage,
     }))?;
     Ok(format!(
-        "memzoi/checkpoint-record-v1:{}",
+        "memzoi/checkpoint-record:{}",
         blake3::hash(&encoded).to_hex()
     ))
 }

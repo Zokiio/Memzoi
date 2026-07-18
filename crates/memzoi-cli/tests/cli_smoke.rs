@@ -133,7 +133,7 @@ fn capture_plan_review_fixture(repo: &Path) -> (PathBuf, PathBuf, PathBuf, Value
     fs::write(
         &decisions_path,
         serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "memzoi/capture-review-input-v2",
+            "schema": "memzoi/capture-review-input",
             "plan_id": json_string(&plan, "plan_id"),
             "decisions": decisions,
         }))
@@ -387,12 +387,9 @@ fn write_canonical_record_fixture(
             r#"---
 id: {id}
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {{}}
 origin:
-  version: memzoi/origin-v1
   origin_key: test-canonical:{id}
   route: repository_materialization
 type: decision
@@ -433,12 +430,9 @@ fn proposal_markdown_with_title(title: &str) -> String {
         r#"---
 id: mem_test_unicode
 kind: proposal
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {{}}
 origin:
-  version: memzoi/origin-v1
   origin_key: test-proposal:mem_test_unicode
   route: repository_proposal
 type: decision
@@ -500,12 +494,9 @@ fn proposal_markdown_with_options(
         r#"---
 id: mem_test_valid
 kind: proposal
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {{}}
 origin:
-  version: memzoi/origin-v1
   origin_key: test-proposal:mem_test_valid
   route: repository_proposal
 type: decision

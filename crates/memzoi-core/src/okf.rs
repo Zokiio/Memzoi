@@ -15,11 +15,10 @@ use crate::{
     RetentionFacts, ScopeKind, Visibility, capture,
     materialization::{MaterializationMetadata, canonical_revision_for_okf_record},
     proposals::title_to_concept_slug,
-    retention::{RETENTION_POLICY_VERSION, evaluate_retention},
+    retention::evaluate_retention,
 };
 
-pub const OKF_FORMAT_VERSION: &str = "okf/v0.2";
-pub const OKF_PROFILE_VERSION: &str = "memzoi/v1";
+pub const OKF_PROFILE: &str = "memzoi";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OkfRecordFile {
@@ -51,7 +50,6 @@ pub struct OkfProposalFile {
     pub file_id: String,
     pub id: String,
     pub kind: Option<String>,
-    pub version: String,
     pub profile: String,
     pub memory_type: MemoryType,
     pub lane: MemoryLane,
@@ -181,8 +179,7 @@ pub(crate) fn render_okf_create_proposal_markdown(
     let frontmatter = OkfCreateProposalFrontmatter {
         id: draft.proposal_id.trim().to_owned(),
         kind: "proposal".to_owned(),
-        version: OKF_FORMAT_VERSION.to_owned(),
-        profile: OKF_PROFILE_VERSION.to_owned(),
+        profile: OKF_PROFILE.to_owned(),
         memory_type: draft.memory_type,
         lane: draft.lane,
         title: draft.title.trim().to_owned(),
@@ -651,8 +648,7 @@ pub fn preflight_okf_proposal_markdown(
         file_id: receipt_file_id,
         id: receipt_id,
         kind: Some("proposal".to_owned()),
-        version: OKF_FORMAT_VERSION.to_owned(),
-        profile: OKF_PROFILE_VERSION.to_owned(),
+        profile: OKF_PROFILE.to_owned(),
         memory_type: MemoryType::Fact,
         lane: MemoryLane::Semantic,
         title: "Redacted non-repo-safe proposal".to_owned(),
@@ -726,7 +722,6 @@ fn unique_top_level_yaml_scalar(frontmatter: &str, key: &str) -> Option<String> 
 
 fn durable_retention_facts() -> RetentionFacts {
     RetentionFacts {
-        policy_version: RETENTION_POLICY_VERSION.to_owned(),
         occurred_at: None,
         started_at: None,
         last_continued_at: None,
@@ -739,7 +734,6 @@ fn durable_retention_facts() -> RetentionFacts {
 fn validate_schema_identity(
     id: Option<&str>,
     kind: Option<&str>,
-    version: Option<&str>,
     profile: Option<&str>,
     expected_kind: &str,
 ) -> Result<()> {
@@ -753,20 +747,12 @@ fn validate_schema_identity(
     if kind != expected_kind {
         bail!("unsupported OKF kind {kind:?}; expected {expected_kind:?}");
     }
-    let version = version
-        .context("version is required by the current OKF profile")?
-        .trim();
-    if version != OKF_FORMAT_VERSION {
-        bail!(
-            "unsupported OKF format version {version:?}; expected {OKF_FORMAT_VERSION}; pre-1.0 artifacts must be manually upgraded or removed"
-        );
-    }
     let profile = profile
         .context("profile is required by the current OKF profile")?
         .trim();
-    if profile != OKF_PROFILE_VERSION {
+    if profile != OKF_PROFILE {
         bail!(
-            "unsupported OKF profile version {profile:?}; expected {OKF_PROFILE_VERSION}; pre-1.0 artifacts must be manually upgraded or removed"
+            "unsupported OKF profile {profile:?}; expected {OKF_PROFILE}; pre-1.0 artifacts must be manually upgraded or removed"
         );
     }
     Ok(())
@@ -825,7 +811,6 @@ pub fn parse_okf_record_markdown(
     validate_schema_identity(
         frontmatter.id.as_deref(),
         frontmatter.kind.as_deref(),
-        frontmatter.version.as_deref(),
         frontmatter.profile.as_deref(),
         "memory",
     )?;
@@ -932,7 +917,6 @@ pub fn parse_okf_proposal_markdown(
     validate_schema_identity(
         Some(&id),
         frontmatter.kind.as_deref(),
-        frontmatter.version.as_deref(),
         frontmatter.profile.as_deref(),
         "proposal",
     )?;
@@ -970,8 +954,7 @@ pub fn parse_okf_proposal_markdown(
         file_id,
         id,
         kind: frontmatter.kind,
-        version: OKF_FORMAT_VERSION.to_owned(),
-        profile: OKF_PROFILE_VERSION.to_owned(),
+        profile: OKF_PROFILE.to_owned(),
         memory_type,
         lane,
         title,
@@ -1139,7 +1122,6 @@ pub(crate) fn render_resolved_okf_proposal_markdown(
     let frontmatter = OkfResolvedProposalFrontmatter {
         id: proposal.id.clone(),
         kind: proposal.kind.clone(),
-        version: proposal.version.clone(),
         profile: proposal.profile.clone(),
         memory_type: proposal.memory_type,
         lane: proposal.lane,
@@ -1245,8 +1227,7 @@ pub fn render_okf_record_markdown(record: &OkfRecordFile) -> Result<String> {
     output.push_str("---\n");
     push_yaml_string(&mut output, "id", &record.concept_id);
     push_yaml_string(&mut output, "kind", "memory");
-    push_yaml_string(&mut output, "version", OKF_FORMAT_VERSION);
-    push_yaml_string(&mut output, "profile", OKF_PROFILE_VERSION);
+    push_yaml_string(&mut output, "profile", OKF_PROFILE);
     push_yaml_string(&mut output, "type", draft.memory_type.as_str());
     push_yaml_string(&mut output, "lane", draft.lane.as_str());
     push_yaml_string(&mut output, "title", &draft.title);
@@ -1372,7 +1353,6 @@ fn proposal_primary_evidence(sources: &[OkfProposalSource]) -> (Option<String>, 
 struct OkfCreateProposalFrontmatter {
     id: String,
     kind: String,
-    version: String,
     profile: String,
     #[serde(rename = "type")]
     memory_type: MemoryType,
@@ -1422,7 +1402,6 @@ struct OkfCreateProposalScope {
 struct OkfFrontmatter {
     id: Option<String>,
     kind: Option<String>,
-    version: Option<String>,
     profile: Option<String>,
     #[serde(rename = "type")]
     memory_type: Option<String>,
@@ -1456,7 +1435,6 @@ struct OkfFrontmatter {
 struct OkfProposalFrontmatter {
     id: Option<String>,
     kind: Option<String>,
-    version: Option<String>,
     profile: Option<String>,
     #[serde(rename = "type")]
     memory_type: Option<String>,
@@ -1496,7 +1474,6 @@ struct OkfResolvedProposalFrontmatter {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
-    version: String,
     profile: String,
     #[serde(rename = "type")]
     memory_type: MemoryType,
@@ -1687,8 +1664,7 @@ fn render_memory_record(record: &MemoryRecord, tags: &[String], applies_to: &[St
     output.push_str("---\n");
     push_yaml_string(&mut output, "id", &record.id);
     push_yaml_string(&mut output, "kind", "memory");
-    push_yaml_string(&mut output, "version", OKF_FORMAT_VERSION);
-    push_yaml_string(&mut output, "profile", OKF_PROFILE_VERSION);
+    push_yaml_string(&mut output, "profile", OKF_PROFILE);
     push_yaml_string(&mut output, "type", record.memory_type.as_str());
     push_yaml_string(&mut output, "lane", record.lane.as_str());
     push_yaml_string(&mut output, "title", &record.title);
@@ -2344,7 +2320,6 @@ mod tests {
             updated_at: "2026-07-06T00:00:00Z".to_owned(),
             supersedes_id: Some("team/old-install-risk".to_owned()),
             retention: RetentionFacts {
-                policy_version: super::RETENTION_POLICY_VERSION.to_owned(),
                 occurred_at: None,
                 started_at: None,
                 last_continued_at: None,
@@ -2443,8 +2418,7 @@ mod tests {
         let markdown = r#"---
 id: no-evidence
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 type: fact
 lane: semantic
 title: No evidence metadata
@@ -2454,10 +2428,8 @@ content_class: general_repo_knowledge
 status: active
 confidence: 1.0
 timestamp: 2026-07-04T00:00:00Z
-retention:
-  policy_version: memzoi/lane-retention-v1
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: test:no-evidence
   route: repository_materialization
 ---
@@ -2602,8 +2574,7 @@ Nullable provenance remains nullable.
             r#"---
 id: missing-lane
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 type: decision
 title: Missing lane
 scope: repo
@@ -2613,10 +2584,8 @@ source: human
 status: active
 confidence: 1.0
 timestamp: 2026-07-04T00:00:00Z
-retention:
-  policy_version: memzoi/lane-retention-v1
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: test:missing-lane
   route: repository_materialization
 ---
@@ -2656,8 +2625,7 @@ The current profile requires an explicit lane.
         let invalid = r#"---
 id: unsafe
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 type: preference
 lane: semantic
 title: Unsafe path
@@ -2668,10 +2636,8 @@ source: human-authored
 status: active
 confidence: 1.0
 timestamp: 2026-07-04T00:00:00Z
-retention:
-  policy_version: memzoi/lane-retention-v1
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: test:unsafe
   route: repository_materialization
 applies_to:
@@ -2763,7 +2729,7 @@ Do not import this.
 
         let unsupported_schema = rendered.replacen(
             MATERIALIZATION_METADATA_SCHEMA,
-            "memzoi/repository-materialization-v999",
+            "incompatible/repository-materialization",
             1,
         );
         let error = super::parse_okf_record_markdown(root, &path, &unsupported_schema)
@@ -2779,16 +2745,15 @@ Do not import this.
 
     fn record_markdown(lane: &str, memory_type: &str) -> String {
         let lane_retention = match lane {
-            "session" => "  started_at: 2026-07-04T00:00:00Z\n",
-            "episodic" => "  occurred_at: 2026-07-04T00:00:00Z\n",
-            _ => "",
+            "session" => "retention:\n  started_at: 2026-07-04T00:00:00Z\n",
+            "episodic" => "retention:\n  occurred_at: 2026-07-04T00:00:00Z\n",
+            _ => "retention: {}\n",
         };
         format!(
             r#"---
 id: lane-test
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 type: {memory_type}
 lane: {lane}
 title: Lane test
@@ -2799,10 +2764,7 @@ source: human
 status: active
 confidence: 1.0
 timestamp: 2026-07-04T00:00:00Z
-retention:
-  policy_version: memzoi/lane-retention-v1
 {lane_retention}origin:
-  version: memzoi/origin-v1
   origin_key: test:lane-test:{lane}
   route: repository_materialization
 ---

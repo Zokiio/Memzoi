@@ -75,7 +75,7 @@ pub(crate) fn search_memory_at(
 
     let limit = normalized_limit(input.limit);
     let evaluated_at = expiry::format_timestamp(now)?;
-    // `include_inactive` remains part of the pre-v1 request shape, but it must
+    // `include_inactive` remains part of the current request shape, but it must
     // never bypass the complete current-assertion boundary.
     let _ = input.include_inactive;
     let current_assertion = retention::current_assertion_sql("memory_record", "?8");

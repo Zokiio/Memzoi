@@ -175,13 +175,10 @@ fn canonical_record() -> String {
         r#"---
 id: rec-expiring-risk
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 retention:
-  policy_version: memzoi/lane-retention-v1
   explicit_expires_at: {EXPIRY}
 origin:
-  version: memzoi/origin-v1
   origin_key: test-expiry:rec-expiring-risk
   route: repository_materialization
 type: risk
@@ -235,13 +232,11 @@ fn insert_runtime_records(db_path: &std::path::Path) -> anyhow::Result<()> {
     ] {
         let retention = if lane == "session" {
             serde_json::json!({
-                "policy_version": "memzoi/lane-retention-v1",
                 "started_at": "2026-07-10T00:00:00Z",
                 "explicit_expires_at": EXPIRY,
             })
         } else {
             serde_json::json!({
-                "policy_version": "memzoi/lane-retention-v1",
                 "explicit_expires_at": EXPIRY,
             })
         };
@@ -251,7 +246,6 @@ fn insert_runtime_records(db_path: &std::path::Path) -> anyhow::Result<()> {
             "local_memory"
         };
         let origin = serde_json::json!({
-            "version": "memzoi/origin-v1",
             "origin_key": format!("test-expiry:{id}"),
             "route": route,
         });

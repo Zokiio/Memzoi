@@ -8,7 +8,7 @@ use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
 const MIXED_MANIFEST: &str = r#"
-version: memzoi/import-v2
+schema: memzoi/import
 origin_key: test-import:mixed-manifest
 sources:
   - path: imports/not-read.yml
@@ -291,15 +291,15 @@ fn malformed_documents_fail_and_non_safe_repo_candidates_are_explicitly_blocked(
     let before_records = file_names(&service.paths().records_dir())?;
 
     for manifest in [
-        "version: memzoi/import-v1\norigin_key: legacy\ncandidates: [",
-        "version: memzoi/import-v2\norigin_key: test-import:invalid-path\nsources:\n  - path: ../secret.yml\ncandidates: []",
-        "version: memzoi/import-v2\norigin_key: test-import:unknown-field\nunknown: true\nsources: []\ncandidates: []",
+        "schema: incompatible/import\norigin_key: invalid\nsources: []\ncandidates: []",
+        "schema: memzoi/import\norigin_key: test-import:invalid-path\nsources:\n  - path: ../secret.yml\ncandidates: []",
+        "schema: memzoi/import\norigin_key: test-import:unknown-field\nunknown: true\nsources: []\ncandidates: []",
     ] {
         assert!(parse_import_document(manifest).is_err());
     }
 
     let repo_unsafe = r#"
-version: memzoi/import-v2
+schema: memzoi/import
 origin_key: test-import:unsafe-repo
 sources:
   - path: imports/IMPORT-SOURCE-SENTINEL.yml
@@ -370,7 +370,7 @@ fn omitted_repo_content_class_is_blocked_before_import_writes() -> anyhow::Resul
     let service = initialized_service(&temp)?;
     let document = parse_import_document(
         r#"
-version: memzoi/import-v2
+schema: memzoi/import
 origin_key: test-import:omitted-class
 sources:
   - ref: issue://101#classification
@@ -399,7 +399,7 @@ fn mixed_unsafe_repo_manifest_omits_sources_but_keeps_local_and_session_writes()
     let temp = tempdir()?;
     let service = initialized_git_service(&temp)?;
     let manifest = r#"
-version: memzoi/import-v2
+schema: memzoi/import
 origin_key: test-import:mixed-unsafe
 sources:
   - ref: issue://41#mixed-route-provenance
@@ -474,7 +474,7 @@ fn every_non_repo_safe_import_sensitivity_is_blocked() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let service = initialized_service(&temp)?;
         let manifest = format!(
-            "version: memzoi/import-v2\norigin_key: test-import:sensitivity-{sensitivity}\nsources:\n  - ref: issue://41\ncandidates:\n  - destination: repo\n    reason: route parity\n    type: fact\n    title: Blocked import candidate\n    body: blocked body\n    sensitivity: {sensitivity}\n"
+            "schema: memzoi/import\norigin_key: test-import:sensitivity-{sensitivity}\nsources:\n  - ref: issue://41\ncandidates:\n  - destination: repo\n    reason: route parity\n    type: fact\n    title: Blocked import candidate\n    body: blocked body\n    sensitivity: {sensitivity}\n"
         );
         let plan = service.plan_import("test", parse_import_document(&manifest)?)?;
         let value = serde_json::to_value(&plan)?;

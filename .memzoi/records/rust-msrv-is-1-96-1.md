@@ -1,12 +1,9 @@
 ---
 id: rust-msrv-is-1-96-1
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: repository-record:rust-msrv-is-1-96-1
   route: repository_materialization
 type: decision

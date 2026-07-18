@@ -781,7 +781,7 @@ fn repo_session_document(title: &str) -> SessionEndDocument {
 
 fn repo_import_document(title: &str) -> ImportDocument {
     ImportDocument {
-        version: "memzoi/import-v2".to_owned(),
+        schema: "memzoi/import".to_owned(),
         origin_key: format!("test-import:{title}"),
         sources: vec![OkfProposalSource {
             path: Some("src/lifecycle.rs".to_owned()),

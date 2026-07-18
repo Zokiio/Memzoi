@@ -32,7 +32,6 @@ fn parses_example_memory_as_memzoi_okf_profile_record() -> anyhow::Result<()> {
     assert_eq!(record.draft.title, "Swedish-first UI copy");
     assert_eq!(record.applies_to, vec!["apps/web/**"]);
     assert_eq!(record.draft.tags, vec!["frontend", "i18n"]);
-    assert_eq!(record.retention.policy_version, "memzoi/lane-retention-v1");
     assert_eq!(record.origin.route, OriginRoute::RepositoryMaterialization);
     assert!(record.draft.body.contains("User-facing UI"));
     assert!(!record.draft.body.starts_with("# Swedish-first"));
@@ -60,8 +59,7 @@ fn parses_okf_proposal_examples_as_review_packets() -> anyhow::Result<()> {
     assert_eq!(semantic.scope_kind, ScopeKind::Project);
     assert_eq!(semantic.applies_to, vec!["src/auth/**"]);
     assert_eq!(semantic.sensitivity, OkfProposalSensitivity::RepoSafe);
-    assert_eq!(semantic.version, "okf/v0.2");
-    assert_eq!(semantic.profile, "memzoi/v1");
+    assert_eq!(semantic.profile, "memzoi");
     assert_eq!(semantic.origin.route, OriginRoute::RepositoryProposal);
     assert!(semantic.body.contains("## Review notes"));
 
@@ -110,8 +108,6 @@ fn checked_in_repository_records_meet_the_current_profile() -> anyhow::Result<()
 
     assert!(!records.is_empty(), "checked-in memory corpus is present");
     for record in records {
-        assert_eq!(record.retention.policy_version, "memzoi/lane-retention-v1");
-        assert_eq!(record.origin.version, "memzoi/origin-v1");
         assert!(!record.origin.origin_key.is_empty());
     }
     Ok(())
@@ -222,19 +218,20 @@ fn proposals_require_the_current_format_retention_and_origin() {
     );
     for (markdown, expected) in [
         (
-            current.replace("version: okf/v0.2", "version: okf/v0.1"),
-            "unsupported OKF format version",
-        ),
-        (
-            current.replace(
-                "retention:\n  policy_version: memzoi/lane-retention-v1\n",
-                "expires_at: 2099-01-01T00:00:00Z\n",
+            current.replacen(
+                "kind: proposal\n",
+                "kind: proposal\nschema: incompatible/okf\n",
+                1,
             ),
-            "unknown field `expires_at`",
+            "unknown field `schema`",
+        ),
+        (
+            current.replace("retention: {}\n", ""),
+            "retention is required",
         ),
         (
             current.replace(
-                "origin:\n  version: memzoi/origin-v1\n  origin_key: test:mem-test-proposal\n  route: repository_proposal\n",
+                "origin:\n  origin_key: test:mem-test-proposal\n  route: repository_proposal\n",
                 "",
             ),
             "origin is required",
@@ -316,12 +313,11 @@ fn current_profile_rejects_missing_classification_and_alias_fields() {
 }
 
 #[test]
-fn rejects_pre_cutover_versions_and_legacy_expiry_fields() {
+fn rejects_incompatible_profile_and_expiry_fields() {
     let current = r#"---
 id: hard-cut
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 type: fact
 lane: semantic
 title: Hard cut
@@ -331,10 +327,8 @@ content_class: general_repo_knowledge
 status: active
 confidence: 1
 timestamp: 2026-07-01T00:00:00Z
-retention:
-  policy_version: memzoi/lane-retention-v1
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: test:hard-cut
   route: repository_materialization
 ---
@@ -346,23 +340,24 @@ Current artifact.
 
     for (markdown, expected) in [
         (
-            current.replace("version: okf/v0.2", "version: okf/v0.1"),
-            "unsupported OKF format version",
-        ),
-        (
-            current.replace("profile: memzoi/v1", "profile: memzoi/v0"),
-            "unsupported OKF profile version",
-        ),
-        (
-            current.replace(
-                "retention:\n  policy_version: memzoi/lane-retention-v1\n",
-                "expires: 2099-01-01T00:00:00Z\n",
+            current.replacen(
+                "kind: memory\n",
+                "kind: memory\nschema: incompatible/okf\n",
+                1,
             ),
+            "unknown field `schema`",
+        ),
+        (
+            current.replace("profile: memzoi", "profile: incompatible"),
+            "unsupported OKF profile",
+        ),
+        (
+            current.replace("retention: {}\n", "expires: 2099-01-01T00:00:00Z\n"),
             "unknown field `expires`",
         ),
         (
             current.replace(
-                "origin:\n  version: memzoi/origin-v1\n  origin_key: test:hard-cut\n  route: repository_materialization\n",
+                "origin:\n  origin_key: test:hard-cut\n  route: repository_materialization\n",
                 "",
             ),
             "origin is required",
@@ -403,8 +398,7 @@ fn rejects_unsafe_applies_to_paths() {
         r#"---
 id: bad
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 type: decision
 lane: semantic
 title: Bad path
@@ -416,10 +410,8 @@ visibility: repo
 content_class: general_repo_knowledge
 confidence: 1.0
 source: human-authored
-retention:
-  policy_version: memzoi/lane-retention-v1
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: test:bad
   route: repository_materialization
 applies_to:
@@ -451,8 +443,7 @@ fn rejects_concept_ids_that_do_not_match_profile_rules() {
         r#"---
 id: Bad_Segment
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 type: decision
 lane: semantic
 title: Bad concept path
@@ -463,10 +454,8 @@ visibility: repo
 content_class: general_repo_knowledge
 confidence: 1.0
 source: human-authored
-retention:
-  policy_version: memzoi/lane-retention-v1
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: test:bad-segment
   route: repository_materialization
 ---
@@ -944,12 +933,9 @@ fn proposal_markdown(
         r#"---
 id: mem_test_proposal
 kind: proposal
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {{}}
 origin:
-  version: memzoi/origin-v1
   origin_key: test:mem-test-proposal
   route: repository_proposal
 type: decision

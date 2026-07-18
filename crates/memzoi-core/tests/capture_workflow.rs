@@ -1531,7 +1531,7 @@ fn reidentify_review(review: &mut CaptureReview) -> anyhow::Result<()> {
     review.review_id.clear();
     let canonical = serde_json_canonicalizer::to_vec(&*review)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-review-v2");
+    hasher.update(b"memzoi/capture-review");
     hasher.update(&[0]);
     hasher.update(&canonical);
     review.review_id = format!("review_{}", hasher.finalize().to_hex());
@@ -1546,7 +1546,7 @@ fn reidentify_candidate(candidate: &mut memzoi_core::CaptureCandidate) -> anyhow
         &candidate.action,
     ))?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-candidate-v1");
+    hasher.update(b"memzoi/capture-candidate");
     hasher.update(&[0]);
     hasher.update(&canonical);
     candidate.candidate_id = format!("candidate_{}", hasher.finalize().to_hex());
@@ -1560,7 +1560,7 @@ fn reidentify_claim(candidate: &mut memzoi_core::CaptureCandidate) -> anyhow::Re
         &candidate.extraction,
     ))?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-claim-v1");
+    hasher.update(b"memzoi/capture-claim");
     hasher.update(&[0]);
     hasher.update(&canonical);
     candidate.claim_id = format!("claim_{}", hasher.finalize().to_hex());
@@ -1571,7 +1571,7 @@ fn reidentify_plan(plan: &mut memzoi_core::CapturePlan) -> anyhow::Result<()> {
     plan.plan_id.clear();
     let canonical = serde_json_canonicalizer::to_vec(&*plan)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-plan-v2");
+    hasher.update(b"memzoi/capture-plan");
     hasher.update(&[0]);
     hasher.update(&canonical);
     plan.plan_id = format!("capture_{}", hasher.finalize().to_hex());

@@ -668,12 +668,9 @@ fn rebuild_json_restores_search_context_and_precheck_from_canonical_records() {
         r#"---
 id: core/canonical-rebuild-decision
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: test-record:canonical-rebuild-decision
   route: repository_materialization
 type: decision
@@ -703,12 +700,9 @@ Use the rebuild sentinel routing recall token when restoring context packs from 
         r#"---
 id: core/canonical-rebuild-risk
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: test-record:canonical-rebuild-risk
   route: repository_materialization
 type: risk

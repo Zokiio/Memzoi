@@ -11,22 +11,21 @@ use crate::{
     ScopeKind, Visibility, capture::validate_capture_provenance, retention::evaluate_retention,
 };
 
-pub const REPOSITORY_MATERIALIZATION_PLAN_SCHEMA: &str =
-    "memzoi/repository-materialization-plan-v2";
+pub const REPOSITORY_MATERIALIZATION_PLAN_SCHEMA: &str = "memzoi/repository-materialization-plan";
 pub const REPOSITORY_MATERIALIZATION_DECISION_SCHEMA: &str =
-    "memzoi/repository-materialization-decision-v2";
+    "memzoi/repository-materialization-decision";
 pub const REPOSITORY_MATERIALIZATION_RESULT_SCHEMA: &str =
-    "memzoi/repository-materialization-result-v2";
-pub const CANONICAL_REVISION_SCHEMA: &str = "memzoi/repository-canonical-revision-v2";
-pub const MATERIALIZATION_METADATA_SCHEMA: &str = "memzoi/repository-materialization-v2";
+    "memzoi/repository-materialization-result";
+pub const CANONICAL_REVISION_SCHEMA: &str = "memzoi/repository-canonical-revision";
+pub const MATERIALIZATION_METADATA_SCHEMA: &str = "memzoi/repository-materialization";
 pub const MAX_MATERIALIZATION_REASON_BYTES: usize = 280;
 pub const REPOSITORY_MATERIALIZATION_CANDIDATE_SCHEMA: &str =
-    "memzoi/repository-materialization-candidate-v2";
+    "memzoi/repository-materialization-candidate";
 
-const PLAN_ID_DOMAIN: &str = "memzoi.repository-materialization.plan-id.v1";
-const DECISION_ID_DOMAIN: &str = "memzoi.repository-materialization.decision-id.v1";
-const REVISION_ID_DOMAIN: &str = "memzoi.repository-materialization.revision-id.v1";
-const CANDIDATE_ID_DOMAIN: &str = "memzoi.repository-materialization.candidate-id.v1";
+const PLAN_ID_DOMAIN: &str = "memzoi.repository-materialization.plan-id";
+const DECISION_ID_DOMAIN: &str = "memzoi.repository-materialization.decision-id";
+const REVISION_ID_DOMAIN: &str = "memzoi.repository-materialization.revision-id";
+const CANDIDATE_ID_DOMAIN: &str = "memzoi.repository-materialization.candidate-id";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1134,7 +1133,6 @@ mod tests {
             updated: None,
             supersedes_id: None,
             retention: RetentionFacts {
-                policy_version: crate::RETENTION_POLICY_VERSION.to_owned(),
                 occurred_at: None,
                 started_at: None,
                 last_continued_at: None,
@@ -1241,7 +1239,6 @@ mod tests {
             updated: None,
             supersedes_id: None,
             retention: RetentionFacts {
-                policy_version: crate::RETENTION_POLICY_VERSION.to_owned(),
                 occurred_at: None,
                 started_at: None,
                 last_continued_at: None,

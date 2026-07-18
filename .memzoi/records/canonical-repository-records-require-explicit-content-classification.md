@@ -1,12 +1,9 @@
 ---
 id: canonical-repository-records-require-explicit-content-classification
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: repository-record:canonical-repository-records-require-explicit-content-classification
   route: repository_materialization
 type: warning

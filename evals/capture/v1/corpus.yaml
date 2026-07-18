@@ -50,7 +50,7 @@ cases:
       - fixture: fixtures/typed.md
         path: notes/typed.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator:
@@ -126,7 +126,7 @@ cases:
       - fixture: fixtures/mixed.md
         path: notes/mixed.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/mixed.md}
@@ -184,7 +184,7 @@ cases:
       - fixture: fixtures/matches.md
         path: notes/matches.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/matches.md}
@@ -308,7 +308,7 @@ cases:
       - fixture: records/inventory-duplicate.md
         path: inventory-duplicate.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/inventory.md}
@@ -348,7 +348,7 @@ cases:
       - fixture: fixtures/stale-before.md
         path: notes/stale.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/stale.md}
@@ -400,7 +400,7 @@ cases:
       - fixture: fixtures/secret.md
         path: notes/synthetic-secret.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/synthetic-secret.md}
@@ -420,7 +420,7 @@ cases:
       - fixture: fixtures/unsupported.txt
         path: notes/unsupported.txt
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/unsupported.txt}
@@ -438,7 +438,7 @@ cases:
       - fixture: fixtures/prompt-injection.md
         path: notes/prompt-injection.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/prompt-injection.md}
@@ -456,7 +456,7 @@ cases:
       - fixture: fixtures/raw-chat.md
         path: notes/raw-chat.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/raw-chat.md}
@@ -474,7 +474,7 @@ cases:
       - fixture: fixtures/private-data.md
         path: notes/private-data.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/private-data.md}
@@ -494,7 +494,7 @@ cases:
       - fixture: fixtures/adr.md
         path: docs/policy/0001.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator:
@@ -517,7 +517,7 @@ cases:
       - fixture: fixtures/unclassified.md
         path: notes/unclassified.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: notes/unclassified.md}
@@ -565,7 +565,7 @@ cases:
       - fixture: fixtures/AGENTS.md
         path: nested/AGENTS.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: nested/AGENTS.md}
@@ -607,7 +607,7 @@ cases:
       - fixture: fixtures/generated-AGENTS.md
         path: AGENTS.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: AGENTS.md}
@@ -633,7 +633,7 @@ cases:
       - fixture: fixtures/instruction-review.md
         path: review/AGENTS.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: review/AGENTS.md}
@@ -731,7 +731,7 @@ cases:
       - fixture: fixtures/adr.md
         path: docs/adr/0001-evidence.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: docs/adr/0001-evidence.md}
@@ -796,7 +796,7 @@ cases:
       - source_id: source-1
         fixture: fixtures/change.diff
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator:
@@ -867,7 +867,7 @@ cases:
       - fixture: fixtures/adr-review.md
         path: docs/adr/0002-review.md
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: docs/adr/0002-review.md}
@@ -1130,7 +1130,7 @@ cases:
         engine_version: memzoi/git-unified-renderer-v1+git-
         engine_match: prefix
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator:
@@ -1212,7 +1212,7 @@ cases:
       - source_id: source-1
         fixture: fixtures/git-review.diff
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator:
@@ -1402,7 +1402,7 @@ cases:
       - fixture: fixtures/rename.diff
         path: changes/rename.diff
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: changes/rename.diff}
@@ -1432,7 +1432,7 @@ cases:
       - fixture: fixtures/delete.diff
         path: changes/delete.diff
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: changes/delete.diff}
@@ -1485,7 +1485,7 @@ cases:
       - fixture: fixtures/malformed.diff
         path: changes/malformed.diff
     request:
-      schema: memzoi/capture-request-v2
+      schema: memzoi/capture-request
       sources:
         - source_id: source-1
           locator: {kind: project_path, path: changes/malformed.diff}

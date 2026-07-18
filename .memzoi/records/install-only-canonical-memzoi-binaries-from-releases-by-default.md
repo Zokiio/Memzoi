@@ -1,12 +1,9 @@
 ---
 id: install-only-canonical-memzoi-binaries-from-releases-by-default
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
-retention:
-  policy_version: memzoi/lane-retention-v1
+profile: memzoi
+retention: {}
 origin:
-  version: memzoi/origin-v1
   origin_key: repository-record:install-only-canonical-memzoi-binaries-from-releases-by-default
   route: repository_materialization
 type: decision

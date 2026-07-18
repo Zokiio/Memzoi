@@ -276,7 +276,7 @@ fn import_plan_and_apply_mixed_destinations_preserve_boundaries() {
     let manifest_path = repo_path.join("mixed-import.yml");
     fs::write(
         &manifest_path,
-        r#"version: memzoi/import-v2
+        r#"schema: memzoi/import
 origin_key: test-import:proposal-recovery-safe
 sources:
   - path: imports/safe-source.yml
@@ -354,7 +354,7 @@ candidates:
         ],
     );
     assert_json_string_field(&planned, &["mode"], "plan");
-    assert_json_string_field(&planned, &["schema"], "memzoi/import-plan-v2");
+    assert_json_string_field(&planned, &["schema"], "memzoi/import-plan");
     assert_json_string_field(&planned, &["source_file"], "mixed-import.yml");
     let plan_id = json_string(&planned, "plan_id").to_owned();
     assert!(
@@ -424,7 +424,7 @@ candidates:
     );
     assert_json_string_field(&applied, &["mode"], "apply");
     assert_json_string_field(&applied, &["expected_plan_id"], &plan_id);
-    assert_json_string_field(&applied, &["schema"], "memzoi/import-plan-v2");
+    assert_json_string_field(&applied, &["schema"], "memzoi/import-plan");
     assert_json_string_field(&applied, &["source_file"], "mixed-import.yml");
     let writes = applied["writes"]
         .as_array()
@@ -613,7 +613,7 @@ fn import_cli_redacts_blocked_repo_candidate_from_plan_apply_and_proposal_files(
     let manifest_path = repo.path().join("blocked-import.yml");
     fs::write(
         &manifest_path,
-        r#"version: memzoi/import-v2
+        r#"schema: memzoi/import
 origin_key: test-import:proposal-recovery-sentinel
 sources:
   - path: imports/IMPORT-SOURCE-SENTINEL.yml
@@ -722,7 +722,7 @@ fn import_plan_and_apply_hide_external_manifest_paths() {
     let manifest_path = external_dir.path().join("external-import.yml");
     fs::write(
         &manifest_path,
-        r#"version: memzoi/import-v2
+        r#"schema: memzoi/import
 origin_key: test-import:proposal-recovery-external
 sources:
   - path: imports/external-source.yml

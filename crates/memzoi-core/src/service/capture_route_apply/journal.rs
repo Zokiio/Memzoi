@@ -28,12 +28,11 @@ use super::super::{
     safe_files::{ensure_safe_directory, remove_staged_file, sync_directory},
 };
 
-pub(super) const CAPTURE_APPLY_JOURNAL_SCHEMA: &str = "memzoi/capture-apply-journal-v3";
-const CAPTURE_APPLY_COMMIT_SCHEMA: &str = "memzoi/capture-apply-commit-v3";
-const CAPTURE_APPLY_OWNERSHIP_SCHEMA: &str = "memzoi/capture-apply-ownership-v3";
-const CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v3.json";
-const CAPTURE_APPLY_OWNERSHIP_FILE: &str = "capture-apply-ownership-v3.json";
-const LEGACY_CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v1.json";
+pub(super) const CAPTURE_APPLY_JOURNAL_SCHEMA: &str = "memzoi/capture-apply-journal";
+const CAPTURE_APPLY_COMMIT_SCHEMA: &str = "memzoi/capture-apply-commit";
+const CAPTURE_APPLY_OWNERSHIP_SCHEMA: &str = "memzoi/capture-apply-ownership";
+const CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal.json";
+const CAPTURE_APPLY_OWNERSHIP_FILE: &str = "capture-apply-ownership.json";
 const CAPTURE_APPLY_COMMIT_EVENT: &str = "capture.apply_committed";
 const MAX_CAPTURE_APPLY_JOURNAL_BYTES: u64 = 256 * 1024;
 const MAX_CAPTURE_APPLY_OWNERSHIP_BYTES: u64 = 64 * 1024;
@@ -221,7 +220,7 @@ pub(super) fn build_capture_apply_journal(
                         .to_string(),
                     projection_digest: {
                         let mut hasher = blake3::Hasher::new();
-                        hasher.update(b"memzoi.capture.projection.v1\0");
+                        hasher.update(b"memzoi.capture.projection\0");
                         hasher.update(proposal.path.as_os_str().as_encoded_bytes());
                         hasher.update(b"\0");
                         hasher.update(proposal.markdown.as_bytes());
@@ -237,10 +236,6 @@ pub(super) fn build_capture_apply_journal(
 
 pub(super) fn capture_apply_journal_path(paths: &MemoryPaths) -> PathBuf {
     paths.runtime_dir.join(CAPTURE_APPLY_JOURNAL_FILE)
-}
-
-fn legacy_capture_apply_journal_path(paths: &MemoryPaths) -> PathBuf {
-    paths.runtime_dir.join(LEGACY_CAPTURE_APPLY_JOURNAL_FILE)
 }
 
 pub(super) fn capture_apply_destination_path(
@@ -564,27 +559,6 @@ pub(super) fn capture_apply_journal_exists(paths: &MemoryPaths) -> Result<bool> 
     }
 }
 
-pub(super) fn legacy_capture_apply_journal_exists(paths: &MemoryPaths) -> Result<bool> {
-    let path = legacy_capture_apply_journal_path(paths);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            bail!("legacy capture apply journal must be a regular file")
-        }
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).context("failed to inspect legacy capture apply journal"),
-    }
-}
-
-fn recover_legacy_capture_apply(paths: &MemoryPaths) -> Result<bool> {
-    if !legacy_capture_apply_journal_exists(paths)? {
-        return Ok(false);
-    }
-    bail!(
-        "unsupported capture apply journal schema; remove the legacy journal manually before retrying"
-    )
-}
-
 fn load_capture_apply_journal(paths: &MemoryPaths) -> Result<Option<LoadedCaptureApplyJournal>> {
     if !capture_apply_journal_exists(paths)? {
         return Ok(None);
@@ -615,10 +589,7 @@ pub(super) fn write_capture_apply_journal(
 ) -> Result<()> {
     validate_capture_apply_journal(journal)?;
     fs::create_dir_all(&paths.runtime_dir).context("failed to create capture journal directory")?;
-    if capture_apply_journal_exists(paths)?
-        || legacy_capture_apply_journal_exists(paths)?
-        || capture_apply_ownership_exists(paths)?
-    {
+    if capture_apply_journal_exists(paths)? || capture_apply_ownership_exists(paths)? {
         bail!("an interrupted capture apply must be recovered before starting another one");
     }
     let bytes = capture_apply_journal_bytes(journal)?;
@@ -687,7 +658,7 @@ pub(super) fn stage_capture_apply_proposals(
         }
         let projection_digest = {
             let mut hasher = blake3::Hasher::new();
-            hasher.update(b"memzoi.capture.projection.v1\0");
+            hasher.update(b"memzoi.capture.projection\0");
             hasher.update(proposal.path.as_os_str().as_encoded_bytes());
             hasher.update(b"\0");
             hasher.update(proposal.markdown.as_bytes());
@@ -1073,9 +1044,6 @@ pub(super) fn recover_capture_apply_with_hook<BeforeInstall>(
 where
     BeforeInstall: FnMut(usize, &Path) -> Result<()>,
 {
-    if recover_legacy_capture_apply(paths)? {
-        return Ok(CaptureApplyRecoveryOutcome::RolledBack);
-    }
     let Some(loaded) = load_capture_apply_journal(paths)? else {
         if capture_apply_ownership_exists(paths)? {
             bail!("capture apply ownership exists without its journal; refusing recovery mutation");

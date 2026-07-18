@@ -5,7 +5,7 @@
   "corpus": {
     "name": "memzoi-trust-contract-v2",
     "version": "memzoi-recall-corpus/v2",
-    "digest": "35a187048ed38c9f9562f1f26f2d3a70da06b91d4447cdd9a60ec383ad5bd7f5"
+    "digest": "c8b444043b1594a8b84724cc32594896218458f5ef69405d364cf5e0fb1cb3cd"
   },
   "metrics": {
     "mean_recall_at_k": 1.0,

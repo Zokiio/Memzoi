@@ -2228,28 +2228,24 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         .iter()
         .filter(|path| path.is_dir())
         .collect::<Vec<_>>();
-    let legacy_receipt = paths
-        .repository_runtime_dir
-        .join("migration-v1.json")
-        .is_file();
-    if !legacy_runtime_dirs.is_empty() || legacy_receipt {
+    if !legacy_runtime_dirs.is_empty() {
         checks.push(check(
-            "legacy_worktree_runtime",
+            "incompatible_worktree_runtime",
             "warning",
             format!(
-                "unsupported pre-v1 runtime state detected (path-keyed directories={}, migration_receipt={legacy_receipt})",
+                "unsupported path-keyed runtime state detected (directories={})",
                 legacy_runtime_dirs.len(),
             ),
         ));
         push_next_step(
             &mut next_steps,
-            "manually upgrade or remove the unsupported pre-v1 runtime state before opening Memzoi",
+            "manually upgrade or remove the unsupported runtime state before opening Memzoi",
         );
     } else {
         checks.push(check(
-            "legacy_worktree_runtime",
+            "incompatible_worktree_runtime",
             "ok",
-            "no legacy path-keyed runtime directories detected",
+            "no incompatible path-keyed runtime directories detected",
         ));
     }
     if paths.records_dir().is_dir() {
@@ -2679,7 +2675,6 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
 
 fn schema_ready(db_path: &Path) -> Result<bool> {
     const REQUIRED_TABLES: &[&str] = &[
-        "schema_migrations",
         "event_log",
         "memory_record",
         "scope_binding",

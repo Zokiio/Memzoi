@@ -127,7 +127,7 @@ limiting. A temporally current record can therefore still be excluded by
 another current-assertion dimension. `include_inactive` does not grant history
 access.
 
-The `memzoi/lane-retention-v1` policy applies these boundaries:
+The current retention policy applies these boundaries:
 
 - session: the earliest of closure, 24 hours after the latest continuation or
   start, seven days after the original start, and explicit expiry;
@@ -180,7 +180,7 @@ integration/documentation change, not an implicit memory write.
 ## Git-native materialization and Git review
 
 Direct materialization consumes one complete
-`memzoi/repository-materialization-candidate-v1` JSON file. The candidate is
+`memzoi/repository-materialization-candidate` JSON file. The candidate is
 the caller's explicit structured input; it carries the typed canonical content,
 classification, provenance, action, and current-record precondition. It is not
 an inbox packet, and planning does not retain it under `.memzoi`.
@@ -424,7 +424,7 @@ successful `repo` route still requires the separate review/apply step above.
 
 Import is a strict, compact manifest workflow, not an extractor or automatic
 classifier. The caller supplies a manifest with the exact version
-`memzoi/import-v2`, a required source-event `origin_key`, explicit candidates, and provenance sources. It does not
+`memzoi/import`, a required source-event `origin_key`, explicit candidates, and provenance sources. It does not
 parse `AGENTS.md`, `CLAUDE.md`, Cursor files, ADRs, chats, or other ambient
 project state; it does not infer candidates from those sources.
 

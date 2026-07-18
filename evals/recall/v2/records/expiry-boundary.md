@@ -1,13 +1,10 @@
 ---
 id: expiry-boundary
 kind: memory
-version: okf/v0.2
-profile: memzoi/v1
+profile: memzoi
 retention:
-  policy_version: memzoi/lane-retention-v1
   explicit_expires_at: "2026-07-10T12:00:00Z"
 origin:
-  version: memzoi/origin-v1
   origin_key: eval-record:expiry-boundary
   route: repository_materialization
 type: warning

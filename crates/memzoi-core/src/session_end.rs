@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDestination, MemoryLane, MemoryType, OriginDescriptor, OriginRoute,
-    RETENTION_POLICY_VERSION, RepositoryContentClass, RetentionFacts, ScopeKind,
+    RepositoryContentClass, RetentionFacts, ScopeKind,
     okf::{OkfCreateProposalDraft, OkfProposalSensitivity},
 };
 
@@ -152,7 +152,6 @@ pub(crate) fn session_end_proposal_draft(
 
 fn retention_facts(lane: MemoryLane, timestamp: &str) -> RetentionFacts {
     RetentionFacts {
-        policy_version: RETENTION_POLICY_VERSION.to_owned(),
         occurred_at: (lane == MemoryLane::Episodic).then(|| timestamp.to_owned()),
         started_at: (lane == MemoryLane::Session).then(|| timestamp.to_owned()),
         last_continued_at: None,
