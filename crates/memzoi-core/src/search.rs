@@ -112,18 +112,7 @@ pub(crate) fn search_memory_at(
     };
 
     let sql = format!(
-        "WITH current_memory AS MATERIALIZED (
-           SELECT memory_record.rowid
-           FROM memory_record
-           WHERE {current_assertion}
-             AND {destination_filter}
-             AND {scope_filter}
-             AND {scope_id_filter}
-             AND {type_filter}
-             AND {lane_filter}
-             AND {path_filter}
-         )
-         SELECT memory_record.id, memory_record.type, memory_record.lane, memory_record.destination,
+        "SELECT memory_record.id, memory_record.type, memory_record.lane, memory_record.destination,
                 memory_record.scope_kind, memory_record.scope_id, memory_record.visibility,
                 memory_record.title, memory_record.body, memory_record.status,
                 memory_record.confidence, memory_record.source_kind, memory_record.source_ref,
@@ -132,10 +121,16 @@ pub(crate) fn search_memory_at(
                 memory_record.retention_json, memory_record.origin_json,
                 memory_record.lineage_json,
                 bm25(memory_fts) AS rank
-         FROM current_memory
-         JOIN memory_record ON memory_record.rowid = current_memory.rowid
-         JOIN memory_fts ON memory_fts.rowid = current_memory.rowid
+         FROM memory_fts
+         JOIN memory_record ON memory_record.rowid = memory_fts.rowid
          WHERE memory_fts MATCH ?1
+           AND {current_assertion}
+           AND {destination_filter}
+           AND {scope_filter}
+           AND {scope_id_filter}
+           AND {type_filter}
+           AND {lane_filter}
+           AND {path_filter}
          ORDER BY rank ASC, memory_record.updated_at DESC, memory_record.id ASC
          LIMIT ?7"
     );
