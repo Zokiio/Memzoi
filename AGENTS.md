@@ -31,3 +31,13 @@ When durable repo knowledge is discovered:
 
 Do not store secrets, raw chat logs, temporary task progress, or private user facts in repo memory.
 <!-- memzoi:end -->
+
+## Agent skills
+
+### Issue tracker
+
+Work is tracked in GitHub Issues for `Zokiio/Memzoi`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Issue-oriented skills use the repository's existing triage labels. See `docs/agents/triage-labels.md`.
