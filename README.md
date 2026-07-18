@@ -207,6 +207,7 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
 - Repository-shared local runtime state under `~/.memzoi/projects/<repository-key>/`, with a durable `shared.db` for local/session memory and DB-local proposals plus disposable indexes and exports under `worktrees/<worktree-key>/`.
 - Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
 - Evidence-backed capture from explicit Markdown, agent-instruction, ADR, and Git-change sources: deterministic planning, complete human review, exact source replay, and stale-guarded apply. Repo-safe candidates become pending proposal files, private local/session candidates stay in runtime storage, and capture provenance survives later apply and rebuild. See the [capture reference](website/docs/reference.md#evidence-backed-capture).
+- Immutable repository maintenance planning: deterministic duplicate, contradiction, staleness, expiry, and renewal evidence plus report/candidate actions, with no execution or private CLI/MCP surface. See the [maintenance reference](website/docs/reference.md#repository-maintenance-planning).
 - Deterministic planning for explicitly classified `memzoi/import` candidates creates reviewable repo proposal files and private local/session runtime records on guarded apply. See the [import reference](website/docs/reference.md#classified-import).
 - Rebuild from canonical records with `memzoi rebuild` when the derived runtime index needs to be regenerated.
 - Text search, prompt-ready context packs, and CLI handoff packs.
@@ -218,6 +219,7 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
   - `inspect_memory_expiry`
   - `build_context_pack`
   - `plan_capture`
+  - `plan_maintenance_v1`
   - `propose_memory`
   - `precheck_path`
   - `precheck_action`

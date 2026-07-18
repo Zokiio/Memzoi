@@ -3,6 +3,7 @@ crates/memzoi-cli/src/commands/capture.rs|.write_all|2
 crates/memzoi-cli/src/commands/capture.rs|openat|3
 crates/memzoi-cli/src/commands/capture.rs|unlinkat|3
 crates/memzoi-cli/src/commands/capture.rs|linkat|1
+crates/memzoi-cli/src/commands/maintenance.rs|.write_all|1
 crates/memzoi-cli/src/commands/materialize.rs|.write_all|1
 crates/memzoi-cli/src/commands/materialize.rs|openat|1
 crates/memzoi-cli/src/eval.rs|fs::create_dir_all|5
@@ -40,6 +41,9 @@ crates/memzoi-core/src/exporters.rs|fs::remove_file|1
 crates/memzoi-core/src/exporters.rs|fs::create_dir_all|2
 crates/memzoi-core/src/git_repository.rs|fs::write|4
 crates/memzoi-core/src/git_repository.rs|fs::create_dir_all|2
+crates/memzoi-core/src/maintenance.rs|fs::write|2
+crates/memzoi-core/src/maintenance.rs|fs::remove_file|1
+crates/memzoi-core/src/maintenance.rs|fs::create_dir_all|1
 crates/memzoi-core/src/okf.rs|fs::write|4
 crates/memzoi-core/src/okf.rs|fs::remove_file|1
 crates/memzoi-core/src/okf.rs|fs::create_dir_all|5
@@ -134,5 +138,5 @@ crates/memzoi-core/src/service/tests.rs|fs::remove_file|1
 crates/memzoi-core/src/service/tests.rs|fs::create_dir_all|1
 crates/memzoi-core/src/service/tests.rs|fs::create_dir|1
 crates/memzoi-mcp/src/protocol.rs|fs::write|7
-crates/memzoi-mcp/src/protocol.rs|fs::create_dir|1
+crates/memzoi-mcp/src/protocol.rs|fs::create_dir|2
 crates/memzoi-mcp/src/protocol.rs|.write_all|3

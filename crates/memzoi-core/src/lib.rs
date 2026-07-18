@@ -10,6 +10,7 @@ mod exporters;
 mod git_repository;
 mod handoff;
 mod import;
+mod maintenance;
 mod materialization;
 mod memory_policy;
 mod models;
@@ -74,6 +75,7 @@ pub use import::{
     ImportDocument, ImportDuplicate, ImportDuplicateKind, ImportPlan, ImportPlanCandidate,
     ImportPlanSummary, ImportScope, ImportWrite, parse_import_document,
 };
+pub use maintenance::*;
 pub use materialization::{
     CANONICAL_REVISION_SCHEMA, CanonicalLifecycleProjection, CanonicalRecordSemanticContent,
     CanonicalRevision, CanonicalRevisionProjection, ExpectedPriorRevision,

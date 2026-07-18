@@ -12,6 +12,8 @@ mod rebuild;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use admission::{admit_repository_record_snapshot, ensure_repository_records_root_safe};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebuildResult {
     pub records_root: PathBuf,

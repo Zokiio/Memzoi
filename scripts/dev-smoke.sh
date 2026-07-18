@@ -41,6 +41,7 @@ expected = {
     'precheck_command',
     'inspect_memory_expiry',
     'plan_capture',
+    'plan_maintenance_v1',
 }
 assert tools == expected, tools
 print('MCP smoke OK:', ','.join(sorted(tools)))

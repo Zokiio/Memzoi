@@ -4,7 +4,7 @@ title: MCP and Agent Integration
 
 # MCP and Agent Integration
 
-Memzoi ships a minimal stdio MCP server for safe agent access. Agents can search, build context, plan capture, propose memory, and run prechecks, but they cannot review or apply capture, approve, reject, apply, supersede, tombstone, or export through MCP.
+Memzoi ships a minimal stdio MCP server for safe agent access. Agents can search, build context, plan capture and repository maintenance, propose memory, and run prechecks, but they cannot execute maintenance, review or apply capture, approve, reject, apply, supersede, tombstone, or export through MCP.
 
 MCP proposals follow the effective proposal approval policy:
 
@@ -46,12 +46,13 @@ The server exposes:
 | `inspect_memory_expiry` | Retrieve a record by ID, including an expired record, and explain normal-read eligibility without mutation. |
 | `build_context_pack` | Build a prompt-ready context pack for a task, with optional local/session memory opt-in. |
 | `plan_capture` | Build a deterministic, evidence-backed capture plan from one explicit project-relative Markdown file without writing memory state. |
+| `plan_maintenance_v1` | Build an immutable maintenance evidence plan from canonical repository records without writing memory or Git state. |
 | `propose_memory` | Create a memory proposal using the effective approval policy or an `approval_mode` override. |
 | `precheck_path` | Check a path against warnings, risks, and failed attempts. |
 | `precheck_action` | Check a planned action, optionally scoped to a path. |
 | `precheck_command` | Check a planned shell command, optionally scoped to a path. |
 
-The server does not expose capture review/apply or lifecycle mutation tools such as approve, reject, apply, supersede, tombstone, or export. Those stay CLI-side so durable and private memory writes remain reviewable.
+The server does not expose maintenance execution, private maintenance planning, capture review/apply, or lifecycle mutation tools such as approve, reject, apply, supersede, tombstone, or export. Those stay outside this MCP surface so durable and private memory writes remain reviewable.
 
 The CLI-only `memzoi handoff` command is not exposed as a separate MCP tool in this slice. MCP clients that need handoff-style context should call `build_context_pack` with the same task, path, token budget, and explicit opt-in policy. For CLI commands, the opt-in flags are `--include-local` and `--include-session`; for the MCP `build_context_pack` JSON input, use the fields `include_local` and `include_session`. Add any client-specific handoff framing outside Memzoi.
 
@@ -122,6 +123,38 @@ workflow only after treating it as untrusted review input, then use `memzoi capt
 `memzoi capture apply` with their pinned IDs. See the
 [capture reference](./reference.md#evidence-backed-capture) for the complete workflow.
 
+## `plan_maintenance_v1` contract
+
+`plan_maintenance_v1` accepts one strict repository-only request:
+
+```json
+{
+  "schema": "memzoi/maintenance-request",
+  "evaluated_at": "2026-07-18T12:00:00Z",
+  "record_ids": ["mem_repository_policy"]
+}
+```
+
+`schema` is required. `evaluated_at` is optional RFC 3339; omitting it captures
+one system-clock instant. `record_ids` is optional; when present it contains at
+most 256 unique canonical record IDs. Omitting it evaluates all admitted
+canonical repository records, up to the same 256-record planning ceiling. Unknown
+fields, output paths, private/local/session
+selectors, grant fields, and mutation-like arguments are rejected.
+
+The tool invokes the same standalone snapshot planner as
+`memzoi maintenance plan`; it does not initialize the normal memory service or
+read private runtime records. The complete `memzoi/maintenance-plan` appears in
+`structuredContent`. Text content is a bounded, content-free summary containing
+the plan identity, validity times, and aggregate finding/action counts.
+
+Planning has a 60-second deadline and supports MCP request cancellation. Success,
+failure, timeout, and cancellation write no records, proposals, indexes,
+overlays, private runtime rows, artifacts, WAL/event logs, or Git state. Errors
+at the MCP boundary use constant safe messages rather than echoing record
+content or rejected input. The artifact reports findings and action candidates
+only: MCP exposes no revalidation, apply, or execution tool in #120.
+
 ## `propose_memory` contract
 
 Required arguments:
@@ -185,7 +218,7 @@ The complete integration/workflow boundary documented by this page is:
 - Git-plane repo memory in `.memzoi/records/*.md` is reviewed, durable, canonical project truth.
 - Runtime-plane local/session memory under `${MEMZOI_HOME:-~/.memzoi}/projects/<repository-key>/shared.db` is local continuity shared across linked worktrees, not shared Git truth. Each worktree has a separate disposable canonical index. Include local/session memory in context only with explicit `--include-local` or `--include-session` opt-in.
 - `memzoi propose` creates reviewable operational proposal state; an `approved` proposal is not a canonical record. Durable canonical writes require an explicit supported apply route: DB proposals use `memzoi apply <proposal-id>` or `memzoi proposals apply --all-approved` after approval (or the one-shot `memzoi propose --apply` route), while file-backed packets require review followed by `memzoi proposal-files apply <proposal-id>`. Approval or review alone never writes `.memzoi/records/*.md`.
-- MCP may search, build context, run prechecks, create capture plans, and create proposal requests, but MCP never reviews/applies capture or applies canonical records. It must not claim or perform a direct canonical apply.
+- MCP may search, build context, run prechecks, create capture plans, create repository-only maintenance plans, and create proposal requests. MCP never executes maintenance, exposes private maintenance, reviews/applies capture, or applies canonical records. It must not claim or perform a direct canonical apply.
 - Do not commit `secrets` (including credentials), `raw_chat_transcripts`, `private_personal_data`, `temporary_task_state`, or `local_only_state`. These are policy exclusions, not automatic detection, extraction, or sanitization; classify and sanitize discoveries before proposing them.
 
 For the complete policy, see [The two planes](./memory-lifecycle.md#the-two-planes), [Destination, plane, lane, and provenance](./memory-lifecycle.md#destination-plane-lane-and-provenance), and [Command boundary](./memory-lifecycle.md#command-boundary). The [CLI reference](./reference.md) lists command syntax.

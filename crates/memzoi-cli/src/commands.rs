@@ -27,8 +27,8 @@ use serde_json::json;
 use crate::{
     cli::{
         CaptureCommands, CheckpointCommands, Cli, Commands, DraftCommand, EvalCommands,
-        EventCommands, ImportCommands, IntegrateCommands, LocalCommands, MaterializeCommands,
-        McpCommands, ProposalCommands, ProposalFileCommands, SafetyCommands,
+        EventCommands, ImportCommands, IntegrateCommands, LocalCommands, MaintenanceCommands,
+        MaterializeCommands, McpCommands, ProposalCommands, ProposalFileCommands, SafetyCommands,
     },
     eval, integrate, mcp,
     output::{print_json, print_jsonl_row},
@@ -36,6 +36,7 @@ use crate::{
 };
 
 mod capture;
+mod maintenance;
 mod materialize;
 mod proposal_files;
 
@@ -762,6 +763,14 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 actor,
                 as_json: json,
             }),
+        },
+        Commands::Maintenance { command } => match command {
+            MaintenanceCommands::Plan {
+                record_ids,
+                evaluated_at,
+                output,
+                json,
+            } => maintenance::plan_command(record_ids, evaluated_at, output, json),
         },
         Commands::Materialize { command } => match command {
             MaterializeCommands::Plan {
