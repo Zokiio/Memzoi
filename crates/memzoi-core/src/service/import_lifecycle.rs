@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
@@ -5,14 +6,18 @@ use rusqlite::Connection;
 
 use crate::{
     AuthorizationProof, ImportApplyResult, ImportDocument, ImportPlan, MemoryDestination,
-    MemoryPaths, MemoryStatus, OkfProposalSensitivity, RepositoryContentClass,
-    RepositoryWriteRoute, SafetyFieldKind, ScopeKind, Visibility,
+    MemoryPaths, OkfProposalSensitivity, RepositoryContentClass, RepositoryWriteRoute,
+    SafetyFieldKind, ScopeKind, Visibility,
     expiry::{self, Clock},
     import::{self, ExistingDuplicate},
     okf,
 };
 
 use super::{
+    import_origin_journal::{
+        ImportOriginJournal, ImportOriginJournalEntry, remove_journal as remove_import_journal,
+        write_journal as write_import_journal,
+    },
     proposal_packets::{FileProposalInventoryEntry, ProposalPacketLifecycle},
     repository_mutation::{
         AuthorizedRepositoryProjectionBatch, CreatedRepositoryFile, OwnedRepositoryProjection,
@@ -132,13 +137,43 @@ impl<'a> ImportLifecycle<'a> {
         let proposal_packets = ProposalPacketLifecycle::new(self.paths, self.shared_conn);
         let (inventory, reserved_proposal_ids) = proposal_packets.planning_inventory()?;
         let existing = self.load_duplicates(&inventory.pending)?;
-        import::build_plan(
+        let initial = import::build_plan(
             actor,
             &document,
             &existing,
             &self.paths.proposals_dir().join("pending"),
             &reserved_proposal_ids,
-        )
+            &BTreeMap::new(),
+        )?;
+        let mut replays = BTreeMap::new();
+        for candidate in &initial.candidates {
+            if !import_origin_is_admissible(candidate) {
+                continue;
+            }
+            let (identity, fingerprint) =
+                import_origin_binding(self.paths, &initial.sources, candidate)?;
+            match crate::lookup_origin(self.shared_conn, &identity, &fingerprint)? {
+                crate::OriginLookup::Replay(outcome) => {
+                    replays.insert(candidate.origin_key.clone(), outcome);
+                }
+                crate::OriginLookup::Prepared(_) => {
+                    bail!("origin_operation_pending: import origin is already prepared")
+                }
+                crate::OriginLookup::Unseen => {}
+            }
+        }
+        if replays.is_empty() {
+            Ok(initial)
+        } else {
+            import::build_plan(
+                actor,
+                &document,
+                &existing,
+                &self.paths.proposals_dir().join("pending"),
+                &reserved_proposal_ids,
+                &replays,
+            )
+        }
     }
 
     pub(super) fn apply(
@@ -192,7 +227,7 @@ impl<'a> ImportLifecycle<'a> {
                 continue;
             };
             let draft =
-                import::proposal_draft(candidate, actor, &timestamp, proposal_id, &plan.sources);
+                import::proposal_draft(candidate, actor, &timestamp, proposal_id, &plan.sources)?;
             planned.push((
                 candidate.index,
                 okf::plan_okf_create_proposal(&pending_root, &draft)?,
@@ -252,14 +287,106 @@ impl<'a> ImportLifecycle<'a> {
                 )
             })
             .transpose()?;
+        let import_origin_journal = if planned.is_empty() {
+            None
+        } else {
+            let entries = planned
+                .iter()
+                .map(|(candidate_index, proposal)| {
+                    let candidate = plan
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.index == *candidate_index)
+                        .context("import journal candidate disappeared from the plan")?;
+                    let (identity, fingerprint) =
+                        import_origin_binding(self.paths, &plan.sources, candidate)?;
+                    ImportOriginJournalEntry::new(
+                        self.paths,
+                        *candidate_index,
+                        identity,
+                        fingerprint,
+                        proposal.proposal_id.clone(),
+                        &proposal.path,
+                        &proposal.markdown,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let journal = ImportOriginJournal::new(self.paths, &plan.plan_id, &timestamp, entries)?;
+            Some(journal)
+        };
         let reserved_runtime_ids = if has_runtime_candidates {
             reserved_runtime_record_ids(self.paths, self.conn)?
         } else {
             BTreeSet::new()
         };
         let mut writes = Vec::new();
+        for candidate in &plan.candidates {
+            let import::ImportCandidateAction::Replay {
+                outcome,
+                destination,
+                record_id,
+                proposal_id,
+            } = &candidate.action
+            else {
+                continue;
+            };
+            if *outcome != crate::OriginOutcomeKind::Created {
+                continue;
+            }
+            match (*destination, record_id, proposal_id) {
+                (Some(MemoryDestination::Repo), _, Some(proposal_id)) => {
+                    writes.push(crate::ImportWrite::ProposalFile {
+                        index: candidate.index,
+                        proposal_id: proposal_id.clone(),
+                        path: std::path::PathBuf::from(".memzoi/proposals/pending")
+                            .join(format!("{proposal_id}.md")),
+                    });
+                }
+                (
+                    Some(destination @ (MemoryDestination::Local | MemoryDestination::Session)),
+                    Some(record_id),
+                    _,
+                ) => {
+                    writes.push(crate::ImportWrite::RuntimeRecord {
+                        index: candidate.index,
+                        record_id: record_id.clone(),
+                        destination,
+                    });
+                }
+                _ => bail!("recorded import origin outcome is missing its durable identifier"),
+            }
+        }
+        if let Some(journal) = import_origin_journal.as_ref() {
+            write_import_journal(self.paths, journal)?;
+        }
         let mut created = Vec::new();
         let result = (|| -> Result<()> {
+            let tx = self.shared_conn.unchecked_transaction()?;
+            let mut prepared_origins = BTreeMap::new();
+            for candidate in &plan.candidates {
+                if matches!(
+                    candidate.action,
+                    import::ImportCandidateAction::Replay { .. }
+                ) || !import_origin_is_admissible(candidate)
+                {
+                    continue;
+                }
+                let (identity, fingerprint) =
+                    import_origin_binding(self.paths, &plan.sources, candidate)?;
+                match crate::prepare_origin(&tx, &identity, &fingerprint, &timestamp)? {
+                    crate::OriginPreparation::Acquired => {
+                        prepared_origins.insert(candidate.index, (identity, fingerprint));
+                    }
+                    crate::OriginPreparation::Replay(_) => {
+                        bail!(
+                            "import origin finalized after planning; retry to receive its recorded outcome"
+                        )
+                    }
+                    crate::OriginPreparation::Pending(_) => {
+                        bail!("origin_operation_pending: import origin is already prepared")
+                    }
+                }
+            }
             if !planned.is_empty() {
                 proposal_packets
                     .ensure_planned_available(planned.iter().map(|(_, proposal)| proposal))?;
@@ -292,7 +419,6 @@ impl<'a> ImportLifecycle<'a> {
                 debug_assert_eq!(created_file.path(), proposal.path);
             }
 
-            let tx = self.shared_conn.unchecked_transaction()?;
             for candidate in &plan.candidates {
                 let import::ImportCandidateAction::CreateRuntime { route } = candidate.action
                 else {
@@ -300,7 +426,7 @@ impl<'a> ImportLifecycle<'a> {
                 };
                 let record = match route {
                     crate::MemoryWriteRoute::RuntimeLocal => RuntimeRecords::new(&tx)
-                        .create_local_avoiding(
+                        .create_local_with_metadata_avoiding(
                             actor,
                             &LocalMemoryInput {
                                 memory_type: candidate.memory_type,
@@ -309,16 +435,26 @@ impl<'a> ImportLifecycle<'a> {
                                 body: candidate.body.clone(),
                             },
                             &timestamp,
+                            crate::OriginDescriptor::new(
+                                &candidate.origin_key,
+                                crate::OriginRoute::Import,
+                            ),
+                            None,
                             &reserved_runtime_ids,
                         )?,
                     crate::MemoryWriteRoute::RuntimeSession => RuntimeRecords::new(&tx)
-                        .create_checkpoint_avoiding(
+                        .create_checkpoint_with_metadata_avoiding(
                             actor,
                             &CheckpointInput {
                                 task: candidate.title.clone(),
                                 note: candidate.body.clone(),
                             },
                             &timestamp,
+                            crate::OriginDescriptor::new(
+                                &candidate.origin_key,
+                                crate::OriginRoute::Import,
+                            ),
+                            None,
                             &reserved_runtime_ids,
                         )?,
                     _ => bail!("import runtime candidate has invalid route {route}"),
@@ -328,6 +464,87 @@ impl<'a> ImportLifecycle<'a> {
                     record_id: record.id,
                     destination: record.destination,
                 });
+            }
+            for candidate in &plan.candidates {
+                let Some((identity, fingerprint)) = prepared_origins.remove(&candidate.index)
+                else {
+                    continue;
+                };
+                let mut outcome = match &candidate.action {
+                    import::ImportCandidateAction::CreateProposal { proposal_id, .. } => {
+                        crate::OriginOutcome::new(
+                            identity,
+                            fingerprint,
+                            crate::OriginOutcomeKind::Created,
+                            &timestamp,
+                        )
+                        .with_destination(MemoryDestination::Repo)
+                        .with_proposal_id(proposal_id)
+                    }
+                    import::ImportCandidateAction::CreateRuntime { .. } => {
+                        let (record_id, destination) = writes
+                            .iter()
+                            .find_map(|write| match write {
+                                crate::ImportWrite::RuntimeRecord {
+                                    index,
+                                    record_id,
+                                    destination,
+                                } if *index == candidate.index => {
+                                    Some((record_id.as_str(), *destination))
+                                }
+                                _ => None,
+                            })
+                            .context("import runtime outcome has no created record")?;
+                        crate::OriginOutcome::new(
+                            identity,
+                            fingerprint,
+                            crate::OriginOutcomeKind::Created,
+                            &timestamp,
+                        )
+                        .with_destination(destination)
+                        .with_record_id(record_id)
+                    }
+                    import::ImportCandidateAction::Duplicate { matches } => {
+                        let mut outcome = crate::OriginOutcome::new(
+                            identity,
+                            fingerprint,
+                            crate::OriginOutcomeKind::ExistingDuplicateNoWrite,
+                            &timestamp,
+                        );
+                        if let Some(existing) = matches.first() {
+                            outcome = match existing.kind {
+                                import::ImportDuplicateKind::PendingProposal => {
+                                    outcome.with_proposal_id(&existing.id)
+                                }
+                                import::ImportDuplicateKind::CanonicalRecord
+                                | import::ImportDuplicateKind::RuntimeRecord => {
+                                    outcome.with_record_id(&existing.id)
+                                }
+                                import::ImportDuplicateKind::EarlierCandidate => outcome,
+                            };
+                        }
+                        outcome
+                    }
+                    import::ImportCandidateAction::NoWrite { .. } => crate::OriginOutcome::new(
+                        identity,
+                        fingerprint,
+                        crate::OriginOutcomeKind::RejectedNoWrite,
+                        &timestamp,
+                    ),
+                    import::ImportCandidateAction::Blocked { .. } => crate::OriginOutcome::new(
+                        identity,
+                        fingerprint,
+                        crate::OriginOutcomeKind::NeedsReviewNoWrite,
+                        &timestamp,
+                    ),
+                    import::ImportCandidateAction::Replay { .. } => {
+                        bail!("replayed import origin was unexpectedly prepared")
+                    }
+                };
+                if outcome.destination.is_none() {
+                    outcome.destination = Some(candidate.classification.destination);
+                }
+                crate::finalize_origin(&tx, &outcome)?;
             }
             tx.commit()?;
             Ok(())
@@ -350,7 +567,18 @@ impl<'a> ImportLifecycle<'a> {
                     "import apply failed; created repository files have no matching authorization",
                 );
             }
+            if let Some(journal) = import_origin_journal.as_ref()
+                && let Err(cleanup) = remove_import_journal(self.paths, journal)
+            {
+                return Err(error).context(format!(
+                    "import apply failed; journal cleanup failed: {cleanup}"
+                ));
+            }
             return Err(error);
+        }
+        if let Some(journal) = import_origin_journal.as_ref() {
+            remove_import_journal(self.paths, journal)
+                .context("import writes committed but origin journal cleanup failed")?;
         }
         if has_runtime_candidates {
             shared_runtime::refresh_index_mirrors_locked(self.paths, self.shared_conn, self.conn)
@@ -374,7 +602,21 @@ impl<'a> ImportLifecycle<'a> {
             false,
             "canonical record root",
         )?;
+        let now = self.clock.now_utc();
         for record in okf::read_okf_record_files(self.paths.records_dir())? {
+            let projected = okf::project_okf_record(&record);
+            if !crate::evaluate_current_assertion(
+                &projected.id,
+                projected.status,
+                projected.lane,
+                &projected.retention,
+                now,
+                Vec::new(),
+            )?
+            .is_current
+            {
+                continue;
+            }
             entries.push(ExistingDuplicate {
                 kind: import::ImportDuplicateKind::CanonicalRecord,
                 id: record.concept_id,
@@ -391,11 +633,17 @@ impl<'a> ImportLifecycle<'a> {
             });
         }
         let runtime_records = RuntimeRecords::new(self.shared_conn).records_for_preservation()?;
-        let now = self.clock.now_utc();
         let mut runtime = Vec::new();
         for record in runtime_records {
-            if record.status == MemoryStatus::Active
-                && !expiry::is_expired(record.expires_at.as_deref(), now)?
+            if crate::evaluate_current_assertion(
+                &record.id,
+                record.status,
+                record.lane,
+                &record.retention,
+                now,
+                Vec::new(),
+            )?
+            .is_current
             {
                 runtime.push(record);
             }
@@ -412,6 +660,43 @@ impl<'a> ImportLifecycle<'a> {
         entries.sort_by(|a, b| (a.kind, a.id.as_str()).cmp(&(b.kind, b.id.as_str())));
         Ok(entries)
     }
+}
+
+fn import_origin_is_admissible(candidate: &import::ImportPlanCandidate) -> bool {
+    !matches!(
+        candidate.sensitivity,
+        OkfProposalSensitivity::Unknown
+            | OkfProposalSensitivity::Secret
+            | OkfProposalSensitivity::RawTranscript
+    )
+}
+
+fn import_origin_binding(
+    paths: &MemoryPaths,
+    sources: &[crate::OkfProposalSource],
+    candidate: &import::ImportPlanCandidate,
+) -> Result<(crate::OriginIdentity, String)> {
+    let route = crate::OriginRoute::Import;
+    let descriptor = crate::OriginDescriptor::new(&candidate.origin_key, route);
+    let identity = crate::OriginIdentity::new(paths.repository_key(), descriptor);
+    let fingerprint = crate::origin_input_fingerprint(
+        route,
+        &serde_json::json!({
+            "origin_key": &candidate.origin_key,
+            "sources": sources,
+            "classification": &candidate.classification,
+            "policy": &candidate.policy,
+            "type": candidate.memory_type,
+            "lane": candidate.lane,
+            "title": &candidate.title,
+            "body": &candidate.body,
+            "sensitivity": candidate.sensitivity,
+            "content_class": candidate.content_class,
+            "scope": &candidate.scope,
+            "tags": &candidate.tags,
+        }),
+    )?;
+    Ok((identity, fingerprint))
 }
 
 fn cleanup_authorized_import_proposals(

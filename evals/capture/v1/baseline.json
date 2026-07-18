@@ -5,7 +5,7 @@
   "corpus": {
     "name": "memzoi-capture-v1",
     "version": "memzoi-capture-corpus/v1",
-    "digest": "blake3:686c766d4542659506950c5bf516950d13292c1993c68122385ff2eac0fdd880"
+    "digest": "blake3:dc150f57b5c3677299a125861b3b9d92a903156299ba62c73397d42aa42669d2"
   },
   "profiles": [
     {

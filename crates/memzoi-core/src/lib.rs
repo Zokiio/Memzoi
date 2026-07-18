@@ -14,6 +14,7 @@ mod materialization;
 mod memory_policy;
 mod models;
 mod okf;
+mod origin;
 mod precheck;
 mod proposals;
 mod recall_candidate_eval;
@@ -24,6 +25,7 @@ mod recall_eval_v3;
 mod recall_operational_eval;
 mod repository_io;
 mod repository_write_safety;
+mod retention;
 mod schema;
 mod search;
 mod service;
@@ -113,6 +115,12 @@ pub use okf::{
     read_okf_proposal_files, read_okf_record_files, redacted_okf_proposal_path,
     render_okf_record_markdown,
 };
+pub use origin::{
+    ORIGIN_IDENTITY_VERSION, OriginDescriptor, OriginIdentity, OriginLookup, OriginOutcome,
+    OriginOutcomeKind, OriginPreparation, OriginRoute, PreparedOrigin, RecordLineage,
+    RecordLineageKind, finalize_origin, lookup_origin, origin_input_fingerprint, prepare_origin,
+    record_origin_outcome,
+};
 pub use precheck::PrecheckInput;
 pub use proposals::{
     MemoryDraft, Proposal, ProposalStatus, ProposalStatusFilter, SupersedeResult, ValidationIssue,
@@ -148,13 +156,21 @@ pub use repository_write_safety::{
     assess_repository_candidate, authorize_repository_write, scan_managed_repository_blob,
     scan_repository_blob,
 };
+pub use retention::{
+    CurrentAssertionDecision, CurrentAssertionExclusion, EpisodicRetentionExtension,
+    RETENTION_POLICY_VERSION, RetentionDecision, RetentionFacts, RetentionReason, RetentionState,
+    SQL_RETENTION_STATE, evaluate_current_assertion, evaluate_retention,
+    retention_facts_for_creation,
+};
 pub use search::SearchInput;
 pub use service::{
-    CheckpointInput, ExportFormat, ExportInput, ExportResult, FileProposalInventory,
-    FileProposalInventoryEntry, FileProposalInventoryError, FileProposalResolutionResult,
-    InitBundleResult, InitRequest, InitResult, LocalMemoryInput, MemoryService,
-    ProposalApprovalOverride, ProposeOptions, ProposeResult, RebuildResult, RepoIndexDrift,
-    init_bundle, lifecycle_transaction_artifact_count, scan_file_proposal_inventory,
+    CheckpointCommandResult, CheckpointInput, CloseCheckpointCommand, ContinueCheckpointCommand,
+    CreateCheckpointCommand, CreateCheckpointSuccessorCommand, ExportFormat, ExportInput,
+    ExportResult, FileProposalInventory, FileProposalInventoryEntry, FileProposalInventoryError,
+    FileProposalResolutionResult, InitBundleResult, InitRequest, InitResult, LocalMemoryInput,
+    MemoryService, ProposalApprovalOverride, ProposeOptions, ProposeResult, RebuildResult,
+    RepoIndexDrift, SessionEndFromCheckpointCommand, SessionEndFromCheckpointResult, init_bundle,
+    lifecycle_transaction_artifact_count, scan_file_proposal_inventory,
 };
 pub use session_end::{
     SessionEndCandidate, SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument,

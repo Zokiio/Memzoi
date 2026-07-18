@@ -88,9 +88,10 @@ The following categories are excluded from canonical repo records:
 
 Proposal sensitivity expresses these boundaries as `repo-safe`, `local-only`,
 `sensitive`, `secret`, `raw-transcript`, `private-personal-data`,
-`temporary-state`, or `unknown`. Omitted DB/file values resolve to `unknown`;
-only `repo-safe` can pass canonical apply. This fail-closed behavior does not
-promise continued admission of older pre-1.0 artifacts.
+`temporary-state`, or `unknown`. Current-format proposal files require an
+explicit sensitivity and content class. Interactive proposal inputs may
+represent an omitted sensitivity as `unknown`; only an explicit `repo-safe`
+classification can pass canonical apply.
 
 Do not put these categories in `.memzoi/records/*.md` or a repo-shared pending proposal.
 A blocked sensitivity is not made safe by auto-approval. Classify or sanitize
@@ -105,35 +106,44 @@ runtime continuity. `memzoi session-end` accepts explicit structured input
 and free-text checkpoint bodies are not an extraction source. See
 [OKF profile](./okf-profile.md) for the file-native proposal/record details.
 
-## Authoritative read-time expiry
+## Retention and current assertions
 
-An active record with `expires`/`expires_at` stops participating in normal
-memory reads when the evaluation clock reaches its expiry. The boundary is
-inclusive: a record is expired when `now >= expires_at`. This rule is shared by
-repo, local, and session search; context and handoff packs (including path-only
-candidates); precheck; local lists; checkpoint list/show; and generated OKF,
-`AGENTS.memory.md`, and `CLAUDE.memory.md` exports.
+Every current-format record carries versioned `retention` facts. Retention is
+the lane-specific temporal decision only; it returns `current` or `query_only`
+plus an effective boundary and reason. The complete ordinary-use decision is
+the **current assertion**:
 
-Expiry values use one of two exact forms:
+```text
+active lifecycle status
+AND retention is current
+AND applicability is valid
+AND no conflict suppression
+AND no quarantine or safety suppression
+```
 
-- `YYYY-MM-DD` means `00:00:00Z` at the start of that date; or
-- an RFC 3339 timestamp with `Z` or an explicit numeric UTC offset.
+Search, context, handoff, precheck, exports, local/checkpoint reads, duplicate
+analysis, and conflict analysis all use that shared boundary before ranking or
+limiting. A temporally current record can therefore still be excluded by
+another current-assertion dimension. `include_inactive` does not grant history
+access.
 
-Offsets describe an instant, so `2026-07-10T14:00:00+02:00` expires at the
-same moment as `2026-07-10T12:00:00Z`. Timestamps without a timezone and
-invalid calendar values are rejected rather than treated as unexpired.
-Production services evaluate against `SystemClock`; embedders and tests can
-inject one clock through `MemoryService::open_with_clock` or
-`MemoryService::open_paths_with_clock`, ensuring every surface in one service
-uses the same instant.
+The `memzoi/lane-retention-v1` policy applies these boundaries:
 
-Expiry is a read-time eligibility decision, not an implicit lifecycle write.
-Memzoi leaves the indexed status and canonical `.memzoi/records/*.md` file
-unchanged during search, rebuild, context, precheck, and export. Use
-`memzoi expiry <record-id>` (or MCP `inspect_memory_expiry`) to retrieve the
-record by ID, see the normalized effective instant, and explain why normal
-reads excluded it. Any renewal or status transition remains a separately
-reviewed canonical lifecycle action.
+- session: the earliest of closure, 24 hours after the latest continuation or
+  start, seven days after the original start, and explicit expiry;
+- episodic: 30 days after occurrence, or an authorized extension capped at 90
+  days, shortened by explicit expiry; and
+- semantic and procedural: no age TTL, while explicit expiry still applies.
+
+The exact boundary is `query_only`. All timestamps are RFC 3339 instants with
+`Z` or an explicit numeric UTC offset. Invalid facts fail with an error naming
+the record; they are never treated as an ordinary non-current result.
+
+Retention evaluation is not an implicit lifecycle write. Memzoi leaves the
+record and canonical `.memzoi/records/*.md` file unchanged during recall. Use
+`memzoi expiry <record-id>` (or MCP `inspect_memory_expiry`) to retrieve a
+record by ID and inspect its retention decision, current assertion, and
+exclusions. Renewal and status transitions remain explicit lifecycle actions.
 
 ## Command boundary
 
@@ -355,6 +365,9 @@ Use checkpoints for explicit task continuity:
 ```bash
 memzoi checkpoint add --task "..." --note "..."
 memzoi checkpoint add --task "..." --from-file notes.md
+memzoi checkpoint continue <checkpoint-id>
+memzoi checkpoint close <checkpoint-id>
+memzoi checkpoint add --task "..." --note "..." --successor-of <checkpoint-id>
 memzoi checkpoint list
 ```
 
@@ -364,6 +377,14 @@ with explicit `--include-local` or `--include-session`. Their recall and
 precheck citations carry `provenance: runtime`; Git records carry
 `provenance: git`. A runtime row never becomes shared repo truth merely
 because it was recalled, exported, or included in a context pack.
+
+A continuation is accepted only while the checkpoint is open and current;
+the exact retention boundary is too late. Closure is terminal and idempotent.
+A closed or expired checkpoint can be named as `--successor-of` to create a
+new session generation with explicit predecessor lineage. Machine-oriented
+JSON calls require caller-controlled `--operation-id` and observed
+`--expected-version`; an identical retry replays its recorded outcome before
+version checks, while changed parameters with the same operation ID fail.
 
 ## Explicit session-end routing
 
@@ -403,7 +424,7 @@ successful `repo` route still requires the separate review/apply step above.
 
 Import is a strict, compact manifest workflow, not an extractor or automatic
 classifier. The caller supplies a manifest with the exact version
-`memzoi/import-v1`, explicit candidates, and provenance sources. It does not
+`memzoi/import-v2`, a required source-event `origin_key`, explicit candidates, and provenance sources. It does not
 parse `AGENTS.md`, `CLAUDE.md`, Cursor files, ADRs, chats, or other ambient
 project state; it does not infer candidates from those sources.
 

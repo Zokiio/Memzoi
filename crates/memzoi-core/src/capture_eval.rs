@@ -2637,8 +2637,14 @@ fn exercise_review_apply_workflow(
         }
     };
     let state_after = capture_managed_state_snapshot(&service, isolated_root)?;
-    let declared_delta_valid =
-        declared_apply_delta_matches(paths, isolated_root, &state_before, &state_after, &applied);
+    let declared_delta_valid = declared_apply_delta_matches(
+        paths,
+        isolated_root,
+        &state_before,
+        &state_after,
+        plan,
+        &applied,
+    );
     let (apply_valid, provenance_valid, repo_routes_valid) =
         validate_applied_workflow(&service, plan, &review, &applied)?;
     checks.apply_valid = apply_valid && declared_delta_valid;
@@ -2768,6 +2774,7 @@ fn declared_apply_delta_matches(
     isolated_root: &Path,
     before: &CaptureManagedStateSnapshot,
     after: &CaptureManagedStateSnapshot,
+    plan: &CapturePlan,
     applied: &CaptureApplyResult,
 ) -> bool {
     let expected_proposal_paths = applied
@@ -2828,7 +2835,11 @@ fn declared_apply_delta_matches(
             allowed_file_changes.insert(relative_from(isolated_root, &path));
         }
     }
-    if !expected_runtime_ids.is_empty() {
+    let expects_origin_outcomes = plan.candidates.iter().any(|candidate| {
+        !matches!(candidate.action, CaptureAction::Replay { .. })
+            && crate::capture::capture_origin_is_admissible(candidate)
+    });
+    if !expected_runtime_ids.is_empty() || expects_origin_outcomes {
         for path in sqlite_artifact_paths(&paths.shared_db_path) {
             allowed_file_changes.insert(relative_from(isolated_root, &path));
         }
@@ -4215,7 +4226,7 @@ mod tests {
             r#"
 id: forged-policy-read
 request:
-  schema: memzoi/capture-request-v1
+  schema: memzoi/capture-request-v2
   sources:
     - source_id: source-1
       locator: {kind: project_path, path: notes/source.md}
@@ -4249,7 +4260,7 @@ expected_policy_inputs:
     engine_version: memzoi/git-unified-renderer-v1+git-
     engine_match: prefix
 request:
-  schema: memzoi/capture-request-v1
+  schema: memzoi/capture-request-v2
   sources:
     - source_id: source-1
       locator:

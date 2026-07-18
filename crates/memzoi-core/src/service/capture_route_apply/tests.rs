@@ -20,8 +20,8 @@ use crate::{
     CaptureExtractorRequest, CaptureMemoryScope, CaptureRequest, CaptureReviewDecisionInput,
     CaptureReviewInput, CaptureReviewOutcome, CaptureSourceLocator, CaptureSourceRequest,
     MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryLane, MemoryPaths, MemoryType,
-    OkfProposalSensitivity, RepositoryContentClass, RepositoryWriteRoute, ScopeKind, Visibility,
-    build_capture_review, okf, plan_capture,
+    OkfProposalSensitivity, OriginDescriptor, OriginRoute, RepositoryContentClass,
+    RepositoryWriteRoute, ScopeKind, Visibility, build_capture_review, okf, plan_capture,
 };
 
 #[test]
@@ -464,6 +464,17 @@ fn committed_recovery_rejects_substituted_staged_bytes() -> anyhow::Result<()> {
             sensitivity: OkfProposalSensitivity::RepoSafe,
             content_class: RepositoryContentClass::GeneralRepoKnowledge,
             capture: None,
+            retention: crate::retention_facts_for_creation(
+                MemoryLane::Semantic,
+                "2026-07-10T12:00:00Z",
+                None,
+                None,
+            )?,
+            origin: OriginDescriptor::new(
+                format!("test:{proposal_id}"),
+                OriginRoute::RepositoryProposal,
+            ),
+            lineage: None,
         },
     )?;
     let safety_values = okf_proposal_safety_values("candidate[candidate_test]", &proposal.parsed);
@@ -536,6 +547,17 @@ fn committed_recovery_rejects_a_substituted_exact_journal() -> anyhow::Result<()
             sensitivity: OkfProposalSensitivity::RepoSafe,
             content_class: RepositoryContentClass::GeneralRepoKnowledge,
             capture: None,
+            retention: crate::retention_facts_for_creation(
+                MemoryLane::Semantic,
+                "2026-07-10T12:00:00Z",
+                None,
+                None,
+            )?,
+            origin: OriginDescriptor::new(
+                format!("test:{proposal_id}"),
+                OriginRoute::RepositoryProposal,
+            ),
+            lineage: None,
         },
     )?;
     let safety_values = okf_proposal_safety_values("candidate[candidate_test]", &proposal.parsed);
@@ -726,7 +748,10 @@ fn open_fails_closed_for_legacy_capture_destination_without_ownership() -> anyho
         .err()
         .context("legacy recovery without ownership must block startup")?;
 
-    assert!(format!("{error:#}").contains("ownership proof"));
+    assert!(
+        format!("{error:#}").contains("unsupported capture apply journal schema"),
+        "{error:#}"
+    );
     assert_eq!(fs::read(&destination)?, contents);
     assert!(
         paths
@@ -866,6 +891,9 @@ fn test_capture_apply_journal(
         entries: vec![CaptureApplyJournalEntry {
             candidate_id: "candidate_test".to_owned(),
             proposal_id: proposal_id.to_owned(),
+            origin: OriginDescriptor::new("capture:test-journal", OriginRoute::Capture),
+            input_fingerprint: "1".repeat(64),
+            intended_outcome: crate::OriginOutcomeKind::Created,
             content_bytes: contents.len() as u64,
             content_hash: blake3::hash(contents).to_hex().to_string(),
             projection_digest: "0".repeat(64),

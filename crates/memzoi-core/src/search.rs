@@ -11,6 +11,7 @@ use crate::{
         MemoryCitation, MemoryDestination, MemoryLane, MemoryPath, MemoryRecord, MemoryType,
         ScopeKind, SearchResult,
     },
+    retention,
 };
 
 pub(crate) const SQL_PATH_MATCHES_REQUEST: &str = "memzoi_path_matches";
@@ -74,11 +75,10 @@ pub(crate) fn search_memory_at(
 
     let limit = normalized_limit(input.limit);
     let evaluated_at = expiry::format_timestamp(now)?;
-    let status_filter = if input.include_inactive {
-        "1 = 1"
-    } else {
-        "memory_record.status = 'active'"
-    };
+    // `include_inactive` remains part of the pre-v1 request shape, but it must
+    // never bypass the complete current-assertion boundary.
+    let _ = input.include_inactive;
+    let current_assertion = retention::current_assertion_sql("memory_record", "?8");
     let scope_filter = if input.scope_kind.is_some() {
         "memory_record.scope_kind = ?2"
     } else {
@@ -112,24 +112,30 @@ pub(crate) fn search_memory_at(
     };
 
     let sql = format!(
-        "SELECT memory_record.id, memory_record.type, memory_record.lane, memory_record.destination,
+        "WITH current_memory AS MATERIALIZED (
+           SELECT memory_record.rowid
+           FROM memory_record
+           WHERE {current_assertion}
+             AND {destination_filter}
+             AND {scope_filter}
+             AND {scope_id_filter}
+             AND {type_filter}
+             AND {lane_filter}
+             AND {path_filter}
+         )
+         SELECT memory_record.id, memory_record.type, memory_record.lane, memory_record.destination,
                 memory_record.scope_kind, memory_record.scope_id, memory_record.visibility,
                 memory_record.title, memory_record.body, memory_record.status,
                 memory_record.confidence, memory_record.source_kind, memory_record.source_ref,
                 memory_record.content_hash, memory_record.created_at, memory_record.updated_at,
-                memory_record.supersedes_id, memory_record.expires_at, memory_record.proposal_id,
+                memory_record.supersedes_id, memory_record.proposal_id,
+                memory_record.retention_json, memory_record.origin_json,
+                memory_record.lineage_json,
                 bm25(memory_fts) AS rank
-         FROM memory_fts
-         JOIN memory_record ON memory_record.rowid = memory_fts.rowid
+         FROM current_memory
+         JOIN memory_record ON memory_record.rowid = current_memory.rowid
+         JOIN memory_fts ON memory_fts.rowid = current_memory.rowid
          WHERE memory_fts MATCH ?1
-           AND {status_filter}
-           AND memzoi_is_expired(memory_record.expires_at, ?8) = 0
-           AND {destination_filter}
-           AND {scope_filter}
-           AND {scope_id_filter}
-           AND {type_filter}
-           AND {lane_filter}
-           AND {path_filter}
          ORDER BY rank ASC, memory_record.updated_at DESC, memory_record.id ASC
          LIMIT ?7"
     );
@@ -233,7 +239,7 @@ pub(crate) fn search_memory_at(
 
 fn ranked_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(MemoryRecord, f64)> {
     let record = record_from_row(row)?;
-    let rank = row.get(19)?;
+    let rank = row.get(21)?;
     Ok((record, rank))
 }
 
@@ -294,14 +300,47 @@ pub(crate) fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memor
         confidence: row.get(10)?,
         source_kind: row.get(11)?,
         source_ref: row.get(12)?,
-        proposal_id: row.get(18)?,
+        proposal_id: row.get(17)?,
         capture: None,
         content_hash: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
         supersedes_id: row.get(16)?,
-        expires_at: row.get(17)?,
+        retention: parse_json_cell(row, 18)?,
+        origin: parse_json_cell(row, 19)?,
+        lineage: parse_optional_json_cell(row, 20)?,
     })
+}
+
+fn parse_json_cell<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let raw: String = row.get(index)?;
+    serde_json::from_str(&raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
+fn parse_optional_json_cell<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let raw: Option<String> = row.get(index)?;
+    raw.map(|raw| {
+        serde_json::from_str(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    })
+    .transpose()
 }
 
 fn parse_cell<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T>
@@ -744,25 +783,34 @@ mod tests {
     }
 
     fn insert_memory(conn: &Connection, memory: MemoryFixture<'_>) -> anyhow::Result<()> {
+        let lane = MemoryLane::Semantic;
+        let now = crate::events::now_utc()?;
+        let mut retention = crate::retention_facts_for_creation(lane, &now, None, None)?;
+        if memory.status == MemoryStatus::Expired {
+            retention.explicit_expires_at = Some("2000-01-01T00:00:00Z".to_owned());
+        }
+        let origin = crate::OriginDescriptor::new(
+            format!("test-search:{}", memory.id),
+            crate::OriginRoute::RepositoryMaterialization,
+        );
         conn.execute(
             "INSERT INTO memory_record(
-                id, type, scope_kind, visibility, title, body, status, confidence,
-                source_kind, source_ref, content_hash, expires_at
-             ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, 0.91, 'test', ?7, ?8, ?9)",
+                id, type, lane, destination, scope_kind, visibility, title, body, status,
+                confidence, source_kind, source_ref, retention_json, origin_json, content_hash
+             ) VALUES (?1, ?2, ?3, 'repo', ?4, 'repo', ?5, ?6, ?7, 0.91, 'test',
+                       ?8, ?9, ?10, ?11)",
             params![
                 memory.id,
                 memory.memory_type.as_str(),
+                lane.as_str(),
                 memory.scope_kind.as_str(),
                 memory.title,
                 memory.body,
                 memory.status.as_str(),
                 memory.source_ref,
+                serde_json::to_string(&retention)?,
+                serde_json::to_string(&origin)?,
                 format!("hash-{}", memory.id),
-                if memory.status == MemoryStatus::Expired {
-                    Some("2000-01-01T00:00:00.000Z")
-                } else {
-                    None
-                },
             ],
         )?;
 

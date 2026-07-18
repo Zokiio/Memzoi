@@ -208,6 +208,8 @@ fn context_include_local_and_session_flags_are_explicit_opt_ins() {
             "Layered omega session checkpoint",
             "--note",
             "Layered omega context should include session memory only with explicit opt-in.",
+            "--operation-id",
+            "layered-omega-checkpoint",
             "--json",
         ],
     );
@@ -299,6 +301,8 @@ fn context_json_excludes_runtime_memory_without_leaking_content_or_counts() {
             "Runtime zircon session private title",
             "--note",
             "Runtime zircon session private body must not leak.",
+            "--operation-id",
+            "runtime-zircon-checkpoint",
             "--json",
         ],
     );
@@ -476,6 +480,8 @@ fn handoff_runtime_memory_requires_explicit_opt_in() {
             "Layered handoff session checkpoint",
             "--note",
             "Layered handoff should include session memory only with explicit opt-in.",
+            "--operation-id",
+            "layered-handoff-checkpoint",
             "--json",
         ],
     );
@@ -660,11 +666,23 @@ fn rebuild_json_restores_search_context_and_precheck_from_canonical_records() {
     fs::write(
         records_dir.join("canonical-rebuild-decision.md"),
         r#"---
+id: core/canonical-rebuild-decision
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: test-record:canonical-rebuild-decision
+  route: repository_materialization
 type: decision
+lane: semantic
 title: Rebuild sentinel routing decision
 description: Restores context packs from canonical records.
 timestamp: 2026-07-05T00:00:00Z
 status: active
+scope: repo
 visibility: repo
 content_class: general_repo_knowledge
 confidence: 0.93
@@ -683,11 +701,23 @@ Use the rebuild sentinel routing recall token when restoring context packs from 
     fs::write(
         records_dir.join("canonical-rebuild-risk.md"),
         r#"---
+id: core/canonical-rebuild-risk
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: test-record:canonical-rebuild-risk
+  route: repository_materialization
 type: risk
+lane: semantic
 title: Rebuild sentinel precheck risk
 description: Restores precheck warnings from canonical records.
 timestamp: 2026-07-05T00:00:00Z
 status: active
+scope: repo
 visibility: repo
 content_class: general_repo_knowledge
 confidence: 0.97

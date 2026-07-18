@@ -145,6 +145,12 @@ pub(crate) enum Commands {
         from_file: Option<PathBuf>,
         #[arg(long = "from-checkpoint")]
         from_checkpoint: Option<String>,
+        /// Caller-controlled idempotency identity for checkpoint promotion. Required with --json.
+        #[arg(long = "operation-id")]
+        operation_id: Option<String>,
+        /// Source checkpoint version observed by the caller. Required with --json.
+        #[arg(long = "expected-version")]
+        expected_version: Option<String>,
         #[arg(long, default_value = "cli")]
         actor: String,
         #[arg(long)]
@@ -613,7 +619,7 @@ pub(crate) enum CaptureCommands {
             required_unless_present = "request_file"
         )]
         source: Option<String>,
-        /// Complete capture-request-v1 JSON or YAML artifact for an extension profile.
+        /// Complete capture-request-v2 JSON or YAML artifact for an extension profile.
         #[arg(long = "request-file", conflicts_with = "source")]
         request_file: Option<PathBuf>,
         /// Explicit supplied-bytes transport path, or '-' for explicitly selected stdin.
@@ -632,13 +638,13 @@ pub(crate) enum CaptureCommands {
 
     /// Bind reviewed decisions to an immutable capture plan.
     Review {
-        /// Complete capture-plan-v1 JSON artifact.
+        /// Complete capture-plan-v2 JSON artifact.
         #[arg(long = "plan-file")]
         plan_file: PathBuf,
-        /// Strict capture-review-input-v1 JSON artifact.
+        /// Strict capture-review-input-v2 JSON artifact.
         #[arg(long = "decisions-file")]
         decisions_file: PathBuf,
-        /// Prior capture-review-v1 artifact when replacing deferred decisions.
+        /// Prior capture-review-v2 artifact when replacing deferred decisions.
         #[arg(long = "prior-review-file")]
         prior_review_file: Option<PathBuf>,
         /// Exact supplied bytes used by the plan, or '-' for explicitly selected stdin.
@@ -660,10 +666,10 @@ pub(crate) enum CaptureCommands {
 
     /// Route one complete, pinned capture plan and review.
     Apply {
-        /// Complete capture-plan-v1 JSON artifact.
+        /// Complete capture-plan-v2 JSON artifact.
         #[arg(long = "plan-file")]
         plan_file: PathBuf,
-        /// Complete capture-review-v1 JSON artifact.
+        /// Complete capture-review-v2 JSON artifact.
         #[arg(long = "review-file")]
         review_file: PathBuf,
         /// Immediate predecessor review when applying a later deferred-decision review.
@@ -831,6 +837,45 @@ pub(crate) enum CheckpointCommands {
         note: Option<String>,
         #[arg(long = "from-file")]
         from_file: Option<PathBuf>,
+        /// Closed or expired checkpoint continued by this new session generation.
+        #[arg(long = "successor-of")]
+        successor_of: Option<String>,
+        /// Caller-controlled idempotency identity. Required with --json.
+        #[arg(long = "operation-id")]
+        operation_id: Option<String>,
+        /// Version of --successor-of observed by the caller. Required with --json.
+        #[arg(long = "expected-version")]
+        expected_version: Option<String>,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Extend the 24-hour lease of an active checkpoint.
+    Continue {
+        checkpoint_id: String,
+        /// Caller-controlled idempotency identity. Required with --json.
+        #[arg(long = "operation-id")]
+        operation_id: Option<String>,
+        /// Checkpoint version observed by the caller. Required with --json.
+        #[arg(long = "expected-version")]
+        expected_version: Option<String>,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Permanently close a checkpoint.
+    Close {
+        checkpoint_id: String,
+        /// Caller-controlled idempotency identity. Required with --json.
+        #[arg(long = "operation-id")]
+        operation_id: Option<String>,
+        /// Checkpoint version observed by the caller. Required with --json.
+        #[arg(long = "expected-version")]
+        expected_version: Option<String>,
         #[arg(long, default_value = "cli")]
         actor: String,
         #[arg(long)]

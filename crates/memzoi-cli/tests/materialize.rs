@@ -129,7 +129,18 @@ fn candidate_record(
         created: "2026-07-16T12:00:00Z".to_owned(),
         updated: None,
         supersedes_id,
-        expires_at: None,
+        retention: memzoi_core::retention_facts_for_creation(
+            MemoryLane::Semantic,
+            "2026-07-16T12:00:00Z",
+            None,
+            None,
+        )
+        .expect("valid materialization fixture retention"),
+        origin: memzoi_core::OriginDescriptor::new(
+            format!("repository-materialization:test:{concept_id}"),
+            memzoi_core::OriginRoute::RepositoryMaterialization,
+        ),
+        lineage: None,
         proposal_id: None,
         capture: None,
     }
@@ -227,10 +238,10 @@ fn materialize_plan_and_decide_only_write_explicit_artifacts() {
         before,
         "plan and decide must not alter records, proposal packets, or runtime state"
     );
-    assert_eq!(plan["schema"], "memzoi/repository-materialization-plan-v1");
+    assert_eq!(plan["schema"], "memzoi/repository-materialization-plan-v2");
     assert_eq!(
         decision["schema"],
-        "memzoi/repository-materialization-decision-v1"
+        "memzoi/repository-materialization-decision-v2"
     );
     assert_eq!(read_json(&plan_path), plan);
     assert_eq!(read_json(&decision_path), decision);
@@ -294,7 +305,7 @@ fn materialize_apply_writes_an_unstaged_canonical_record_and_reports_review_data
     let applied = run_json(repo.path(), home.path(), &apply_args);
     assert_eq!(
         applied["schema"],
-        "memzoi/repository-materialization-apply-report-v1"
+        "memzoi/repository-materialization-apply-report-v2"
     );
     let record_path = paths.records_dir().join(format!("{concept_id}.md"));
     assert!(
@@ -303,7 +314,7 @@ fn materialize_apply_writes_an_unstaged_canonical_record_and_reports_review_data
     );
     assert_eq!(
         applied["result"]["schema"],
-        "memzoi/repository-materialization-result-v1"
+        "memzoi/repository-materialization-result-v2"
     );
     assert_eq!(
         applied["result"]["outputs"][0]["path"],

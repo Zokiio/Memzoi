@@ -3,14 +3,15 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{collections::BTreeMap, str::FromStr};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::RepositoryContentClass;
 use crate::events::{AppendEvent, append_event, now_utc};
-use crate::models::{
-    MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
-};
+use crate::models::{MemoryLane, MemoryRecord, MemoryType, ScopeKind, Visibility};
 use crate::okf::OkfProposalSensitivity;
+use crate::{
+    OriginDescriptor, OriginRoute, RepositoryContentClass, retention, retention_facts_for_creation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,7 +78,6 @@ impl FromStr for ProposalStatusFilter {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryDraft {
     pub memory_type: MemoryType,
-    #[serde(default)]
     pub lane: MemoryLane,
     pub scope_kind: ScopeKind,
     pub scope_id: Option<String>,
@@ -87,11 +87,9 @@ pub struct MemoryDraft {
     pub tags: Vec<String>,
     pub source_kind: Option<String>,
     pub source_ref: Option<String>,
-    /// Classification for writes to canonical repo memory. Missing legacy values deserialize as unknown.
-    #[serde(default)]
+    /// Explicit classification for writes to canonical repo memory.
     pub sensitivity: OkfProposalSensitivity,
-    /// Typed contextual-policy claim for repository writes. Missing legacy values fail closed.
-    #[serde(default)]
+    /// Explicit typed contextual-policy claim for repository writes.
     pub content_class: RepositoryContentClass,
     pub confidence: f64,
 }
@@ -244,7 +242,7 @@ pub fn validate_proposal_against_records(
             content_hash: None,
         });
     }
-    for record_id in duplicate_record_ids(records_conn, &hash)? {
+    for record_id in duplicate_record_ids(records_conn, &hash, OffsetDateTime::now_utc())? {
         issues.push(ValidationIssue {
             code: "duplicate_content_hash".to_owned(),
             message: "an active memory already has the same content hash".to_owned(),
@@ -506,11 +504,17 @@ fn insert_record(
     let id = next_record_id(conn, &draft)?;
     let now = now_utc()?;
     let hash = content_hash(&draft);
+    let retention = retention_facts_for_creation(draft.lane, &now, None, None)?;
+    let origin = OriginDescriptor::new(
+        format!("repository-materialization:{id}"),
+        OriginRoute::RepositoryMaterialization,
+    );
     conn.execute(
         "INSERT INTO memory_record (
           id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status, confidence,
-          source_kind, source_ref, proposal_id, content_hash, created_at, updated_at, supersedes_id
-        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)",
+          source_kind, source_ref, proposal_id, content_hash, created_at, updated_at, supersedes_id,
+          retention_json, origin_json, lineage_json
+        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17, NULL)",
         params![
             id,
             draft.memory_type.as_str(),
@@ -527,6 +531,8 @@ fn insert_record(
             hash,
             now,
             supersedes_id,
+            serde_json::to_string(&retention)?,
+            serde_json::to_string(&origin)?,
         ],
     )?;
     for tag in &draft.tags {
@@ -543,39 +549,10 @@ fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
         .query_row(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at, proposal_id
+                supersedes_id, proposal_id, retention_json, origin_json, lineage_json
          FROM memory_record WHERE id = ?1",
         [id],
-        |row| {
-            let memory_type: String = row.get(1)?;
-            let lane: String = row.get(2)?;
-            let destination: String = row.get(3)?;
-            let scope_kind: String = row.get(4)?;
-            let visibility: String = row.get(6)?;
-            let status: String = row.get(9)?;
-            Ok(MemoryRecord {
-                id: row.get(0)?,
-                memory_type: parse_memory_type(&memory_type)?,
-                lane: parse_model_enum(&lane)?,
-                destination: parse_memory_destination(&destination)?,
-                scope_kind: parse_scope_kind(&scope_kind)?,
-                scope_id: row.get(5)?,
-                visibility: parse_visibility(&visibility)?,
-                title: row.get(7)?,
-                body: row.get(8)?,
-                status: parse_memory_status(&status)?,
-                confidence: row.get(10)?,
-                source_kind: row.get(11)?,
-                source_ref: row.get(12)?,
-                proposal_id: row.get(18)?,
-                capture: None,
-                content_hash: row.get(13)?,
-                created_at: row.get(14)?,
-                updated_at: row.get(15)?,
-                supersedes_id: row.get(16)?,
-                expires_at: row.get(17)?,
-            })
-        },
+        crate::search::record_from_row,
     )
         .optional()?
         .with_context(|| format!("memory record not found: {id}"))?;
@@ -583,15 +560,24 @@ fn load_record(conn: &Connection, id: &str) -> Result<MemoryRecord> {
     Ok(record)
 }
 
-fn duplicate_record_ids(conn: &Connection, content_hash: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
+fn duplicate_record_ids(
+    conn: &Connection,
+    content_hash: &str,
+    now: OffsetDateTime,
+) -> Result<Vec<String>> {
+    let current_assertion = retention::current_assertion_sql("memory_record", "?2");
+    let sql = format!(
         "SELECT id FROM memory_record
          WHERE content_hash = ?1
            AND destination = 'repo'
-           AND status NOT IN ('tombstoned', 'redacted')
-         ORDER BY id",
+           AND {current_assertion}
+         ORDER BY id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params![content_hash, crate::expiry::format_timestamp(now)?],
+        |row| row.get(0),
     )?;
-    let rows = stmt.query_map([content_hash], |row| row.get(0))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -649,33 +635,6 @@ fn parse_proposal_status(value: &str) -> rusqlite::Result<ProposalStatus> {
     value.parse().map_err(|_| {
         rusqlite::Error::InvalidParameterName(format!("invalid proposal status: {value}"))
     })
-}
-
-fn parse_memory_type(value: &str) -> rusqlite::Result<MemoryType> {
-    parse_model_enum(value)
-}
-
-fn parse_memory_destination(value: &str) -> rusqlite::Result<MemoryDestination> {
-    parse_model_enum(value)
-}
-
-fn parse_memory_status(value: &str) -> rusqlite::Result<MemoryStatus> {
-    parse_model_enum(value)
-}
-
-fn parse_scope_kind(value: &str) -> rusqlite::Result<ScopeKind> {
-    parse_model_enum(value)
-}
-
-fn parse_visibility(value: &str) -> rusqlite::Result<Visibility> {
-    parse_model_enum(value)
-}
-
-fn parse_model_enum<T>(value: &str) -> rusqlite::Result<T>
-where
-    T: FromStr<Err = String>,
-{
-    value.parse().map_err(rusqlite::Error::InvalidParameterName)
 }
 
 #[cfg(test)]
@@ -952,12 +911,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_missing_sensitivity_is_unknown_and_cannot_apply() -> anyhow::Result<()> {
+    fn current_proposal_payload_rejects_missing_sensitivity() -> anyhow::Result<()> {
         let (_temp, conn) = initialized_database()?;
         let proposal = propose_memory(
             &conn,
             "agent:red-tests",
-            sample_memory_draft("Legacy sensitivity compatibility"),
+            sample_memory_draft("Required sensitivity"),
         )?;
         let mut payload = serde_json::to_value(&proposal.payload)?;
         payload
@@ -969,24 +928,9 @@ mod tests {
             rusqlite::params![serde_json::to_string(&payload)?, proposal.id],
         )?;
 
-        let loaded = load_proposal(&conn, &proposal.id)?;
-        assert_eq!(
-            loaded.payload.sensitivity,
-            crate::OkfProposalSensitivity::Unknown
-        );
-        let validation = validate_proposal(&conn, &proposal.id)?;
-        assert!(!validation.is_valid);
-        assert!(
-            validation
-                .issues
-                .iter()
-                .any(|issue| issue.code == "repo_sensitivity_required")
-        );
-
-        approve_proposal(&conn, &proposal.id, "reviewer:human")?;
-        let error = apply_proposal(&conn, &proposal.id, "agent:applier")
-            .expect_err("legacy unknown sensitivity must not apply");
-        assert!(error.to_string().contains("got unknown"));
+        let error = load_proposal(&conn, &proposal.id)
+            .expect_err("current proposal payloads must provide sensitivity");
+        assert!(format!("{error:#}").contains("missing field `sensitivity`"));
         let record_count: i64 =
             conn.query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
         assert_eq!(record_count, 0);

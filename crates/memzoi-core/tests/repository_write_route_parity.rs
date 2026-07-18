@@ -213,7 +213,17 @@ fn materialization_candidate(
             created: "2026-07-16T00:00:00Z".to_owned(),
             updated: None,
             supersedes_id: None,
-            expires_at: None,
+            retention: memzoi_core::retention_facts_for_creation(
+                MemoryLane::Semantic,
+                "2026-07-16T00:00:00Z",
+                None,
+                None,
+            )?,
+            origin: memzoi_core::OriginDescriptor::new(
+                format!("repository-materialization:test:{concept_id}"),
+                memzoi_core::OriginRoute::RepositoryMaterialization,
+            ),
+            lineage: None,
             proposal_id: None,
             capture: None,
         },

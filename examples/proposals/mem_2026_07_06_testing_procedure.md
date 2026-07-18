@@ -1,8 +1,14 @@
 ---
 id: mem_2026_07_06_testing_procedure
 kind: proposal
-version: okf/v0.1
-profile: memzoi/v0
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: repository-proposal:mem_2026_07_06_testing_procedure
+  route: repository_proposal
 type: procedure
 lane: procedural
 title: Run focused tests before full workspace checks
@@ -27,6 +33,7 @@ sources:
   - path: README.md
 supersedes: []
 sensitivity: repo-safe
+content_class: general_repo_knowledge
 ---
 
 # Run focused tests before full workspace checks

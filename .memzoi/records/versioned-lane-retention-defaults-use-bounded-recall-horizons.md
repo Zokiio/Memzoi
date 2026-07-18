@@ -1,4 +1,14 @@
 ---
+id: versioned-lane-retention-defaults-use-bounded-recall-horizons
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: repository-record:versioned-lane-retention-defaults-use-bounded-recall-horizons
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Versioned lane-retention defaults use bounded recall horizons"

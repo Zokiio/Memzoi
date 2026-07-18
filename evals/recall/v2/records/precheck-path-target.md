@@ -1,4 +1,14 @@
 ---
+id: precheck-path-target
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: eval-record:precheck-path-target
+  route: repository_materialization
 type: risk
 lane: semantic
 title: Magenta precheck sentinel risk

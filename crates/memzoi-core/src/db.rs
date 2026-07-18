@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-use crate::{expiry, schema, search};
+use crate::{retention, schema, search};
 
 pub fn open_database(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -28,8 +28,8 @@ fn configure_connection(conn: &Connection) -> Result<()> {
         .context("failed to set SQLite busy timeout")?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("failed to enable SQLite WAL journal mode")?;
-    expiry::register_sqlite_functions(conn)
-        .context("failed to register SQLite expiry functions")?;
+    retention::register_sqlite_functions(conn)
+        .context("failed to register SQLite retention functions")?;
     search::register_sqlite_functions(conn)
         .context("failed to register SQLite path applicability functions")?;
     Ok(())
@@ -45,6 +45,7 @@ mod tests {
         "schema_migrations",
         "event_log",
         "memory_record",
+        "origin_outcome",
         "scope_binding",
         "memory_path",
         "proposal",
@@ -63,12 +64,15 @@ mod tests {
 
         init_database(&conn)?;
         conn.execute(
-            "INSERT INTO memory_record(id, type, scope_kind, title, body, status, content_hash)
-             VALUES (?1, 'fact', 'repo', ?2, ?3, 'active', ?4)",
+            "INSERT INTO memory_record(
+               id, type, scope_kind, title, body, status, retention_json, origin_json, content_hash
+             ) VALUES (?1, 'fact', 'repo', ?2, ?3, 'active', ?4, ?5, ?6)",
             params![
                 "rec-existing",
                 "Existing memory",
                 "This row must survive a second schema init.",
+                r#"{"policy_version":"memzoi/lane-retention-v1"}"#,
+                r#"{"version":"memzoi/origin-v1","origin_key":"test:rec-existing","route":"local_memory"}"#,
                 "hash-existing"
             ],
         )?;
@@ -79,11 +83,11 @@ mod tests {
         }
 
         let migrations: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3, 4, 5, 6)",
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 7",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(migrations, 6);
+        assert_eq!(migrations, 1);
         let capture_table: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_capture')",
             [],
@@ -116,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn init_database_migrates_existing_records_without_lane_to_semantic() -> anyhow::Result<()> {
+    fn init_database_rejects_pre_v7_databases_without_migrating_them() -> anyhow::Result<()> {
         let temp = TempDir::new()?;
         let db_path = temp.path().join("memory.db");
         let conn = open_database(&db_path)?;
@@ -126,7 +130,7 @@ mod tests {
               version INTEGER PRIMARY KEY,
               applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             );
-            INSERT INTO schema_migrations(version) VALUES (1);
+            INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5), (6);
             CREATE TABLE memory_record (
               rowid INTEGER PRIMARY KEY,
               id TEXT NOT NULL UNIQUE,
@@ -151,134 +155,16 @@ mod tests {
             "#,
         )?;
 
-        init_database(&conn)?;
+        let error = init_database(&conn).expect_err("legacy schema must be rejected");
+        let message = format!("{error:#}");
+        assert!(message.contains("unsupported SQLite schema versions"));
+        assert!(message.contains("expected only version 7"));
 
-        let lane: String = conn.query_row(
-            "SELECT lane FROM memory_record WHERE id = 'legacy-record'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(lane, "semantic");
-
-        let migration: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 2)",
-            [],
-            |row| row.get(0),
-        )?;
-        assert!(migration);
-
-        Ok(())
-    }
-
-    #[test]
-    fn init_database_migrates_existing_records_without_destination_to_repo() -> anyhow::Result<()> {
-        let temp = TempDir::new()?;
-        let db_path = temp.path().join("memory.db");
-        let conn = open_database(&db_path)?;
-        conn.execute_batch(
-            r#"
-            CREATE TABLE schema_migrations (
-              version INTEGER PRIMARY KEY,
-              applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            );
-            INSERT INTO schema_migrations(version) VALUES (1);
-            INSERT INTO schema_migrations(version) VALUES (2);
-            CREATE TABLE memory_record (
-              rowid INTEGER PRIMARY KEY,
-              id TEXT NOT NULL UNIQUE,
-              type TEXT NOT NULL,
-              lane TEXT NOT NULL DEFAULT 'semantic',
-              scope_kind TEXT NOT NULL,
-              scope_id TEXT,
-              visibility TEXT NOT NULL DEFAULT 'repo',
-              title TEXT NOT NULL,
-              body TEXT NOT NULL,
-              status TEXT NOT NULL,
-              confidence REAL NOT NULL DEFAULT 1.0,
-              source_kind TEXT,
-              source_ref TEXT,
-              content_hash TEXT NOT NULL,
-              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-              updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-              supersedes_id TEXT,
-              expires_at TEXT
-            );
-            INSERT INTO memory_record(id, type, lane, scope_kind, title, body, status, content_hash)
-            VALUES ('legacy-destination-record', 'decision', 'semantic', 'repo', 'Legacy destination', 'Legacy destination body', 'active', 'legacy-destination-hash');
-            "#,
-        )?;
-
-        init_database(&conn)?;
-
-        let destination: String = conn.query_row(
-            "SELECT destination FROM memory_record WHERE id = 'legacy-destination-record'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(destination, "repo");
-
-        let migration: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 3)",
-            [],
-            |row| row.get(0),
-        )?;
-        assert!(migration);
-
-        Ok(())
-    }
-
-    #[test]
-    fn init_database_adds_nullable_proposal_lineage_to_legacy_records() -> anyhow::Result<()> {
-        let temp = TempDir::new()?;
-        let db_path = temp.path().join("memory.db");
-        let conn = open_database(&db_path)?;
-        conn.execute_batch(
-            r#"
-            CREATE TABLE schema_migrations (
-              version INTEGER PRIMARY KEY,
-              applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            );
-            INSERT INTO schema_migrations(version) VALUES (1), (2), (3);
-            CREATE TABLE memory_record (
-              rowid INTEGER PRIMARY KEY,
-              id TEXT NOT NULL UNIQUE,
-              type TEXT NOT NULL,
-              lane TEXT NOT NULL DEFAULT 'semantic',
-              destination TEXT NOT NULL DEFAULT 'repo',
-              scope_kind TEXT NOT NULL,
-              scope_id TEXT,
-              visibility TEXT NOT NULL DEFAULT 'repo',
-              title TEXT NOT NULL,
-              body TEXT NOT NULL,
-              status TEXT NOT NULL,
-              confidence REAL NOT NULL DEFAULT 1.0,
-              source_kind TEXT,
-              source_ref TEXT,
-              content_hash TEXT NOT NULL,
-              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-              updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-              supersedes_id TEXT,
-              expires_at TEXT
-            );
-            INSERT INTO memory_record(id, type, scope_kind, title, body, status, content_hash)
-            VALUES ('legacy-lineage-record', 'decision', 'repo', 'Legacy lineage', 'Legacy body', 'active', 'legacy-lineage-hash');
-            "#,
-        )?;
-
-        init_database(&conn)?;
-
-        let proposal_id: Option<String> = conn.query_row(
-            "SELECT proposal_id FROM memory_record WHERE id = 'legacy-lineage-record'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(proposal_id, None);
-        let migration: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 4)",
-            [],
-            |row| row.get(0),
-        )?;
-        assert!(migration);
+        let versions: Vec<i64> = conn
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
 
         Ok(())
     }
@@ -317,12 +203,15 @@ mod tests {
         init_database(&conn)?;
 
         conn.execute(
-            "INSERT INTO memory_record(id, type, scope_kind, title, body, status, content_hash)
-             VALUES (?1, 'fact', 'repo', ?2, ?3, 'active', ?4)",
+            "INSERT INTO memory_record(
+               id, type, scope_kind, title, body, status, retention_json, origin_json, content_hash
+             ) VALUES (?1, 'fact', 'repo', ?2, ?3, 'active', ?4, ?5, ?6)",
             params![
                 "rec-active",
                 "Searchable setup note",
                 "The zircon token must be findable through the FTS index.",
+                r#"{"policy_version":"memzoi/lane-retention-v1"}"#,
+                r#"{"version":"memzoi/origin-v1","origin_key":"test:rec-active","route":"local_memory"}"#,
                 "hash-active"
             ],
         )?;

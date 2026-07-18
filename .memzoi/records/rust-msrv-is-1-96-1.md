@@ -1,5 +1,16 @@
 ---
+id: rust-msrv-is-1-96-1
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: repository-record:rust-msrv-is-1-96-1
+  route: repository_materialization
 type: decision
+lane: semantic
 title: "Rust MSRV is 1.96.1+"
 description: "The workspace should support Rust 1.96.1 and newer. Cargo workspace package metadata should advertise rust-version = \"1.96.1\", and syntax/dependency choices may assume that compiler floor."
 timestamp: "2026-07-05T20:16:46.552153Z"

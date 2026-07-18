@@ -4,17 +4,18 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MemoryDestination, MemoryLane, MemoryType, RepositoryContentClass, ScopeKind,
+    MemoryDestination, MemoryLane, MemoryType, OriginDescriptor, OriginRoute,
+    RETENTION_POLICY_VERSION, RepositoryContentClass, RetentionFacts, ScopeKind,
     okf::{OkfCreateProposalDraft, OkfProposalSensitivity},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEndDocument {
     pub task: String,
     pub candidates: Vec<SessionEndCandidate>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEndCandidate {
     pub destination: MemoryDestination,
     #[serde(rename = "type")]
@@ -38,7 +39,7 @@ fn default_repository_content_class() -> RepositoryContentClass {
     RepositoryContentClass::Unknown
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEndScope {
     #[serde(default = "default_scope_kind")]
     pub kind: ScopeKind,
@@ -48,13 +49,13 @@ pub struct SessionEndScope {
     pub paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEndResult {
     pub task: String,
     pub candidates: Vec<SessionEndCandidateResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEndCandidateResult {
     pub index: usize,
     pub destination: MemoryDestination,
@@ -70,7 +71,7 @@ pub struct SessionEndCandidateResult {
     pub write: Option<SessionEndWrite>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionEndCandidateStatus {
     Written,
@@ -88,7 +89,7 @@ impl SessionEndCandidateStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionEndWrite {
     ProposalFile {
@@ -106,6 +107,7 @@ pub(crate) fn session_end_proposal_draft(
     actor: &str,
     timestamp: &str,
     proposal_id: String,
+    command_origin: Option<OriginDescriptor>,
 ) -> Result<OkfCreateProposalDraft> {
     if candidate.destination != MemoryDestination::Repo {
         bail!("session-end proposal drafts require repo destination");
@@ -118,6 +120,13 @@ pub(crate) fn session_end_proposal_draft(
     if candidate.sensitivity != OkfProposalSensitivity::RepoSafe {
         bail!("{}", repo_sensitivity_block_reason(candidate.sensitivity));
     }
+    let retention = retention_facts(candidate.lane, timestamp);
+    let origin = command_origin.unwrap_or_else(|| {
+        OriginDescriptor::new(
+            format!("session-end-proposal:{proposal_id}"),
+            OriginRoute::SessionEnd,
+        )
+    });
     Ok(OkfCreateProposalDraft {
         proposal_id,
         memory_type: candidate.memory_type,
@@ -135,7 +144,22 @@ pub(crate) fn session_end_proposal_draft(
         sensitivity: candidate.sensitivity,
         content_class: candidate.content_class,
         capture: None,
+        retention,
+        origin,
+        lineage: None,
     })
+}
+
+fn retention_facts(lane: MemoryLane, timestamp: &str) -> RetentionFacts {
+    RetentionFacts {
+        policy_version: RETENTION_POLICY_VERSION.to_owned(),
+        occurred_at: (lane == MemoryLane::Episodic).then(|| timestamp.to_owned()),
+        started_at: (lane == MemoryLane::Session).then(|| timestamp.to_owned()),
+        last_continued_at: None,
+        closed_at: None,
+        explicit_expires_at: None,
+        episodic_extension: None,
+    }
 }
 
 pub fn parse_session_end_document(input: &str) -> Result<SessionEndDocument> {

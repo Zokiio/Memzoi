@@ -43,6 +43,8 @@ fn test_paths(repo: &Path) -> MemoryPaths {
 
 #[path = "cli_smoke/capture.rs"]
 mod capture;
+#[path = "cli_smoke/checkpoint_lifecycle.rs"]
+mod checkpoint_lifecycle;
 #[path = "cli_smoke/doctor.rs"]
 mod doctor;
 #[path = "cli_smoke/eval.rs"]
@@ -131,7 +133,7 @@ fn capture_plan_review_fixture(repo: &Path) -> (PathBuf, PathBuf, PathBuf, Value
     fs::write(
         &decisions_path,
         serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "memzoi/capture-review-input-v1",
+            "schema": "memzoi/capture-review-input-v2",
             "plan_id": json_string(&plan, "plan_id"),
             "decisions": decisions,
         }))
@@ -383,6 +385,16 @@ fn write_canonical_record_fixture(
         records.join(format!("{id}.md")),
         format!(
             r#"---
+id: {id}
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: test-canonical:{id}
+  route: repository_materialization
 type: decision
 lane: semantic
 title: Legacy auth evidence
@@ -421,8 +433,14 @@ fn proposal_markdown_with_title(title: &str) -> String {
         r#"---
 id: mem_test_unicode
 kind: proposal
-version: okf/v0.1
-profile: memzoi/v0
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: test-proposal:mem_test_unicode
+  route: repository_proposal
 type: decision
 lane: semantic
 title: "{title}"
@@ -482,8 +500,14 @@ fn proposal_markdown_with_options(
         r#"---
 id: mem_test_valid
 kind: proposal
-version: okf/v0.1
-profile: memzoi/v0
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: test-proposal:mem_test_valid
+  route: repository_proposal
 type: decision
 lane: {lane}
 title: Valid proposal
@@ -641,7 +665,7 @@ fn update_record_source_ref(repo: &Path, record_id: &str, source_ref: &str) {
 
 fn set_record_expiry(repo: &Path, record_id: &str, expires_at: &str) {
     mutate_canonical_record(repo, record_id, |record| {
-        record.expires_at = Some(expires_at.to_owned());
+        record.retention.explicit_expires_at = Some(expires_at.to_owned());
     });
 }
 

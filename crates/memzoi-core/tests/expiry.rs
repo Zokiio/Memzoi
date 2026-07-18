@@ -2,7 +2,7 @@ use std::fs;
 
 use memzoi_core::{
     ContextPackInput, ExportFormat, ExportInput, FixedClock, HandoffInput, InitRequest,
-    MemoryPaths, MemoryService, PrecheckInput, ScopeKind, SearchInput,
+    MemoryPaths, MemoryService, PrecheckInput, RetentionState, ScopeKind, SearchInput,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -108,13 +108,14 @@ fn expiry_is_authoritative_across_rebuild_and_every_normal_read_surface() -> any
     let diagnostic = at_boundary.inspect_expiry("rec-expiring-risk")?;
     assert_eq!(diagnostic.record.body, canonical_body());
     assert_eq!(diagnostic.record.status.as_str(), "active");
-    assert!(diagnostic.expired);
+    assert_eq!(diagnostic.retention.state, RetentionState::QueryOnly);
+    assert!(!diagnostic.current_assertion);
     assert!(diagnostic.excluded_from_normal_reads);
     assert_eq!(
-        diagnostic.effective_expires_at.as_deref(),
+        diagnostic.retention.effective_boundary.as_deref(),
         Some("2026-07-10T12:00:00Z")
     );
-    assert!(diagnostic.reason.contains("at or after expiry"));
+    assert!(diagnostic.reason.contains("current-assertion exclusions"));
 
     assert_eq!(
         fs::read_to_string(&fixture.canonical_path)?,
@@ -122,7 +123,7 @@ fn expiry_is_authoritative_across_rebuild_and_every_normal_read_surface() -> any
         "read-time expiry must not rewrite canonical memory"
     );
     assert!(canonical_before.contains("status: active"));
-    assert!(canonical_before.contains(&format!("expires: {EXPIRY}")));
+    assert!(canonical_before.contains(&format!("explicit_expires_at: {EXPIRY}")));
 
     Ok(())
 }
@@ -172,6 +173,17 @@ fn repo_search() -> SearchInput {
 fn canonical_record() -> String {
     format!(
         r#"---
+id: rec-expiring-risk
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+  explicit_expires_at: {EXPIRY}
+origin:
+  version: memzoi/origin-v1
+  origin_key: test-expiry:rec-expiring-risk
+  route: repository_materialization
 type: risk
 lane: semantic
 title: Expiring authoritative risk
@@ -183,7 +195,6 @@ content_class: general_repo_knowledge
 confidence: 0.9
 scope: repo
 source: test
-expires: {EXPIRY}
 applies_to:
   - crates/memzoi-core/src/search.rs
 ---
@@ -222,12 +233,36 @@ fn insert_runtime_records(db_path: &std::path::Path) -> anyhow::Result<()> {
             "memzoi-checkpoint",
         ),
     ] {
+        let retention = if lane == "session" {
+            serde_json::json!({
+                "policy_version": "memzoi/lane-retention-v1",
+                "started_at": "2026-07-10T00:00:00Z",
+                "explicit_expires_at": EXPIRY,
+            })
+        } else {
+            serde_json::json!({
+                "policy_version": "memzoi/lane-retention-v1",
+                "explicit_expires_at": EXPIRY,
+            })
+        };
+        let route = if destination == "session" {
+            "checkpoint_create"
+        } else {
+            "local_memory"
+        };
+        let origin = serde_json::json!({
+            "version": "memzoi/origin-v1",
+            "origin_key": format!("test-expiry:{id}"),
+            "route": route,
+        });
         conn.execute(
             "INSERT INTO memory_record(
                 id, type, lane, destination, scope_kind, visibility, title, body, status,
-                confidence, source_kind, content_hash, created_at, updated_at, expires_at
+                confidence, source_kind, retention_json, origin_json, content_hash,
+                created_at, updated_at
              ) VALUES (?1, ?2, ?3, ?4, 'personal', 'private', ?5, ?6, 'active',
-                       1.0, ?7, ?8, '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z', ?9)",
+                       1.0, ?7, ?8, ?9, ?10,
+                       '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z')",
             params![
                 id,
                 memory_type,
@@ -236,8 +271,9 @@ fn insert_runtime_records(db_path: &std::path::Path) -> anyhow::Result<()> {
                 title,
                 body,
                 source_kind,
+                retention.to_string(),
+                origin.to_string(),
                 format!("hash-{id}"),
-                EXPIRY,
             ],
         )?;
     }

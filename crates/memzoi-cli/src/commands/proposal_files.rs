@@ -240,12 +240,8 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     if let Some(kind) = &entry.proposal.kind {
         println!("kind:\t{kind}");
     }
-    if let Some(version) = &entry.proposal.version {
-        println!("version:\t{version}");
-    }
-    if let Some(profile) = &entry.proposal.profile {
-        println!("profile:\t{profile}");
-    }
+    println!("version:\t{}", entry.proposal.version);
+    println!("profile:\t{}", entry.proposal.profile);
     println!("status:\t{}", entry.proposal.status.as_str());
     println!("action:\t{}", entry.proposal.proposal.action.as_str());
     println!("proposed_by:\t{}", entry.proposal.proposal.proposed_by);
@@ -299,6 +295,22 @@ fn print_proposal_file_detail(entry: &ProposalFileEntry) {
     }
     println!("sensitivity:\t{}", entry.source_sensitivity.as_str());
     println!("content_class:\t{}", entry.source_content_class.as_str());
+    println!(
+        "retention:\t{}",
+        serde_json::to_string(&entry.proposal.retention)
+            .expect("typed retention facts must serialize")
+    );
+    println!(
+        "origin:\t{}",
+        serde_json::to_string(&entry.proposal.origin)
+            .expect("typed origin descriptor must serialize")
+    );
+    if let Some(lineage) = &entry.proposal.lineage {
+        println!(
+            "lineage:\t{}",
+            serde_json::to_string(lineage).expect("typed record lineage must serialize")
+        );
+    }
     println!("title:\t{}", entry.proposal.title);
     println!("description:\t{}", entry.proposal.description);
     println!("body:\t{}", entry.proposal.body);
@@ -380,6 +392,9 @@ fn proposal_file_json(entry: &ProposalFileEntry, include_body: bool) -> serde_js
         "supersedes": &proposal.supersedes,
         "sensitivity": entry.source_sensitivity.as_str(),
         "content_class": entry.source_content_class.as_str(),
+        "retention": &proposal.retention,
+        "origin": &proposal.origin,
+        "lineage": &proposal.lineage,
         "resolution": &proposal.resolution,
     });
     if include_body {

@@ -83,6 +83,7 @@ struct FileWorkflowConfig {
 pub struct MemoryPaths {
     pub project_root: PathBuf,
     pub memory_dir: PathBuf,
+    repository_key: String,
     pub repository_runtime_dir: PathBuf,
     pub worktree_runtime_dir: PathBuf,
     pub shared_db_path: PathBuf,
@@ -135,6 +136,7 @@ impl MemoryPaths {
         legacy_runtime_dirs.dedup();
         Self {
             project_root,
+            repository_key: identity.repository_key,
             db_path: index_db_path.clone(),
             config_path: repository_runtime_dir.join("config.toml"),
             exports_dir: worktree_runtime_dir.join("exports"),
@@ -158,6 +160,14 @@ impl MemoryPaths {
 
     pub fn records_dir(&self) -> PathBuf {
         self.memory_dir.join("records")
+    }
+
+    /// Stable local authority key shared by every worktree of this repository.
+    ///
+    /// This key locates repository-scoped runtime state. It is intentionally
+    /// local and must not be serialized into portable OKF artifacts.
+    pub fn repository_key(&self) -> &str {
+        &self.repository_key
     }
 
     pub fn proposals_dir(&self) -> PathBuf {
@@ -864,6 +874,7 @@ proposal_approval = "sometimes"
             main_paths.repository_runtime_dir,
             linked_paths.repository_runtime_dir
         );
+        assert_eq!(main_paths.repository_key(), linked_paths.repository_key());
         assert_eq!(main_paths.shared_db_path, linked_paths.shared_db_path);
         assert_eq!(main_paths.config_path, linked_paths.config_path);
         assert_ne!(

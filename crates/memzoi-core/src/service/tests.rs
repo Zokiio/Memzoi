@@ -1120,7 +1120,12 @@ fn legacy_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Resul
     let inactive_error = service
         .tombstone_record(&active.id, "agent:red-tests", "already inactive")
         .expect_err("inactive targets must be rejected");
-    assert!(inactive_error.to_string().contains("status superseded"));
+    assert!(
+        inactive_error
+            .to_string()
+            .contains("not a current assertion"),
+        "{inactive_error:#}"
+    );
     assert_eq!(fs::read(&active_path)?, active_before);
     assert_eq!(
         RuntimeRecords::new(&service.conn)
@@ -1827,7 +1832,18 @@ fn materialization_candidate_record(
         created: "2026-07-16T00:00:00Z".to_owned(),
         updated: None,
         supersedes_id: None,
-        expires_at: None,
+        retention: crate::retention_facts_for_creation(
+            MemoryLane::Semantic,
+            "2026-07-16T00:00:00Z",
+            None,
+            None,
+        )
+        .expect("valid test retention"),
+        origin: crate::OriginDescriptor::new(
+            format!("repository-materialization:test:{concept_id}"),
+            crate::OriginRoute::RepositoryMaterialization,
+        ),
+        lineage: None,
         proposal_id: None,
         capture: None,
     }

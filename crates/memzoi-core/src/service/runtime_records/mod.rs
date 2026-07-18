@@ -12,10 +12,12 @@ use crate::{
 
 use super::safe_files::ensure_safe_directory;
 
+mod lifecycle;
 mod preservation;
 mod query;
 mod write;
 
+pub(super) use self::lifecycle::CheckpointLifecycleMutation;
 pub(super) use self::preservation::RuntimeRecordSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +32,49 @@ pub struct LocalMemoryInput {
 pub struct CheckpointInput {
     pub task: String,
     pub note: String,
+}
+
+/// Idempotent creation of a new, unrelated checkpoint generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateCheckpointCommand {
+    pub operation_id: String,
+    pub input: CheckpointInput,
+}
+
+/// Idempotent continuation of an open checkpoint lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinueCheckpointCommand {
+    pub operation_id: String,
+    pub checkpoint_id: String,
+    pub expected_version: String,
+}
+
+/// Idempotent terminal closure of a checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseCheckpointCommand {
+    pub operation_id: String,
+    pub checkpoint_id: String,
+    pub expected_version: String,
+}
+
+/// Idempotent creation of a successor after its predecessor has become terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateCheckpointSuccessorCommand {
+    pub operation_id: String,
+    pub predecessor_id: String,
+    pub expected_predecessor_version: String,
+    pub input: CheckpointInput,
+}
+
+/// Stable, content-free command result suitable for orchestrator retries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointCommandResult {
+    pub operation_id: String,
+    pub checkpoint_id: String,
+    pub record_version: String,
+    pub lifecycle_event_id: Option<String>,
+    pub applied: bool,
+    pub replayed: bool,
 }
 
 pub(super) struct RuntimeRecords<'a> {
@@ -61,6 +106,26 @@ impl<'a> RuntimeRecords<'a> {
         write::create_local_memory_avoiding(self.conn, actor, input, now, reserved_ids)
     }
 
+    pub(super) fn create_local_with_metadata_avoiding(
+        &self,
+        actor: &str,
+        input: &LocalMemoryInput,
+        now: &str,
+        origin: crate::OriginDescriptor,
+        lineage: Option<crate::RecordLineage>,
+        reserved_ids: &BTreeSet<String>,
+    ) -> Result<MemoryRecord> {
+        write::create_local_memory_with_metadata_avoiding(
+            self.conn,
+            actor,
+            input,
+            now,
+            origin,
+            lineage,
+            reserved_ids,
+        )
+    }
+
     pub(super) fn create_checkpoint_avoiding(
         &self,
         actor: &str,
@@ -69,6 +134,26 @@ impl<'a> RuntimeRecords<'a> {
         reserved_ids: &BTreeSet<String>,
     ) -> Result<MemoryRecord> {
         write::create_checkpoint_avoiding(self.conn, actor, input, now, reserved_ids)
+    }
+
+    pub(super) fn create_checkpoint_with_metadata_avoiding(
+        &self,
+        actor: &str,
+        input: &CheckpointInput,
+        now: &str,
+        origin: crate::OriginDescriptor,
+        lineage: Option<crate::RecordLineage>,
+        reserved_ids: &BTreeSet<String>,
+    ) -> Result<MemoryRecord> {
+        write::create_checkpoint_with_metadata_avoiding(
+            self.conn,
+            actor,
+            input,
+            now,
+            origin,
+            lineage,
+            reserved_ids,
+        )
     }
 
     pub(super) fn create_capture(
@@ -126,6 +211,42 @@ impl<'a> RuntimeRecords<'a> {
         query::checkpoint_record(self.conn, record_id, now)
     }
 
+    pub(super) fn checkpoint_for_lifecycle(&self, record_id: &str) -> Result<MemoryRecord> {
+        lifecycle::checkpoint_for_lifecycle(self.conn, record_id)
+    }
+
+    pub(super) fn checkpoint_record_version(record: &MemoryRecord) -> Result<String> {
+        lifecycle::checkpoint_record_version(record)
+    }
+
+    pub(super) fn ensure_successor_predecessor(
+        record: &MemoryRecord,
+        expected_version: &str,
+        now: OffsetDateTime,
+    ) -> Result<()> {
+        lifecycle::ensure_successor_predecessor(record, expected_version, now)
+    }
+
+    pub(super) fn continue_checkpoint(
+        &self,
+        actor: &str,
+        command: &ContinueCheckpointCommand,
+        now: OffsetDateTime,
+        timestamp: &str,
+    ) -> Result<CheckpointLifecycleMutation> {
+        lifecycle::continue_checkpoint(self.conn, actor, command, now, timestamp)
+    }
+
+    pub(super) fn close_checkpoint(
+        &self,
+        actor: &str,
+        command: &CloseCheckpointCommand,
+        now: OffsetDateTime,
+        timestamp: &str,
+    ) -> Result<CheckpointLifecycleMutation> {
+        lifecycle::close_checkpoint(self.conn, actor, command, now, timestamp)
+    }
+
     pub(super) fn records_for_preservation(&self) -> Result<Vec<MemoryRecord>> {
         query::records_for_runtime_preservation(self.conn)
     }
@@ -147,10 +268,6 @@ impl<'a> RuntimeRecords<'a> {
 
     pub(super) fn restore_snapshots(&self, records: &[RuntimeRecordSnapshot]) -> Result<()> {
         preservation::restore_runtime_record_snapshots(self.conn, records)
-    }
-
-    pub(super) fn replace_snapshot_exact(&self, snapshot: &RuntimeRecordSnapshot) -> Result<()> {
-        preservation::replace_runtime_record_snapshot_exact(self.conn, snapshot)
     }
 
     #[cfg(test)]

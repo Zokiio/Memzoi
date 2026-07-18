@@ -1,4 +1,14 @@
 ---
+id: precheck-path-unrelated
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: eval-record:precheck-path-unrelated
+  route: repository_materialization
 type: warning
 lane: semantic
 title: Magenta precheck sentinel unrelated warning

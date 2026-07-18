@@ -1,4 +1,15 @@
 ---
+id: expiry-boundary
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+  explicit_expires_at: "2026-07-10T12:00:00Z"
+origin:
+  version: memzoi/origin-v1
+  origin_key: eval-record:expiry-boundary
+  route: repository_materialization
 type: warning
 lane: semantic
 title: Saffron expiry sentinel boundary
@@ -11,7 +22,6 @@ content_class: general_repo_knowledge
 confidence: 1
 source: eval
 source_ref: fixture://expiry-boundary
-expires: "2026-07-10T12:00:00Z"
 applies_to:
   - crates/memzoi-core/src/expiry.rs
 ---

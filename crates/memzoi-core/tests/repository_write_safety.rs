@@ -252,12 +252,12 @@ fn canonical_record_markdown(body: &str, content_class: Option<&str>) -> String 
         .map(|value| format!("content_class: {value}\n"))
         .unwrap_or_default();
     format!(
-        "---\ntype: fact\ntitle: Candidate\ntimestamp: 2026-07-14T00:00:00Z\nupdated: 2026-07-14T00:00:00Z\nstatus: active\nscope: repo\nvisibility: repo\n{content_class}confidence: 1\n---\n\n# Candidate\n\n{body}\n"
+        "---\nid: candidate\nkind: memory\nversion: okf/v0.2\nprofile: memzoi/v1\nretention:\n  policy_version: memzoi/lane-retention-v1\norigin:\n  version: memzoi/origin-v1\n  origin_key: test-record:candidate\n  route: repository_materialization\ntype: fact\nlane: semantic\ntitle: Candidate\ntimestamp: 2026-07-14T00:00:00Z\nupdated: 2026-07-14T00:00:00Z\nstatus: active\nscope: repo\nvisibility: repo\n{content_class}confidence: 1\nsource: test\nsource_ref: fixture://candidate\n---\n\n# Candidate\n\n{body}\n"
     )
 }
 
 fn proposal_markdown(sensitivity: &str) -> String {
     format!(
-        "---\nid: mem_scan_candidate\nkind: proposal\nversion: okf/v0.1\nprofile: memzoi/v0\ntype: fact\nlane: semantic\ntitle: Candidate\ndescription: Candidate description.\nstatus: proposed\nproposal:\n  action: create\n  proposed_by: test\n  proposed_at: 2026-07-14T00:00:00Z\nscope:\n  kind: repo\n  paths: []\ntags: []\ntimestamp: 2026-07-14T00:00:00Z\ncreated_by: test\nsources: []\nsupersedes: []\nsensitivity: {sensitivity}\ncontent_class: general_repo_knowledge\n---\n\n# Candidate\n\nDurable repository knowledge.\n"
+        "---\nid: mem_scan_candidate\nkind: proposal\nversion: okf/v0.2\nprofile: memzoi/v1\nretention:\n  policy_version: memzoi/lane-retention-v1\norigin:\n  version: memzoi/origin-v1\n  origin_key: test:mem-scan-candidate\n  route: repository_proposal\ntype: fact\nlane: semantic\ntitle: Candidate\ndescription: Candidate description.\nstatus: proposed\nproposal:\n  action: create\n  proposed_by: test\n  proposed_at: 2026-07-14T00:00:00Z\nscope:\n  kind: repo\n  paths: []\ntags: []\ntimestamp: 2026-07-14T00:00:00Z\ncreated_by: test\nsources: []\nsupersedes: []\nsensitivity: {sensitivity}\ncontent_class: general_repo_knowledge\n---\n\n# Candidate\n\nDurable repository knowledge.\n"
     )
 }

@@ -21,7 +21,7 @@ use crate::output::print_json;
 const MATERIALIZATION_ARTIFACT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 const MATERIALIZATION_APPLY_REPORT_SCHEMA: &str =
-    "memzoi/repository-materialization-apply-report-v1";
+    "memzoi/repository-materialization-apply-report-v2";
 
 #[derive(Serialize)]
 struct MaterializationReviewCommand {

@@ -1,4 +1,14 @@
 ---
+id: expiry-removes-current-suppression-authority-but-preserves-permitted-history
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: repository-record:expiry-removes-current-suppression-authority-but-preserves-permitted-history
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Expiry removes current suppression authority but preserves permitted history"

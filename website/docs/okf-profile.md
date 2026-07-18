@@ -4,7 +4,9 @@ title: OKF Profile
 
 # Memzoi OKF Profile
 
-Memzoi uses an OKF v0.1 profile for reviewable, file-native memory. The profile defines where records live, which frontmatter fields Memzoi understands, and which files are reserved for human navigation or logs.
+Memzoi uses the `okf/v0.2` format with the `memzoi/v1` profile for reviewable, file-native memory. The profile defines where records live, which frontmatter fields Memzoi understands, and which files are reserved for human navigation or logs.
+
+Before Memzoi 1.0, format changes are hard cutovers. Older artifacts are rejected and must be manually upgraded or removed; Memzoi does not provide legacy readers, inferred defaults, dual writes, or automatic migrations.
 
 This page describes the target authored-memory shape. Runtime indexes are derived from these files and can be rebuilt.
 
@@ -83,22 +85,30 @@ A canonical record is a Markdown file with YAML frontmatter followed by the huma
 ---
 id: use-react-query-in-apps-active
 kind: memory
-version: okf/v0.1
-profile: memzoi/v0
+version: okf/v0.2
+profile: memzoi/v1
 type: decision
 lane: semantic
 title: Use React Query in apps/active
 description: apps/active uses React Query for server state.
 timestamp: 2026-07-05T00:00:00Z
 status: active
+scope: repo
 visibility: repo
-confidence: confirmed
+content_class: general_repo_knowledge
+confidence: 1.0
 applies_to:
   - apps/active/**
 source: human
 source_ref: issue://123
 supersedes: old-data-client
-expires: 2027-01-01
+retention:
+  policy_version: memzoi/lane-retention-v1
+  explicit_expires_at: 2027-01-01T00:00:00Z
+origin:
+  version: memzoi/origin-v1
+  origin_key: issue:123:accepted-decision
+  route: repository_materialization
 ---
 # Use React Query in apps/active
 
@@ -107,20 +117,22 @@ apps/active uses React Query for server state and should not add a second data-f
 
 ### Memzoi extension fields
 
-These fields extend OKF v0.1 for Memzoi:
+These fields define the current Memzoi profile:
 
 | Field | Meaning |
 | --- | --- |
-| `lane` | Memzoi memory lane. Valid values are `session`, `semantic`, `episodic`, and `procedural`. Records without `lane` are accepted as `semantic` for backward compatibility. |
-| `status` | Lifecycle state. Canonical active record value is `active`; inbound `current` is accepted as an alias for `active` and should be normalized on write. |
+| `lane` | Required Memzoi memory lane. Valid values are `session`, `semantic`, `episodic`, and `procedural`. |
+| `status` | Required lifecycle state. Canonical active record value is `active`; aliases such as `current` are rejected. |
 | `visibility` | Sharing boundary. Valid values are `public`, `private`, `repo`, `team`, and `org`. Exports skip `private` records. |
-| `confidence` | Numeric confidence `0.0`-`1.0` or a label. Label mappings: `confirmed` -> `1.0`, `likely` -> `0.75`, `uncertain` -> `0.4`. |
+| `confidence` | Required numeric confidence from `0.0` through `1.0`. Label aliases are rejected. |
 | `applies_to` | Repository paths, path prefixes, or trailing `/**` scopes where the record is relevant. This is separate from the path concept ID. General glob syntax is not part of the current matcher. |
 | `source` | Short provenance kind such as `human`, `agent`, `import`, `issue`, `pr`, or `doc`. |
 | `source_ref` | Optional durable reference for provenance, such as `issue://123`, `pr://45`, a commit SHA, or a URL. |
 | `proposal_id` | Optional ID of the review packet that approved the record. This is proposal lineage, not evidence provenance, and is kept separate from `source`/`source_ref`. |
 | `supersedes` | Optional record ID replaced by this record. Prefer this over mutating old records in place. |
-| `expires` | Optional `YYYY-MM-DD` (start of that date in UTC) or RFC 3339 timestamp with an explicit timezone. At and after that instant, the active record is excluded from normal search, context, handoff, precheck, runtime lists/show, and generated exports without changing its canonical file or status. |
+| `retention` | Required versioned retention facts. Semantic/procedural records need only `policy_version`; episodic records require `occurred_at`; session records require `started_at`. Optional `explicit_expires_at` must be RFC 3339. |
+| `origin` | Required content-free source-event identity containing `version`, repository-scoped `origin_key`, and `route`. Exact source replay uses this identity independently of record expiry. |
+| `lineage` | Optional renewal or session-successor relationship containing `kind` and `predecessor_id`. It is separate from `supersedes`. |
 
 `source` and `source_ref` are independently optional. Memzoi preserves missing
 evidence as `null` across canonical render, rebuild, recall, and export; it does
@@ -135,6 +147,8 @@ Memory lanes:
 
 `lane` is orthogonal to `type`: `lane` describes how the memory is used and retained, while `type` describes the knowledge record's content shape.
 
+Retention is a temporal input to the complete current-assertion decision. Session records close at the earliest terminal boundary, inactivity lease, seven-day cap, or explicit expiry. Episodic records have a 30-day ordinary window, extendable by authorized facts to at most 90 days. Semantic and procedural records have no age TTL. At a retention boundary the record becomes query-only; its canonical body is not rewritten or deleted.
+
 Record status values:
 
 - `active`
@@ -143,11 +157,7 @@ Record status values:
 - `tombstoned`
 - `redacted`
 
-Importer compatibility:
-
-- Accept `current` as an alias for `active`.
-- Accept numeric confidence values and the labels `confirmed`, `likely`, and `uncertain`.
-- Normalize generated canonical files to `active` rather than `current`.
+Current-profile readers require the exact serialized field names and values shown above. They do not infer omitted scope, classification, status, confidence, retention, or origin data.
 
 ## Proposal frontmatter
 
@@ -165,8 +175,14 @@ The initial proposal status is always `proposed`. Do not confuse file proposal s
 ---
 id: mem_2026_07_06_auth_001
 kind: proposal
-version: okf/v0.1
-profile: memzoi/v0
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: issue:123:proposal
+  route: repository_proposal
 type: decision
 lane: semantic
 title: Protected routes must validate sessions server-side
@@ -192,6 +208,7 @@ sources:
   - path: src/auth/session.ts
 supersedes: []
 sensitivity: repo-safe
+content_class: general_repo_knowledge
 ---
 # Protected routes must validate sessions server-side
 
@@ -201,6 +218,9 @@ Protected API routes must validate the session server-side. Do not trust client-
 Required proposal fields:
 
 - `id`
+- `kind`
+- `version`
+- `profile`
 - `type`
 - `title`
 - `description`
@@ -209,6 +229,9 @@ Required proposal fields:
 - `proposal`
 - `timestamp`
 - `sensitivity`
+- `content_class`
+- `retention`
+- `origin`
 
 The nested `proposal` object requires:
 

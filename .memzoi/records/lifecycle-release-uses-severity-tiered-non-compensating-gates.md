@@ -1,4 +1,14 @@
 ---
+id: lifecycle-release-uses-severity-tiered-non-compensating-gates
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: repository-record:lifecycle-release-uses-severity-tiered-non-compensating-gates
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Lifecycle release uses severity-tiered non-compensating gates"

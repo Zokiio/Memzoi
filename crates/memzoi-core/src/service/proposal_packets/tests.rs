@@ -2,7 +2,7 @@ use super::super::safe_files::RepoLifecycleLock;
 use super::*;
 use crate::{
     ImportCandidateInput, MemoryLane, MemoryType, OkfProposalSensitivity, OkfProposalSource,
-    SessionEndCandidate, SessionEndWrite,
+    OriginDescriptor, OriginRoute, SessionEndCandidate, SessionEndWrite,
 };
 use tempfile::TempDir;
 
@@ -781,7 +781,8 @@ fn repo_session_document(title: &str) -> SessionEndDocument {
 
 fn repo_import_document(title: &str) -> ImportDocument {
     ImportDocument {
-        version: "memzoi/import-v1".to_owned(),
+        version: "memzoi/import-v2".to_owned(),
+        origin_key: format!("test-import:{title}"),
         sources: vec![OkfProposalSource {
             path: Some("src/lifecycle.rs".to_owned()),
             url: None,
@@ -877,6 +878,17 @@ fn write_test_pending_proposal_with_id_and_content_class(
         sensitivity: OkfProposalSensitivity::RepoSafe,
         content_class,
         capture: None,
+        retention: crate::retention_facts_for_creation(
+            MemoryLane::Semantic,
+            "2026-07-10T00:00:00Z",
+            None,
+            None,
+        )?,
+        origin: OriginDescriptor::new(
+            format!("test:{proposal_id}"),
+            OriginRoute::RepositoryProposal,
+        ),
+        lineage: None,
     };
     let plan =
         okf::plan_okf_create_proposal(&service.paths.proposals_dir().join("pending"), &draft)?;
@@ -940,7 +952,17 @@ fn insert_runtime_record_with_id(
         created_at: "2026-07-10T00:00:00Z".to_owned(),
         updated_at: "2026-07-10T00:00:00Z".to_owned(),
         supersedes_id: None,
-        expires_at: None,
+        retention: crate::retention_facts_for_creation(
+            MemoryLane::Semantic,
+            "2026-07-10T00:00:00Z",
+            None,
+            None,
+        )?,
+        origin: OriginDescriptor::new(
+            format!("test:runtime-collision:{record_id}"),
+            OriginRoute::LocalMemory,
+        ),
+        lineage: None,
     };
     RuntimeRecords::new(&service.shared_conn).insert_for_test(&record)
 }

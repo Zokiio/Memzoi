@@ -13,6 +13,7 @@ use crate::{
         MemoryCitation, MemoryDestination, MemoryPath, MemoryType, PrecheckWarning, ScopeKind,
         SearchResult,
     },
+    retention,
     search::{
         SearchInput, citation_for, load_paths, path_matches_request, record_from_row,
         search_memory_at,
@@ -141,25 +142,26 @@ fn path_governance_candidates(
     // The SQLite scalar delegates to the same literal matcher used below, so
     // SQL candidate discovery cannot diverge on LIKE metacharacters, case, or
     // trailing slash normalization.
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT memory_record.id, memory_record.type, memory_record.lane,
+    let current_assertion = retention::current_assertion_sql("memory_record", "?4");
+    let sql = format!(
+        "SELECT DISTINCT memory_record.id, memory_record.type, memory_record.lane,
                     memory_record.destination, memory_record.scope_kind, memory_record.scope_id,
                     memory_record.visibility, memory_record.title, memory_record.body,
                     memory_record.status, memory_record.confidence, memory_record.source_kind,
                     memory_record.source_ref, memory_record.content_hash, memory_record.created_at,
-                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at,
-                    memory_record.proposal_id
+                    memory_record.updated_at, memory_record.supersedes_id, memory_record.proposal_id,
+                    memory_record.retention_json, memory_record.origin_json, memory_record.lineage_json
              FROM memory_path
              JOIN memory_record ON memory_record.id = memory_path.record_id
-             WHERE memory_record.status = 'active'
-               AND memzoi_is_expired(memory_record.expires_at, ?4) = 0
-               AND memory_record.destination = ?1
+             WHERE memory_record.destination = ?1
+               AND {current_assertion}
                AND memory_record.type IN ('risk', 'warning', 'failed_attempt')
                AND (?2 IS NULL OR memory_record.scope_kind = ?2)
                AND memzoi_path_matches(memory_path.path, ?3) = 1
-             ORDER BY memory_record.updated_at DESC, memory_record.id ASC",
-        )
+             ORDER BY memory_record.updated_at DESC, memory_record.id ASC"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
         .context("failed to prepare path-scoped precheck candidate query")?;
     let rows = stmt
         .query_map(
@@ -461,9 +463,16 @@ mod tests {
                 source_ref: "issue://expired-path-only",
             },
         )?;
+        let retention_json: String = conn.query_row(
+            "SELECT retention_json FROM memory_record WHERE id = ?1",
+            ["risk-expired-path-only"],
+            |row| row.get(0),
+        )?;
+        let mut retention: crate::RetentionFacts = serde_json::from_str(&retention_json)?;
+        retention.explicit_expires_at = Some("2026-07-10T12:00:00Z".to_owned());
         conn.execute(
-            "UPDATE memory_record SET expires_at = ?1 WHERE id = ?2",
-            params!["2026-07-10T12:00:00Z", "risk-expired-path-only"],
+            "UPDATE memory_record SET retention_json = ?1 WHERE id = ?2",
+            params![serde_json::to_string(&retention)?, "risk-expired-path-only"],
         )?;
 
         let warnings = precheck_at(
@@ -943,19 +952,32 @@ mod tests {
     }
 
     fn insert_memory(conn: &Connection, memory: MemoryFixture<'_>) -> anyhow::Result<()> {
+        let lane = crate::MemoryLane::Semantic;
+        let now = crate::events::now_utc()?;
+        let retention = serde_json::to_string(&crate::retention_facts_for_creation(
+            lane, &now, None, None,
+        )?)?;
+        let origin = serde_json::to_string(&crate::OriginDescriptor::new(
+            format!("test-precheck:{}", memory.id),
+            crate::OriginRoute::RepositoryMaterialization,
+        ))?;
         conn.execute(
             "INSERT INTO memory_record(
-                id, type, scope_kind, visibility, title, body, status, confidence,
-                source_kind, source_ref, content_hash
-             ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, 0.93, 'test', ?7, ?8)",
+                id, type, lane, destination, scope_kind, visibility, title, body, status,
+                confidence, source_kind, source_ref, retention_json, origin_json, content_hash
+             ) VALUES (?1, ?2, ?3, 'repo', ?4, 'repo', ?5, ?6, ?7, 0.93, 'test',
+                       ?8, ?9, ?10, ?11)",
             params![
                 memory.id,
                 memory.memory_type.as_str(),
+                lane.as_str(),
                 ScopeKind::Repo.as_str(),
                 memory.title,
                 memory.body,
                 MemoryStatus::Active.as_str(),
                 memory.source_ref,
+                retention,
+                origin,
                 format!("hash-{}", memory.id),
             ],
         )?;

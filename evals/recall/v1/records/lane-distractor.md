@@ -1,4 +1,14 @@
 ---
+id: lane-distractor
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: eval-record:lane-distractor
+  route: repository_materialization
 type: procedure
 lane: semantic
 title: Verdant lane sentinel

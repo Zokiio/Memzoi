@@ -1,4 +1,14 @@
 ---
+id: private-redaction-and-deletion-are-distinct-irreversible-operations
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: repository-record:private-redaction-and-deletion-are-distinct-irreversible-operations
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Private redaction and deletion are distinct irreversible operations"

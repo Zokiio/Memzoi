@@ -1,4 +1,14 @@
 ---
+id: keep-canonical-records-compact-and-proposal-packets-reviewable
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: repository-record:keep-canonical-records-compact-and-proposal-packets-reviewable
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Keep canonical records compact and proposal packets reviewable"

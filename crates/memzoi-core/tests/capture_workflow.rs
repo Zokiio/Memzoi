@@ -969,7 +969,7 @@ fn typed_markdown_requires_explicit_contextual_classification_for_repo() -> anyh
 }
 
 #[test]
-fn repeated_private_capture_is_planned_as_an_idempotent_runtime_duplicate() -> anyhow::Result<()> {
+fn repeated_private_capture_is_planned_as_an_exact_origin_replay() -> anyhow::Result<()> {
     let fixture = CaptureFixture::new()?;
     fixture.write_source(
         "private-repeat.md",
@@ -999,18 +999,21 @@ fn repeated_private_capture_is_planned_as_an_idempotent_runtime_duplicate() -> a
     let repeated = plan_capture(&fixture.paths, request)?;
     let after = file_snapshot(fixture.temp.path())?;
     assert_eq!(before, after, "WAL-aware planning must remain read-only");
-    assert_eq!(repeated.summary.duplicates, 1);
+    assert_eq!(repeated.summary.replays, 1);
+    assert_eq!(repeated.summary.duplicates, 0);
     assert_eq!(repeated.summary.runtime_writes, 0);
     match &repeated.candidates[0].action {
-        CaptureAction::Duplicate { matches } => {
-            assert_eq!(matches.len(), 1);
-            assert_eq!(
-                matches[0].kind,
-                memzoi_core::CaptureMatchKind::RuntimeRecord
-            );
-            assert_eq!(matches[0].destination, Some(MemoryDestination::Local));
+        CaptureAction::Replay {
+            outcome,
+            destination,
+            record_id,
+            ..
+        } => {
+            assert_eq!(*outcome, memzoi_core::OriginOutcomeKind::Created);
+            assert_eq!(*destination, Some(MemoryDestination::Local));
+            assert_eq!(record_id.as_deref(), Some("local-repeated-private-capture"));
         }
-        action => panic!("expected an idempotent runtime duplicate, got {action:?}"),
+        action => panic!("expected an exact origin replay, got {action:?}"),
     }
     Ok(())
 }
@@ -1082,17 +1085,18 @@ fn linked_worktree_standalone_plan_and_review_use_shared_runtime_inventory() -> 
     drop(service);
 
     let linked_duplicate = plan_capture(&linked_paths, request)?;
-    assert_eq!(linked_duplicate.summary.duplicates, 1);
+    assert_eq!(linked_duplicate.summary.replays, 1);
+    assert_eq!(linked_duplicate.summary.duplicates, 0);
     match &linked_duplicate.candidates[0].action {
-        CaptureAction::Duplicate { matches } => {
-            assert_eq!(matches.len(), 1);
-            assert_eq!(
-                matches[0].kind,
-                memzoi_core::CaptureMatchKind::RuntimeRecord
-            );
-            assert_eq!(matches[0].destination, Some(MemoryDestination::Local));
+        CaptureAction::Replay {
+            outcome,
+            destination,
+            ..
+        } => {
+            assert_eq!(*outcome, memzoi_core::OriginOutcomeKind::Created);
+            assert_eq!(*destination, Some(MemoryDestination::Local));
         }
-        action => panic!("expected a shared runtime duplicate, got {action:?}"),
+        action => panic!("expected a shared origin replay, got {action:?}"),
     }
 
     let stale_error = build_capture_review(
@@ -1527,7 +1531,7 @@ fn reidentify_review(review: &mut CaptureReview) -> anyhow::Result<()> {
     review.review_id.clear();
     let canonical = serde_json_canonicalizer::to_vec(&*review)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-review-v1");
+    hasher.update(b"memzoi/capture-review-v2");
     hasher.update(&[0]);
     hasher.update(&canonical);
     review.review_id = format!("review_{}", hasher.finalize().to_hex());
@@ -1567,7 +1571,7 @@ fn reidentify_plan(plan: &mut memzoi_core::CapturePlan) -> anyhow::Result<()> {
     plan.plan_id.clear();
     let canonical = serde_json_canonicalizer::to_vec(&*plan)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-plan-v1");
+    hasher.update(b"memzoi/capture-plan-v2");
     hasher.update(&[0]);
     hasher.update(&canonical);
     plan.plan_id = format!("capture_{}", hasher.finalize().to_hex());

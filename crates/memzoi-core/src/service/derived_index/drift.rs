@@ -95,7 +95,9 @@ pub(super) fn repo_record_matches(canonical: &okf::OkfRecordFile, indexed: &Memo
         && indexed.created_at == canonical.created
         && indexed.updated_at == canonical.updated.as_deref().unwrap_or(&canonical.created)
         && indexed.supersedes_id == canonical.supersedes_id
-        && indexed.expires_at == canonical.expires_at
+        && indexed.retention == canonical.retention
+        && indexed.origin == canonical.origin
+        && indexed.lineage == canonical.lineage
 }
 
 pub(super) fn fts_content_index_is_current(conn: &Connection) -> Result<bool> {

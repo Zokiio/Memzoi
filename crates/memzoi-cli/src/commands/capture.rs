@@ -418,7 +418,7 @@ pub(super) fn plan_command(
     let paths = discover_paths(&cwd)?;
     let request = match (source, request_file) {
         (Some(source), None) => serde_json::from_value::<CaptureRequest>(json!({
-            "schema": "memzoi/capture-request-v1",
+            "schema": memzoi_core::CAPTURE_REQUEST_SCHEMA,
             "sources": [{
                 "source_id": source_id,
                 "locator": {

@@ -309,11 +309,25 @@ mod tests {
         } else {
             "private"
         };
+        let now = crate::events::now_utc()?;
+        let retention = serde_json::to_string(&crate::retention_facts_for_creation(
+            lane, &now, None, None,
+        )?)?;
+        let route = match destination {
+            MemoryDestination::Repo => crate::OriginRoute::RepositoryMaterialization,
+            MemoryDestination::Local => crate::OriginRoute::LocalMemory,
+            MemoryDestination::Session => crate::OriginRoute::CheckpointCreate,
+            _ => crate::OriginRoute::OwnerCommand,
+        };
+        let origin = serde_json::to_string(&crate::OriginDescriptor::new(
+            format!("test-handoff:{}", memory.id),
+            route,
+        ))?;
         conn.execute(
             "INSERT INTO memory_record(
                 id, type, lane, destination, scope_kind, visibility, title, body, status, confidence,
-                source_kind, source_ref, content_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0.88, 'test', NULL, ?10)",
+                source_kind, source_ref, retention_json, origin_json, content_hash
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0.88, 'test', NULL, ?10, ?11, ?12)",
             params![
                 memory.id,
                 memory.memory_type.as_str(),
@@ -324,6 +338,8 @@ mod tests {
                 memory.title,
                 memory.body,
                 memory.status.as_str(),
+                retention,
+                origin,
                 format!("hash-{}", memory.id),
             ],
         )?;

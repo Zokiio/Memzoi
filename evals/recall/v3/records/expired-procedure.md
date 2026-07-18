@@ -1,4 +1,15 @@
 ---
+id: expired-procedure
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+  explicit_expires_at: "2026-07-01T00:00:00Z"
+origin:
+  version: memzoi/origin-v1
+  origin_key: eval-record:expired-procedure
+  route: repository_materialization
 type: procedure
 lane: procedural
 title: Temporary migration window
@@ -11,7 +22,6 @@ content_class: general_repo_knowledge
 confidence: 1
 source: eval
 source_ref: fixture://expired-procedure
-expires: "2026-07-01T00:00:00Z"
 ---
 
 # Temporary migration window

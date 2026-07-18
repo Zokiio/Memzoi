@@ -45,7 +45,7 @@ fn rebuild_with_options(
     after_snapshot: impl FnOnce() -> Result<()>,
     admission: RepositoryRecordAdmission,
 ) -> Result<RebuildResult> {
-    shared_runtime::migrate_legacy_runtime_if_needed(&paths)?;
+    shared_runtime::reject_unsupported_runtime_layout(&paths)?;
     let _lifecycle_lock = RepoLifecycleLock::acquire(&paths)?;
     let shared = db::open_database(&paths.shared_db_path).with_context(|| {
         format!(

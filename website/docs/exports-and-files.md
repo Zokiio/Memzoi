@@ -61,7 +61,7 @@ Workflow policy config is separate from the runtime project config. Effective pr
 proposal_approval = "manual" # or "auto"
 ```
 
-The runtime project config under `~/.memzoi/projects/<repository-key>/config.toml` is shared by linked worktrees; it is not the repo/user workflow policy file. Worktree indexes and exports remain isolated. Legacy path-keyed directories are migrated non-destructively: durable local/session records and proposals are merged with conflict checks, canonical indexes are rebuilt, and legacy directories are retained with a migration receipt.
+The runtime project config under `~/.memzoi/projects/<repository-key>/config.toml` is shared by linked worktrees; it is not the repo/user workflow policy file. Worktree indexes and exports remain isolated. Before v1.0, legacy path-keyed runtime directories and migration receipts are rejected with an unsupported-schema error; operators must manually upgrade or remove them.
 
 ## Proposal inbox and rebuild
 

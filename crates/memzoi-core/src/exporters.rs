@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 use crate::{
     expiry,
     models::{MemoryPath, MemoryRecord, MemoryType, ScopeKind},
+    retention,
     search::{load_paths, record_from_row},
 };
 
@@ -168,16 +169,16 @@ fn active_records_for_scope(
     memory_types: Option<&[MemoryType]>,
     now: OffsetDateTime,
 ) -> Result<Vec<MemoryRecord>> {
-    let mut sql = String::from(
+    let current_assertion = retention::current_assertion_sql("memory_record", "?2");
+    let mut sql = format!(
         "SELECT id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
                 confidence, source_kind, source_ref, content_hash, created_at, updated_at,
-                supersedes_id, expires_at, proposal_id
+                supersedes_id, proposal_id, retention_json, origin_json, lineage_json
          FROM memory_record
-         WHERE status = 'active'
-           AND destination = 'repo'
+         WHERE destination = 'repo'
            AND scope_kind = ?1
            AND visibility != 'private'
-           AND memzoi_is_expired(expires_at, ?2) = 0",
+           AND {current_assertion}",
     );
     if let Some(types) = memory_types
         && !types.is_empty()
@@ -227,8 +228,10 @@ fn render_record_markdown(record: &MemoryRecord, paths: &[MemoryPath]) -> String
     if let Some(supersedes_id) = &record.supersedes_id {
         push_frontmatter(&mut output, "supersedes_id", supersedes_id);
     }
-    if let Some(expires_at) = &record.expires_at {
-        push_frontmatter(&mut output, "expires_at", expires_at);
+    push_nested_frontmatter(&mut output, "retention", &record.retention);
+    push_nested_frontmatter(&mut output, "origin", &record.origin);
+    if let Some(lineage) = &record.lineage {
+        push_nested_frontmatter(&mut output, "lineage", lineage);
     }
     if !paths.is_empty() {
         output.push_str("applies_to:\n");
@@ -241,6 +244,20 @@ fn render_record_markdown(record: &MemoryRecord, paths: &[MemoryPath]) -> String
     output.push_str(&record.body);
     output.push('\n');
     output
+}
+
+fn push_nested_frontmatter<T>(output: &mut String, key: &str, value: &T)
+where
+    T: serde::Serialize,
+{
+    output.push_str(key);
+    output.push_str(":\n");
+    let yaml = serde_yaml::to_string(value).expect("memory metadata must serialize");
+    for line in yaml.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
 }
 
 fn push_frontmatter(output: &mut String, key: &str, value: &str) {
@@ -431,19 +448,32 @@ mod tests {
         body: &str,
         path: &str,
     ) -> anyhow::Result<()> {
+        let lane = crate::MemoryLane::Semantic;
+        let now = crate::events::now_utc()?;
+        let retention = serde_json::to_string(&crate::retention_facts_for_creation(
+            lane, &now, None, None,
+        )?)?;
+        let origin = serde_json::to_string(&crate::OriginDescriptor::new(
+            format!("test-export:{id}"),
+            crate::OriginRoute::RepositoryMaterialization,
+        ))?;
         conn.execute(
             "INSERT INTO memory_record(
-                id, type, scope_kind, visibility, title, body, status, confidence,
-                source_kind, source_ref, content_hash
-             ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, 0.92, 'test', ?7, ?8)",
+                id, type, lane, destination, scope_kind, visibility, title, body, status,
+                confidence, source_kind, source_ref, retention_json, origin_json, content_hash
+             ) VALUES (?1, ?2, ?3, 'repo', ?4, 'repo', ?5, ?6, ?7, 0.92, 'test',
+                       ?8, ?9, ?10, ?11)",
             params![
                 id,
                 memory_type.as_str(),
+                lane.as_str(),
                 scope_kind.as_str(),
                 title,
                 body,
                 status.as_str(),
                 format!("test://{id}"),
+                retention,
+                origin,
                 format!("hash-{id}"),
             ],
         )?;

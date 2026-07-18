@@ -1,4 +1,14 @@
 ---
+id: temporal-old
+kind: memory
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: eval-record:temporal-old
+  route: repository_materialization
 type: fact
 lane: semantic
 title: Previous release channel

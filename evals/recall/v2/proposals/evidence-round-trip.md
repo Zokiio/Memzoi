@@ -1,8 +1,14 @@
 ---
 id: mem_eval_evidence_round_trip
 kind: proposal
-version: okf/v0.1
-profile: memzoi/v0
+version: okf/v0.2
+profile: memzoi/v1
+retention:
+  policy_version: memzoi/lane-retention-v1
+origin:
+  version: memzoi/origin-v1
+  origin_key: eval:proposal-evidence-round-trip
+  route: repository_proposal
 type: decision
 lane: semantic
 title: Proposal evidence round trip
