@@ -21,7 +21,7 @@ Memzoi deliberately separates shared Git truth from local runtime continuity:
 Transitional proposal commands remain present in the current implementation and
 may still create a pending file-backed proposal at
 `.memzoi/proposals/pending/<proposal-id>.md`. They are not a pre-1.0
-compatibility commitment and may be versioned or removed without an adapter.
+compatibility commitment and may be changed or removed without an adapter.
 That packet is a review artifact, not a canonical record. New direct repository
 materialization does not require or create a proposal packet: an explicitly
 authorized structured candidate becomes an ordinary working-tree change under
@@ -108,7 +108,7 @@ and free-text checkpoint bodies are not an extraction source. See
 
 ## Retention and current assertions
 
-Every current-format record carries versioned `retention` facts. Retention is
+Every current-format record carries required typed `retention` facts. Retention is
 the lane-specific temporal decision only; it returns `current` or `query_only`
 plus an effective boundary and reason. The complete ordinary-use decision is
 the **current assertion**:
@@ -131,8 +131,9 @@ The current retention policy applies these boundaries:
 
 - session: the earliest of closure, 24 hours after the latest continuation or
   start, seven days after the original start, and explicit expiry;
-- episodic: 30 days after occurrence, or an authorized extension capped at 90
-  days, shortened by explicit expiry; and
+- episodic: 30 days after occurrence, shortened by explicit expiry; extension
+  facts remain unsupported until #121 provides exact owner-authorized creation
+  and verification; and
 - semantic and procedural: no age TTL, while explicit expiry still applies.
 
 The exact boundary is `query_only`. All timestamps are RFC 3339 instants with
@@ -159,7 +160,7 @@ command's JSON output, event, or database row does not change what it writes.
 |  | `memzoi proposal-files apply <proposal-id>` | Explicitly apply one valid repo-safe OKF proposal, update the runtime search index in the same operation, and move the packet from `pending/` to `resolved/applied/`. |
 |  | `memzoi supersede <record-id> --sensitivity repo-safe`; `memzoi tombstone <record-id>` | Explicitly update an active, non-private repo record and its derived row as one staged transaction. Supersede replacements must remain in the target's scope and require an explicit repo-safe classification; local/session, private, and inactive targets are rejected before canonical writes. |
 |  | `memzoi quickstart --apply-sample` | Explicitly creates the quickstart sample as a canonical repo record (and also generates an export). |
-| **Pending file proposal writers — transitional current behavior** | `memzoi session-end --from-file <path>`; `memzoi session-end --from-checkpoint <id>` with a `repo` candidate | Write `.memzoi/proposals/pending/*.md` review packets. They do **not** write `.memzoi/records/*.md`; review and an explicit proposal-file apply are separate steps. These commands may be versioned or removed before 1.0 without an adapter. |
+| **Pending file proposal writers — transitional current behavior** | `memzoi session-end --from-file <path>`; `memzoi session-end --from-checkpoint <id>` with a `repo` candidate | Write `.memzoi/proposals/pending/*.md` review packets. They do **not** write `.memzoi/records/*.md`; review and an explicit proposal-file apply are separate steps. These commands may be changed or removed before 1.0 without an adapter. |
 |  | `memzoi capture apply ...` with an accepted or edited `repo`/`repo-safe` candidate | Write a pending evidence-backed proposal packet after validating pinned plan/review identities and current preconditions. Capture apply never writes the candidate directly to `.memzoi/records/*.md`. |
 | **DB proposal-state writers (not file/canonical writers)** | `memzoi propose`; `memzoi approve <proposal-id>`; `memzoi reject <proposal-id>` | Create or change proposal state in the runtime database. `propose` without `--apply` never writes a canonical record; approval alone never writes one. |
 | **Runtime local/session writers** | `memzoi local add`; `memzoi checkpoint add`; `memzoi session-end ...` with `local` or `session` candidates | Write private runtime rows under the project runtime directory. Session candidates become checkpoints and require `type: episode` plus `lane: session`; neither route writes a Git record. |
@@ -261,7 +262,7 @@ being silently repaired or restored.
 
 These commands document current executable behavior. They are not a pre-1.0
 compatibility route: existing artifacts must satisfy the current schema, and
-the commands or their formats may be versioned or removed without an adapter.
+the commands or their formats may be changed or removed without an adapter.
 
 The effective DB-proposal approval policy is resolved from the built-in default
 (`auto`), then the user-global config, repo config, and a per-call CLI override.
