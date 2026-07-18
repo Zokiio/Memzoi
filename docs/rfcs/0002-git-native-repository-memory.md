@@ -34,13 +34,13 @@ writer previously obtained Memzoi authorization.
 Memzoi never stages, commits, pushes, opens or merges pull requests, switches
 branches, changes Git configuration, or implicitly promotes personal or
 session memory into the repository. MCP initially receives no Git-native
-repository-materialization authority. Existing versioned MCP proposal behavior
-remains compatible without gaining authority to write beneath the repository
-root.
+repository-materialization authority. Pre-1.0 MCP proposal behavior has no
+forward-compatibility guarantee and does not gain authority to write beneath
+the repository root.
 
-Existing proposal packets remain readable and applicable during a documented
-compatibility period, but they are not required for new normal repository
-writes and never become active memory themselves.
+Pre-1.0 proposal packets must be manually upgraded to a current supported
+format or removed. They are not required for normal repository writes and
+never become active memory themselves.
 
 ## Context
 
@@ -99,7 +99,8 @@ matches the current checkout.
    decisions, and stale-input protection in Git-rebuildable form.
 10. Keep local, personal, session, unknown-sensitivity, and prohibited content
     out of Memzoi-originated repository writes.
-11. Preserve existing proposal data through a versioned compatibility period.
+11. Require pre-1.0 records and proposal artifacts to meet the current schema
+    or be removed; never auto-classify or silently migrate them.
 12. Keep runtime indexes disposable and deny Memzoi Git-operation authority.
 
 ## Non-goals
@@ -121,7 +122,8 @@ matches the current checkout.
   authoritative.
 - Automatically repairing arbitrary malformed or semantically inconsistent
   manual edits.
-- Removing legacy proposal support immediately.
+- Providing automatic legacy migration or fallback admission for pre-1.0
+  artifacts.
 - Defining cryptographic author identity or approval signatures.
 
 ## Terminology and identities
@@ -307,11 +309,10 @@ Materialization is a separate explicit operation. Initial authority is:
 | Extractor or model adapter | No repository-write authority |
 | Provider-import adapter | No direct repository-write authority |
 
-Existing versioned MCP operations that create legacy DB-local proposal state
-retain their compatibility behavior until explicitly versioned or deprecated.
-They do not grant permission to write beneath the repository root. MCP recall,
-context, precheck, capture planning, and proposal requests retain only their
-documented existing authority.
+Pre-1.0 MCP operations that create DB-local proposal state have no
+forward-compatibility guarantee and do not grant permission to write beneath
+the repository root. MCP recall, context, precheck, capture planning, and
+proposal requests retain only their documented current authority.
 
 A future RFC or versioned extension may grant an MCP profile materialization
 authority. That authority must be opt-in, locally authenticated by the host
@@ -350,9 +351,9 @@ files, proposal packets, journals, receipts, or recovery artifacts, redacted
 bounded diagnostics, and no Git operation. Route-specific checks may add
 constraints but may not bypass, weaken, or reimplement the common gate.
 
-Legacy compatibility does not permit sensitive candidate content beneath the
-repository merely because an artifact is called a proposal, journal, receipt,
-recovery packet, or temporary file.
+Transitional pre-1.0 handling does not permit sensitive candidate content
+beneath the repository merely because an artifact is called a proposal,
+journal, receipt, recovery packet, or temporary file.
 
 ### 7. Decisions, revisions, provenance, and time are pinned
 
@@ -402,7 +403,8 @@ materialization:
 Supersede and tombstone revisions additionally preserve the target record and
 revision, and a bounded repository-safe reason. The exact additive YAML shape
 may be finalized by the versioned canonical-record contract, but the following
-facts may not exist only in SQLite or in an optional legacy proposal:
+facts may not exist only in SQLite or in an optional transitional proposal
+artifact:
 
 - action;
 - target record and target revision, when applicable;
@@ -414,9 +416,10 @@ The canonical record remains small and human-readable. Full plans, raw source
 bodies, private evidence, credentials, chats, prompts, or model traces are not
 copied into records merely to create an audit trail.
 
-Existing records without RFC-0002 materialization metadata remain compatible.
-Their absence means the revision lacks this new materialization attestation; it
-does not invent one or make a legacy proposal canonical.
+Canonical records must meet the current schema. A record missing required
+metadata, including `content_class`, is fail-closed and must be manually
+upgraded after review or removed. Memzoi never invents a materialization
+attestation or makes a legacy proposal canonical.
 
 ### 9. Manual edits and deletions use file-native behavior
 
@@ -494,14 +497,14 @@ content in `.memzoi/records/`, read-side admission applies, and Memzoi must not
 claim that the write was authorized or that admission proves original
 classification.
 
-### 13. Legacy proposals are compatible, not required
+### 13. Pre-1.0 proposals are not a supported compatibility route
 
-Existing pending and resolved proposals remain readable during a documented
-compatibility period. Compatibility supports inspection, explicit valid apply,
-lineage and evidence preservation, duplicate prevention, and rebuild without
-treating proposals as active memory.
+Pending and resolved pre-1.0 proposals must be manually upgraded to a current
+supported format or removed. Implementations may retain transitional readers,
+but those readers are not a forward-compatibility contract and do not treat
+proposals as active memory.
 
-Any compatibility operation that writes beneath the repository uses the same
+Any transitional operation that writes beneath the repository uses the same
 current write gate and read-side admission contract. DB-local proposal state
 does not grant repository-write authority.
 
@@ -510,9 +513,9 @@ repo-safe evidence or recovery artifacts may remain supporting evidence, but
 they are not a hidden inbox, approval state, canonical store, active memory, or
 safety bypass.
 
-The compatibility period ends only after a release documents migration,
-deprecation warnings, public-contract versioning, and the treatment of every
-supported pending and resolved state. No automatic bulk promotion occurs.
+No automatic bulk promotion, fallback classification, or compatibility
+guarantee applies before 1.0. Operators must review, manually upgrade, or
+remove pre-1.0 artifacts before relying on them.
 
 ## End-to-end state model
 
@@ -624,31 +627,25 @@ follow:
 reviewed plan -> repository-write gate -> unstaged canonical revision
 ```
 
-The old route remains available only through the documented compatibility
-contract until removal.
+The old route may be removed or changed in any pre-1.0 release. It is not a
+supported compatibility contract.
 
 ### Existing state
 
-- Existing valid canonical records require no bulk migration. They pass the new
-  read-side admission contract but are not assigned fictional RFC-0002
-  attestations.
-- Existing pending proposals remain inactive until explicitly applied,
-  converted into a current plan, rejected, archived, or migrated by a later
-  versioned tool.
-- Existing resolved proposals remain audit artifacts and never override
-  canonical files.
-- Existing capture reviews and import plans retain their current contracts;
-  materialization uses a versioned adapter or requires regeneration when their
-  identities cannot satisfy the new decision contract.
-- Existing scripts and integrations receive deprecation and migration guidance
-  before proposal commands or result fields are removed.
+- Canonical records missing required current metadata are fail-closed. Review
+  each one and either manually upgrade it to the current schema or remove it.
+- Pending and resolved pre-1.0 proposals, capture reviews, import plans,
+  scripts, and integrations have no forward-compatibility guarantee. They must
+  be explicitly upgraded, regenerated, or removed before use.
+- Existing audit artifacts never override canonical files.
 
 ### Public contracts
 
 Breaking changes to CLI JSON, MCP schemas, plan and decision schemas, proposal
 formats, admission results, materialization results, or canonical identity
-require explicit versioning. Additive record metadata must remain readable by
-compatible readers; unknown required semantics fail closed.
+require explicit versioning. Before 1.0, a versioned breaking change does not
+require a compatibility adapter: operators must upgrade or remove affected
+artifacts. Unknown required semantics fail closed.
 
 ## Implementation sequence and issue mapping
 
@@ -658,8 +655,8 @@ compatible readers; unknown required semantics fail closed.
    materialization, pinned decisions, atomic writes, action-aware review output,
    read-side admission, revision-safe manual edits, and checkout-projection
    reconciliation.
-3. Legacy proposal apply is routed through the shared gate, with compatibility
-   warnings and migration documentation.
+3. Transitional proposal apply, while present, remains behind the shared gate
+   and can be removed in a pre-1.0 release without a compatibility adapter.
 4. Capture, classified import, provider import, maintenance, migration,
    recovery, and direct proposal routes gain parity tests proving equivalent
    candidates receive equivalent write and admission decisions.
@@ -684,8 +681,9 @@ another repository-write model:
 
 ### Keep proposals mandatory
 
-Rejected for the normal route because it duplicates Git review. Legacy
-proposals remain temporarily for compatibility and specialized audit needs.
+Rejected for the normal route because it duplicates Git review. Transitional
+proposal support may remain for specialized audit needs but is not a
+compatibility commitment.
 
 ### Delay local activity until staging or commit
 
@@ -717,8 +715,9 @@ operations unsafe to reason about.
 
 ### Give MCP materialization authority immediately
 
-Rejected for the initial implementation. Existing DB-local proposal behavior
-remains compatible without expanding repository authority.
+Rejected for the initial implementation. Any remaining DB-local proposal
+behavior has no forward-compatibility guarantee and does not expand repository
+authority.
 
 ## Consequences
 
@@ -740,8 +739,8 @@ remains compatible without expanding repository authority.
 - External writes cannot be proven to have passed original classification.
 - Read surfaces need inventory reconciliation rather than trusting SQLite.
 - Manual edits require revision-aware evidence handling.
-- Supporting legacy proposals and the new route temporarily increases
-  complexity.
+- Transitional proposal support remains isolated from the normal route and can
+  be removed without a compatibility adapter before 1.0.
 - Atomicity, audit metadata, and cross-route parity make this more than a simple
   file writer.
 
@@ -772,14 +771,14 @@ The maintainer ratifies:
 6. every read surface establishes current-checkout projection consistency, and
    precheck cannot return a false clean result;
 7. explicit CLI materialization may create unstaged canonical revisions;
-8. MCP initially gains no repository-materialization authority, while existing
-   DB-local proposal behavior remains compatible;
+8. MCP initially gains no repository-materialization authority, while any
+   remaining DB-local proposal behavior has no forward-compatibility guarantee;
 9. new lifecycle revisions preserve compact Git-rebuildable rationale;
 10. retries use pinned decision time and are byte-idempotent;
 11. Memzoi performs no Git acceptance operations and no implicit
     private-to-repository promotion; and
-12. mandatory proposals become a compatibility-only route for normal
-    repository memory.
+12. mandatory proposals are not required for normal repository memory and any
+    transitional implementation can be removed before 1.0.
 
 With acceptance, #99 may close, #101 implements the shared write gate first,
 and #100 follows with materialization, admission, and projection consistency.
