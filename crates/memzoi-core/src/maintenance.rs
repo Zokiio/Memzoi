@@ -1706,11 +1706,9 @@ fn validate_request(request: &MaintenancePlanRequest) -> Result<()> {
     if let Some(evaluated_at) = request.evaluated_at.as_deref() {
         parse_timestamp(evaluated_at, "maintenance evaluated_at")?;
     }
-    if request.record_ids.len() > MAINTENANCE_MAX_ADMITTED_RECORDS {
+    let normalized_record_ids = normalize_record_ids(request.record_ids.clone())?;
+    if normalized_record_ids.len() > MAINTENANCE_MAX_ADMITTED_RECORDS {
         bail!("maintenance request exceeds the admitted-record selector limit");
-    }
-    for record_id in &request.record_ids {
-        crate::validate_canonical_record_id(record_id.trim())?;
     }
     Ok(())
 }
@@ -3085,6 +3083,34 @@ mod tests {
             .plan("2026-07-18T12:00:00Z", Vec::new())
             .expect_err("oversized source must fail before parsing");
         assert!(format!("{error:#}").contains("maintenance file limit"));
+        Ok(())
+    }
+
+    #[test]
+    fn selector_limit_applies_to_normalized_unique_ids() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.write(&record(
+            "selector-target",
+            "Selector target",
+            "Selector target is current.",
+        ))?;
+
+        let duplicate_selectors =
+            vec!["selector-target".to_owned(); MAINTENANCE_MAX_ADMITTED_RECORDS + 17];
+        let plan = fixture.plan("2026-07-18T12:00:00Z", duplicate_selectors)?;
+        assert_eq!(plan.request.record_ids, ["selector-target"]);
+        assert_eq!(plan.scope.target_record_ids, ["selector-target"]);
+
+        let unique_selectors = (0..=MAINTENANCE_MAX_ADMITTED_RECORDS)
+            .map(|index| format!("selector-{index:03}"))
+            .collect::<Vec<_>>();
+        let error = fixture
+            .plan("2026-07-18T12:00:00Z", unique_selectors)
+            .expect_err("more than the admitted number of unique selectors must fail");
+        assert!(
+            format!("{error:#}").contains("admitted-record selector limit"),
+            "{error:#}"
+        );
         Ok(())
     }
 

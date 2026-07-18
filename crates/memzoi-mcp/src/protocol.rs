@@ -36,12 +36,12 @@ const PLANNING_TIMEOUT: Duration = Duration::from_secs(60);
 const PLANNING_TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const CAPTURE_CANCELLED: &str = "capture planning cancelled";
 const CAPTURE_TIMED_OUT: &str = "capture planning timed out";
-const CAPTURE_BUSY: &str = "another capture plan is already running";
+const CAPTURE_BUSY: &str = "cannot start another plan while capture planning is running";
 const CAPTURE_TERMINATION_FAILED: &str =
     "capture planner did not terminate within the cancellation grace period";
 const MAINTENANCE_CANCELLED: &str = "maintenance planning cancelled";
 const MAINTENANCE_TIMED_OUT: &str = "maintenance planning timed out";
-const MAINTENANCE_BUSY: &str = "another maintenance plan is already running";
+const MAINTENANCE_BUSY: &str = "cannot start another plan while maintenance planning is running";
 const MAINTENANCE_TERMINATION_FAILED: &str =
     "maintenance planner did not terminate within the cancellation grace period";
 const STDIO_INPUT_CAPACITY: usize = 16;
@@ -379,7 +379,7 @@ impl ActivePlanningControl {
         }
     }
 
-    fn busy(&self) -> &'static str {
+    fn active_planner_busy_message(&self) -> &'static str {
         match self {
             Self::Capture(_) => CAPTURE_BUSY,
             Self::Maintenance(_) => MAINTENANCE_BUSY,
@@ -502,7 +502,7 @@ fn wait_for_planning_request(
                             Instant::now().checked_add(PLANNING_TERMINATION_GRACE);
                     }
                 } else {
-                    reject_concurrent_input(&mut output, &line, control.busy())?;
+                    reject_concurrent_input(&mut output, &line, &control)?;
                 }
             }
             Ok(InputEvent::TooLarge) => write_json_line(
@@ -548,13 +548,21 @@ fn cancellation_targets_request(line: &str, active_id: &Value) -> bool {
         && request.pointer("/params/requestId") == Some(active_id)
 }
 
-fn reject_concurrent_input(mut output: impl Write, line: &str, busy_message: &str) -> Result<()> {
+fn reject_concurrent_input(
+    mut output: impl Write,
+    line: &str,
+    active_control: &ActivePlanningControl,
+) -> Result<()> {
     match parse_jsonrpc_line(line) {
         Ok(request) => {
             if let Some(id) = request.get("id").cloned() {
                 write_protocol_response(
                     &mut output,
-                    &jsonrpc_error(id, -32002, busy_message.to_owned()),
+                    &jsonrpc_error(
+                        id,
+                        -32002,
+                        active_control.active_planner_busy_message().to_owned(),
+                    ),
                 )?;
             }
         }
@@ -2027,6 +2035,27 @@ mod tests {
         )
     }
 
+    fn concurrent_busy_response(
+        active_control: &ActivePlanningControl,
+        incoming_id: &str,
+        incoming_tool: &str,
+        arguments: Value,
+    ) -> Value {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": incoming_id,
+            "method": "tools/call",
+            "params": {
+                "name": incoming_tool,
+                "arguments": arguments
+            }
+        })
+        .to_string();
+        let mut output = Vec::new();
+        reject_concurrent_input(&mut output, &line, active_control).unwrap();
+        serde_json::from_slice(&output).unwrap()
+    }
+
     fn managed_state_snapshot(state: &ProtocolState) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut snapshot = BTreeMap::new();
         snapshot_tree(
@@ -2234,6 +2263,42 @@ mod tests {
 
         assert_eq!(response, None);
         assert!(state.service.get().is_none());
+    }
+
+    #[test]
+    fn active_capture_reports_capture_busy_to_concurrent_maintenance() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let active = ActivePlanningControl::Capture(CapturePlanningControl::new(deadline));
+
+        let response = concurrent_busy_response(
+            &active,
+            "maintenance-while-capture",
+            "plan_maintenance_v1",
+            maintenance_arguments(),
+        );
+
+        assert_eq!(response["id"], "maintenance-while-capture");
+        assert_eq!(response["error"]["code"], -32002);
+        assert_eq!(response["error"]["message"], CAPTURE_BUSY);
+        assert_ne!(response["error"]["message"], MAINTENANCE_BUSY);
+    }
+
+    #[test]
+    fn active_maintenance_reports_maintenance_busy_to_concurrent_capture() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let active = ActivePlanningControl::Maintenance(MaintenancePlanningControl::new(deadline));
+
+        let response = concurrent_busy_response(
+            &active,
+            "capture-while-maintenance",
+            "plan_capture",
+            capture_arguments("concurrent-capture.md"),
+        );
+
+        assert_eq!(response["id"], "capture-while-maintenance");
+        assert_eq!(response["error"]["code"], -32002);
+        assert_eq!(response["error"]["message"], MAINTENANCE_BUSY);
+        assert_ne!(response["error"]["message"], CAPTURE_BUSY);
     }
 
     #[test]
