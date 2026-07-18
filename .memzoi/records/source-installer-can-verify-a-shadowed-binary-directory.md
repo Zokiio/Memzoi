@@ -1,4 +1,11 @@
 ---
+id: source-installer-can-verify-a-shadowed-binary-directory
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:source-installer-can-verify-a-shadowed-binary-directory
+  route: repository_materialization
 type: warning
 lane: semantic
 title: "Source installer can verify a shadowed binary directory"

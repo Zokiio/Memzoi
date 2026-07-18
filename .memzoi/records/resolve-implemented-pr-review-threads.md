@@ -1,4 +1,11 @@
 ---
+id: resolve-implemented-pr-review-threads
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:resolve-implemented-pr-review-threads
+  route: repository_materialization
 type: preference
 lane: semantic
 title: "Resolve implemented PR review threads"

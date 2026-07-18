@@ -71,7 +71,7 @@ fn capture_plan_requires_exactly_one_explicit_source_argument() {
 }
 
 #[test]
-fn capture_plan_does_not_create_an_absent_reserved_memory_root_for_private_output() {
+fn capture_plan_requires_the_initialized_service_clock_before_output_validation() {
     let repo = tempfile::tempdir().expect("temp repo");
     run_git_fixture(repo.path(), &["init", "-q"]);
     fs::write(
@@ -92,7 +92,7 @@ fn capture_plan_does_not_create_an_absent_reserved_memory_root_for_private_outpu
             forbidden.to_str().expect("reserved path utf-8"),
         ],
     );
-    assert!(error.contains("private runtime directory"), "{error}");
+    assert!(error.contains("bundle is not initialized"), "{error}");
     assert!(!forbidden.exists());
 }
 
@@ -120,7 +120,7 @@ fn capture_plan_json_human_and_explicit_artifact_are_deterministic_and_read_only
         &["capture", "plan", "--source", "capture-source.md", "--json"],
     );
     assert_eq!(planned, repeated, "capture planning must be deterministic");
-    assert_json_string_field(&planned, &["schema"], "memzoi/capture-plan-v1");
+    assert_json_string_field(&planned, &["schema"], "memzoi/capture-plan");
     assert_json_string_field(&planned, &["status"], "ready");
     assert_json_string_field(&planned, &["data_class"], "private");
     assert!(json_string(&planned, "plan_id").starts_with("capture_"));
@@ -351,7 +351,7 @@ fn capture_review_binds_every_decision_without_mutating_memory_state() {
     assert!(source.is_file());
     assert!(plan_path.is_file());
     assert!(review_path.is_file());
-    assert_json_string_field(&review, &["schema"], "memzoi/capture-review-v1");
+    assert_json_string_field(&review, &["schema"], "memzoi/capture-review");
     assert_json_string_field(&review, &["plan_id"], json_string(&plan, "plan_id"));
     assert_json_string_field(&review, &["data_class"], "private");
     assert!(json_string(&review, "review_id").starts_with("review_"));
@@ -466,7 +466,7 @@ fn capture_apply_routes_repo_candidates_to_pending_proposals_only() {
             "--json",
         ],
     );
-    assert_json_string_field(&applied, &["schema"], "memzoi/capture-apply-result-v1");
+    assert_json_string_field(&applied, &["schema"], "memzoi/capture-apply-result");
     assert_json_string_field(&applied, &["plan_id"], json_string(&plan, "plan_id"));
     assert_json_string_field(&applied, &["review_id"], json_string(&review, "review_id"));
     let writes = applied["writes"]
@@ -513,7 +513,7 @@ fn capture_request_file_requires_and_replays_explicit_supplied_bytes() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "memzoi/capture-request-v1",
+            "schema": "memzoi/capture-request",
             "sources": [{
                 "source_id": "reviewed-diff",
                 "locator": {
@@ -596,7 +596,7 @@ fn capture_request_file_requires_and_replays_explicit_supplied_bytes() {
     fs::write(
         &decisions_path,
         serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "memzoi/capture-review-input-v1",
+            "schema": "memzoi/capture-review-input",
             "plan_id": json_string(&plan, "plan_id"),
             "decisions": [{
                 "candidate_id": json_string(&plan["candidates"][0], "candidate_id"),

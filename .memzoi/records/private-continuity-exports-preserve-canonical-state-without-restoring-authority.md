@@ -1,4 +1,11 @@
 ---
+id: private-continuity-exports-preserve-canonical-state-without-restoring-authority
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:private-continuity-exports-preserve-canonical-state-without-restoring-authority
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Private continuity exports preserve canonical state without restoring authority"

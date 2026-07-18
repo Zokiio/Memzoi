@@ -18,6 +18,7 @@ use crate::{
         ContextPackPolicy, ContextPackWarning, MemoryCitation, MemoryDestination, MemoryLane,
         MemoryPath, MemoryRecord, MemoryType, SearchRanking, SearchRankingSignals, SearchResult,
     },
+    retention,
     search::{
         SearchInput, citation_for, load_paths, path_matches_request, record_from_row,
         search_memory_at,
@@ -245,24 +246,25 @@ fn path_candidates(
     if requested_path.is_empty() {
         return Ok(Vec::new());
     }
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT memory_record.id, memory_record.type, memory_record.lane,
+    let current_assertion = retention::current_assertion_sql("memory_record", "?4");
+    let sql = format!(
+        "SELECT DISTINCT memory_record.id, memory_record.type, memory_record.lane,
                     memory_record.destination, memory_record.scope_kind, memory_record.scope_id,
                     memory_record.visibility, memory_record.title, memory_record.body,
                     memory_record.status, memory_record.confidence, memory_record.source_kind,
                     memory_record.source_ref, memory_record.content_hash, memory_record.created_at,
-                    memory_record.updated_at, memory_record.supersedes_id, memory_record.expires_at,
-                    memory_record.proposal_id
+                    memory_record.updated_at, memory_record.supersedes_id, memory_record.proposal_id,
+                    memory_record.retention_json, memory_record.origin_json, memory_record.lineage_json
              FROM memory_path
              JOIN memory_record ON memory_record.id = memory_path.record_id
-             WHERE memory_record.status = 'active'
-               AND memzoi_is_expired(memory_record.expires_at, ?4) = 0
-               AND memory_record.destination = ?1
+             WHERE memory_record.destination = ?1
+               AND {current_assertion}
                AND memzoi_path_matches(memory_path.path, ?2) = 1
              ORDER BY memory_record.updated_at DESC, memory_record.id ASC
-             LIMIT ?3",
-        )
+             LIMIT ?3"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
         .context("failed to prepare path-scoped context candidate query")?;
     let rows = stmt
         .query_map(
@@ -1380,11 +1382,25 @@ mod tests {
         } else {
             "private"
         };
+        let now = crate::events::now_utc()?;
+        let retention = serde_json::to_string(&crate::retention_facts_for_creation(
+            lane, &now, None, None,
+        )?)?;
+        let route = match destination {
+            MemoryDestination::Repo => crate::OriginRoute::RepositoryMaterialization,
+            MemoryDestination::Local => crate::OriginRoute::LocalMemory,
+            MemoryDestination::Session => crate::OriginRoute::CheckpointCreate,
+            _ => crate::OriginRoute::OwnerCommand,
+        };
+        let origin = serde_json::to_string(&crate::OriginDescriptor::new(
+            format!("test-context:{}", memory.id),
+            route,
+        ))?;
         conn.execute(
             "INSERT INTO memory_record(
                 id, type, lane, destination, scope_kind, visibility, title, body, status, confidence,
-                source_kind, source_ref, content_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0.88, 'test', ?10, ?11)",
+                source_kind, source_ref, retention_json, origin_json, content_hash
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0.88, 'test', ?10, ?11, ?12, ?13)",
             params![
                 memory.id,
                 memory.memory_type.as_str(),
@@ -1396,6 +1412,8 @@ mod tests {
                 memory.body,
                 memory.status.as_str(),
                 memory.source_ref,
+                retention,
+                origin,
                 format!("hash-{}", memory.id),
             ],
         )?;
@@ -1433,7 +1451,18 @@ mod tests {
                 created_at: "2026-07-09T00:00:00Z".to_owned(),
                 updated_at: "2026-07-09T00:00:00Z".to_owned(),
                 supersedes_id: None,
-                expires_at: None,
+                retention: crate::retention_facts_for_creation(
+                    MemoryLane::Semantic,
+                    "2026-07-09T00:00:00Z",
+                    None,
+                    None,
+                )
+                .expect("valid test retention"),
+                origin: crate::OriginDescriptor::new(
+                    format!("test-context:{id}"),
+                    crate::OriginRoute::LocalMemory,
+                ),
+                lineage: None,
             },
             score,
             snippet: None,

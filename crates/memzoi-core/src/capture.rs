@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MemoryDestination, MemoryDestinationPolicy, MemoryLane, MemoryPaths, MemoryStatus, MemoryType,
+    MemoryDestination, MemoryDestinationPolicy, MemoryLane, MemoryPaths, MemoryType,
     MemoryWriteRoute, OkfProposalFile, OkfProposalSensitivity, OkfProposalStatus, OkfRecordFile,
     ScopeKind, parse_okf_proposal_markdown, parse_okf_record_markdown,
 };
@@ -23,20 +23,16 @@ use crate::{
 mod adapters;
 mod sources;
 
-pub const CAPTURE_REQUEST_SCHEMA: &str = "memzoi/capture-request-v1";
-pub const CAPTURE_PLAN_SCHEMA: &str = "memzoi/capture-plan-v1";
-pub const CAPTURE_REVIEW_INPUT_SCHEMA: &str = "memzoi/capture-review-input-v1";
-pub const CAPTURE_REVIEW_SCHEMA: &str = "memzoi/capture-review-v1";
-pub const CAPTURE_APPLY_RESULT_SCHEMA: &str = "memzoi/capture-apply-result-v1";
-pub const CAPTURE_PROVENANCE_SCHEMA: &str = "memzoi/capture-provenance-v1";
+pub const CAPTURE_REQUEST_SCHEMA: &str = "memzoi/capture-request";
+pub const CAPTURE_PLAN_SCHEMA: &str = "memzoi/capture-plan";
+pub const CAPTURE_REVIEW_INPUT_SCHEMA: &str = "memzoi/capture-review-input";
+pub const CAPTURE_REVIEW_SCHEMA: &str = "memzoi/capture-review";
+pub const CAPTURE_APPLY_RESULT_SCHEMA: &str = "memzoi/capture-apply-result";
+pub const CAPTURE_PROVENANCE_SCHEMA: &str = "memzoi/capture-provenance";
 pub const MARKDOWN_EXTRACTOR_PROFILE: &str = "markdown-deterministic";
-pub const MARKDOWN_EXTRACTOR_VERSION: &str = "1.0.0";
 pub const INSTRUCTION_EXTRACTOR_PROFILE: &str = "instruction-deterministic";
-pub const INSTRUCTION_EXTRACTOR_VERSION: &str = "1.0.0";
 pub const ADR_EXTRACTOR_PROFILE: &str = "adr-deterministic";
-pub const ADR_EXTRACTOR_VERSION: &str = "1.0.0";
 pub const GIT_CHANGE_EXTRACTOR_PROFILE: &str = "git-change-deterministic";
-pub const GIT_CHANGE_EXTRACTOR_VERSION: &str = "1.0.0";
 pub const MAX_MARKDOWN_SOURCE_BYTES: u64 = 1024 * 1024;
 pub const MAX_DIFF_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
 pub const CAPTURE_MAX_AGGREGATE_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
@@ -295,7 +291,7 @@ pub struct CaptureSourceMemberSnapshot {
 pub struct CapturePolicyInputSnapshot {
     pub path: String,
     pub source_content_hash: String,
-    pub engine_version: String,
+    pub engine_identity: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,7 +343,7 @@ impl CaptureEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-// Keep the public v1 semantic-location shape direct and human-readable in Rust and JSON.
+// Keep the current semantic-location shape direct and human-readable in Rust and JSON.
 #[allow(clippy::large_enum_variant)]
 pub enum CaptureSemanticLocation {
     Instruction,
@@ -388,8 +384,7 @@ pub enum CaptureSemanticLocation {
 pub struct CaptureExtractorIdentity {
     pub kind: String,
     pub id: String,
-    pub version: String,
-    pub configuration_hash: String,
+    pub implementation_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,12 +444,31 @@ pub struct CaptureMatch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CaptureAction {
-    CreateProposal { proposal_id: String, path: String },
-    CreateRuntime { route: MemoryWriteRoute },
-    Duplicate { matches: Vec<CaptureMatch> },
-    Conflict { matches: Vec<CaptureMatch> },
-    NoWrite { reason_code: String },
-    Blocked { code: String },
+    Replay {
+        outcome: crate::OriginOutcomeKind,
+        destination: Option<MemoryDestination>,
+        record_id: Option<String>,
+        proposal_id: Option<String>,
+    },
+    CreateProposal {
+        proposal_id: String,
+        path: String,
+    },
+    CreateRuntime {
+        route: MemoryWriteRoute,
+    },
+    Duplicate {
+        matches: Vec<CaptureMatch>,
+    },
+    Conflict {
+        matches: Vec<CaptureMatch>,
+    },
+    NoWrite {
+        reason_code: String,
+    },
+    Blocked {
+        code: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -494,14 +508,13 @@ pub type CaptureCandidatePreconditions = CaptureCandidatePrecondition;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePreconditions {
-    pub policy_version: String,
+    pub policy_digest: String,
     pub candidates: BTreeMap<String, CaptureCandidatePrecondition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureSafeguards {
-    pub policy_version: String,
     pub configuration_hash: String,
     pub max_source_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -544,6 +557,7 @@ pub struct CapturePlanSummary {
     pub candidates: usize,
     pub create_proposals: usize,
     pub runtime_writes: usize,
+    pub replays: usize,
     pub duplicates: usize,
     pub conflicts: usize,
     pub needs_review: usize,
@@ -743,31 +757,35 @@ where
         .with_context(|| format!("failed to parse {label}"))
 }
 
-pub fn build_capture_review(
+pub fn build_capture_review_at(
     paths: &MemoryPaths,
     plan: &CapturePlan,
     input: CaptureReviewInput,
     reviewed_by: &str,
     reviewed_at: &str,
+    evaluated_at: time::OffsetDateTime,
 ) -> Result<CaptureReview> {
-    build_capture_review_with_inputs(
+    build_capture_review_with_inputs_at(
         paths,
         plan,
         input,
         &CaptureSourceInputs::default(),
         reviewed_by,
         reviewed_at,
+        evaluated_at,
     )
 }
 
-pub fn build_capture_review_with_inputs(
+pub fn build_capture_review_with_inputs_at(
     paths: &MemoryPaths,
     plan: &CapturePlan,
     input: CaptureReviewInput,
     source_inputs: &CaptureSourceInputs,
     reviewed_by: &str,
     reviewed_at: &str,
+    evaluated_at: time::OffsetDateTime,
 ) -> Result<CaptureReview> {
+    let evaluated_at = crate::expiry::format_timestamp(evaluated_at)?;
     build_capture_review_inner(
         paths,
         None,
@@ -777,18 +795,20 @@ pub fn build_capture_review_with_inputs(
         source_inputs,
         reviewed_by,
         reviewed_at,
+        &evaluated_at,
     )
 }
 
-pub fn build_capture_review_with_prior(
+pub fn build_capture_review_with_prior_at(
     paths: &MemoryPaths,
     plan: &CapturePlan,
     input: CaptureReviewInput,
     prior_review: &CaptureReview,
     reviewed_by: &str,
     reviewed_at: &str,
+    evaluated_at: time::OffsetDateTime,
 ) -> Result<CaptureReview> {
-    build_capture_review_with_prior_and_inputs(
+    build_capture_review_with_prior_and_inputs_at(
         paths,
         plan,
         input,
@@ -796,10 +816,12 @@ pub fn build_capture_review_with_prior(
         &CaptureSourceInputs::default(),
         reviewed_by,
         reviewed_at,
+        evaluated_at,
     )
 }
 
-pub fn build_capture_review_with_prior_and_inputs(
+#[allow(clippy::too_many_arguments)]
+pub fn build_capture_review_with_prior_and_inputs_at(
     paths: &MemoryPaths,
     plan: &CapturePlan,
     input: CaptureReviewInput,
@@ -807,7 +829,9 @@ pub fn build_capture_review_with_prior_and_inputs(
     source_inputs: &CaptureSourceInputs,
     reviewed_by: &str,
     reviewed_at: &str,
+    evaluated_at: time::OffsetDateTime,
 ) -> Result<CaptureReview> {
+    let evaluated_at = crate::expiry::format_timestamp(evaluated_at)?;
     build_capture_review_inner(
         paths,
         None,
@@ -817,6 +841,7 @@ pub fn build_capture_review_with_prior_and_inputs(
         source_inputs,
         reviewed_by,
         reviewed_at,
+        &evaluated_at,
     )
 }
 
@@ -831,6 +856,7 @@ pub(crate) fn build_capture_review_with_connection_and_inputs(
     source_inputs: &CaptureSourceInputs,
     reviewed_by: &str,
     reviewed_at: &str,
+    evaluated_at: &str,
 ) -> Result<CaptureReview> {
     build_capture_review_inner(
         paths,
@@ -841,6 +867,7 @@ pub(crate) fn build_capture_review_with_connection_and_inputs(
         source_inputs,
         reviewed_by,
         reviewed_at,
+        evaluated_at,
     )
 }
 
@@ -855,6 +882,7 @@ fn build_capture_review_inner(
     source_inputs: &CaptureSourceInputs,
     reviewed_by: &str,
     reviewed_at: &str,
+    evaluated_at: &str,
 ) -> Result<CaptureReview> {
     validate_plan_identity(plan)?;
     if plan.status != CapturePlanStatus::Ready {
@@ -873,14 +901,17 @@ fn build_capture_review_inner(
         &input,
         prior_review,
         source_inputs,
+        evaluated_at,
     )?;
     let reviewed_by = reviewed_by.trim();
     let reviewed_at = reviewed_at.trim();
     validate_capture_actor(reviewed_by)?;
     time::OffsetDateTime::parse(reviewed_at, &time::format_description::well_known::Rfc3339)
         .context("capture reviewed_at must be RFC 3339")?;
+    time::OffsetDateTime::parse(evaluated_at, &time::format_description::well_known::Rfc3339)
+        .context("capture evaluated_at must be RFC 3339")?;
 
-    validate_capture_plan_live_state(paths, runtime_conn, plan, source_inputs, None)
+    validate_capture_plan_live_state(paths, runtime_conn, plan, source_inputs, evaluated_at, None)
         .context("stale capture plan")?;
 
     let mut inputs = BTreeMap::new();
@@ -897,8 +928,8 @@ fn build_capture_review_inner(
     }
 
     let inventory = match runtime_conn {
-        Some(conn) => load_inventory_with_connection(paths, conn, None)?,
-        None => load_inventory(paths, None)?,
+        Some(conn) => load_inventory_with_connection(paths, conn, evaluated_at, None)?,
+        None => load_inventory(paths, evaluated_at, None)?,
     };
     let mut reviewed_reserved_ids = inventory.reserved_ids.clone();
     for candidate in &plan.candidates {
@@ -1006,6 +1037,7 @@ fn validate_prior_review_lineage(
     input: &CaptureReviewInput,
     prior_review: Option<&CaptureReview>,
     source_inputs: &CaptureSourceInputs,
+    evaluated_at: &str,
 ) -> Result<()> {
     let prior_id = input.prior_review_id.as_deref();
     if let Some(prior_id) = prior_id
@@ -1052,6 +1084,7 @@ fn validate_prior_review_lineage(
         source_inputs,
         &prior_review.reviewed_by,
         &prior_review.reviewed_at,
+        evaluated_at,
     )
     .context("capture prior review is not a complete semantic review of the plan")?;
     if replayed.decisions != prior_review.decisions
@@ -1131,7 +1164,9 @@ fn valid_capture_identity(value: &str, prefix: &str) -> bool {
 
 fn require_routeable_review_action(action: &CaptureAction) -> Result<()> {
     match action {
-        CaptureAction::CreateProposal { .. } | CaptureAction::CreateRuntime { .. } => Ok(()),
+        CaptureAction::Replay { .. }
+        | CaptureAction::CreateProposal { .. }
+        | CaptureAction::CreateRuntime { .. } => Ok(()),
         CaptureAction::Duplicate { .. } => {
             bail!("duplicate capture candidates cannot be accepted as new memory")
         }
@@ -1221,33 +1256,77 @@ fn validate_selected_review_matches(decisions: &[CaptureReviewDecision]) -> Resu
     Ok(())
 }
 
-pub fn plan_capture(paths: &MemoryPaths, request: CaptureRequest) -> Result<CapturePlan> {
-    plan_capture_with_inputs(paths, request, &CaptureSourceInputs::default())
+pub fn plan_capture_at(
+    paths: &MemoryPaths,
+    request: CaptureRequest,
+    evaluated_at: time::OffsetDateTime,
+) -> Result<CapturePlan> {
+    plan_capture_with_inputs_at(
+        paths,
+        request,
+        &CaptureSourceInputs::default(),
+        evaluated_at,
+    )
 }
 
-pub fn plan_capture_with_inputs(
+pub fn plan_capture_with_inputs_at(
     paths: &MemoryPaths,
     request: CaptureRequest,
     source_inputs: &CaptureSourceInputs,
+    evaluated_at: time::OffsetDateTime,
 ) -> Result<CapturePlan> {
-    plan_capture_inner(paths, request, source_inputs, None, None)
+    let evaluated_at = crate::expiry::format_timestamp(evaluated_at)?;
+    plan_capture_inner(paths, request, source_inputs, None, &evaluated_at, None)
 }
 
-pub fn plan_capture_with_control(
+pub fn plan_capture_with_control_at(
     paths: &MemoryPaths,
     request: CaptureRequest,
+    evaluated_at: time::OffsetDateTime,
     control: &CapturePlanningControl,
 ) -> Result<CapturePlan> {
-    plan_capture_with_inputs_and_control(paths, request, &CaptureSourceInputs::default(), control)
+    plan_capture_with_inputs_and_control_at(
+        paths,
+        request,
+        &CaptureSourceInputs::default(),
+        evaluated_at,
+        control,
+    )
 }
 
-pub fn plan_capture_with_inputs_and_control(
+pub fn plan_capture_with_inputs_and_control_at(
     paths: &MemoryPaths,
     request: CaptureRequest,
     source_inputs: &CaptureSourceInputs,
+    evaluated_at: time::OffsetDateTime,
     control: &CapturePlanningControl,
 ) -> Result<CapturePlan> {
-    plan_capture_inner(paths, request, source_inputs, None, Some(control))
+    let evaluated_at = crate::expiry::format_timestamp(evaluated_at)?;
+    plan_capture_inner(
+        paths,
+        request,
+        source_inputs,
+        None,
+        &evaluated_at,
+        Some(control),
+    )
+}
+
+pub(crate) fn plan_capture_with_connection_and_inputs(
+    paths: &MemoryPaths,
+    conn: &Connection,
+    request: CaptureRequest,
+    source_inputs: &CaptureSourceInputs,
+    evaluated_at: &str,
+) -> Result<CapturePlan> {
+    plan_capture_inner(
+        paths,
+        request,
+        source_inputs,
+        Some(conn),
+        evaluated_at,
+        None,
+    )
 }
 
 fn plan_capture_inner(
@@ -1255,6 +1334,7 @@ fn plan_capture_inner(
     request: CaptureRequest,
     source_inputs: &CaptureSourceInputs,
     runtime_conn: Option<&Connection>,
+    evaluated_at: &str,
     control: Option<&CapturePlanningControl>,
 ) -> Result<CapturePlan> {
     check_planning_control(control)?;
@@ -1324,8 +1404,8 @@ fn plan_capture_inner(
     }
     check_planning_control(control)?;
     let inventory_result = match runtime_conn {
-        Some(conn) => load_inventory_with_connection(paths, conn, control),
-        None => load_inventory(paths, control),
+        Some(conn) => load_inventory_with_connection(paths, conn, evaluated_at, control),
+        None => load_inventory(paths, evaluated_at, control),
     };
     let inventory = match inventory_result {
         Ok(inventory) => inventory,
@@ -1360,7 +1440,9 @@ fn plan_capture_inner(
         }
     };
     let mut candidates = extraction.candidates;
-    if let Err(error) = classify_actions(&inventory, &mut candidates, control) {
+    if let Err(error) = apply_capture_origin_replays(paths, runtime_conn, &mut candidates)
+        .and_then(|()| classify_actions(&inventory, &mut candidates, control))
+    {
         let _ = error;
         return blocked_after_planning_failure(
             &request,
@@ -1426,6 +1508,7 @@ pub(crate) fn validate_capture_plan_live_state(
     runtime_conn: Option<&Connection>,
     plan: &CapturePlan,
     source_inputs: &CaptureSourceInputs,
+    evaluated_at: &str,
     control: Option<&CapturePlanningControl>,
 ) -> Result<()> {
     validate_plan_identity(plan)?;
@@ -1452,8 +1535,8 @@ pub(crate) fn validate_capture_plan_live_state(
     validate_plan_evidence(plan, &loaded)?;
 
     let inventory = match runtime_conn {
-        Some(conn) => load_inventory_with_connection(paths, conn, control)?,
-        None => load_inventory(paths, control)?,
+        Some(conn) => load_inventory_with_connection(paths, conn, evaluated_at, control)?,
+        None => load_inventory(paths, evaluated_at, control)?,
     };
     if plan.extractor.kind != "deterministic" {
         bail!("capture profile requires a trusted issuance attestation before replay");
@@ -1467,6 +1550,7 @@ pub(crate) fn validate_capture_plan_live_state(
     )?;
     let mut replay_candidates = replay.candidates;
     let mut replay_diagnostics = replay.diagnostics;
+    apply_capture_origin_replays(paths, runtime_conn, &mut replay_candidates)?;
     classify_actions(&inventory, &mut replay_candidates, control)?;
     if replay_candidates.iter().any(|candidate| {
         matches!(
@@ -1513,6 +1597,7 @@ pub(crate) fn validate_capture_plan_live_state(
             sensitivity_reason,
         )?);
     }
+    apply_capture_origin_replays(paths, runtime_conn, &mut expected_candidates)?;
     classify_actions(&inventory, &mut expected_candidates, control)?;
     if expected_candidates != plan.candidates {
         bail!("capture candidate identity, classification, or action changed");
@@ -2407,8 +2492,8 @@ fn validate_request(request: &CaptureRequest) -> Result<()> {
                     ..
                 } => {
                     validate_project_relative(path, "ADR directory")?;
-                    if ignore_policy != "git-v1" {
-                        bail!("ADR directory capture requires ignore_policy git-v1");
+                    if ignore_policy != "git" {
+                        bail!("ADR directory capture requires ignore_policy git");
                     }
                     if include.as_slice() != ["*.md"] {
                         bail!("ADR directory capture supports only the deterministic *.md include");
@@ -2474,7 +2559,7 @@ fn validate_request(request: &CaptureRequest) -> Result<()> {
                     if !matches!(merge_parent.as_str(), "base_to_head" | "first_parent") {
                         bail!("git_range merge_parent is unsupported");
                     }
-                    if diff_format != "git-unified-v1" {
+                    if diff_format != "git-unified" {
                         bail!("git_range diff_format is unsupported");
                     }
                 }
@@ -2684,14 +2769,105 @@ struct CaptureInventorySnapshot {
     runtime_available: bool,
 }
 
+pub(crate) fn capture_origin_binding(
+    paths: &MemoryPaths,
+    candidate: &CaptureCandidate,
+) -> Result<(crate::OriginIdentity, String)> {
+    let route = crate::OriginRoute::Capture;
+    let descriptor = crate::OriginDescriptor::new(format!("capture:{}", candidate.claim_id), route);
+    let identity = crate::OriginIdentity::new(paths.repository_key(), descriptor);
+    let fingerprint = crate::origin_input_fingerprint(
+        route,
+        &serde_json::json!({
+            "claim_id": &candidate.claim_id,
+            "memory": &candidate.memory,
+            "evidence": &candidate.evidence,
+            "extraction": &candidate.extraction,
+            "confidence": candidate.confidence,
+            "sensitivity": candidate.classification.sensitivity,
+            "content_class": candidate.classification.content_class,
+        }),
+    )?;
+    Ok((identity, fingerprint))
+}
+
+pub(crate) fn capture_origin_is_admissible(candidate: &CaptureCandidate) -> bool {
+    !matches!(
+        candidate.classification.sensitivity,
+        OkfProposalSensitivity::Unknown
+            | OkfProposalSensitivity::Secret
+            | OkfProposalSensitivity::RawTranscript
+    )
+}
+
+fn apply_capture_origin_replays(
+    paths: &MemoryPaths,
+    runtime_conn: Option<&Connection>,
+    candidates: &mut [CaptureCandidate],
+) -> Result<()> {
+    let owned_conn = if runtime_conn.is_none() && paths.shared_db_path.is_file() {
+        let uri = format!(
+            "file:{}?mode=ro&immutable=1",
+            percent_encode_sqlite_uri_path(&paths.shared_db_path)
+        );
+        Some(
+            Connection::open_with_flags(
+                uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_URI
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .context("failed to open capture origin registry read-only")?,
+        )
+    } else {
+        None
+    };
+    let Some(conn) = runtime_conn.or(owned_conn.as_ref()) else {
+        return Ok(());
+    };
+    let has_registry = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_master
+           WHERE type = 'table' AND name = 'origin_outcome'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_registry {
+        bail!("capture origin registry schema is unsupported; remove or upgrade shared.db");
+    }
+    for candidate in candidates {
+        if !capture_origin_is_admissible(candidate) {
+            continue;
+        }
+        let (identity, fingerprint) = capture_origin_binding(paths, candidate)?;
+        match crate::lookup_origin(conn, &identity, &fingerprint)? {
+            crate::OriginLookup::Replay(outcome) => {
+                candidate.action = CaptureAction::Replay {
+                    outcome: outcome.outcome,
+                    destination: outcome.destination,
+                    record_id: outcome.record_id,
+                    proposal_id: outcome.proposal_id,
+                };
+            }
+            crate::OriginLookup::Prepared(_) => {
+                bail!("origin_operation_pending: capture origin is already prepared")
+            }
+            crate::OriginLookup::Unseen => {}
+        }
+    }
+    Ok(())
+}
+
 fn load_inventory(
     paths: &MemoryPaths,
+    evaluated_at: &str,
     control: Option<&CapturePlanningControl>,
 ) -> Result<CaptureInventorySnapshot> {
-    let mut inventory = load_file_inventory(paths, control)?;
+    let mut inventory = load_file_inventory(paths, evaluated_at, control)?;
     let mut runtime_entries = Vec::new();
     inventory.runtime_available = paths.shared_db_path.try_exists().unwrap_or(false)
-        && load_runtime_inventory(paths, &mut runtime_entries, control).is_ok();
+        && load_runtime_inventory(paths, &mut runtime_entries, evaluated_at, control).is_ok();
     if inventory.runtime_available {
         inventory.entries.extend(runtime_entries);
     }
@@ -2702,10 +2878,11 @@ fn load_inventory(
 fn load_inventory_with_connection(
     paths: &MemoryPaths,
     conn: &Connection,
+    evaluated_at: &str,
     control: Option<&CapturePlanningControl>,
 ) -> Result<CaptureInventorySnapshot> {
-    let mut inventory = load_file_inventory(paths, control)?;
-    load_runtime_inventory_from_connection(conn, &mut inventory.entries, control)?;
+    let mut inventory = load_file_inventory(paths, evaluated_at, control)?;
+    load_runtime_inventory_from_connection(conn, &mut inventory.entries, evaluated_at, control)?;
     inventory.runtime_available = true;
     finish_inventory_snapshot(&mut inventory);
     Ok(inventory)
@@ -2720,14 +2897,27 @@ fn finish_inventory_snapshot(inventory: &mut CaptureInventorySnapshot) {
 
 fn load_file_inventory(
     paths: &MemoryPaths,
+    evaluated_at: &str,
     control: Option<&CapturePlanningControl>,
 ) -> Result<CaptureInventorySnapshot> {
+    let evaluated_at =
+        time::OffsetDateTime::parse(evaluated_at, &time::format_description::well_known::Rfc3339)
+            .context("capture inventory evaluated_at must be RFC 3339")?;
     let mut entries = Vec::new();
     let mut reserved_ids = BTreeSet::new();
     let mut budget = CaptureInventoryBudget::default();
     for record in read_bounded_okf_record_files(&paths.records_dir(), &mut budget, control)? {
         reserved_ids.insert(record.concept_id.clone());
-        if record.status != MemoryStatus::Active {
+        if !crate::evaluate_current_assertion(
+            &record.concept_id,
+            record.status,
+            record.draft.lane,
+            &record.retention,
+            evaluated_at,
+            Vec::new(),
+        )?
+        .is_current
+        {
             continue;
         }
         let updated_at = record
@@ -2753,7 +2943,16 @@ fn load_file_inventory(
     }
     for proposal in read_bounded_okf_proposal_files(&paths.proposals_dir(), &mut budget, control)? {
         reserved_ids.insert(proposal.id.clone());
-        if proposal.status == OkfProposalStatus::Proposed {
+        if proposal.status == OkfProposalStatus::Proposed
+            && crate::evaluate_retention(
+                &proposal.id,
+                proposal.lane,
+                &proposal.retention,
+                evaluated_at,
+            )?
+            .state
+                == crate::RetentionState::Current
+        {
             entries.push(InventoryEntry {
                 kind: CaptureMatchKind::PendingProposal,
                 id: proposal.id,
@@ -2940,6 +3139,7 @@ fn sort_inventory(entries: &mut [InventoryEntry]) {
 fn load_runtime_inventory(
     paths: &MemoryPaths,
     entries: &mut Vec<InventoryEntry>,
+    evaluated_at: &str,
     control: Option<&CapturePlanningControl>,
 ) -> Result<()> {
     check_planning_control(control)?;
@@ -2962,7 +3162,8 @@ fn load_runtime_inventory(
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .context("failed to open capture runtime inventory read-only")?;
-    load_runtime_inventory_from_connection(&conn, entries, control)?;
+    crate::retention::register_sqlite_functions(&conn)?;
+    load_runtime_inventory_from_connection(&conn, entries, evaluated_at, control)?;
     check_planning_control(control)?;
     let after = runtime_database_read_state(&paths.shared_db_path)?;
     if before != after {
@@ -2974,6 +3175,7 @@ fn load_runtime_inventory(
 fn load_runtime_inventory_from_connection(
     conn: &Connection,
     entries: &mut Vec<InventoryEntry>,
+    evaluated_at: &str,
     control: Option<&CapturePlanningControl>,
 ) -> Result<()> {
     check_planning_control(control)?;
@@ -2991,28 +3193,36 @@ fn load_runtime_inventory_from_connection(
         bail!("capture runtime inventory schema is incompatible");
     }
 
-    ensure_runtime_inventory_bounds(conn)?;
+    ensure_runtime_inventory_bounds(conn, evaluated_at)?;
 
-    let mut stmt = conn.prepare(
+    let current_assertion = crate::retention::current_assertion_sql("memory_record", "?1");
+    let sql = format!(
         "SELECT id, type, lane, destination, scope_kind, scope_id, title, body, updated_at
          FROM memory_record
-         WHERE status = 'active' AND destination IN ('local', 'session')
+         WHERE ({current_assertion}) AND destination IN ('local', 'session')
          ORDER BY id ASC
-         LIMIT ?1",
+         LIMIT ?2"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            evaluated_at,
+            CAPTURE_MAX_RUNTIME_INVENTORY_RECORDS as i64 + 1
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        },
     )?;
-    let rows = stmt.query_map([CAPTURE_MAX_RUNTIME_INVENTORY_RECORDS as i64 + 1], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, String>(7)?,
-            row.get::<_, String>(8)?,
-        ))
-    })?;
     let starting_entries = entries.len();
     for row in rows {
         check_planning_control(control)?;
@@ -3042,8 +3252,9 @@ fn load_runtime_inventory_from_connection(
     Ok(())
 }
 
-fn ensure_runtime_inventory_bounds(conn: &Connection) -> Result<()> {
-    let (record_count, record_bytes) = conn.query_row(
+fn ensure_runtime_inventory_bounds(conn: &Connection, evaluated_at: &str) -> Result<()> {
+    let current_assertion = crate::retention::current_assertion_sql("memory_record", "?1");
+    let records_sql = format!(
         "SELECT COUNT(*), COALESCE(SUM(
              length(CAST(id AS BLOB))
              + length(CAST(type AS BLOB))
@@ -3056,10 +3267,11 @@ fn ensure_runtime_inventory_bounds(conn: &Connection) -> Result<()> {
              + length(CAST(updated_at AS BLOB))
          ), 0)
          FROM memory_record
-         WHERE status = 'active' AND destination IN ('local', 'session')",
-        [],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    )?;
+         WHERE ({current_assertion}) AND destination IN ('local', 'session')"
+    );
+    let (record_count, record_bytes) = conn.query_row(&records_sql, [evaluated_at], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
     if record_count > CAPTURE_MAX_RUNTIME_INVENTORY_RECORDS as i64 {
         bail!("capture runtime inventory exceeds the record-count limit");
     }
@@ -3067,15 +3279,17 @@ fn ensure_runtime_inventory_bounds(conn: &Connection) -> Result<()> {
         bail!("capture runtime inventory exceeds the aggregate byte limit");
     }
 
-    let (path_count, path_bytes) = conn.query_row(
+    let path_current_assertion = crate::retention::current_assertion_sql("memory_record", "?1");
+    let paths_sql = format!(
         "SELECT COUNT(*), COALESCE(SUM(length(CAST(memory_path.path AS BLOB))), 0)
          FROM memory_path
          JOIN memory_record ON memory_record.id = memory_path.record_id
-         WHERE memory_record.status = 'active'
+         WHERE ({path_current_assertion})
            AND memory_record.destination IN ('local', 'session')",
-        [],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    )?;
+    );
+    let (path_count, path_bytes) = conn.query_row(&paths_sql, [evaluated_at], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
     let max_path_count = (CAPTURE_MAX_RUNTIME_INVENTORY_RECORDS as i64)
         .saturating_mul(CAPTURE_MAX_RUNTIME_PATHS_PER_RECORD as i64);
     if path_count > max_path_count {
@@ -3684,7 +3898,7 @@ fn candidate(
     sensitivity_reason: &str,
 ) -> Result<CaptureCandidate> {
     let claim_payload = canonical_json_bytes(&(&memory, &evidence, extractor))?;
-    let claim_id = domain_id("claim", "memzoi/capture-claim-v1", &claim_payload);
+    let claim_id = domain_id("claim", "memzoi/capture-claim", &claim_payload);
     let classification = CaptureClassification {
         destination,
         destination_reason: destination_reason.to_owned(),
@@ -3695,11 +3909,7 @@ fn candidate(
     };
     let action = preliminary_action(&classification);
     let candidate_payload = canonical_json_bytes(&(&claim_id, 1.0f64, &classification, &action))?;
-    let candidate_id = domain_id(
-        "candidate",
-        "memzoi/capture-candidate-v1",
-        &candidate_payload,
-    );
+    let candidate_id = domain_id("candidate", "memzoi/capture-candidate", &candidate_payload);
     Ok(CaptureCandidate {
         claim_id,
         candidate_id,
@@ -3955,6 +4165,16 @@ fn classify_actions_with_reserved(
     let mut earlier = Vec::<InventoryEntry>::new();
     for candidate in candidates {
         check_planning_control(control)?;
+        if matches!(candidate.action, CaptureAction::Replay { .. }) {
+            let payload = canonical_json_bytes(&(
+                &candidate.claim_id,
+                candidate.confidence,
+                &candidate.classification,
+                &candidate.action,
+            ))?;
+            candidate.candidate_id = domain_id("candidate", "memzoi/capture-candidate", &payload);
+            continue;
+        }
         let exact_key = draft_key(&candidate.memory)?;
         let candidate_conflict_key = conflict_key(&candidate.memory);
         let mut duplicates = Vec::new();
@@ -4024,7 +4244,7 @@ fn classify_actions_with_reserved(
             &candidate.classification,
             &candidate.action,
         ))?;
-        candidate.candidate_id = domain_id("candidate", "memzoi/capture-candidate-v1", &payload);
+        candidate.candidate_id = domain_id("candidate", "memzoi/capture-candidate", &payload);
         earlier.push(InventoryEntry {
             kind: CaptureMatchKind::EarlierCandidate,
             id: candidate.candidate_id.clone(),
@@ -4075,14 +4295,18 @@ fn candidate_preconditions(candidates: &[CaptureCandidate]) -> CapturePreconditi
         );
     }
     CapturePreconditions {
-        policy_version: "memzoi/destination-policy-v1".to_owned(),
+        policy_digest: content_hash(
+            b"memzoi/destination-policy\0current-assertion\0same-plane-scope-lane\0origin-first",
+        ),
         candidates: map,
     }
 }
 
 fn empty_preconditions() -> CapturePreconditions {
     CapturePreconditions {
-        policy_version: "memzoi/destination-policy-v1".to_owned(),
+        policy_digest: content_hash(
+            b"memzoi/destination-policy\0current-assertion\0same-plane-scope-lane\0origin-first",
+        ),
         candidates: BTreeMap::new(),
     }
 }
@@ -4095,6 +4319,7 @@ fn summarize(candidates: &[CaptureCandidate]) -> CapturePlanSummary {
     };
     for candidate in candidates {
         match candidate.action {
+            CaptureAction::Replay { .. } => summary.replays += 1,
             CaptureAction::CreateProposal { .. } => summary.create_proposals += 1,
             CaptureAction::CreateRuntime { .. } => summary.runtime_writes += 1,
             CaptureAction::Duplicate { .. } => summary.duplicates += 1,
@@ -4120,29 +4345,25 @@ fn supported_extractor_profile(profile: &str) -> bool {
 }
 
 fn extractor_identity(profile: &str) -> Result<CaptureExtractorIdentity> {
-    let (id, version, configuration) = match profile {
+    let (id, implementation) = match profile {
         MARKDOWN_EXTRACTOR_PROFILE => (
             "memzoi-markdown",
-            MARKDOWN_EXTRACTOR_VERSION,
-            b"memzoi/markdown-deterministic-v1\0typed-atx-sections\0unsupported-regions=diagnostic-v1"
+            b"memzoi/markdown-deterministic\0typed-atx-sections\0unsupported-regions=diagnostic"
                 .as_slice(),
         ),
         INSTRUCTION_EXTRACTOR_PROFILE => (
             "memzoi-instructions",
-            INSTRUCTION_EXTRACTOR_VERSION,
-            b"memzoi/instruction-deterministic-v1\0structured-sections\0generated-blocks=exclude-v1\0temporary-heading-preamble-body=needs-review-v3"
+            b"memzoi/instruction-deterministic\0structured-sections\0generated-blocks=exclude\0temporary-heading-preamble-body=needs-review"
                 .as_slice(),
         ),
         ADR_EXTRACTOR_PROFILE => (
             "memzoi-adr",
-            ADR_EXTRACTOR_VERSION,
-            b"memzoi/adr-deterministic-v1\0status-context-decision-consequences-supersession\0title-status-field-target-evidence=v2\0conflicting-metadata=fail-safe-v1\0directory-order=path-v1"
+            b"memzoi/adr-deterministic\0status-context-decision-consequences-supersession\0title-status-field-target-evidence\0conflicting-metadata=fail-safe\0directory-order=path"
                 .as_slice(),
         ),
         GIT_CHANGE_EXTRACTOR_PROFILE => (
             "memzoi-git-change",
-            GIT_CHANGE_EXTRACTOR_VERSION,
-            b"memzoi/git-change-deterministic-v1\0unified-diff-v1\0strict-headers-and-blobs=v2\0typed-durable-guidance-v1\0heading-boundary=all-v1\0path-policy=git-durable-v1\0files=512\0hunks=4096\0rename=exact-blob-v1\0mode-authority=regular-blob-evidence-v1"
+            b"memzoi/git-change-deterministic\0unified-diff\0strict-headers-and-blobs\0typed-durable-guidance\0heading-boundary=all\0path-policy=git-durable\0files=512\0hunks=4096\0rename=exact-blob\0mode-authority=regular-blob-evidence"
                 .as_slice(),
         ),
         _ => bail!("unsupported capture extractor profile"),
@@ -4150,8 +4371,7 @@ fn extractor_identity(profile: &str) -> Result<CaptureExtractorIdentity> {
     Ok(CaptureExtractorIdentity {
         kind: "deterministic".to_owned(),
         id: id.to_owned(),
-        version: version.to_owned(),
-        configuration_hash: content_hash(configuration),
+        implementation_digest: content_hash(implementation),
     })
 }
 
@@ -4162,18 +4382,17 @@ fn safeguards(profile: &str) -> Result<CaptureSafeguards> {
     let git_change = profile == GIT_CHANGE_EXTRACTOR_PROFILE;
     let adr_directory = profile == ADR_EXTRACTOR_PROFILE;
     Ok(CaptureSafeguards {
-        policy_version: "memzoi/capture-safeguards-v1".to_owned(),
         configuration_hash: if adr_directory {
             content_hash(
-                b"memzoi/capture-safeguards-v1\0prohibited-detectors=6\0source-hard-links=reject\0max-source=1048576\0max-aggregate-source=4194304\0max-directory-files=128\0max-directory-depth=8\0directory-ignore=git-v1+ignore-0.4.28\0policy-prohibited-scan=raw-v1\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
+                b"memzoi/capture-safeguards\0prohibited-detectors=6\0source-hard-links=reject\0max-source=1048576\0max-aggregate-source=4194304\0max-directory-files=128\0max-directory-depth=8\0directory-ignore=git+ignore-0.4.28\0policy-prohibited-scan=raw\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
             )
         } else if git_change {
             content_hash(
-                b"memzoi/capture-safeguards-v1\0prohibited-detectors=6\0source-hard-links=reject\0max-source=2097152\0max-changed-files=512\0max-diff-hunks=4096\0max-policy-file=65536\0max-policy-bytes=262144\0policy-prohibited-scan=raw-v1\0adapter-timeout-ms=60000\0gitignore-engine=ignore-0.4.28\0git-no-lazy-fetch=1\0git-repository-identity=filesystem-v1\0git-local-config=memzoi/git-local-config-v1+no-includes+no-worktree-config\0git-hermetic-env=env-clear+explicit-path+nonexistent-home-xdg-tmp+trace-disabled-v1\0git-renderer-min=2.43\0git-renderer-options=order-null+inter-hunk-0+prefix-a-b+indicators-v1\0git-attributes=head-tree-only-v1\0git-control-files=stable-nlink1+per-child-revalidation-v1\0git-quote-path=true\0git-regular-blob-evidence=100644+100755-v1\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
+                b"memzoi/capture-safeguards\0prohibited-detectors=6\0source-hard-links=reject\0max-source=2097152\0max-changed-files=512\0max-diff-hunks=4096\0max-policy-file=65536\0max-policy-bytes=262144\0policy-prohibited-scan=raw\0adapter-timeout-ms=60000\0gitignore-engine=ignore-0.4.28\0git-no-lazy-fetch=1\0git-repository-identity=filesystem\0git-local-config=memzoi/git-local-config+no-includes+no-worktree-config\0git-hermetic-env=env-clear+explicit-path+nonexistent-home-xdg-tmp+trace-disabled\0git-renderer-min=2.43\0git-renderer-options=order-null+inter-hunk-0+prefix-a-b+indicators\0git-attributes=head-tree-only\0git-control-files=stable-nlink1+per-child-revalidation\0git-quote-path=true\0git-regular-blob-evidence=100644+100755\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
             )
         } else {
             content_hash(
-                b"memzoi/capture-safeguards-v1\0prohibited-detectors=6\0source-hard-links=reject\0max-source=1048576\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
+                b"memzoi/capture-safeguards\0prohibited-detectors=6\0source-hard-links=reject\0max-source=1048576\0max-path=4096\0max-candidates=100\0max-headings=4096\0max-evidence-item=16384\0max-evidence=262144\0max-inventory-files=10000\0max-inventory-entries=20000\0max-inventory-depth=16\0max-inventory-file=2097152\0max-inventory-bytes=33554432\0max-runtime-inventory-records=10000\0max-runtime-inventory-bytes=33554432\0max-runtime-paths-per-record=256\0max-serialized-plan=2093056\0max-serialized-review=2093056",
             )
         },
         max_source_bytes: if git_change {
@@ -4534,7 +4753,7 @@ fn draft_key(memory: &CaptureMemoryDraft) -> Result<String> {
         &memory.scope,
     );
     Ok(domain_hash(
-        "memzoi/capture-exact-draft-v1",
+        "memzoi/capture-exact-draft",
         &canonical_json_bytes(&normalized)?,
     ))
 }
@@ -4582,7 +4801,7 @@ fn reserve_proposal_id(title: &str, used: &mut BTreeSet<String>) -> String {
 
 fn match_set_hash(label: &str, matches: &[CaptureMatch]) -> String {
     let bytes = canonical_json_bytes(matches).expect("capture matches are serializable");
-    domain_hash(&format!("memzoi/capture-{label}-match-set-v1"), &bytes)
+    domain_hash(&format!("memzoi/capture-{label}-match-set"), &bytes)
 }
 
 fn canonical_json_bytes<T>(value: &T) -> Result<Vec<u8>>
@@ -4663,6 +4882,8 @@ pub(crate) fn validate_capture_provenance(provenance: &CaptureProvenance) -> Res
         || provenance.reviewed_claim_id.trim().is_empty()
         || provenance.candidate_id.trim().is_empty()
         || provenance.reviewed_candidate_id.trim().is_empty()
+        || provenance.extraction.kind.trim().is_empty()
+        || provenance.extraction.id.trim().is_empty()
         || provenance.reviewed_by.trim().is_empty()
         || provenance.reviewed_at.trim().is_empty()
         || provenance.routed_by.trim().is_empty()
@@ -4670,6 +4891,8 @@ pub(crate) fn validate_capture_provenance(provenance: &CaptureProvenance) -> Res
     {
         bail!("capture provenance is incomplete");
     }
+    validate_content_hash(&provenance.extraction.implementation_digest)
+        .context("capture extractor implementation digest is invalid")?;
     let confidence = provenance
         .confidence
         .parse::<f64>()
@@ -4678,4 +4901,23 @@ pub(crate) fn validate_capture_provenance(provenance: &CaptureProvenance) -> Res
         bail!("capture provenance confidence is outside 0..=1");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod extractor_identity_tests {
+    use super::*;
+
+    #[test]
+    fn current_extractors_use_content_addressed_implementation_identities() -> Result<()> {
+        for profile in [
+            MARKDOWN_EXTRACTOR_PROFILE,
+            INSTRUCTION_EXTRACTOR_PROFILE,
+            ADR_EXTRACTOR_PROFILE,
+            GIT_CHANGE_EXTRACTOR_PROFILE,
+        ] {
+            let identity = extractor_identity(profile)?;
+            validate_content_hash(&identity.implementation_digest)?;
+        }
+        Ok(())
+    }
 }

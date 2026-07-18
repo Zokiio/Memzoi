@@ -1359,8 +1359,9 @@ mod tests {
 
     #[test]
     fn corpus_top_k_matches_production_search_boundary() -> anyhow::Result<()> {
-        let mut corpus: RecallV3Corpus =
-            serde_yaml::from_str(include_str!("../../../evals/recall/v3/corpus.yaml"))?;
+        let mut corpus: RecallV3Corpus = serde_yaml::from_str(include_str!(
+            "../../../evals/recall/development/corpus.yaml"
+        ))?;
         corpus.cases[0].top_k = SEARCH_RESULT_LIMIT_MAX;
         validate_corpus(&corpus)?;
         corpus.cases[0].top_k = SEARCH_RESULT_LIMIT_MAX + 1;

@@ -28,12 +28,11 @@ use super::super::{
     safe_files::{ensure_safe_directory, remove_staged_file, sync_directory},
 };
 
-pub(super) const CAPTURE_APPLY_JOURNAL_SCHEMA: &str = "memzoi/capture-apply-journal-v2";
-const CAPTURE_APPLY_COMMIT_SCHEMA: &str = "memzoi/capture-apply-commit-v2";
-const CAPTURE_APPLY_OWNERSHIP_SCHEMA: &str = "memzoi/capture-apply-ownership-v2";
-const CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v2.json";
-const CAPTURE_APPLY_OWNERSHIP_FILE: &str = "capture-apply-ownership-v2.json";
-const LEGACY_CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal-v1.json";
+pub(super) const CAPTURE_APPLY_JOURNAL_SCHEMA: &str = "memzoi/capture-apply-journal";
+const CAPTURE_APPLY_COMMIT_SCHEMA: &str = "memzoi/capture-apply-commit";
+const CAPTURE_APPLY_OWNERSHIP_SCHEMA: &str = "memzoi/capture-apply-ownership";
+const CAPTURE_APPLY_JOURNAL_FILE: &str = "capture-apply-journal.json";
+const CAPTURE_APPLY_OWNERSHIP_FILE: &str = "capture-apply-ownership.json";
 const CAPTURE_APPLY_COMMIT_EVENT: &str = "capture.apply_committed";
 const MAX_CAPTURE_APPLY_JOURNAL_BYTES: u64 = 256 * 1024;
 const MAX_CAPTURE_APPLY_OWNERSHIP_BYTES: u64 = 64 * 1024;
@@ -43,8 +42,6 @@ const MAX_CAPTURE_APPLY_JOURNAL_ENTRIES: usize = 128;
 #[serde(deny_unknown_fields)]
 pub(super) struct CaptureApplyJournal {
     pub(super) schema: String,
-    pub(super) safety_contract_version: String,
-    pub(super) detector_policy_version: String,
     pub(super) route: String,
     pub(super) authorization_digest: String,
     pub(super) project_context_digest: String,
@@ -59,27 +56,12 @@ pub(super) struct CaptureApplyJournal {
 pub(super) struct CaptureApplyJournalEntry {
     pub(super) candidate_id: String,
     pub(super) proposal_id: String,
+    pub(super) origin: crate::OriginDescriptor,
+    pub(super) input_fingerprint: String,
+    pub(super) intended_outcome: crate::OriginOutcomeKind,
     pub(super) content_bytes: u64,
     pub(super) content_hash: String,
     pub(super) projection_digest: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyCaptureApplyJournal {
-    schema: String,
-    journal_id: String,
-    plan_id: String,
-    review_id: String,
-    entries: Vec<LegacyCaptureApplyJournalEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyCaptureApplyJournalEntry {
-    proposal_id: String,
-    content_bytes: u64,
-    content_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,8 +187,6 @@ pub(super) fn build_capture_apply_journal(
 ) -> Result<CaptureApplyJournal> {
     let journal = CaptureApplyJournal {
         schema: CAPTURE_APPLY_JOURNAL_SCHEMA.to_owned(),
-        safety_contract_version: crate::REPOSITORY_WRITE_SAFETY_VERSION.to_owned(),
-        detector_policy_version: crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.to_owned(),
         route: RepositoryWriteRoute::CaptureApply.as_str().to_owned(),
         authorization_digest: authorization.digest(),
         project_context_digest: capture_project_context_digest(paths)?,
@@ -215,23 +195,36 @@ pub(super) fn build_capture_apply_journal(
         review_id: review.review_id.clone(),
         entries: planned
             .iter()
-            .map(|(candidate_id, proposal)| CaptureApplyJournalEntry {
-                candidate_id: candidate_id.clone(),
-                proposal_id: proposal.proposal_id.clone(),
-                content_bytes: proposal.markdown.len() as u64,
-                content_hash: blake3::hash(proposal.markdown.as_bytes())
-                    .to_hex()
-                    .to_string(),
-                projection_digest: {
-                    let mut hasher = blake3::Hasher::new();
-                    hasher.update(b"memzoi.capture.projection.v1\0");
-                    hasher.update(proposal.path.as_os_str().as_encoded_bytes());
-                    hasher.update(b"\0");
-                    hasher.update(proposal.markdown.as_bytes());
-                    hasher.finalize().to_hex().to_string()
-                },
+            .map(|(candidate_id, proposal)| {
+                let candidate = review
+                    .decisions
+                    .iter()
+                    .filter_map(|decision| decision.reviewed_candidate.as_ref())
+                    .find(|candidate| candidate.candidate_id == *candidate_id)
+                    .context("capture journal candidate disappeared from the review")?;
+                let (_, input_fingerprint) =
+                    crate::capture::capture_origin_binding(paths, candidate)?;
+                Ok(CaptureApplyJournalEntry {
+                    candidate_id: candidate_id.clone(),
+                    proposal_id: proposal.proposal_id.clone(),
+                    origin: proposal.parsed.origin.clone(),
+                    input_fingerprint,
+                    intended_outcome: crate::OriginOutcomeKind::Created,
+                    content_bytes: proposal.markdown.len() as u64,
+                    content_hash: blake3::hash(proposal.markdown.as_bytes())
+                        .to_hex()
+                        .to_string(),
+                    projection_digest: {
+                        let mut hasher = blake3::Hasher::new();
+                        hasher.update(b"memzoi.capture.projection\0");
+                        hasher.update(proposal.path.as_os_str().as_encoded_bytes());
+                        hasher.update(b"\0");
+                        hasher.update(proposal.markdown.as_bytes());
+                        hasher.finalize().to_hex().to_string()
+                    },
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
     };
     validate_capture_apply_journal(&journal)?;
     Ok(journal)
@@ -239,10 +232,6 @@ pub(super) fn build_capture_apply_journal(
 
 pub(super) fn capture_apply_journal_path(paths: &MemoryPaths) -> PathBuf {
     paths.runtime_dir.join(CAPTURE_APPLY_JOURNAL_FILE)
-}
-
-fn legacy_capture_apply_journal_path(paths: &MemoryPaths) -> PathBuf {
-    paths.runtime_dir.join(LEGACY_CAPTURE_APPLY_JOURNAL_FILE)
 }
 
 pub(super) fn capture_apply_destination_path(
@@ -469,10 +458,7 @@ fn validate_capture_apply_journal(journal: &CaptureApplyJournal) -> Result<()> {
     if journal.schema != CAPTURE_APPLY_JOURNAL_SCHEMA {
         bail!("unsupported capture apply journal schema");
     }
-    if journal.safety_contract_version.is_empty()
-        || journal.detector_policy_version.is_empty()
-        || journal.route != RepositoryWriteRoute::CaptureApply.as_str()
-    {
+    if journal.route != RepositoryWriteRoute::CaptureApply.as_str() {
         bail!("capture apply journal safety decision is stale or unsupported");
     }
     for (value, label) in [
@@ -495,6 +481,11 @@ fn validate_capture_apply_journal(journal: &CaptureApplyJournal) -> Result<()> {
     for entry in &journal.entries {
         validate_capture_apply_journal_token(&entry.candidate_id, "candidate id")?;
         validate_capture_apply_proposal_id(&entry.proposal_id)?;
+        entry.origin.validate()?;
+        validate_lower_hex_digest(&entry.input_fingerprint, "input fingerprint")?;
+        if entry.intended_outcome != crate::OriginOutcomeKind::Created {
+            bail!("capture apply journal outcome must describe artifact creation");
+        }
         if !proposal_ids.insert(entry.proposal_id.as_str()) {
             bail!("capture apply journal contains a duplicate proposal id");
         }
@@ -561,88 +552,6 @@ pub(super) fn capture_apply_journal_exists(paths: &MemoryPaths) -> Result<bool> 
     }
 }
 
-pub(super) fn legacy_capture_apply_journal_exists(paths: &MemoryPaths) -> Result<bool> {
-    let path = legacy_capture_apply_journal_path(paths);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            bail!("legacy capture apply journal must be a regular file")
-        }
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).context("failed to inspect legacy capture apply journal"),
-    }
-}
-
-fn recover_legacy_capture_apply(paths: &MemoryPaths) -> Result<bool> {
-    if !legacy_capture_apply_journal_exists(paths)? {
-        return Ok(false);
-    }
-    if capture_apply_journal_exists(paths)? {
-        bail!("current and legacy capture apply journals cannot coexist");
-    }
-    if capture_apply_ownership_exists(paths)? {
-        bail!("legacy journal and current capture ownership cannot coexist");
-    }
-    let path = legacy_capture_apply_journal_path(paths);
-    let metadata =
-        fs::symlink_metadata(&path).context("failed to inspect legacy capture apply journal")?;
-    if metadata.len() == 0 || metadata.len() > MAX_CAPTURE_APPLY_JOURNAL_BYTES {
-        bail!("legacy capture apply journal has an invalid size");
-    }
-    let bytes = fs::read(&path).context("failed to read legacy capture apply journal")?;
-    let journal: LegacyCaptureApplyJournal =
-        serde_json::from_slice(&bytes).context("failed to parse legacy capture apply journal")?;
-    if journal.schema != "memzoi/capture-apply-journal-v1"
-        || journal.entries.is_empty()
-        || journal.entries.len() > MAX_CAPTURE_APPLY_JOURNAL_ENTRIES
-    {
-        bail!("legacy capture apply journal is invalid");
-    }
-    validate_capture_apply_journal_token(&journal.journal_id, "legacy journal id")?;
-    validate_capture_apply_journal_token(&journal.plan_id, "legacy plan id")?;
-    validate_capture_apply_journal_token(&journal.review_id, "legacy review id")?;
-    let mut recovery_entries = Vec::with_capacity(journal.entries.len());
-    for entry in &journal.entries {
-        validate_capture_apply_proposal_id(&entry.proposal_id)?;
-        validate_lower_hex_digest(&entry.content_hash, "legacy content hash")?;
-        if entry.content_bytes == 0 || entry.content_bytes > 8 * 1024 * 1024 {
-            bail!("legacy capture apply journal contains an invalid proposal size");
-        }
-        let destination = paths
-            .proposals_dir()
-            .join("pending")
-            .join(format!("{}.md", entry.proposal_id));
-        let staged = repository_transaction_path(paths, &destination, &journal.journal_id, "write");
-        match fs::symlink_metadata(&destination) {
-            Ok(_) => bail!(
-                "legacy capture recovery has no installed-file ownership proof; refusing recovery mutation"
-            ),
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).context("failed to inspect legacy capture destination");
-            }
-        }
-        recovery_entries.push((staged, entry));
-    }
-    for (staged, entry) in recovery_entries {
-        remove_capture_apply_transaction_file_if_matching(
-            paths,
-            &staged,
-            entry.content_bytes,
-            &entry.content_hash,
-            "legacy unverified staged capture proposal",
-        )?;
-    }
-    remove_capture_apply_file_if_matching(
-        &path,
-        bytes.len() as u64,
-        blake3::hash(&bytes).to_hex().as_ref(),
-        "legacy capture apply journal",
-    )?;
-    sync_directory(&paths.runtime_dir)?;
-    Ok(true)
-}
-
 fn load_capture_apply_journal(paths: &MemoryPaths) -> Result<Option<LoadedCaptureApplyJournal>> {
     if !capture_apply_journal_exists(paths)? {
         return Ok(None);
@@ -673,10 +582,7 @@ pub(super) fn write_capture_apply_journal(
 ) -> Result<()> {
     validate_capture_apply_journal(journal)?;
     fs::create_dir_all(&paths.runtime_dir).context("failed to create capture journal directory")?;
-    if capture_apply_journal_exists(paths)?
-        || legacy_capture_apply_journal_exists(paths)?
-        || capture_apply_ownership_exists(paths)?
-    {
+    if capture_apply_journal_exists(paths)? || capture_apply_ownership_exists(paths)? {
         bail!("an interrupted capture apply must be recovered before starting another one");
     }
     let bytes = capture_apply_journal_bytes(journal)?;
@@ -745,7 +651,7 @@ pub(super) fn stage_capture_apply_proposals(
         }
         let projection_digest = {
             let mut hasher = blake3::Hasher::new();
-            hasher.update(b"memzoi.capture.projection.v1\0");
+            hasher.update(b"memzoi.capture.projection\0");
             hasher.update(proposal.path.as_os_str().as_encoded_bytes());
             hasher.update(b"\0");
             hasher.update(proposal.markdown.as_bytes());
@@ -920,10 +826,7 @@ fn capture_recovery_authorization(
     paths: &MemoryPaths,
     journal: &CaptureApplyJournal,
 ) -> Result<Option<CaptureRecoveryAuthorization>> {
-    if journal.safety_contract_version != crate::REPOSITORY_WRITE_SAFETY_VERSION
-        || journal.detector_policy_version != crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION
-        || journal.project_context_digest != capture_project_context_digest(paths)?
-    {
+    if journal.project_context_digest != capture_project_context_digest(paths)? {
         return Ok(None);
     }
     let pending_root = paths.proposals_dir().join("pending");
@@ -1131,9 +1034,6 @@ pub(super) fn recover_capture_apply_with_hook<BeforeInstall>(
 where
     BeforeInstall: FnMut(usize, &Path) -> Result<()>,
 {
-    if recover_legacy_capture_apply(paths)? {
-        return Ok(CaptureApplyRecoveryOutcome::RolledBack);
-    }
     let Some(loaded) = load_capture_apply_journal(paths)? else {
         if capture_apply_ownership_exists(paths)? {
             bail!("capture apply ownership exists without its journal; refusing recovery mutation");

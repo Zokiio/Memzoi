@@ -9,7 +9,8 @@ use memzoi_core::{
 };
 
 fn locked_corpus_fixture() -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf)> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let bytes = std::fs::read(root.join("corpus.yaml"))?;
     let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
     corpus.kind = RecallV3CorpusKind::LockedTest;
@@ -26,7 +27,8 @@ fn locked_corpus_fixture() -> anyhow::Result<(tempfile::TempDir, std::path::Path
 
 #[test]
 fn embedding_builder_reads_only_declared_corpus_files() -> anyhow::Result<()> {
-    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let source =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let bytes = std::fs::read(source.join("corpus.yaml"))?;
     let corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
     let dir = tempfile::tempdir()?;
@@ -71,7 +73,7 @@ fn locked_commitment_preflight_detects_corpus_tampering() -> anyhow::Result<()> 
 #[test]
 fn locked_commitment_rejects_development_corpora_and_unknown_fields() -> anyhow::Result<()> {
     let development = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/corpus.yaml");
+        .join("../../evals/recall/development/corpus.yaml");
     let error = prepare_recall_v3_locked_commitment(&development, &[])
         .expect_err("development corpus must not produce a locked commitment");
     assert!(error.to_string().contains("locked_test"));
@@ -91,7 +93,7 @@ fn locked_commitment_rejects_development_corpora_and_unknown_fields() -> anyhow:
 #[test]
 fn recall_v3_runs_lexical_baseline_in_isolated_state() -> anyhow::Result<()> {
     let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/corpus.yaml");
+        .join("../../evals/recall/development/corpus.yaml");
     let first = run_recall_v3_eval(&corpus)?;
     let second = run_recall_v3_eval(&corpus)?;
 
@@ -130,7 +132,8 @@ fn recall_v3_runs_lexical_baseline_in_isolated_state() -> anyhow::Result<()> {
 
 #[test]
 fn manifest_driven_exact_union_preserves_signals_and_citations() -> anyhow::Result<()> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let corpus: RecallV3Corpus = serde_yaml::from_slice(&std::fs::read(root.join("corpus.yaml"))?)?;
     let expected_comparisons = corpus
         .cases
@@ -168,7 +171,8 @@ fn manifest_driven_exact_union_preserves_signals_and_citations() -> anyhow::Resu
 
 #[test]
 fn missing_manifest_artifact_normalizes_to_lexical_fallback() -> anyhow::Result<()> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let bytes = std::fs::read(root.join("candidates/exact-union.json"))?;
     let mut manifest: RecallRetrievalCandidateManifest = serde_json::from_slice(&bytes)?;
     manifest.id = "fixture-missing-index".into();
@@ -297,7 +301,7 @@ impl RecallV3Candidate for PathlessCitationCandidate {
 #[test]
 fn recall_v3_rejects_pathless_citations_for_path_scoped_cases() -> anyhow::Result<()> {
     let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/corpus.yaml");
+        .join("../../evals/recall/development/corpus.yaml");
     let mut candidate = PathlessCitationCandidate;
     let report = run_recall_v3_eval_with_candidates(corpus, &mut [&mut candidate])?;
     let candidate = &report.candidates[1];
@@ -309,7 +313,8 @@ fn recall_v3_rejects_pathless_citations_for_path_scoped_cases() -> anyhow::Resul
 
 #[test]
 fn recall_v3_candidates_receive_lexical_hits_beyond_top_k() -> anyhow::Result<()> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let bytes = std::fs::read(root.join("corpus.yaml"))?;
     let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
     corpus.cases.truncate(1);
@@ -333,7 +338,7 @@ fn recall_v3_candidates_receive_lexical_hits_beyond_top_k() -> anyhow::Result<()
 #[test]
 fn recall_v3_candidates_share_eligibility_and_fallback_boundaries() -> anyhow::Result<()> {
     let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/corpus.yaml");
+        .join("../../evals/recall/development/corpus.yaml");
     let mut broken = BrokenFallback;
     let report = run_recall_v3_eval_with_candidates(&corpus, &mut [&mut broken])?;
 
@@ -356,7 +361,8 @@ fn recall_v3_rejects_unknown_schema_fields() {
 
 #[test]
 fn recall_v3_rejects_cases_without_eligible_relevance() -> anyhow::Result<()> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let bytes = std::fs::read(root.join("corpus.yaml"))?;
     let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
     for judgment in &mut corpus.cases[0].judgments {
@@ -379,7 +385,8 @@ fn recall_v3_rejects_cases_without_eligible_relevance() -> anyhow::Result<()> {
 
 #[test]
 fn recall_v3_rejects_empty_slices_and_record_ids() -> anyhow::Result<()> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let bytes = std::fs::read(root.join("corpus.yaml"))?;
     let original: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
     let mut invalid = Vec::new();
@@ -406,7 +413,8 @@ fn recall_v3_rejects_empty_slices_and_record_ids() -> anyhow::Result<()> {
 
 #[test]
 fn recall_v3_requires_every_staged_record_to_be_judged() -> anyhow::Result<()> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let bytes = std::fs::read(root.join("corpus.yaml"))?;
     let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
     corpus.cases[0].judgments.pop();
@@ -426,7 +434,8 @@ fn recall_v3_requires_every_staged_record_to_be_judged() -> anyhow::Result<()> {
 
 #[test]
 fn recall_v3_rejects_duplicate_record_paths() -> anyhow::Result<()> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let bytes = std::fs::read(root.join("corpus.yaml"))?;
     let mut corpus: RecallV3Corpus = serde_yaml::from_slice(&bytes)?;
     corpus.records.push(corpus.records[0].clone());
@@ -476,7 +485,7 @@ impl RecallV3Candidate for UnknownRecordCandidate {
 #[test]
 fn unknown_candidate_ids_count_as_forbidden_other() -> anyhow::Result<()> {
     let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/corpus.yaml");
+        .join("../../evals/recall/development/corpus.yaml");
     let mut candidate = UnknownRecordCandidate;
     let report = run_recall_v3_eval_with_candidates(&corpus, &mut [&mut candidate])?;
     let candidate = &report.candidates[1];

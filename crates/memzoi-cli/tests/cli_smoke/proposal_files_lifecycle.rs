@@ -232,7 +232,7 @@ fn proposal_files_validate_rejects_invalid_target_shapes_and_states_before_mutat
                 "supersedes: []",
                 "  target: lifecycle-target\n",
             ),
-            "is inactive",
+            "not a current assertion",
         ),
         (
             "stale",

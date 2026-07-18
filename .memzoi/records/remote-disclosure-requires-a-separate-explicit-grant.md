@@ -1,4 +1,11 @@
 ---
+id: remote-disclosure-requires-a-separate-explicit-grant
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:remote-disclosure-requires-a-separate-explicit-grant
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Remote disclosure requires a separate explicit grant"

@@ -335,7 +335,7 @@ fn open_recovers_applied_proposal_and_event_from_shared_sync_journal() -> anyhow
     assert!(
         paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .is_file()
     );
     drop(service);
@@ -355,7 +355,7 @@ fn open_recovers_applied_proposal_and_event_from_shared_sync_journal() -> anyhow
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     drop(recovered);
@@ -405,7 +405,7 @@ fn open_finishes_proposal_sync_after_marker_cleanup_interruption() -> anyhow::Re
     assert!(
         paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .is_file()
     );
     drop(service);
@@ -431,7 +431,7 @@ fn open_finishes_proposal_sync_after_marker_cleanup_interruption() -> anyhow::Re
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     Ok(())
@@ -472,7 +472,7 @@ fn reject_recovers_interrupted_apply_before_mutating_shared_proposal() -> anyhow
         !service
             .paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     Ok(())
@@ -695,7 +695,7 @@ fn open_rolls_forward_exact_canonical_create_after_precommit_crash() -> anyhow::
     assert!(
         paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .is_file()
     );
     drop(service);
@@ -721,7 +721,7 @@ fn open_rolls_forward_exact_canonical_create_after_precommit_crash() -> anyhow::
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     drop(recovered);
@@ -777,7 +777,7 @@ fn markerless_recovery_rejects_substituted_canonical_bytes() -> anyhow::Result<(
     assert!(
         paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .is_file(),
         "failed-closed recovery must retain its journal"
     );
@@ -993,6 +993,46 @@ fn shared_proposals_are_authoritative_during_reads_and_open() -> anyhow::Result<
 }
 
 #[test]
+fn open_rebuilds_an_incompatible_disposable_index() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let record = apply_test_record(
+        &service,
+        sample_memory_draft(
+            "Disposable index rebuild",
+            "Canonical records must survive replacement of an incompatible index.",
+        ),
+    )?;
+    let paths = service.paths.clone();
+    drop(service);
+
+    let incompatible = Connection::open(&paths.index_db_path)?;
+    incompatible.execute("CREATE TABLE obsolete_index_layout(id INTEGER)", [])?;
+    drop(incompatible);
+
+    let reopened = MemoryService::open_paths(paths)?;
+    let obsolete_exists: bool = reopened.conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_schema
+           WHERE type = 'table' AND name = 'obsolete_index_layout'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(!obsolete_exists, "incompatible index was not replaced");
+    assert!(
+        reopened
+            .search_memory(SearchInput {
+                query: "Disposable index rebuild".to_owned(),
+                ..SearchInput::default()
+            })?
+            .iter()
+            .any(|result| result.record.id == record.id),
+        "rebuilt index omitted the canonical record"
+    );
+    Ok(())
+}
+
+#[test]
 fn unchanged_search_does_not_open_the_repository_lifecycle_lock() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let _lifecycle_lock = RepoLifecycleLock::acquire(&service.paths)?;
@@ -1007,7 +1047,7 @@ fn unchanged_search_does_not_open_the_repository_lifecycle_lock() -> anyhow::Res
 }
 
 #[test]
-fn legacy_lifecycle_rejects_runtime_targets_without_canonical_leaks() -> anyhow::Result<()> {
+fn canonical_lifecycle_rejects_runtime_targets_without_canonical_leaks() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let local = service.create_local_memory(
         "agent:red-tests",
@@ -1061,11 +1101,11 @@ fn legacy_lifecycle_rejects_runtime_targets_without_canonical_leaks() -> anyhow:
 }
 
 #[test]
-fn legacy_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Result<()> {
+fn canonical_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let private_draft = sample_memory_draft(
         "Private repo target",
-        "Private visibility must not be rewritten through a legacy lifecycle route.",
+        "Private visibility must not be rewritten through a canonical lifecycle route.",
     );
     let private = apply_test_record(&service, private_draft)?;
     service.conn.execute(
@@ -1120,7 +1160,12 @@ fn legacy_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Resul
     let inactive_error = service
         .tombstone_record(&active.id, "agent:red-tests", "already inactive")
         .expect_err("inactive targets must be rejected");
-    assert!(inactive_error.to_string().contains("status superseded"));
+    assert!(
+        inactive_error
+            .to_string()
+            .contains("not a current assertion"),
+        "{inactive_error:#}"
+    );
     assert_eq!(fs::read(&active_path)?, active_before);
     assert_eq!(
         RuntimeRecords::new(&service.conn)
@@ -1133,7 +1178,7 @@ fn legacy_lifecycle_rejects_private_and_inactive_repo_targets() -> anyhow::Resul
 }
 
 #[test]
-fn legacy_supersede_rejects_cross_scope_replacements_before_mutation() -> anyhow::Result<()> {
+fn direct_supersede_rejects_cross_scope_replacements_before_mutation() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let target = apply_test_record(
         &service,
@@ -1174,7 +1219,7 @@ fn legacy_supersede_rejects_cross_scope_replacements_before_mutation() -> anyhow
 }
 
 #[test]
-fn legacy_supersede_rolls_back_db_and_files_when_second_install_fails() -> anyhow::Result<()> {
+fn direct_supersede_rolls_back_db_and_files_when_second_install_fails() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let target = apply_test_record(
         &service,
@@ -1209,7 +1254,7 @@ fn legacy_supersede_rolls_back_db_and_files_when_second_install_fails() -> anyho
         .expect_err("second-write failure must abort the lifecycle transaction");
     assert!(error.to_string().contains("second-write install failure"));
 
-    assert_legacy_supersede_unchanged(
+    assert_direct_supersede_unchanged(
         &service,
         &target,
         &target_path,
@@ -1220,7 +1265,7 @@ fn legacy_supersede_rolls_back_db_and_files_when_second_install_fails() -> anyho
 }
 
 #[test]
-fn legacy_supersede_rolls_back_installed_files_when_db_commit_fails() -> anyhow::Result<()> {
+fn direct_supersede_rolls_back_installed_files_when_db_commit_fails() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let target = apply_test_record(
         &service,
@@ -1262,7 +1307,7 @@ fn legacy_supersede_rolls_back_installed_files_when_db_commit_fails() -> anyhow:
         "expected actual commit failure, got: {error:#}"
     );
 
-    assert_legacy_supersede_unchanged(
+    assert_direct_supersede_unchanged(
         &service,
         &target,
         &target_path,
@@ -1827,7 +1872,18 @@ fn materialization_candidate_record(
         created: "2026-07-16T00:00:00Z".to_owned(),
         updated: None,
         supersedes_id: None,
-        expires_at: None,
+        retention: crate::retention_facts_for_creation(
+            MemoryLane::Semantic,
+            "2026-07-16T00:00:00Z",
+            None,
+            None,
+        )
+        .expect("valid test retention"),
+        origin: crate::OriginDescriptor::new(
+            format!("repository-materialization:test:{concept_id}"),
+            crate::OriginRoute::RepositoryMaterialization,
+        ),
+        lineage: None,
         proposal_id: None,
         capture: None,
     }
@@ -1844,23 +1900,22 @@ fn materialization_capture() -> crate::CaptureProvenance {
         reviewed_candidate_id: "reviewed-capture-candidate".to_owned(),
         extraction: crate::CaptureExtractorIdentity {
             kind: "markdown".to_owned(),
-            id: "markdown-v1".to_owned(),
-            version: "1".to_owned(),
-            configuration_hash: "blake3:configuration".to_owned(),
+            id: "markdown".to_owned(),
+            implementation_digest: format!("blake3:{}", "1".repeat(64)),
         },
         evidence: vec![crate::CaptureEvidence {
             source_id: "source-1".to_owned(),
             locator: crate::CaptureSourceLocator::ProjectPath {
                 path: "notes.md".to_owned(),
             },
-            source_content_hash: "blake3:source".to_owned(),
+            source_content_hash: format!("blake3:{}", "2".repeat(64)),
             span: crate::CaptureEvidenceSpan {
                 byte_start: 0,
                 byte_end: 12,
                 line_start: 1,
                 line_end: 1,
             },
-            evidence_content_hash: "blake3:evidence".to_owned(),
+            evidence_content_hash: format!("blake3:{}", "3".repeat(64)),
             text: None,
             heading_path: vec!["Capture".to_owned()],
             section_kind: "fact".to_owned(),
@@ -1934,7 +1989,7 @@ fn apply_test_record(service: &MemoryService, draft: MemoryDraft) -> anyhow::Res
     service.apply_proposal(&proposal.id, "agent:applier")
 }
 
-fn assert_legacy_supersede_unchanged(
+fn assert_direct_supersede_unchanged(
     service: &MemoryService,
     target: &MemoryRecord,
     target_path: &Path,

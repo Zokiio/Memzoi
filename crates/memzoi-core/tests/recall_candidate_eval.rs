@@ -8,7 +8,7 @@ use memzoi_core::{
 #[test]
 fn fixture_vector_artifact_digest_is_stable() -> anyhow::Result<()> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/candidates/vectors/exact-union.json");
+        .join("../../evals/recall/development/candidates/vectors/exact-union.json");
     let artifact: RecallVectorArtifact = serde_json::from_slice(&std::fs::read(root)?)?;
     let digest = recall_vector_artifact_digest(&artifact)?;
     assert_eq!(
@@ -20,7 +20,8 @@ fn fixture_vector_artifact_digest_is_stable() -> anyhow::Result<()> {
 
 #[test]
 fn modified_vector_artifacts_fall_back_without_using_unbound_scores() -> anyhow::Result<()> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let mut manifest: RecallRetrievalCandidateManifest =
         serde_json::from_slice(&std::fs::read(root.join("candidates/exact-union.json"))?)?;
     manifest.id = "fixture-tampered-index".into();
@@ -63,7 +64,7 @@ fn modified_vector_artifacts_fall_back_without_using_unbound_scores() -> anyhow:
 #[test]
 fn published_manifest_can_resolve_a_separate_local_artifact_root() -> anyhow::Result<()> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/candidates");
+        .join("../../evals/recall/development/candidates");
     let manifest_dir = tempfile::tempdir()?;
     let artifact_dir = tempfile::tempdir()?;
     std::fs::copy(
@@ -120,7 +121,8 @@ fn development_log_retains_completed_rejected_and_failed_attempts() -> anyhow::R
 
 #[test]
 fn all_required_candidate_architectures_run_through_one_boundary() -> anyhow::Result<()> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
     let bytes = std::fs::read(root.join("candidates/exact-union.json"))?;
     let base: RecallRetrievalCandidateManifest = serde_json::from_slice(&bytes)?;
     let dir = tempfile::tempdir()?;
@@ -181,7 +183,7 @@ fn all_required_candidate_architectures_run_through_one_boundary() -> anyhow::Re
 #[test]
 fn approximate_search_manifest_is_rejected() -> anyhow::Result<()> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/candidates");
+        .join("../../evals/recall/development/candidates");
     let bytes = std::fs::read(root.join("exact-union.json"))?;
     let mut manifest: RecallRetrievalCandidateManifest = serde_json::from_slice(&bytes)?;
     manifest.storage.exact_search = false;
@@ -200,7 +202,7 @@ fn approximate_search_manifest_is_rejected() -> anyhow::Result<()> {
 #[test]
 fn unsupported_structural_weights_are_rejected() -> anyhow::Result<()> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/candidates");
+        .join("../../evals/recall/development/candidates");
     let bytes = std::fs::read(root.join("exact-union.json"))?;
     let mut manifest: RecallRetrievalCandidateManifest = serde_json::from_slice(&bytes)?;
     manifest.retrieval.path_weight = 0.25;
@@ -219,7 +221,7 @@ fn unsupported_structural_weights_are_rejected() -> anyhow::Result<()> {
 #[test]
 fn unsupported_tie_breaking_and_rerank_fusion_are_rejected() -> anyhow::Result<()> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/candidates");
+        .join("../../evals/recall/development/candidates");
     let bytes = std::fs::read(root.join("exact-union.json"))?;
     let base: RecallRetrievalCandidateManifest = serde_json::from_slice(&bytes)?;
     let invalid = [
@@ -290,7 +292,7 @@ fn development_log_rejects_blank_attempt_metadata() {
 #[test]
 fn empty_vector_artifact_path_is_rejected() -> anyhow::Result<()> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/candidates");
+        .join("../../evals/recall/development/candidates");
     let bytes = std::fs::read(root.join("exact-union.json"))?;
     let mut manifest: RecallRetrievalCandidateManifest = serde_json::from_slice(&bytes)?;
     manifest.storage.vector_artifact = "".into();

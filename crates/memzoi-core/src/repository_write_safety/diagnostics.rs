@@ -2,10 +2,7 @@ use std::{error::Error, fmt};
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    REPOSITORY_WRITE_DETECTOR_POLICY_VERSION, REPOSITORY_WRITE_SAFETY_SCHEMA,
-    REPOSITORY_WRITE_SAFETY_VERSION, RepositoryWriteRoute,
-};
+use super::{REPOSITORY_WRITE_SAFETY_SCHEMA, RepositoryWriteRoute};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,8 +90,6 @@ pub struct RepositoryWriteSafetyFinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryWriteSafetyReport {
     pub schema: String,
-    pub contract_version: String,
-    pub detector_policy_version: String,
     pub route: RepositoryWriteRoute,
     pub allowed: bool,
     pub candidate_fingerprint: String,
@@ -124,8 +119,6 @@ impl RepositoryWriteSafetyReport {
         findings.dedup();
         Self {
             schema: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
-            contract_version: REPOSITORY_WRITE_SAFETY_VERSION.to_owned(),
-            detector_policy_version: REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.to_owned(),
             route,
             allowed: findings.is_empty(),
             candidate_fingerprint,

@@ -1,4 +1,11 @@
 ---
+id: unresolved-high-confidence-contradictions-suppress-automatic-recall
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:unresolved-high-confidence-contradictions-suppress-automatic-recall
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Unresolved high-confidence contradictions suppress automatic recall"

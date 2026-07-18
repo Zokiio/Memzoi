@@ -1,102 +1,91 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 
+pub const UNSUPPORTED_SCHEMA_ERROR_PREFIX: &str = "unsupported SQLite schema";
+
+pub fn is_unsupported_schema_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains(UNSUPPORTED_SCHEMA_ERROR_PREFIX))
+}
+
 pub fn init(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA)
-        .context("failed to initialize SQLite schema")?;
-    ensure_memory_lane_column(conn)?;
-    ensure_memory_destination_column(conn)?;
-    ensure_memory_proposal_id_column(conn)?;
-    conn.execute_batch(RUNTIME_MIRROR_TRIGGERS)
-        .context("failed to initialize runtime mirror revision triggers")?;
-    conn.execute_batch(
-        "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (6);",
-    )
-    .context("failed to record schema migrations 2 through 6")?;
+    if database_has_no_application_objects(conn)? {
+        conn.execute_batch(CURRENT_SCHEMA)
+            .context("failed to initialize SQLite schema")?;
+        conn.execute_batch(RUNTIME_MIRROR_TRIGGERS)
+            .context("failed to initialize runtime mirror revision triggers")?;
+    }
+    validate_exact_current_schema(conn)?;
     Ok(())
 }
 
-fn ensure_memory_proposal_id_column(conn: &Connection) -> Result<()> {
-    let has_proposal_id: bool = conn
-        .query_row(
-            "SELECT EXISTS(
-              SELECT 1 FROM pragma_table_info('memory_record') WHERE name = 'proposal_id'
-            )",
-            [],
-            |row| row.get(0),
-        )
-        .context("failed to inspect memory_record proposal lineage schema")?;
-
-    if !has_proposal_id {
-        conn.execute_batch("ALTER TABLE memory_record ADD COLUMN proposal_id TEXT;")
-            .context("failed to add memory_record.proposal_id column")?;
+pub(crate) fn validate_existing(conn: &Connection) -> Result<()> {
+    if database_has_no_application_objects(conn)? {
+        return Ok(());
     }
+    validate_exact_current_schema(conn)
+}
 
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_memory_record_proposal_id ON memory_record(proposal_id);",
+fn database_has_no_application_objects(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT NOT EXISTS(
+           SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'
+         )",
+        [],
+        |row| row.get(0),
     )
-    .context("failed to create memory proposal lineage index")
+    .context("failed to inspect SQLite schema")
 }
 
-fn ensure_memory_lane_column(conn: &Connection) -> Result<()> {
-    let has_lane: bool = conn
-        .query_row(
-            "SELECT EXISTS(
-              SELECT 1 FROM pragma_table_info('memory_record') WHERE name = 'lane'
-            )",
-            [],
-            |row| row.get(0),
-        )
-        .context("failed to inspect memory_record schema")?;
+fn validate_exact_current_schema(conn: &Connection) -> Result<()> {
+    let expected = Connection::open_in_memory()
+        .context("failed to create current-schema validation database")?;
+    expected
+        .execute_batch(CURRENT_SCHEMA)
+        .context("failed to create current-schema validation tables")?;
+    expected
+        .execute_batch(RUNTIME_MIRROR_TRIGGERS)
+        .context("failed to create current-schema validation triggers")?;
 
-    if !has_lane {
-        conn.execute_batch(
-            "ALTER TABLE memory_record
-               ADD COLUMN lane TEXT NOT NULL DEFAULT 'semantic'
-               CHECK (lane IN ('session', 'semantic', 'episodic', 'procedural'));",
-        )
-        .context("failed to add memory_record.lane column")?;
+    if schema_snapshot(conn)? != schema_snapshot(&expected)? {
+        bail!(
+            "unsupported SQLite schema: database does not match the current Memzoi format; manually upgrade or remove it"
+        );
     }
-
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_memory_record_lane ON memory_record(lane);")
-        .context("failed to create memory lane index")
+    Ok(())
 }
 
-fn ensure_memory_destination_column(conn: &Connection) -> Result<()> {
-    let has_destination: bool = conn
-        .query_row(
-            "SELECT EXISTS(
-              SELECT 1 FROM pragma_table_info('memory_record') WHERE name = 'destination'
-            )",
-            [],
-            |row| row.get(0),
-        )
-        .context("failed to inspect memory_record destination schema")?;
-
-    if !has_destination {
-        conn.execute_batch(
-            "ALTER TABLE memory_record
-               ADD COLUMN destination TEXT NOT NULL DEFAULT 'repo'
-               CHECK (destination IN ('repo', 'local', 'session'));",
-        )
-        .context("failed to add memory_record.destination column")?;
-    }
-
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_memory_record_destination ON memory_record(destination);",
-    )
-    .context("failed to create memory destination index")
+#[derive(Debug, PartialEq, Eq)]
+struct SchemaObject {
+    object_type: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
 }
 
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_migrations (
-  version INTEGER PRIMARY KEY,
-  applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+fn schema_snapshot(conn: &Connection) -> Result<Vec<SchemaObject>> {
+    let mut statement = conn.prepare(
+        "SELECT type, name, tbl_name, sql
+         FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%'
+         ORDER BY type, name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(SchemaObject {
+            object_type: row.get(0)?,
+            name: row.get(1)?,
+            table_name: row.get(2)?,
+            sql: row
+                .get::<_, Option<String>>(3)?
+                .map(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" ")),
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to read SQLite schema definition")
+}
+
+const CURRENT_SCHEMA: &str = r#"
 
 CREATE TABLE IF NOT EXISTS event_log (
   id TEXT PRIMARY KEY,
@@ -124,11 +113,48 @@ CREATE TABLE IF NOT EXISTS memory_record (
   source_kind TEXT,
   source_ref TEXT,
   proposal_id TEXT,
+  retention_json TEXT NOT NULL CHECK (json_valid(retention_json)),
+  origin_json TEXT NOT NULL CHECK (json_valid(origin_json)),
+  lineage_json TEXT CHECK (lineage_json IS NULL OR json_valid(lineage_json)),
   content_hash TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  supersedes_id TEXT REFERENCES memory_record(id),
-  expires_at TEXT
+  supersedes_id TEXT REFERENCES memory_record(id)
+);
+
+CREATE TABLE IF NOT EXISTS origin_outcome (
+  repository_key TEXT NOT NULL CHECK (length(trim(repository_key)) > 0),
+  origin_key TEXT NOT NULL CHECK (length(trim(origin_key)) > 0),
+  route TEXT NOT NULL CHECK (length(trim(route)) > 0),
+  input_fingerprint TEXT NOT NULL CHECK (
+    length(input_fingerprint) = 64
+    AND input_fingerprint NOT GLOB '*[^0-9a-f]*'
+  ),
+  state TEXT NOT NULL CHECK (state IN ('prepared', 'finalized')),
+  outcome_kind TEXT CHECK (
+    outcome_kind IS NULL OR outcome_kind IN (
+      'created',
+      'existing_duplicate_no_write',
+      'conflict_no_write',
+      'needs_review_no_write',
+      'rejected_no_write',
+      'erased'
+    )
+  ),
+  destination TEXT CHECK (
+    destination IS NULL OR destination IN ('repo', 'local', 'session', 'discard', 'needs_review')
+  ),
+  record_id TEXT,
+  proposal_id TEXT,
+  lifecycle_event_id TEXT,
+  prepared_at TEXT NOT NULL CHECK (length(trim(prepared_at)) > 0),
+  recorded_at TEXT,
+  PRIMARY KEY (repository_key, origin_key),
+  CHECK (
+    (state = 'prepared' AND outcome_kind IS NULL AND recorded_at IS NULL)
+    OR
+    (state = 'finalized' AND outcome_kind IS NOT NULL AND recorded_at IS NOT NULL)
+  )
 );
 
 CREATE TABLE IF NOT EXISTS scope_binding (
@@ -209,13 +235,12 @@ END;
 CREATE INDEX IF NOT EXISTS idx_memory_record_id ON memory_record(id);
 CREATE INDEX IF NOT EXISTS idx_memory_record_status_scope_type ON memory_record(status, scope_kind, type);
 CREATE INDEX IF NOT EXISTS idx_memory_record_content_hash ON memory_record(content_hash);
+CREATE INDEX IF NOT EXISTS idx_memory_record_proposal_id ON memory_record(proposal_id);
 CREATE INDEX IF NOT EXISTS idx_memory_path_record_id ON memory_path(record_id);
 CREATE INDEX IF NOT EXISTS idx_memory_path_path ON memory_path(path);
 CREATE INDEX IF NOT EXISTS idx_proposal_id_status ON proposal(id, status);
 CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_memory_capture_record_id ON memory_capture(record_id);
-
-INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
 "#;
 
 const RUNTIME_MIRROR_TRIGGERS: &str = r#"

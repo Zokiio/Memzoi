@@ -1,4 +1,11 @@
 ---
+id: private-context-requires-separate-local-and-remote-release-operations
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:private-context-requires-separate-local-and-remote-release-operations
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Private context requires separate local and remote release operations"

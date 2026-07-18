@@ -1,4 +1,11 @@
 ---
+id: trust-baselines-exclude-runtime-observations
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:trust-baselines-exclude-runtime-observations
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Trust baselines exclude runtime observations"

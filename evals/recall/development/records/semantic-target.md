@@ -1,0 +1,27 @@
+---
+id: semantic-target
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: eval-record:semantic-target
+  route: repository_materialization
+type: procedure
+lane: procedural
+title: Atomic release pointer
+timestamp: "2026-07-01T00:00:00Z"
+updated: "2026-07-01T00:00:00Z"
+status: active
+scope: repo
+visibility: repo
+content_class: general_repo_knowledge
+confidence: 1
+source: eval
+source_ref: fixture://semantic-target
+applies_to:
+  - docs/roadmap.md
+---
+
+# Atomic release pointer
+
+Deployment activates a fully built generation by atomically replacing the current pointer.

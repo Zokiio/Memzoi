@@ -134,7 +134,9 @@ pub struct MemoryRecord {
     pub created_at: String,
     pub updated_at: String,
     pub supersedes_id: Option<String>,
-    pub expires_at: Option<String>,
+    pub retention: crate::RetentionFacts,
+    pub origin: crate::OriginDescriptor,
+    pub lineage: Option<crate::RecordLineage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

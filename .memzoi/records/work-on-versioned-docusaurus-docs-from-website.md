@@ -1,4 +1,11 @@
 ---
+id: work-on-versioned-docusaurus-docs-from-website
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:work-on-versioned-docusaurus-docs-from-website
+  route: repository_materialization
 type: procedure
 lane: procedural
 title: "Work on versioned Docusaurus docs from website"

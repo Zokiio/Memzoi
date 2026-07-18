@@ -93,12 +93,13 @@ fn expiry_command_shows_records_excluded_from_normal_search_and_explains_why() {
     let diagnostic = run_json_command(repo.path(), &["expiry", record_id.as_str(), "--json"]);
     assert_eq!(diagnostic["record"]["id"], record_id);
     assert_eq!(diagnostic["record"]["status"], "active");
-    assert_eq!(diagnostic["expired"], true);
+    assert_eq!(diagnostic["retention"]["state"], "query_only");
+    assert_eq!(diagnostic["current_assertion"], false);
     assert_eq!(diagnostic["excluded_from_normal_reads"], true);
     assert!(
         diagnostic["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("at or after expiry")),
+            .is_some_and(|reason| reason.contains("explicit_expiry")),
         "diagnostic should explain exclusion: {diagnostic}"
     );
 }
@@ -214,11 +215,20 @@ fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
             .records_dir()
             .join("repo-zircon-decision.md"),
         r#"---
+id: repo-zircon-decision
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: test-record:repo-zircon-decision
+  route: repository_materialization
 type: decision
+lane: semantic
 title: Repo zircon decision
 description: Canonical repo memory imported during rebuild.
 timestamp: 2026-07-08T00:00:00Z
 status: active
+scope: repo
 visibility: repo
 content_class: general_repo_knowledge
 confidence: 1
@@ -280,6 +290,8 @@ fn checkpoint_commands_create_list_and_stay_out_of_repo_outputs() {
             "Implement checkpoint workflow",
             "--note",
             "  Remember the checkpoint zircon state only as runtime continuity.  \n",
+            "--operation-id",
+            "checkpoint-first",
             "--json",
         ],
     );
@@ -324,6 +336,8 @@ fn checkpoint_commands_create_list_and_stay_out_of_repo_outputs() {
             "File checkpoint workflow",
             "--from-file",
             note_path.to_str().expect("note path utf-8"),
+            "--operation-id",
+            "checkpoint-from-file",
             "--json",
         ],
     );
@@ -354,6 +368,8 @@ fn checkpoint_commands_create_list_and_stay_out_of_repo_outputs() {
             "Implement checkpoint workflow",
             "--note",
             "Second checkpoint for the same task.",
+            "--operation-id",
+            "checkpoint-duplicate-title",
             "--json",
         ],
     );

@@ -8,18 +8,18 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
-    CaptureDataClass, CapturePlanningControl, CaptureRequest, CaptureSourceLocator,
+    CaptureDataClass, CapturePlanningControl, CaptureRequest, CaptureSourceLocator, Clock,
     ContextPackInput, MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryDraft, MemoryLane,
     MemoryPaths, MemoryService, MemoryType, OkfProposalSensitivity, PrecheckInput, Proposal,
-    ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, Visibility, plan_capture,
-    plan_capture_with_control,
+    ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, SystemClock, Visibility,
+    plan_capture_at, plan_capture_with_control_at,
 };
 use serde_json::{Value, json};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "memzoi";
 const DEFAULT_ACTOR: &str = "mcp";
-const INVALID_CAPTURE_REQUEST: &str = "invalid memzoi/capture-request-v1 request";
+const INVALID_CAPTURE_REQUEST: &str = "invalid memzoi/capture-request request";
 const CAPTURE_PLANNING_FAILED: &str = "capture planning failed safely";
 const PRIVATE_CAPTURE_DENIED: &str = "private capture plans are not available to this MCP client";
 const MAX_JSONRPC_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -313,7 +313,7 @@ fn valid_jsonrpc_id(id: &Value) -> bool {
 fn is_capture_tool_request(request: &Value) -> bool {
     request.get("id").is_some()
         && request.get("method").and_then(Value::as_str) == Some("tools/call")
-        && request.pointer("/params/name").and_then(Value::as_str) == Some("plan_capture_v1")
+        && request.pointer("/params/name").and_then(Value::as_str) == Some("plan_capture")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -682,7 +682,7 @@ fn tools_list_result() -> Value {
                 })
             ),
             tool_schema(
-                "plan_capture_v1",
+                "plan_capture",
                 "Plan evidence-backed capture from exactly one explicit project-relative Markdown file. This tool is read-only and never applies, approves, or writes memory state.",
                 json!({
                     "type": "object",
@@ -690,7 +690,7 @@ fn tools_list_result() -> Value {
                     "properties": {
                         "schema": {
                             "type": "string",
-                            "const": "memzoi/capture-request-v1"
+                            "const": "memzoi/capture-request"
                         },
                         "sources": {
                             "type": "array",
@@ -829,11 +829,11 @@ fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
         "description": description,
         "inputSchema": input_schema,
     });
-    if name == "plan_capture_v1" {
+    if name == "plan_capture" {
         tool["outputSchema"] = json!({
             "type": "object",
             "properties": {
-                "schema": { "const": "memzoi/capture-plan-v1" },
+                "schema": { "const": "memzoi/capture-plan" },
                 "plan_id": { "type": "string" },
                 "status": { "enum": ["ready", "blocked"] },
                 "data_class": { "enum": ["repo_safe", "private", "blocked"] },
@@ -879,7 +879,7 @@ fn tools_call(
                 .memory_service()?
                 .build_context_pack(context_input(&arguments)?)?,
         )?,
-        "plan_capture_v1" => match plan_capture_output(state, &arguments, capture_control) {
+        "plan_capture" => match plan_capture_output(state, &arguments, capture_control) {
             Ok(plan) => plan,
             Err(error) if error.to_string() == INVALID_CAPTURE_REQUEST => return Err(error),
             Err(error) => return Ok(tool_error_result(&error.to_string())),
@@ -912,7 +912,7 @@ fn tools_call(
         _ => bail!("unknown tool: {name}"),
     };
 
-    let text = if name == "plan_capture_v1" {
+    let text = if name == "plan_capture" {
         capture_text_content(&structured)?
     } else {
         serde_json::to_string_pretty(&structured)?
@@ -969,9 +969,10 @@ fn plan_capture_output(
     let request = serde_json::from_value::<CaptureRequest>(arguments.clone())
         .map_err(|_| anyhow!(INVALID_CAPTURE_REQUEST))?;
     validate_mcp_capture_authority(&request)?;
+    let evaluated_at = SystemClock.now_utc();
     let plan = match control {
-        Some(control) => plan_capture_with_control(&state.paths, request, control),
-        None => plan_capture(&state.paths, request),
+        Some(control) => plan_capture_with_control_at(&state.paths, request, evaluated_at, control),
+        None => plan_capture_at(&state.paths, request, evaluated_at),
     }
     .map_err(|error| {
         if control.is_some_and(CapturePlanningControl::is_cancelled) {
@@ -1280,7 +1281,7 @@ mod tests {
 
     fn capture_arguments(path: &str) -> Value {
         json!({
-            "schema": "memzoi/capture-request-v1",
+            "schema": "memzoi/capture-request",
             "sources": [
                 {
                     "source_id": "mcp-source",
@@ -1305,7 +1306,7 @@ mod tests {
                 "id": id,
                 "method": "tools/call",
                 "params": {
-                    "name": "plan_capture_v1",
+                    "name": "plan_capture",
                     "arguments": arguments
                 }
             }),
@@ -1500,7 +1501,7 @@ mod tests {
                     "id": "cancel-active",
                     "method": "tools/call",
                     "params": {
-                        "name": "plan_capture_v1",
+                        "name": "plan_capture",
                         "arguments": capture_arguments(source_path)
                     }
                 })
@@ -1550,7 +1551,7 @@ mod tests {
                     "id": "timeout-active",
                     "method": "tools/call",
                     "params": {
-                        "name": "plan_capture_v1",
+                        "name": "plan_capture",
                         "arguments": capture_arguments(source_path)
                     }
                 })
@@ -1745,7 +1746,7 @@ mod tests {
             "search_memory",
             "inspect_memory_expiry",
             "build_context_pack",
-            "plan_capture_v1",
+            "plan_capture",
             "propose_memory",
             "precheck_path",
             "precheck_action",
@@ -1769,12 +1770,12 @@ mod tests {
 
         let capture_tool = tools
             .iter()
-            .find(|tool| tool["name"].as_str() == Some("plan_capture_v1"))
-            .unwrap_or_else(|| panic!("plan_capture_v1 tool should be exposed: {tools:?}"));
+            .find(|tool| tool["name"].as_str() == Some("plan_capture"))
+            .unwrap_or_else(|| panic!("plan_capture tool should be exposed: {tools:?}"));
         let schema = &capture_tool["inputSchema"];
         assert_eq!(
             capture_tool["outputSchema"]["properties"]["schema"]["const"],
-            "memzoi/capture-plan-v1"
+            "memzoi/capture-plan"
         );
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
@@ -1783,7 +1784,7 @@ mod tests {
         );
         assert_eq!(
             schema["properties"]["schema"]["const"],
-            "memzoi/capture-request-v1"
+            "memzoi/capture-request"
         );
         let sources = &schema["properties"]["sources"];
         assert_eq!(sources["minItems"], 1);
@@ -1905,7 +1906,7 @@ mod tests {
         let before = managed_state_snapshot(&state);
 
         let request = serde_json::from_value::<CaptureRequest>(arguments.clone()).unwrap();
-        let expected = plan_capture(&state.paths, request).unwrap();
+        let expected = plan_capture_at(&state.paths, request, SystemClock.now_utc()).unwrap();
         assert_eq!(expected.data_class, CaptureDataClass::Private);
         assert_eq!(expected.candidates.len(), 1);
         assert_eq!(
@@ -2018,7 +2019,7 @@ mod tests {
         let result = &response["result"];
         assert_eq!(result["isError"], false);
         let structured = &result["structuredContent"];
-        assert_eq!(structured["schema"], "memzoi/capture-plan-v1");
+        assert_eq!(structured["schema"], "memzoi/capture-plan");
         assert_eq!(structured["status"], "blocked");
         assert_eq!(structured["data_class"], "blocked");
         assert_eq!(structured["candidates"], json!([]));
@@ -2350,16 +2351,24 @@ mod tests {
             temp.path()
                 .join(".memzoi/records/expired-mcp-diagnostic.md"),
             r#"---
+id: expired-mcp-diagnostic
+kind: memory
+profile: memzoi
 type: fact
+lane: semantic
 title: Expired MCP diagnostic
 timestamp: 2026-01-01T00:00:00Z
 status: active
 visibility: repo
 content_class: general_repo_knowledge
-confidence: confirmed
+confidence: 1.0
 scope: repo
 source: test
-expires: 2000-01-01T00:00:00Z
+retention:
+  explicit_expires_at: 2000-01-01T00:00:00Z
+origin:
+  origin_key: test:expired-mcp-diagnostic
+  route: repository_materialization
 ---
 
 # Expired MCP diagnostic
@@ -2386,12 +2395,15 @@ The mcpexpirydiagnostic token should be hidden from normal search.
 
         let diagnostic = &response["result"]["structuredContent"];
         assert_eq!(diagnostic["record"]["status"], "active");
-        assert_eq!(diagnostic["expired"], true);
+        assert_eq!(diagnostic["retention"]["state"], "query_only");
+        assert_eq!(diagnostic["retention"]["reason"], "explicit_expiry");
+        assert_eq!(diagnostic["current_assertion"], false);
+        assert_eq!(diagnostic["exclusions"][0]["kind"], "retention");
         assert_eq!(diagnostic["excluded_from_normal_reads"], true);
         assert!(
             diagnostic["reason"]
                 .as_str()
-                .is_some_and(|reason| reason.contains("at or after expiry"))
+                .is_some_and(|reason| reason.contains("current-assertion exclusions"))
         );
     }
 

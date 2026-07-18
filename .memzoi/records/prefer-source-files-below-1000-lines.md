@@ -1,4 +1,11 @@
 ---
+id: prefer-source-files-below-1000-lines
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:prefer-source-files-below-1000-lines
+  route: repository_materialization
 type: preference
 lane: semantic
 title: "Prefer source files below 1000 lines"

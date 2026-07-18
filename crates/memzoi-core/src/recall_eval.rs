@@ -1427,7 +1427,9 @@ fn validate_forbidden_semantics(
         for id in &forbidden.stale {
             let record = &catalog[id].record;
             let effectively_expired = record.status == MemoryStatus::Expired
-                || crate::expiry::is_expired(record.expires_at.as_deref(), now)?;
+                || crate::evaluate_retention(&record.id, record.lane, &record.retention, now)?
+                    .state
+                    == crate::RetentionState::QueryOnly;
             if record.status == MemoryStatus::Active || effectively_expired {
                 bail!(
                     "recall case {:?} stale record {:?} must be inactive and not expired",
@@ -1439,7 +1441,8 @@ fn validate_forbidden_semantics(
         for id in &forbidden.expired {
             let record = &catalog[id].record;
             if record.status != MemoryStatus::Expired
-                && !crate::expiry::is_expired(record.expires_at.as_deref(), now)?
+                && crate::evaluate_retention(&record.id, record.lane, &record.retention, now)?.state
+                    != crate::RetentionState::QueryOnly
             {
                 bail!(
                     "recall case {:?} expired record {:?} is not expired at evaluated_at",
@@ -2832,7 +2835,7 @@ unexpected: true
     #[test]
     fn representative_corpus_is_valid() -> anyhow::Result<()> {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../evals/recall/v2/corpus.yaml");
+            .join("../../evals/recall/quality/corpus.yaml");
         if !path.exists() {
             return Ok(());
         }

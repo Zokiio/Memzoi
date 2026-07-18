@@ -1,4 +1,11 @@
 ---
+id: retention-changes-require-explicit-owner-policy-and-evidence
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:retention-changes-require-explicit-owner-policy-and-evidence
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Retention changes require explicit owner policy and evidence"

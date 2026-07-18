@@ -17,12 +17,43 @@ use super::super::{
 use super::journal::*;
 use crate::{
     AuthorizationProof, CAPTURE_REQUEST_SCHEMA, CAPTURE_REVIEW_INPUT_SCHEMA,
-    CaptureExtractorRequest, CaptureMemoryScope, CaptureRequest, CaptureReviewDecisionInput,
-    CaptureReviewInput, CaptureReviewOutcome, CaptureSourceLocator, CaptureSourceRequest,
-    MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryLane, MemoryPaths, MemoryType,
-    OkfProposalSensitivity, RepositoryContentClass, RepositoryWriteRoute, ScopeKind, Visibility,
-    build_capture_review, okf, plan_capture,
+    CaptureExtractorRequest, CaptureMemoryScope, CapturePlan, CaptureRequest, CaptureReview,
+    CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome, CaptureSourceLocator,
+    CaptureSourceRequest, MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryLane, MemoryPaths,
+    MemoryType, OkfProposalSensitivity, OriginDescriptor, OriginRoute, RepositoryContentClass,
+    RepositoryWriteRoute, ScopeKind, Visibility, build_capture_review_at, okf, plan_capture_at,
 };
+
+const CAPTURE_EVALUATED_AT: &str = "2026-07-18T12:00:00Z";
+
+fn capture_evaluated_at() -> time::OffsetDateTime {
+    time::OffsetDateTime::parse(
+        CAPTURE_EVALUATED_AT,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .expect("capture test evaluated_at must be valid")
+}
+
+fn plan_capture(paths: &MemoryPaths, request: CaptureRequest) -> anyhow::Result<CapturePlan> {
+    plan_capture_at(paths, request, capture_evaluated_at())
+}
+
+fn build_capture_review(
+    paths: &MemoryPaths,
+    plan: &CapturePlan,
+    input: CaptureReviewInput,
+    reviewed_by: &str,
+    reviewed_at: &str,
+) -> anyhow::Result<CaptureReview> {
+    build_capture_review_at(
+        paths,
+        plan,
+        input,
+        reviewed_by,
+        reviewed_at,
+        capture_evaluated_at(),
+    )
+}
 
 #[test]
 fn capture_apply_rejects_non_repo_proposal_scope() {
@@ -164,7 +195,7 @@ fn committed_capture_fallback_completes_shared_sync_before_success() -> anyhow::
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     drop(service);
@@ -186,7 +217,7 @@ fn committed_capture_fallback_completes_shared_sync_before_success() -> anyhow::
     assert!(
         !paths
             .repository_runtime_dir
-            .join("shared-sync-v1.json")
+            .join("shared-sync.json")
             .exists()
     );
     drop(recovered);
@@ -464,6 +495,17 @@ fn committed_recovery_rejects_substituted_staged_bytes() -> anyhow::Result<()> {
             sensitivity: OkfProposalSensitivity::RepoSafe,
             content_class: RepositoryContentClass::GeneralRepoKnowledge,
             capture: None,
+            retention: crate::retention_facts_for_creation(
+                MemoryLane::Semantic,
+                "2026-07-10T12:00:00Z",
+                None,
+                None,
+            )?,
+            origin: OriginDescriptor::new(
+                format!("test:{proposal_id}"),
+                OriginRoute::RepositoryProposal,
+            ),
+            lineage: None,
         },
     )?;
     let safety_values = okf_proposal_safety_values("candidate[candidate_test]", &proposal.parsed);
@@ -536,6 +578,17 @@ fn committed_recovery_rejects_a_substituted_exact_journal() -> anyhow::Result<()
             sensitivity: OkfProposalSensitivity::RepoSafe,
             content_class: RepositoryContentClass::GeneralRepoKnowledge,
             capture: None,
+            retention: crate::retention_facts_for_creation(
+                MemoryLane::Semantic,
+                "2026-07-10T12:00:00Z",
+                None,
+                None,
+            )?,
+            origin: OriginDescriptor::new(
+                format!("test:{proposal_id}"),
+                OriginRoute::RepositoryProposal,
+            ),
+            lineage: None,
         },
     )?;
     let safety_values = okf_proposal_safety_values("candidate[candidate_test]", &proposal.parsed);
@@ -694,46 +747,35 @@ fn open_rolls_back_journal_written_before_proposal_staging() -> anyhow::Result<(
 }
 
 #[test]
-fn open_fails_closed_for_legacy_capture_destination_without_ownership() -> anyhow::Result<()> {
+fn open_rejects_an_incompatible_capture_journal_without_mutating_artifacts() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let paths = service.paths.clone();
     ProposalPacketLifecycle::new(&paths, &service.conn).prepare_pending_root()?;
-    let proposal_id = "mem_legacy_capture_rollback";
+    let proposal_id = "mem_incompatible_capture_rollback";
     let contents = b"Authorization: Bearer deterministic-test-fixture\n";
     let destination = paths
         .proposals_dir()
         .join("pending")
         .join(format!("{proposal_id}.md"));
     fs::write(&destination, contents)?;
-    let legacy_journal = serde_json::json!({
-        "schema": "memzoi/capture-apply-journal-v1",
-        "journal_id": Uuid::now_v7().to_string(),
-        "plan_id": "capture_legacy_test",
-        "review_id": "review_legacy_test",
-        "entries": [{
-            "proposal_id": proposal_id,
-            "content_bytes": contents.len(),
-            "content_hash": blake3::hash(contents).to_hex().to_string(),
-        }],
-    });
+    let mut incompatible_journal = test_capture_apply_journal(&paths, proposal_id, contents);
+    incompatible_journal.schema = "incompatible/capture-apply-journal".to_owned();
     fs::write(
-        paths.runtime_dir.join("capture-apply-journal-v1.json"),
-        serde_json::to_vec_pretty(&legacy_journal)?,
+        capture_apply_journal_path(&paths),
+        serde_json::to_vec_pretty(&incompatible_journal)?,
     )?;
     drop(service);
 
     let error = MemoryService::open_paths(paths.clone())
         .err()
-        .context("legacy recovery without ownership must block startup")?;
+        .context("incompatible recovery without ownership must block startup")?;
 
-    assert!(format!("{error:#}").contains("ownership proof"));
-    assert_eq!(fs::read(&destination)?, contents);
     assert!(
-        paths
-            .runtime_dir
-            .join("capture-apply-journal-v1.json")
-            .exists()
+        format!("{error:#}").contains("unsupported capture apply journal schema"),
+        "{error:#}"
     );
+    assert_eq!(fs::read(&destination)?, contents);
+    assert!(capture_apply_journal_path(&paths).exists());
     Ok(())
 }
 
@@ -847,8 +889,6 @@ fn test_capture_apply_journal(
 ) -> CaptureApplyJournal {
     CaptureApplyJournal {
         schema: CAPTURE_APPLY_JOURNAL_SCHEMA.to_owned(),
-        safety_contract_version: crate::REPOSITORY_WRITE_SAFETY_VERSION.to_owned(),
-        detector_policy_version: crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.to_owned(),
         route: crate::RepositoryWriteRoute::CaptureApply
             .as_str()
             .to_owned(),
@@ -866,6 +906,9 @@ fn test_capture_apply_journal(
         entries: vec![CaptureApplyJournalEntry {
             candidate_id: "candidate_test".to_owned(),
             proposal_id: proposal_id.to_owned(),
+            origin: OriginDescriptor::new("capture:test-journal", OriginRoute::Capture),
+            input_fingerprint: "1".repeat(64),
+            intended_outcome: crate::OriginOutcomeKind::Created,
             content_bytes: contents.len() as u64,
             content_hash: blake3::hash(contents).to_hex().to_string(),
             projection_digest: "0".repeat(64),
@@ -917,7 +960,7 @@ fn authorized_test_capture_apply(
     .to_string();
     let entry = &mut journal.entries[0];
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi.capture.projection.v1\0");
+    hasher.update(b"memzoi.capture.projection\0");
     hasher.update(destination.as_os_str().as_encoded_bytes());
     hasher.update(b"\0");
     hasher.update(contents);

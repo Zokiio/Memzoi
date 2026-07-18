@@ -1,4 +1,11 @@
 ---
+id: install-only-canonical-memzoi-binaries-from-releases-by-default
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:install-only-canonical-memzoi-binaries-from-releases-by-default
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Install only canonical Memzoi binaries from releases by default"

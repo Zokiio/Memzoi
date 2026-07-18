@@ -1,4 +1,11 @@
 ---
+id: stream-runtime-event-exports-row-by-row
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:stream-runtime-event-exports-row-by-row
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Stream runtime event exports row by row"

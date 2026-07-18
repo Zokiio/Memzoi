@@ -40,12 +40,14 @@ fn proposal_files_apply_repo_safe_create_resolves_packet_and_updates_runtime_ind
     assert!(rendered.contains("source: path\n"));
     assert!(rendered.contains("source_ref: src/lib.rs\n"));
     assert!(rendered.contains("proposal_id: mem_test_valid\n"));
+    assert!(rendered.contains("kind: memory\n"));
+    assert!(rendered.contains("id: valid-proposal\n"));
+    assert!(rendered.contains("profile: memzoi\n"));
+    assert!(rendered.contains("retention:\n"));
+    assert!(rendered.contains("origin:\n"));
     assert!(rendered.contains("# Valid proposal\n\nThis proposal body is valid."));
     for forbidden in [
-        "kind:",
-        "version:",
-        "profile:",
-        "proposal:",
+        "\nproposal:",
         "proposed_by:",
         "proposed_at:",
         "reason:",
@@ -492,9 +494,9 @@ fn proposal_file_validation_and_rejection_never_echo_non_repo_safe_content() {
 }
 
 #[test]
-fn legacy_file_proposal_shapes_remain_showable_and_rejectable() {
+fn proposal_with_optional_reason_omitted_remains_showable_and_rejectable() {
     let repo = initialized_temp_repo();
-    let legacy = proposal_markdown_with_options(
+    let proposal = proposal_markdown_with_options(
         "semantic",
         "supersede",
         "proposed",
@@ -506,7 +508,7 @@ fn legacy_file_proposal_shapes_remain_showable_and_rejectable() {
         "  reason: Review packet context should not become canonical frontmatter.\n",
         "",
     );
-    write_pending_proposal_file(repo.path(), "legacy-shape.md", legacy);
+    write_pending_proposal_file(repo.path(), "reason-omitted.md", proposal);
 
     let shown = run_json_command(
         repo.path(),
@@ -526,7 +528,7 @@ fn legacy_file_proposal_shapes_remain_showable_and_rejectable() {
             "reject",
             "mem_test_valid",
             "--reason",
-            "Legacy packet is reviewable but not applyable.",
+            "Packet is reviewable but not applicable.",
             "--json",
         ],
     );
@@ -534,9 +536,9 @@ fn legacy_file_proposal_shapes_remain_showable_and_rejectable() {
 }
 
 #[test]
-fn legacy_file_proposal_without_content_class_cannot_apply() {
+fn current_file_proposal_without_content_class_is_rejected() {
     let repo = initialized_temp_repo();
-    let legacy = proposal_markdown_with_options(
+    let incompatible = proposal_markdown_with_options(
         "semantic",
         "create",
         "proposed",
@@ -545,13 +547,13 @@ fn legacy_file_proposal_without_content_class_cannot_apply() {
         "repo-safe",
     )
     .replace("content_class: general_repo_knowledge\n", "");
-    write_pending_proposal_file(repo.path(), "legacy-unclassified.md", legacy);
+    write_pending_proposal_file(repo.path(), "unclassified.md", incompatible);
 
     let error =
         run_command_failure_stderr(repo.path(), &["proposal-files", "apply", "mem_test_valid"]);
     assert!(
-        error.contains("unknown_content_class") || error.contains("repository write blocked"),
-        "unexpected unclassified proposal error: {error}"
+        error.contains("missing required field content_class"),
+        "{error}"
     );
     assert!(
         test_paths(repo.path()).records_dir().read_dir().is_err()

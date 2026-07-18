@@ -14,6 +14,7 @@ mod materialization;
 mod memory_policy;
 mod models;
 mod okf;
+mod origin;
 mod precheck;
 mod proposals;
 mod recall_candidate_eval;
@@ -24,6 +25,7 @@ mod recall_eval_v3;
 mod recall_operational_eval;
 mod repository_io;
 mod repository_write_safety;
+mod retention;
 mod schema;
 mod search;
 mod service;
@@ -33,31 +35,30 @@ mod session_end;
 pub(crate) use db::{init_database, open_database};
 
 pub use capture::{
-    ADR_EXTRACTOR_PROFILE, ADR_EXTRACTOR_VERSION, CAPTURE_APPLY_RESULT_SCHEMA,
-    CAPTURE_MAX_AGGREGATE_SOURCE_BYTES, CAPTURE_MAX_CANDIDATES, CAPTURE_MAX_DIRECTORY_DEPTH,
-    CAPTURE_MAX_DIRECTORY_FILES, CAPTURE_MAX_EVIDENCE_BYTES, CAPTURE_MAX_EVIDENCE_ITEM_BYTES,
-    CAPTURE_MAX_INVENTORY_BYTES, CAPTURE_MAX_INVENTORY_DEPTH, CAPTURE_MAX_INVENTORY_ENTRIES,
-    CAPTURE_MAX_INVENTORY_FILE_BYTES, CAPTURE_MAX_INVENTORY_FILES, CAPTURE_MAX_MARKDOWN_HEADINGS,
-    CAPTURE_MAX_PATH_BYTES, CAPTURE_MAX_RUNTIME_INVENTORY_BYTES,
-    CAPTURE_MAX_RUNTIME_INVENTORY_RECORDS, CAPTURE_MAX_RUNTIME_PATHS_PER_RECORD,
-    CAPTURE_MAX_SERIALIZED_PLAN_BYTES, CAPTURE_MAX_SERIALIZED_REVIEW_BYTES,
-    CAPTURE_MAX_SOURCE_BYTES, CAPTURE_PLAN_SCHEMA, CAPTURE_PROVENANCE_SCHEMA,
-    CAPTURE_REQUEST_SCHEMA, CAPTURE_REVIEW_INPUT_SCHEMA, CAPTURE_REVIEW_SCHEMA, CaptureAction,
-    CaptureApplyResult, CaptureCandidate, CaptureCandidatePreconditions, CaptureClassification,
-    CaptureDataClass, CaptureDiagnostic, CaptureEvidence, CaptureEvidenceSpan,
-    CaptureExtractorIdentity, CaptureExtractorRequest, CaptureGitSourceContext, CaptureMatch,
-    CaptureMatchKind, CaptureMemoryDraft, CaptureMemoryScope, CapturePlan, CapturePlanStatus,
-    CapturePlanSummary, CapturePlanningControl, CapturePolicyInputSnapshot, CaptureProvenance,
-    CaptureRequest, CaptureReview, CaptureReviewDecision, CaptureReviewDecisionInput,
-    CaptureReviewInput, CaptureReviewOutcome, CaptureSafeguards, CaptureSemanticLocation,
-    CaptureSourceInputs, CaptureSourceLocator, CaptureSourceMemberSnapshot, CaptureSourceRequest,
-    CaptureSourceSnapshot, CaptureWrite, GIT_CHANGE_EXTRACTOR_PROFILE,
-    GIT_CHANGE_EXTRACTOR_VERSION, INSTRUCTION_EXTRACTOR_PROFILE, INSTRUCTION_EXTRACTOR_VERSION,
-    MARKDOWN_EXTRACTOR_PROFILE, MAX_DIFF_SOURCE_BYTES, build_capture_review,
-    build_capture_review_with_inputs, build_capture_review_with_prior,
-    build_capture_review_with_prior_and_inputs, parse_capture_plan, parse_capture_request,
-    parse_capture_review, parse_capture_review_input, plan_capture, plan_capture_with_control,
-    plan_capture_with_inputs, plan_capture_with_inputs_and_control,
+    ADR_EXTRACTOR_PROFILE, CAPTURE_APPLY_RESULT_SCHEMA, CAPTURE_MAX_AGGREGATE_SOURCE_BYTES,
+    CAPTURE_MAX_CANDIDATES, CAPTURE_MAX_DIRECTORY_DEPTH, CAPTURE_MAX_DIRECTORY_FILES,
+    CAPTURE_MAX_EVIDENCE_BYTES, CAPTURE_MAX_EVIDENCE_ITEM_BYTES, CAPTURE_MAX_INVENTORY_BYTES,
+    CAPTURE_MAX_INVENTORY_DEPTH, CAPTURE_MAX_INVENTORY_ENTRIES, CAPTURE_MAX_INVENTORY_FILE_BYTES,
+    CAPTURE_MAX_INVENTORY_FILES, CAPTURE_MAX_MARKDOWN_HEADINGS, CAPTURE_MAX_PATH_BYTES,
+    CAPTURE_MAX_RUNTIME_INVENTORY_BYTES, CAPTURE_MAX_RUNTIME_INVENTORY_RECORDS,
+    CAPTURE_MAX_RUNTIME_PATHS_PER_RECORD, CAPTURE_MAX_SERIALIZED_PLAN_BYTES,
+    CAPTURE_MAX_SERIALIZED_REVIEW_BYTES, CAPTURE_MAX_SOURCE_BYTES, CAPTURE_PLAN_SCHEMA,
+    CAPTURE_PROVENANCE_SCHEMA, CAPTURE_REQUEST_SCHEMA, CAPTURE_REVIEW_INPUT_SCHEMA,
+    CAPTURE_REVIEW_SCHEMA, CaptureAction, CaptureApplyResult, CaptureCandidate,
+    CaptureCandidatePreconditions, CaptureClassification, CaptureDataClass, CaptureDiagnostic,
+    CaptureEvidence, CaptureEvidenceSpan, CaptureExtractorIdentity, CaptureExtractorRequest,
+    CaptureGitSourceContext, CaptureMatch, CaptureMatchKind, CaptureMemoryDraft,
+    CaptureMemoryScope, CapturePlan, CapturePlanStatus, CapturePlanSummary, CapturePlanningControl,
+    CapturePolicyInputSnapshot, CaptureProvenance, CaptureRequest, CaptureReview,
+    CaptureReviewDecision, CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome,
+    CaptureSafeguards, CaptureSemanticLocation, CaptureSourceInputs, CaptureSourceLocator,
+    CaptureSourceMemberSnapshot, CaptureSourceRequest, CaptureSourceSnapshot, CaptureWrite,
+    GIT_CHANGE_EXTRACTOR_PROFILE, INSTRUCTION_EXTRACTOR_PROFILE, MARKDOWN_EXTRACTOR_PROFILE,
+    MAX_DIFF_SOURCE_BYTES, build_capture_review_at, build_capture_review_with_inputs_at,
+    build_capture_review_with_prior_and_inputs_at, build_capture_review_with_prior_at,
+    parse_capture_plan, parse_capture_request, parse_capture_review, parse_capture_review_input,
+    plan_capture_at, plan_capture_with_control_at, plan_capture_with_inputs_and_control_at,
+    plan_capture_with_inputs_at,
 };
 pub use capture_eval::*;
 pub use config::{
@@ -113,6 +114,12 @@ pub use okf::{
     read_okf_proposal_files, read_okf_record_files, redacted_okf_proposal_path,
     render_okf_record_markdown,
 };
+pub use origin::{
+    OriginDescriptor, OriginIdentity, OriginLookup, OriginOutcome, OriginOutcomeKind,
+    OriginPreparation, OriginRoute, PreparedOrigin, RecordLineage, RecordLineageKind,
+    finalize_origin, lookup_origin, origin_input_fingerprint, prepare_origin,
+    record_origin_outcome,
+};
 pub use precheck::PrecheckInput;
 pub use proposals::{
     MemoryDraft, Proposal, ProposalStatus, ProposalStatusFilter, SupersedeResult, ValidationIssue,
@@ -139,8 +146,7 @@ pub use recall_eval_v3::*;
 pub use recall_operational_eval::*;
 pub use repository_write_safety::{
     AuthorizationProof, AuthorizedRepositoryWriteBatch, FreshnessCheck, ProvenanceAssessment,
-    REPOSITORY_WRITE_DETECTOR_POLICY_VERSION, REPOSITORY_WRITE_MAX_BLOB_BYTES,
-    REPOSITORY_WRITE_SAFETY_SCHEMA, REPOSITORY_WRITE_SAFETY_VERSION, RepositoryContentClass,
+    REPOSITORY_WRITE_MAX_BLOB_BYTES, REPOSITORY_WRITE_SAFETY_SCHEMA, RepositoryContentClass,
     RepositoryProjection, RepositoryProjectionPurpose, RepositoryScope, RepositoryWriteBlocked,
     RepositoryWriteDecision, RepositoryWriteRequest, RepositoryWriteRoute,
     RepositoryWriteSafetyAssessment, RepositoryWriteSafetyFinding, RepositoryWriteSafetyReasonCode,
@@ -148,13 +154,20 @@ pub use repository_write_safety::{
     assess_repository_candidate, authorize_repository_write, scan_managed_repository_blob,
     scan_repository_blob,
 };
+pub use retention::{
+    CurrentAssertionDecision, CurrentAssertionExclusion, EpisodicRetentionExtension,
+    RetentionDecision, RetentionFacts, RetentionReason, RetentionState, SQL_RETENTION_STATE,
+    evaluate_current_assertion, evaluate_retention, retention_facts_for_creation,
+};
 pub use search::SearchInput;
 pub use service::{
-    CheckpointInput, ExportFormat, ExportInput, ExportResult, FileProposalInventory,
-    FileProposalInventoryEntry, FileProposalInventoryError, FileProposalResolutionResult,
-    InitBundleResult, InitRequest, InitResult, LocalMemoryInput, MemoryService,
-    ProposalApprovalOverride, ProposeOptions, ProposeResult, RebuildResult, RepoIndexDrift,
-    init_bundle, lifecycle_transaction_artifact_count, scan_file_proposal_inventory,
+    CheckpointCommandResult, CheckpointInput, CloseCheckpointCommand, ContinueCheckpointCommand,
+    CreateCheckpointCommand, CreateCheckpointSuccessorCommand, ExportFormat, ExportInput,
+    ExportResult, FileProposalInventory, FileProposalInventoryEntry, FileProposalInventoryError,
+    FileProposalResolutionResult, InitBundleResult, InitRequest, InitResult, LocalMemoryInput,
+    MemoryService, ProposalApprovalOverride, ProposeOptions, ProposeResult, RebuildResult,
+    RepoIndexDrift, SessionEndFromCheckpointCommand, SessionEndFromCheckpointResult, init_bundle,
+    lifecycle_transaction_artifact_count, scan_file_proposal_inventory,
 };
 pub use session_end::{
     SessionEndCandidate, SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument,

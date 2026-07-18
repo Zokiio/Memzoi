@@ -1,8 +1,11 @@
 ---
 id: mem_2026_07_06_auth_tombstone
 kind: proposal
-version: okf/v0.1
-profile: memzoi/v0
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-proposal:mem_2026_07_06_auth_tombstone
+  route: repository_proposal
 type: decision
 lane: semantic
 title: Tombstone obsolete client auth guidance
@@ -28,6 +31,7 @@ sources:
   - path: src/auth/session.ts
 supersedes: []
 sensitivity: repo-safe
+content_class: general_repo_knowledge
 ---
 
 # Tombstone obsolete client auth guidance

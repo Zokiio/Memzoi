@@ -1,4 +1,11 @@
 ---
+id: use-installed-memzoi-binaries-for-normal-repo-memory-workflows
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:use-installed-memzoi-binaries-for-normal-repo-memory-workflows
+  route: repository_materialization
 type: procedure
 lane: procedural
 title: "Use installed Memzoi binaries for normal repo memory workflows"

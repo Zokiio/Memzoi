@@ -36,7 +36,7 @@ Memzoi v0 is local-first and intended for dogfooding and early experimentation. 
   - `search_memory`
   - `inspect_memory_expiry`
   - `build_context_pack`
-  - `plan_capture_v1`
+  - `plan_capture`
   - `propose_memory`
   - `precheck_path`
   - `precheck_action`

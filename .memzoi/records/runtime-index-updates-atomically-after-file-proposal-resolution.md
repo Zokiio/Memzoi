@@ -1,4 +1,11 @@
 ---
+id: runtime-index-updates-atomically-after-file-proposal-resolution
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:runtime-index-updates-atomically-after-file-proposal-resolution
+  route: repository_materialization
 type: procedure
 lane: procedural
 title: "Runtime index updates atomically after file proposal resolution"

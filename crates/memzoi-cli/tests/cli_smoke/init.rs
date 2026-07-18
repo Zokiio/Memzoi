@@ -60,7 +60,7 @@ fn init_json_creates_memory_bundle_and_second_init_fails_without_force() {
         .expect("query initialized schema");
     assert!(
         has_memory_record_table,
-        "database was created without the v0 schema"
+        "database was created without the current schema"
     );
 
     let mut second = memzoi();
@@ -80,7 +80,7 @@ fn init_json_creates_memory_bundle_and_second_init_fails_without_force() {
         .success();
 
     let rewritten_config = fs::read_to_string(&config_path).expect("read forced config");
-    assert!(rewritten_config.contains("version = 1"));
+    assert!(!rewritten_config.contains("version"));
     assert!(rewritten_config.contains("scope_kind = \"repo\""));
     assert!(!rewritten_config.contains("changed = true"));
 }

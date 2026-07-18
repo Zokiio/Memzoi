@@ -2,10 +2,7 @@ use std::path::Path;
 
 use blake3::Hasher;
 
-use super::{
-    REPOSITORY_WRITE_DETECTOR_POLICY_VERSION, REPOSITORY_WRITE_SAFETY_VERSION,
-    RepositoryWriteRequest,
-};
+use super::RepositoryWriteRequest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryProjectionPurpose {
@@ -46,12 +43,12 @@ impl std::fmt::Debug for RepositoryProjection<'_> {
 }
 
 pub(crate) fn project_digest(identity: &[u8]) -> [u8; 32] {
-    domain_hash(b"memzoi.repository-write.project.v1", [identity])
+    domain_hash(b"memzoi.repository-write.project", [identity])
 }
 
 pub(crate) fn projection_digest(projections: &[RepositoryProjection<'_>]) -> [u8; 32] {
     let mut hasher = Hasher::new();
-    hasher.update(b"memzoi.repository-write.projections.v1\0");
+    hasher.update(b"memzoi.repository-write.projections\0");
     put_usize(&mut hasher, projections.len());
     for projection in projections {
         put_bytes(&mut hasher, projection.path.as_os_str().as_encoded_bytes());
@@ -68,12 +65,7 @@ pub(crate) fn authorization_digest(
     projection_digest: &[u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Hasher::new();
-    hasher.update(b"memzoi.repository-write.authorization.v1\0");
-    put_bytes(&mut hasher, REPOSITORY_WRITE_SAFETY_VERSION.as_bytes());
-    put_bytes(
-        &mut hasher,
-        REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.as_bytes(),
-    );
+    hasher.update(b"memzoi.repository-write.authorization\0");
     put_bytes(&mut hasher, project_digest);
     put_bytes(&mut hasher, policy_context_digest);
     put_bytes(&mut hasher, projection_digest);
@@ -82,7 +74,7 @@ pub(crate) fn authorization_digest(
 
 pub(crate) fn policy_context_digest(request: &RepositoryWriteRequest<'_>) -> [u8; 32] {
     let mut hasher = Hasher::new();
-    hasher.update(b"memzoi.repository-write.policy-context.v1\0");
+    hasher.update(b"memzoi.repository-write.policy-context\0");
     put_bytes(&mut hasher, request.route.as_str().as_bytes());
     put_bytes(&mut hasher, request.destination.as_str().as_bytes());
     put_bytes(&mut hasher, request.sensitivity.as_str().as_bytes());
@@ -122,7 +114,7 @@ pub(crate) fn policy_context_digest(request: &RepositoryWriteRequest<'_>) -> [u8
 
 pub(crate) fn candidate_fingerprint(request: &RepositoryWriteRequest<'_>) -> String {
     let mut hasher = Hasher::new();
-    hasher.update(b"memzoi.repository-write.candidate.v1\0");
+    hasher.update(b"memzoi.repository-write.candidate\0");
     for field in &request.fields {
         put_bytes(&mut hasher, field.location.as_bytes());
         put_bytes(&mut hasher, field.kind.as_str().as_bytes());

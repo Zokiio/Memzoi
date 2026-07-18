@@ -2,8 +2,9 @@ use std::{hint::black_box, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memzoi_core::{
-    ContextPackInput, InitRequest, MemoryService, MemoryStatus, MemoryType, PrecheckInput,
-    ScopeKind, SearchInput, Visibility,
+    ContextPackInput, InitRequest, MemoryDestination, MemoryLane, MemoryService, MemoryStatus,
+    MemoryType, OriginDescriptor, OriginRoute, PrecheckInput, RetentionFacts, ScopeKind,
+    SearchInput, Visibility,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -25,7 +26,7 @@ fn bench_search_memory(c: &mut Criterion) {
                 bench.iter(|| {
                     fixture
                         .service
-                        .search_memory(black_box(input.clone()))
+                        .search_memory_for_benchmark(black_box(input.clone()))
                         .expect("search benchmark should succeed")
                 });
             },
@@ -47,7 +48,7 @@ fn bench_search_memory(c: &mut Criterion) {
                 bench.iter(|| {
                     fixture
                         .service
-                        .search_memory(black_box(input.clone()))
+                        .search_memory_for_benchmark(black_box(input.clone()))
                         .expect("filtered search benchmark should succeed")
                 });
             },
@@ -75,7 +76,7 @@ fn bench_context_pack(c: &mut Criterion) {
                     bench.iter(|| {
                         fixture
                             .service
-                            .build_context_pack(black_box(input.clone()))
+                            .build_context_pack_for_benchmark(black_box(input.clone()))
                             .expect("context benchmark should succeed")
                     });
                 },
@@ -103,7 +104,7 @@ fn bench_precheck(c: &mut Criterion) {
                 bench.iter(|| {
                     fixture
                         .service
-                        .precheck(black_box(input.clone()))
+                        .precheck_for_benchmark(black_box(input.clone()))
                         .expect("precheck benchmark should succeed")
                 });
             },
@@ -122,7 +123,7 @@ fn bench_precheck(c: &mut Criterion) {
                 bench.iter(|| {
                     fixture
                         .service
-                        .precheck(black_box(input.clone()))
+                        .precheck_for_benchmark(black_box(input.clone()))
                         .expect("command precheck benchmark should succeed")
                 });
             },
@@ -219,14 +220,32 @@ struct FixtureRecord {
 }
 
 fn insert_record(conn: &Connection, record: FixtureRecord) -> anyhow::Result<()> {
+    let retention = RetentionFacts {
+        occurred_at: None,
+        started_at: None,
+        last_continued_at: None,
+        closed_at: None,
+        explicit_expires_at: None,
+        episodic_extension: None,
+    };
+    let origin = OriginDescriptor::new(
+        format!("benchmark:{}", record.id),
+        OriginRoute::RepositoryMaterialization,
+    );
     conn.execute(
         "INSERT INTO memory_record(
-            id, type, scope_kind, visibility, title, body, status, confidence,
-            source_kind, source_ref, content_hash, expires_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0.91, 'bench', ?8, ?9, NULL)",
+            id, type, lane, destination, scope_kind, visibility, title, body, status, confidence,
+            source_kind, source_ref, content_hash, created_at, updated_at, retention_json,
+            origin_json
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0.91, 'bench', ?10, ?11,
+            '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z', ?12, ?13
+         )",
         params![
             record.id,
             record.memory_type.as_str(),
+            MemoryLane::Semantic.as_str(),
+            MemoryDestination::Repo.as_str(),
             ScopeKind::Repo.as_str(),
             Visibility::Repo.as_str(),
             record.title,
@@ -234,6 +253,8 @@ fn insert_record(conn: &Connection, record: FixtureRecord) -> anyhow::Result<()>
             record.status.as_str(),
             format!("bench://{}", record.path),
             format!("hash-{}", record.id),
+            serde_json::to_string(&retention)?,
+            serde_json::to_string(&origin)?,
         ],
     )?;
     conn.execute(

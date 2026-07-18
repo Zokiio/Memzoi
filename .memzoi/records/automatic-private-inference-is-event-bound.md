@@ -1,4 +1,11 @@
 ---
+id: automatic-private-inference-is-event-bound
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:automatic-private-inference-is-event-bound
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Automatic private inference is event-bound"

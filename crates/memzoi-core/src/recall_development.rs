@@ -1596,7 +1596,7 @@ mod tests {
 
     #[test]
     fn checked_in_profiles_and_matrix_are_strict_and_complete() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v3");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/development");
         for profile in [
             "bge-small-en-v1.5.json",
             "multilingual-e5-small.json",

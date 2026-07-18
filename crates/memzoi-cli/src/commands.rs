@@ -10,14 +10,16 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    CheckpointInput, ContextPackInput, ExportFormat, ExportInput, HandoffInput, ImportApplyResult,
-    ImportPlan, InitRequest, LocalMemoryInput, MemoryDestination, MemoryDraft, MemoryLane,
-    MemoryRecord, MemoryService, MemoryType, OkfProposalSensitivity, OkfProposalStatus,
-    PrecheckInput, Proposal, ProposalApprovalOverride, ProposalInboxSummary, ProposalStatus,
-    ProposalStatusFilter, ProposeOptions, REPOSITORY_WRITE_MAX_BLOB_BYTES, ScopeKind, SearchInput,
-    SearchResult, SessionEndResult, SessionEndWrite, Visibility, discover_paths,
-    lifecycle_transaction_artifact_count, parse_import_document, parse_session_end_document,
-    scan_file_proposal_inventory, scan_managed_repository_blob,
+    CheckpointInput, CloseCheckpointCommand, ContextPackInput, ContinueCheckpointCommand,
+    CreateCheckpointCommand, CreateCheckpointSuccessorCommand, ExportFormat, ExportInput,
+    HandoffInput, ImportApplyResult, ImportPlan, InitRequest, LocalMemoryInput, MemoryDestination,
+    MemoryDraft, MemoryLane, MemoryRecord, MemoryService, MemoryType, OkfProposalSensitivity,
+    OkfProposalStatus, PrecheckInput, Proposal, ProposalApprovalOverride, ProposalInboxSummary,
+    ProposalStatus, ProposalStatusFilter, ProposeOptions, REPOSITORY_WRITE_MAX_BLOB_BYTES,
+    ScopeKind, SearchInput, SearchResult, SessionEndFromCheckpointCommand, SessionEndResult,
+    SessionEndWrite, Visibility, discover_paths, lifecycle_transaction_artifact_count,
+    parse_import_document, parse_session_end_document, scan_file_proposal_inventory,
+    scan_managed_repository_blob,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -828,9 +830,49 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 task,
                 note,
                 from_file,
+                successor_of,
+                operation_id,
+                expected_version,
                 actor,
                 json,
-            } => checkpoint_add_command(task, note, from_file, &actor, json),
+            } => checkpoint_add_command(
+                CheckpointAddOptions {
+                    task,
+                    note,
+                    from_file,
+                    successor_of,
+                    operation_id,
+                    expected_version,
+                },
+                &actor,
+                json,
+            ),
+            CheckpointCommands::Continue {
+                checkpoint_id,
+                operation_id,
+                expected_version,
+                actor,
+                json,
+            } => checkpoint_continue_command(
+                checkpoint_id,
+                operation_id,
+                expected_version,
+                &actor,
+                json,
+            ),
+            CheckpointCommands::Close {
+                checkpoint_id,
+                operation_id,
+                expected_version,
+                actor,
+                json,
+            } => checkpoint_close_command(
+                checkpoint_id,
+                operation_id,
+                expected_version,
+                &actor,
+                json,
+            ),
             CheckpointCommands::List { json } => checkpoint_list_command(json),
         },
         Commands::Events { command } => match command {
@@ -839,9 +881,18 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
         Commands::SessionEnd {
             from_file,
             from_checkpoint,
+            operation_id,
+            expected_version,
             actor,
             json,
-        } => session_end_command(from_file, from_checkpoint, &actor, json),
+        } => session_end_command(
+            from_file,
+            from_checkpoint,
+            operation_id,
+            expected_version,
+            &actor,
+            json,
+        ),
         Commands::Supersede {
             record_id,
             memory_type,
@@ -1472,20 +1523,171 @@ fn local_search_command(query: String, limit: usize, as_json: bool) -> Result<()
     }
 }
 
-fn checkpoint_add_command(
+struct CheckpointAddOptions {
     task: String,
     note: Option<String>,
     from_file: Option<PathBuf>,
+    successor_of: Option<String>,
+    operation_id: Option<String>,
+    expected_version: Option<String>,
+}
+
+fn checkpoint_add_command(options: CheckpointAddOptions, actor: &str, as_json: bool) -> Result<()> {
+    let CheckpointAddOptions {
+        task,
+        note,
+        from_file,
+        successor_of,
+        operation_id,
+        expected_version,
+    } = options;
+    let note = checkpoint_note_from_args(note, from_file)?;
+    let service = open_service()?;
+    let operation_id = checkpoint_operation_id(operation_id, as_json)?;
+    let input = CheckpointInput { task, note };
+    let result = match successor_of {
+        Some(predecessor_id) => {
+            let expected_predecessor_version =
+                checkpoint_expected_version(&service, &predecessor_id, expected_version, as_json)?;
+            service.create_checkpoint_successor(
+                actor,
+                CreateCheckpointSuccessorCommand {
+                    operation_id,
+                    predecessor_id,
+                    expected_predecessor_version,
+                    input,
+                },
+            )?
+        }
+        None => {
+            if expected_version.is_some() {
+                bail!("--expected-version requires --successor-of");
+            }
+            service.create_checkpoint_command(
+                actor,
+                CreateCheckpointCommand {
+                    operation_id,
+                    input,
+                },
+            )?
+        }
+    };
+    if as_json {
+        print_json(&checkpoint_command_result_json(&service, &result)?)
+    } else {
+        println!(
+            "checkpoint\t{}\t{}\t{}\t{}",
+            MemoryDestination::Session.as_str(),
+            result.checkpoint_id,
+            result.operation_id,
+            result.record_version
+        );
+        Ok(())
+    }
+}
+
+fn checkpoint_continue_command(
+    checkpoint_id: String,
+    operation_id: Option<String>,
+    expected_version: Option<String>,
     actor: &str,
     as_json: bool,
 ) -> Result<()> {
-    let note = checkpoint_note_from_args(note, from_file)?;
     let service = open_service()?;
-    let record = service.create_checkpoint(actor, CheckpointInput { task, note })?;
+    let operation_id = checkpoint_operation_id(operation_id, as_json)?;
+    let expected_version =
+        checkpoint_expected_version(&service, &checkpoint_id, expected_version, as_json)?;
+    let result = service.continue_checkpoint(
+        actor,
+        ContinueCheckpointCommand {
+            operation_id,
+            checkpoint_id,
+            expected_version,
+        },
+    )?;
+    print_checkpoint_command_result(&service, &result, as_json)
+}
+
+fn checkpoint_close_command(
+    checkpoint_id: String,
+    operation_id: Option<String>,
+    expected_version: Option<String>,
+    actor: &str,
+    as_json: bool,
+) -> Result<()> {
+    let service = open_service()?;
+    let operation_id = checkpoint_operation_id(operation_id, as_json)?;
+    let expected_version =
+        checkpoint_expected_version(&service, &checkpoint_id, expected_version, as_json)?;
+    let result = service.close_checkpoint(
+        actor,
+        CloseCheckpointCommand {
+            operation_id,
+            checkpoint_id,
+            expected_version,
+        },
+    )?;
+    print_checkpoint_command_result(&service, &result, as_json)
+}
+
+fn checkpoint_operation_id(operation_id: Option<String>, as_json: bool) -> Result<String> {
+    match operation_id {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(_) => bail!("--operation-id cannot be empty"),
+        None if as_json => bail!("--operation-id is required with --json"),
+        None => Ok(uuid::Uuid::now_v7().to_string()),
+    }
+}
+
+fn checkpoint_expected_version(
+    service: &MemoryService,
+    checkpoint_id: &str,
+    expected_version: Option<String>,
+    as_json: bool,
+) -> Result<String> {
+    match expected_version {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(_) => bail!("--expected-version cannot be empty"),
+        None if as_json => bail!("--expected-version is required with --json"),
+        None => service.checkpoint_record_version(checkpoint_id),
+    }
+}
+
+fn checkpoint_command_result_json(
+    service: &MemoryService,
+    result: &memzoi_core::CheckpointCommandResult,
+) -> Result<serde_json::Value> {
+    let record = service.inspect_checkpoint(&result.checkpoint_id)?;
+    let mut value = runtime_record_json(&record);
+    let object = value
+        .as_object_mut()
+        .context("runtime checkpoint JSON must be an object")?;
+    object.insert("operation_id".to_owned(), json!(&result.operation_id));
+    object.insert("record_version".to_owned(), json!(&result.record_version));
+    object.insert(
+        "lifecycle_event_id".to_owned(),
+        json!(&result.lifecycle_event_id),
+    );
+    object.insert("applied".to_owned(), json!(result.applied));
+    object.insert("replayed".to_owned(), json!(result.replayed));
+    Ok(value)
+}
+
+fn print_checkpoint_command_result(
+    service: &MemoryService,
+    result: &memzoi_core::CheckpointCommandResult,
+    as_json: bool,
+) -> Result<()> {
     if as_json {
-        print_json(&runtime_record_json(&record))
+        print_json(&checkpoint_command_result_json(service, result)?)
     } else {
-        println!("checkpoint\t{}\t{}", record.destination.as_str(), record.id);
+        println!(
+            "checkpoint\t{}\t{}\t{}\t{}",
+            MemoryDestination::Session.as_str(),
+            result.checkpoint_id,
+            result.operation_id,
+            result.record_version
+        );
         Ok(())
     }
 }
@@ -1526,13 +1728,18 @@ fn checkpoint_note_from_args(note: Option<String>, from_file: Option<PathBuf>) -
 fn session_end_command(
     from_file: Option<PathBuf>,
     from_checkpoint: Option<String>,
+    operation_id: Option<String>,
+    expected_version: Option<String>,
     actor: &str,
     as_json: bool,
 ) -> Result<()> {
     let service = open_service()?;
-    let (document, source) = match (from_file, from_checkpoint) {
+    let (document, source, checkpoint_command) = match (from_file, from_checkpoint) {
         (Some(_), Some(_)) => bail!("use either --from-file or --from-checkpoint, not both"),
         (Some(path), None) => {
+            if operation_id.is_some() || expected_version.is_some() {
+                bail!("--operation-id and --expected-version require --from-checkpoint");
+            }
             let body = fs::read_to_string(&path).with_context(|| {
                 format!("failed to read session-end input from {}", path.display())
             })?;
@@ -1542,25 +1749,48 @@ fn session_end_command(
                     "kind": "file",
                     "path": path,
                 }),
+                None,
             )
         }
         (None, Some(record_id)) => {
-            let checkpoint = service.show_checkpoint(&record_id)?;
+            let operation_id = checkpoint_operation_id(operation_id, as_json)?;
+            let expected_version =
+                checkpoint_expected_version(&service, &record_id, expected_version, as_json)?;
+            let checkpoint = service.inspect_checkpoint(&record_id)?;
             (
                 parse_session_end_document(&checkpoint.body)?,
                 json!({
                     "kind": "checkpoint",
-                    "record_id": record_id,
+                    "record_id": &record_id,
                 }),
+                Some((operation_id, record_id, expected_version)),
             )
         }
         (None, None) => bail!("session-end requires --from-file or --from-checkpoint"),
     };
 
-    let result = service.promote_session_end(actor, document)?;
+    let (result, closure) = match checkpoint_command {
+        Some((operation_id, checkpoint_id, expected_version)) => {
+            let promoted = service.promote_session_end_from_checkpoint(
+                actor,
+                SessionEndFromCheckpointCommand {
+                    operation_id,
+                    checkpoint_id,
+                    expected_version,
+                    document,
+                },
+            )?;
+            (promoted.promotion, promoted.closure)
+        }
+        None => (service.promote_session_end(actor, document)?, None),
+    };
     if as_json {
         let project_root = service.paths().project_root.as_path();
-        print_json(&session_end_result_json(&result, source, project_root))
+        let mut value = session_end_result_json(&result, source, project_root);
+        if let Some(object) = value.as_object_mut() {
+            object.insert("checkpoint_closure".to_owned(), json!(closure));
+        }
+        print_json(&value)
     } else {
         for candidate in &result.candidates {
             match &candidate.write {
@@ -1598,6 +1828,12 @@ fn session_end_command(
                 }
             }
         }
+        if let Some(closure) = closure {
+            println!(
+                "closed\tsession\t{}\t{}\t{}",
+                closure.checkpoint_id, closure.operation_id, closure.record_version
+            );
+        }
         Ok(())
     }
 }
@@ -1619,6 +1855,9 @@ fn runtime_record_json(record: &MemoryRecord) -> serde_json::Value {
         "proposal_id": &record.proposal_id,
         "created_at": &record.created_at,
         "updated_at": &record.updated_at,
+        "retention": &record.retention,
+        "origin": &record.origin,
+        "lineage": &record.lineage,
     })
 }
 
@@ -1767,11 +2006,25 @@ fn expiry_command(record_id: &str, as_json: bool) -> Result<()> {
         println!("title:\t{}", diagnostic.record.title);
         println!("status:\t{}", diagnostic.record.status.as_str());
         println!(
-            "expires_at:\t{}",
-            diagnostic.record.expires_at.as_deref().unwrap_or("none")
+            "explicit_expires_at:\t{}",
+            diagnostic
+                .record
+                .retention
+                .explicit_expires_at
+                .as_deref()
+                .unwrap_or("none")
         );
         println!("evaluated_at:\t{}", diagnostic.evaluated_at);
-        println!("expired:\t{}", diagnostic.expired);
+        println!("retention_state:\t{}", diagnostic.retention.state.as_str());
+        println!(
+            "effective_boundary:\t{}",
+            diagnostic
+                .retention
+                .effective_boundary
+                .as_deref()
+                .unwrap_or("none")
+        );
+        println!("current_assertion:\t{}", diagnostic.current_assertion);
         println!(
             "excluded_from_normal_reads:\t{}",
             diagnostic.excluded_from_normal_reads
@@ -1970,56 +2223,6 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         "ok",
         paths.project_root.display().to_string(),
     ));
-    let legacy_runtime_dirs = paths
-        .legacy_runtime_dirs
-        .iter()
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-    if !legacy_runtime_dirs.is_empty() {
-        if paths
-            .repository_runtime_dir
-            .join("migration-v1.json")
-            .is_file()
-        {
-            checks.push(check(
-                "legacy_worktree_runtime",
-                "ok",
-                format!(
-                    "{} legacy path-keyed runtime {} retained after verified migration",
-                    legacy_runtime_dirs.len(),
-                    if legacy_runtime_dirs.len() == 1 {
-                        "directory"
-                    } else {
-                        "directories"
-                    }
-                ),
-            ));
-        } else {
-            checks.push(check(
-                "legacy_worktree_runtime",
-                "warning",
-                format!(
-                    "{} fragmented path-keyed runtime {} detected; the next normal Memzoi open will merge durable state without deleting legacy data",
-                    legacy_runtime_dirs.len(),
-                    if legacy_runtime_dirs.len() == 1 {
-                        "directory"
-                    } else {
-                        "directories"
-                    }
-                ),
-            ));
-            push_next_step(
-                &mut next_steps,
-                "run memzoi context --task \"verify migrated worktree memory\"",
-            );
-        }
-    } else {
-        checks.push(check(
-            "legacy_worktree_runtime",
-            "ok",
-            "no legacy path-keyed runtime directories detected",
-        ));
-    }
     if paths.records_dir().is_dir() {
         checks.push(check(
             "records",
@@ -2191,7 +2394,7 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                 "lifecycle_transactions",
                 "warning",
                 format!(
-                    "{} hidden lifecycle transaction artifact{} require inspection in local runtime storage or the legacy records/proposals roots",
+                    "{} hidden lifecycle transaction artifact{} require inspection in local runtime storage or the current records/proposals roots",
                     count,
                     if count == 1 { "" } else { "s" },
                 ),
@@ -2447,7 +2650,6 @@ fn quickstart_command(apply_sample: bool, as_json: bool) -> Result<()> {
 
 fn schema_ready(db_path: &Path) -> Result<bool> {
     const REQUIRED_TABLES: &[&str] = &[
-        "schema_migrations",
         "event_log",
         "memory_record",
         "scope_binding",

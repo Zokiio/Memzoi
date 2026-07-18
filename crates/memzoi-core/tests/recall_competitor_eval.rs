@@ -5,7 +5,7 @@ use memzoi_core::{
 #[test]
 fn two_track_competitor_fixture_is_complete_and_reproducible() -> anyhow::Result<()> {
     let evidence = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/competitors/fixture-evidence.json");
+        .join("../../evals/recall/development/competitors/fixture-evidence.json");
     let report = run_recall_competitor_eval(evidence)?;
 
     assert_eq!(report.version, RECALL_COMPETITOR_REPORT_VERSION);
@@ -21,7 +21,7 @@ fn two_track_competitor_fixture_is_complete_and_reproducible() -> anyhow::Result
 #[test]
 fn competitor_evidence_digest_ignores_json_formatting() -> anyhow::Result<()> {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/competitors/fixture-evidence.json");
+        .join("../../evals/recall/development/competitors/fixture-evidence.json");
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&fixture)?)?;
     let dir = tempfile::tempdir()?;
     let compact = dir.path().join("compact.json");
@@ -58,7 +58,7 @@ fn competitor_schema_rejects_hidden_fields() {
 #[test]
 fn competitor_citation_support_and_integrity_must_agree() {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/competitors/fixture-evidence.json");
+        .join("../../evals/recall/development/competitors/fixture-evidence.json");
     let bytes = std::fs::read(fixture).unwrap();
     let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let invalid = [
@@ -84,7 +84,7 @@ fn competitor_citation_support_and_integrity_must_agree() {
 #[test]
 fn observed_label_without_executable_verification_is_not_ship_evidence() -> anyhow::Result<()> {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/competitors/fixture-evidence.json");
+        .join("../../evals/recall/development/competitors/fixture-evidence.json");
     let mut evidence: serde_json::Value = serde_json::from_slice(&std::fs::read(fixture)?)?;
     evidence["evidence_kind"] = serde_json::json!("observed_bakeoff");
     let dir = tempfile::tempdir()?;

@@ -5,8 +5,8 @@ use std::{
 
 use memzoi_core::{
     InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryService, MemoryStatus, MemoryType,
-    OkfProposalAction, OkfProposalSensitivity, OkfProposalStatus, ScopeKind, Visibility,
-    parse_okf_proposal_markdown, parse_okf_record_file, parse_okf_record_markdown,
+    OkfProposalAction, OkfProposalSensitivity, OkfProposalStatus, OriginRoute, ScopeKind,
+    Visibility, parse_okf_proposal_markdown, parse_okf_record_file, parse_okf_record_markdown,
     read_okf_proposal_files, read_okf_record_files, render_okf_record_markdown,
 };
 use rusqlite::Connection;
@@ -32,6 +32,7 @@ fn parses_example_memory_as_memzoi_okf_profile_record() -> anyhow::Result<()> {
     assert_eq!(record.draft.title, "Swedish-first UI copy");
     assert_eq!(record.applies_to, vec!["apps/web/**"]);
     assert_eq!(record.draft.tags, vec!["frontend", "i18n"]);
+    assert_eq!(record.origin.route, OriginRoute::RepositoryMaterialization);
     assert!(record.draft.body.contains("User-facing UI"));
     assert!(!record.draft.body.starts_with("# Swedish-first"));
 
@@ -58,6 +59,8 @@ fn parses_okf_proposal_examples_as_review_packets() -> anyhow::Result<()> {
     assert_eq!(semantic.scope_kind, ScopeKind::Project);
     assert_eq!(semantic.applies_to, vec!["src/auth/**"]);
     assert_eq!(semantic.sensitivity, OkfProposalSensitivity::RepoSafe);
+    assert_eq!(semantic.profile, "memzoi");
+    assert_eq!(semantic.origin.route, OriginRoute::RepositoryProposal);
     assert!(semantic.body.contains("## Review notes"));
 
     let episodic = proposals
@@ -96,6 +99,21 @@ fn parses_okf_proposal_examples_as_review_packets() -> anyhow::Result<()> {
 }
 
 #[test]
+fn checked_in_repository_records_meet_the_current_profile() -> anyhow::Result<()> {
+    let records_root = examples_root()
+        .parent()
+        .expect("examples directory has repository root")
+        .join(".memzoi/records");
+    let records = read_okf_record_files(&records_root)?;
+
+    assert!(!records.is_empty(), "checked-in memory corpus is present");
+    for record in records {
+        assert!(!record.origin.origin_key.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn compact_canonical_example_parses_without_proposal_metadata() -> anyhow::Result<()> {
     let fixture = examples_root().join("compact-canonical-from-proposal.md");
     let bundle = fixture.parent().expect("example has parent");
@@ -112,7 +130,7 @@ fn compact_canonical_example_parses_without_proposal_metadata() -> anyhow::Resul
     );
     assert_eq!(
         record.proposal_id, None,
-        "legacy canonical records without proposal_id remain readable"
+        "proposal_id remains optional because origin is the replay identity"
     );
     assert!(
         !record.draft.body.contains("proposal:"),
@@ -189,241 +207,170 @@ fn rejects_unknown_proposal_schema_values() {
 }
 
 #[test]
-fn legacy_proposal_without_sensitivity_is_read_as_unknown() -> anyhow::Result<()> {
-    let markdown = proposal_markdown(
+fn proposals_require_the_current_format_retention_and_origin() {
+    let current = proposal_markdown(
         "create",
         "semantic",
         "proposed",
         "repo-safe",
         "supersedes: []",
         "",
-    )
-    .replace("sensitivity: repo-safe\n", "");
-    let parsed = parse_okf_proposal_markdown(
-        Path::new("/bundle"),
-        Path::new("/bundle/mem_test_proposal.md"),
-        &markdown,
-    )?
-    .expect("legacy proposal should remain reviewable");
-
-    assert_eq!(parsed.sensitivity, OkfProposalSensitivity::Unknown);
-    Ok(())
-}
-
-#[test]
-fn legacy_action_shapes_remain_parseable_for_review() -> anyhow::Result<()> {
-    let supersede = parse_okf_proposal_markdown(
-        Path::new("/bundle"),
-        Path::new("/bundle/mem_supersede.md"),
-        &proposal_markdown(
-            "supersede",
-            "semantic",
-            "proposed",
-            "repo-safe",
-            "supersedes: []",
-            "",
-        ),
-    )?
-    .expect("legacy supersede packet should remain reviewable");
-    assert_eq!(supersede.proposal.action, OkfProposalAction::Supersede);
-    assert!(supersede.supersedes.is_empty());
-    assert!(supersede.proposal.reason.is_none());
-
-    let tombstone = parse_okf_proposal_markdown(
-        Path::new("/bundle"),
-        Path::new("/bundle/mem_tombstone.md"),
-        &proposal_markdown(
-            "tombstone",
-            "semantic",
-            "proposed",
-            "repo-safe",
-            "supersedes: []",
-            "",
-        ),
-    )?
-    .expect("legacy tombstone packet should remain reviewable");
-    assert_eq!(tombstone.proposal.action, OkfProposalAction::Tombstone);
-    assert!(tombstone.proposal.target.is_none());
-    assert!(tombstone.proposal.reason.is_none());
-    Ok(())
-}
-
-#[test]
-fn proposal_aliases_allow_equal_or_legacy_values_and_reject_conflicts() -> anyhow::Result<()> {
-    let legacy_target = proposal_markdown(
-        "tombstone",
-        "semantic",
-        "proposed",
-        "repo-safe",
-        "supersedes: []",
-        "  target_id: semantic/legacy-target\n",
     );
-    let parsed = parse_okf_proposal_markdown(
-        Path::new("/bundle"),
-        Path::new("/bundle/legacy-target.md"),
-        &legacy_target,
-    )?
-    .expect("target_id-only packet should remain compatible");
-    assert_eq!(
-        parsed.proposal.target.as_deref(),
-        Some("semantic/legacy-target")
-    );
-
-    let equal_targets = legacy_target.replace(
-        "  target_id: semantic/legacy-target\n",
-        "  target: semantic/legacy-target\n  target_id: \" semantic/legacy-target \"\n",
-    );
-    parse_okf_proposal_markdown(
-        Path::new("/bundle"),
-        Path::new("/bundle/equal-targets.md"),
-        &equal_targets,
-    )?
-    .expect("equal target aliases should parse");
-
-    let conflicting_targets = equal_targets.replace(
-        "target_id: \" semantic/legacy-target \"",
-        "target_id: semantic/other-target",
-    );
-    let error = parse_okf_proposal_markdown(
-        Path::new("/bundle"),
-        Path::new("/bundle/conflicting-targets.md"),
-        &conflicting_targets,
-    )
-    .expect_err("conflicting target aliases must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("proposal.target and proposal.target_id must match")
-    );
-    assert!(!error.to_string().contains("other-target"));
-
     for (markdown, expected) in [
         (
-            proposal_markdown(
-                "create",
-                "semantic",
-                "proposed",
-                "repo-safe",
-                "supersedes: []",
-                "",
-            )
-            .replace(
-                "scope:\n  kind: repo\n",
-                "scope_kind: project\nscope:\n  kind: repo\n",
+            current.replacen(
+                "kind: proposal\n",
+                "kind: proposal\nschema: incompatible/okf\n",
+                1,
             ),
-            "scope_kind and scope.kind must match",
+            "unknown field `schema`",
         ),
         (
-            proposal_markdown(
-                "create",
-                "semantic",
-                "proposed",
-                "repo-safe",
-                "supersedes: []",
+            current.replace("retention: {}\n", ""),
+            "retention is required",
+        ),
+        (
+            current.replace(
+                "origin:\n  origin_key: test:mem-test-proposal\n  route: repository_proposal\n",
                 "",
-            )
-            .replace(
-                "scope:\n  kind: repo\n",
-                "scope_id: top-level\nscope:\n  kind: repo\n  id: nested\n",
             ),
-            "scope_id and scope.id must match",
+            "origin is required",
         ),
     ] {
         let error = parse_okf_proposal_markdown(
             Path::new("/bundle"),
-            Path::new("/bundle/conflicting-scope.md"),
+            Path::new("/bundle/mem_test_proposal.md"),
             &markdown,
         )
-        .expect_err("conflicting scope aliases must fail");
-        assert!(error.to_string().contains(expected), "{error:#}");
+        .expect_err("old or incomplete proposals must fail closed");
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
     }
-    Ok(())
 }
 
 #[test]
-fn canonical_aliases_are_normalized_and_conflicts_are_rejected() -> anyhow::Result<()> {
-    let markdown = r#"---
-type: fact
-lane: semantic
-title: Alias fixture
-scope: " repo "
-scope_kind: repo
-scope_id: " team-a "
-visibility: repo
-status: active
-confidence: 1.0
-source: " human "
-source_kind: human
-created: 2026-07-01T00:00:00Z
-created_at: " 2026-07-01T00:00:00Z "
-timestamp: 2026-07-01T00:00:00Z
-updated: 2026-07-02T00:00:00Z
-updated_at: " 2026-07-02T00:00:00Z "
-supersedes: old-record
-supersedes_id: " old-record "
-expires: 2099-01-01T00:00:00Z
-expires_at: " 2099-01-01T00:00:00Z "
----
+fn current_profile_rejects_missing_classification_and_alias_fields() {
+    let current = proposal_markdown(
+        "create",
+        "semantic",
+        "proposed",
+        "repo-safe",
+        "supersedes: []",
+        "",
+    );
+    for (markdown, expected) in [
+        (
+            current.replace("sensitivity: repo-safe\n", ""),
+            "missing required field sensitivity",
+        ),
+        (
+            current.replace(
+                "proposal:\n  action: create\n",
+                "proposal:\n  action: create\n  target_id: old-target\n",
+            ),
+            "unknown field",
+        ),
+        (
+            current.replace(
+                "scope:\n  kind: repo\n",
+                "scope_kind: repo\nscope:\n  kind: repo\n",
+            ),
+            "unknown field",
+        ),
+    ] {
+        let error = parse_okf_proposal_markdown(
+            Path::new("/bundle"),
+            Path::new("/bundle/mem_test_proposal.md"),
+            &markdown,
+        )
+        .expect_err("current-format proposals must reject missing fields and aliases");
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 
-# Alias fixture
-
-Alias fixture body.
-"#;
-    let parsed = parse_okf_record_markdown(
-        Path::new("/bundle"),
-        Path::new("/bundle/alias-fixture.md"),
-        markdown,
-    )?
-    .expect("equal aliases should parse");
-    assert_eq!(parsed.draft.scope_id.as_deref(), Some("team-a"));
-    assert_eq!(parsed.draft.source_kind.as_deref(), Some("human"));
-
-    for (needle, replacement, expected) in [
+    let record = fs::read_to_string(examples_root().join("example-memory.md"))
+        .expect("example record must be readable");
+    for (markdown, expected) in [
         (
-            "scope_kind: repo",
-            "scope_kind: project",
-            "scope_kind and scope must match",
+            record.replace("status: active", "status: current"),
+            "unknown memory status",
         ),
         (
-            "source_kind: human",
-            "source_kind: agent",
-            "source and source_kind must match",
+            record.replace("confidence: 1.0", "confidence: confirmed"),
+            "expected f64",
         ),
         (
-            "created_at: \" 2026-07-01T00:00:00Z \"",
-            "created_at: 2026-07-03T00:00:00Z",
-            "created and created_at must match",
-        ),
-        (
-            "timestamp: 2026-07-01T00:00:00Z",
-            "timestamp: 2026-07-03T00:00:00Z",
-            "created and timestamp must match",
-        ),
-        (
-            "updated_at: \" 2026-07-02T00:00:00Z \"",
-            "updated_at: 2026-07-03T00:00:00Z",
-            "updated and updated_at must match",
-        ),
-        (
-            "supersedes_id: \" old-record \"",
-            "supersedes_id: other-record",
-            "supersedes and supersedes_id must match",
-        ),
-        (
-            "expires_at: \" 2099-01-01T00:00:00Z \"",
-            "expires_at: 2098-01-01T00:00:00Z",
-            "expires and expires_at must match",
+            record.replace("scope: repo\n", "scope: repo\nscope_kind: repo\n"),
+            "unknown field",
         ),
     ] {
         let error = parse_okf_record_markdown(
             Path::new("/bundle"),
-            Path::new("/bundle/alias-fixture.md"),
-            &markdown.replace(needle, replacement),
+            Path::new("/bundle/example-memory.md"),
+            &markdown,
         )
-        .expect_err("conflicting aliases must fail");
-        assert!(error.to_string().contains(expected), "{error:#}");
+        .expect_err("current-format records must reject value and field aliases");
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
     }
-    Ok(())
+}
+
+#[test]
+fn rejects_incompatible_profile_and_expiry_fields() {
+    let current = r#"---
+id: hard-cut
+kind: memory
+profile: memzoi
+type: fact
+lane: semantic
+title: Hard cut
+scope: repo
+visibility: repo
+content_class: general_repo_knowledge
+status: active
+confidence: 1
+timestamp: 2026-07-01T00:00:00Z
+retention: {}
+origin:
+  origin_key: test:hard-cut
+  route: repository_materialization
+---
+
+# Hard cut
+
+Current artifact.
+"#;
+
+    for (markdown, expected) in [
+        (
+            current.replacen(
+                "kind: memory\n",
+                "kind: memory\nschema: incompatible/okf\n",
+                1,
+            ),
+            "unknown field `schema`",
+        ),
+        (
+            current.replace("profile: memzoi", "profile: incompatible"),
+            "unsupported OKF profile",
+        ),
+        (
+            current.replace("retention: {}\n", "expires: 2099-01-01T00:00:00Z\n"),
+            "unknown field `expires`",
+        ),
+        (
+            current.replace(
+                "origin:\n  origin_key: test:hard-cut\n  route: repository_materialization\n",
+                "",
+            ),
+            "origin is required",
+        ),
+    ] {
+        let error = parse_okf_record_markdown(
+            Path::new("/bundle"),
+            Path::new("/bundle/hard-cut.md"),
+            &markdown,
+        )
+        .expect_err("old or incomplete artifacts must fail closed");
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 }
 
 #[test]
@@ -449,14 +396,24 @@ fn rejects_unsafe_applies_to_paths() {
     fs::write(
         &file,
         r#"---
+id: bad
+kind: memory
+profile: memzoi
 type: decision
+lane: semantic
 title: Bad path
 description: Bad path record.
 timestamp: 2026-07-05T00:00:00Z
 status: active
+scope: repo
 visibility: repo
-confidence: confirmed
+content_class: general_repo_knowledge
+confidence: 1.0
 source: human-authored
+retention: {}
+origin:
+  origin_key: test:bad
+  route: repository_materialization
 applies_to:
   - ../secrets
 ---
@@ -484,14 +441,23 @@ fn rejects_concept_ids_that_do_not_match_profile_rules() {
     fs::write(
         &file,
         r#"---
+id: Bad_Segment
+kind: memory
+profile: memzoi
 type: decision
+lane: semantic
 title: Bad concept path
 description: Bad concept path record.
 timestamp: 2026-07-05T00:00:00Z
 status: active
 visibility: repo
-confidence: confirmed
+content_class: general_repo_knowledge
+confidence: 1.0
 source: human-authored
+retention: {}
+origin:
+  origin_key: test:bad-segment
+  route: repository_materialization
 ---
 
 # Bad concept path
@@ -967,8 +933,11 @@ fn proposal_markdown(
         r#"---
 id: mem_test_proposal
 kind: proposal
-version: okf/v0.1
-profile: memzoi/v0
+profile: memzoi
+retention: {{}}
+origin:
+  origin_key: test:mem-test-proposal
+  route: repository_proposal
 type: decision
 lane: {lane}
 title: Test proposal

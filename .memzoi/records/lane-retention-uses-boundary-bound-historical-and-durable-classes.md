@@ -1,4 +1,11 @@
 ---
+id: lane-retention-uses-boundary-bound-historical-and-durable-classes
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:lane-retention-uses-boundary-bound-historical-and-durable-classes
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Lane retention uses boundary-bound, historical, and durable classes"

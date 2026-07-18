@@ -1,4 +1,11 @@
 ---
+id: pre-1-0-artifacts-must-meet-the-current-schema
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:pre-1-0-artifacts-must-meet-the-current-schema
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Pre-1.0 artifacts must meet the current schema"

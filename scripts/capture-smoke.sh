@@ -53,6 +53,29 @@ MARKDOWN
 "$MEMZOI_MCP_BIN" --version >"$TMP/output/memzoi-mcp-version.txt"
 
 cd "$TMP/repo"
+"$MEMZOI_BIN" init --json >"$TMP/output/init.json"
+
+CAPTURE_SMOKE_HOME="$MEMZOI_HOME" \
+CAPTURE_SMOKE_STATE="$TMP/output/state-before.json" \
+python3 - <<'PY'
+import json
+import os
+import sqlite3
+
+databases = []
+for root, _, files in os.walk(os.environ['CAPTURE_SMOKE_HOME']):
+    if 'shared.db' in files:
+        databases.append(os.path.join(root, 'shared.db'))
+assert len(databases) == 1, databases
+connection = sqlite3.connect(databases[0])
+counts = {
+    table: connection.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+    for table in ['memory_record', 'origin_outcome', 'proposal', 'event_log']
+}
+with open(os.environ['CAPTURE_SMOKE_STATE'], 'w') as fh:
+    json.dump(counts, fh, sort_keys=True)
+PY
+
 "$MEMZOI_BIN" capture plan \
   --source notes/capture.md \
   --source-id capture-smoke \
@@ -65,7 +88,7 @@ import os
 out = os.environ['CAPTURE_SMOKE_OUT']
 with open(os.path.join(out, 'cli-plan.json')) as fh:
     plan = json.load(fh)
-assert plan['schema'] == 'memzoi/capture-plan-v1'
+assert plan['schema'] == 'memzoi/capture-plan'
 assert plan['status'] == 'ready'
 assert plan['data_class'] == 'private'
 assert len(plan['candidates']) == 1
@@ -76,10 +99,27 @@ assert candidate['classification']['sensitivity'] == 'unknown'
 assert candidate['evidence'][0]['locator']['path'] == 'notes/capture.md'
 PY
 
-if [[ -e "$TMP/repo/.memzoi" || -e "$MEMZOI_HOME" ]]; then
-  printf '%s\n' 'CLI capture planning created managed memory state' >&2
-  exit 1
-fi
+CAPTURE_SMOKE_HOME="$MEMZOI_HOME" \
+CAPTURE_SMOKE_BEFORE="$TMP/output/state-before.json" \
+python3 - <<'PY'
+import json
+import os
+import sqlite3
+
+databases = []
+for root, _, files in os.walk(os.environ['CAPTURE_SMOKE_HOME']):
+    if 'shared.db' in files:
+        databases.append(os.path.join(root, 'shared.db'))
+assert len(databases) == 1, databases
+connection = sqlite3.connect(databases[0])
+after = {
+    table: connection.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+    for table in ['memory_record', 'origin_outcome', 'proposal', 'event_log']
+}
+with open(os.environ['CAPTURE_SMOKE_BEFORE']) as fh:
+    before = json.load(fh)
+assert after == before, (before, after)
+PY
 
 CAPTURE_SMOKE_MCP_BIN="$MEMZOI_MCP_BIN" \
 CAPTURE_SMOKE_OUT="$TMP/output" \
@@ -126,9 +166,9 @@ messages = [
         'id': 2,
         'method': 'tools/call',
         'params': {
-            'name': 'plan_capture_v1',
+            'name': 'plan_capture',
             'arguments': {
-                'schema': 'memzoi/capture-request-v1',
+                'schema': 'memzoi/capture-request',
                 'sources': [{
                     'source_id': 'capture-smoke',
                     'locator': {'kind': 'project_path', 'path': 'notes/capture.md'},
@@ -189,9 +229,26 @@ assert result['content'][0]['text'] == (
 assert 'structuredContent' not in result
 PY
 
-if [[ -e "$TMP/repo/.memzoi" || -e "$MEMZOI_HOME" ]]; then
-  printf '%s\n' 'MCP capture planning created managed memory state' >&2
-  exit 1
-fi
+CAPTURE_SMOKE_HOME="$MEMZOI_HOME" \
+CAPTURE_SMOKE_BEFORE="$TMP/output/state-before.json" \
+python3 - <<'PY'
+import json
+import os
+import sqlite3
+
+databases = []
+for root, _, files in os.walk(os.environ['CAPTURE_SMOKE_HOME']):
+    if 'shared.db' in files:
+        databases.append(os.path.join(root, 'shared.db'))
+assert len(databases) == 1, databases
+connection = sqlite3.connect(databases[0])
+after = {
+    table: connection.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+    for table in ['memory_record', 'origin_outcome', 'proposal', 'event_log']
+}
+with open(os.environ['CAPTURE_SMOKE_BEFORE']) as fh:
+    before = json.load(fh)
+assert after == before, (before, after)
+PY
 
 printf 'capture smoke OK: %s, %s\n' "$MEMZOI_BIN" "$MEMZOI_MCP_BIN"

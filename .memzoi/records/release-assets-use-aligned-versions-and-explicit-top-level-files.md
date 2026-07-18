@@ -1,4 +1,11 @@
 ---
+id: release-assets-use-aligned-versions-and-explicit-top-level-files
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:release-assets-use-aligned-versions-and-explicit-top-level-files
+  route: repository_materialization
 type: procedure
 lane: procedural
 title: "Release assets use aligned versions and explicit top-level files"

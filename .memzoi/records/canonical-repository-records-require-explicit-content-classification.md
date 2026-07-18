@@ -1,4 +1,11 @@
 ---
+id: canonical-repository-records-require-explicit-content-classification
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:canonical-repository-records-require-explicit-content-classification
+  route: repository_materialization
 type: warning
 lane: semantic
 title: "Canonical repository records require explicit content classification"

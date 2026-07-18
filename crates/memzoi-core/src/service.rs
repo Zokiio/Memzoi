@@ -8,20 +8,21 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::{Date, OffsetDateTime, Time, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
-    AuthorizationProof, CaptureApplyResult, CapturePlan, CaptureReview, CaptureSourceInputs,
-    ContextPack, ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult, ImportDocument,
-    ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryPaths, MemoryRecord,
-    MemoryStatus, OkfProposalAction, OkfProposalFile, OkfProposalOutcome, OkfProposalResolution,
-    OkfProposalSensitivity, PrecheckInput, PrecheckWarning, Proposal, ProposalStatus,
-    ProposalStatusFilter, RepositoryContentClass, RepositoryWriteRoute, SafetyFieldKind, ScopeKind,
-    SearchInput, SearchResult, SupersedeResult, ValidationResult, Visibility,
+    AuthorizationProof, CaptureApplyResult, CapturePlan, CaptureRequest, CaptureReview,
+    CaptureReviewInput, CaptureSourceInputs, ContextPack, ContextPackInput, HandoffInput,
+    HandoffPack, ImportApplyResult, ImportDocument, ImportPlan, MemoryDestination, MemoryDraft,
+    MemoryEvent, MemoryPaths, MemoryRecord, MemoryStatus, OkfProposalAction, OkfProposalFile,
+    OkfProposalOutcome, OkfProposalResolution, OkfProposalSensitivity, PrecheckInput,
+    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, RepositoryContentClass,
+    RepositoryWriteRoute, SafetyFieldKind, ScopeKind, SearchInput, SearchResult, SupersedeResult,
+    ValidationResult, Visibility,
 };
 use crate::{
     config::{
@@ -30,7 +31,7 @@ use crate::{
     context, db,
     events::{AppendEvent, append_event, for_each_merged_event},
     expiry::{self, Clock, ExpiryDiagnostic, SystemClock},
-    exporters, handoff, okf, precheck, proposals, search,
+    exporters, handoff, okf, precheck, proposals, schema, search,
     session_end::{SessionEndDocument, SessionEndResult},
 };
 
@@ -38,6 +39,7 @@ mod canonical_write;
 mod capture_route_apply;
 mod derived_index;
 mod import_lifecycle;
+mod import_origin_journal;
 mod materialization;
 mod proposal_packets;
 mod repository_mutation;
@@ -53,7 +55,10 @@ pub use self::proposal_packets::{
     FileProposalInventory, FileProposalInventoryEntry, FileProposalInventoryError,
     FileProposalResolutionResult, scan_file_proposal_inventory,
 };
-pub use self::runtime_records::{CheckpointInput, LocalMemoryInput};
+pub use self::runtime_records::{
+    CheckpointCommandResult, CheckpointInput, CloseCheckpointCommand, ContinueCheckpointCommand,
+    CreateCheckpointCommand, CreateCheckpointSuccessorCommand, LocalMemoryInput,
+};
 
 use self::canonical_write::{CanonicalFileWrite, CanonicalWriteSession, FileWriteMode};
 use self::import_lifecycle::ImportLifecycle;
@@ -148,6 +153,21 @@ pub struct ProposeResult {
     pub applied: bool,
 }
 
+/// Idempotent promotion of one checkpoint's explicit session-end document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEndFromCheckpointCommand {
+    pub operation_id: String,
+    pub checkpoint_id: String,
+    pub expected_version: String,
+    pub document: SessionEndDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionEndFromCheckpointResult {
+    pub promotion: SessionEndResult,
+    pub closure: Option<CheckpointCommandResult>,
+}
+
 pub struct MemoryService {
     paths: MemoryPaths,
     conn: Connection,
@@ -189,7 +209,6 @@ impl MemoryService {
         trusted_recall_evaluation: bool,
     ) -> Result<Self> {
         paths.validate_runtime_identity()?;
-        shared_runtime::migrate_legacy_runtime_if_needed(&paths)?;
         if !paths.config_path.is_file() {
             bail!(
                 "Memzoi bundle is not initialized at {}; run `memzoi init` first",
@@ -197,19 +216,23 @@ impl MemoryService {
             );
         }
 
-        let shared_conn = db::open_database(&paths.shared_db_path)?;
-        db::init_database(&shared_conn)?;
-        if !paths.index_db_path.is_file() {
+        let shared_conn = open_current_shared_database(&paths)?;
+        let index_conn = open_disposable_index_if_current(&paths)?;
+        if index_conn.is_none() {
             if trusted_recall_evaluation {
                 derived_index::rebuild_for_trusted_recall_eval(paths.clone())?;
             } else {
                 derived_index::rebuild(paths.clone())?;
             }
         }
-        let conn = db::open_database(&paths.index_db_path)?;
-        db::init_database(&conn)?;
+        let conn = match index_conn {
+            Some(conn) => conn,
+            None => open_current_index_database(&paths)?,
+        };
+        import_origin_journal::recover_on_open(&paths, &shared_conn)?;
         shared_runtime::refresh_index_mirrors(&paths, &shared_conn, &conn)?;
         capture_route_apply::recover_on_open(&paths, &conn)?;
+        SessionEndRouteApply::new(&paths, &conn, &shared_conn, &clock).recover_on_open()?;
         Ok(Self {
             paths,
             conn,
@@ -226,8 +249,7 @@ impl MemoryService {
 
     pub fn initialize_paths(paths: MemoryPaths, request: InitRequest) -> Result<InitResult> {
         paths.validate_runtime_identity()?;
-        let migrated = shared_runtime::migrate_legacy_runtime_if_needed(&paths)?;
-        init_bundle_after_migration(&paths, request.force, migrated)?;
+        init_current_bundle(&paths, request.force)?;
         Ok(InitResult { paths })
     }
 
@@ -463,7 +485,7 @@ impl MemoryService {
         let target = RuntimeRecords::new(&self.conn)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
-        validate_legacy_canonical_target(&target)?;
+        validate_canonical_lifecycle_target(&target, self.now())?;
         if target.scope_kind != draft.scope_kind || target.scope_id != draft.scope_id {
             bail!(
                 "cannot supersede record {record_id} cross-scope: target={}:{}, replacement={}:{}",
@@ -498,7 +520,7 @@ impl MemoryService {
         let target = RuntimeRecords::new(&tx)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
-        validate_legacy_canonical_target(&target)?;
+        validate_canonical_lifecycle_target(&target, self.now())?;
         if target.scope_kind != draft.scope_kind || target.scope_id != draft.scope_id {
             bail!(
                 "cannot supersede record {record_id} cross-scope: target={}:{}, replacement={}:{}",
@@ -559,7 +581,7 @@ impl MemoryService {
         let target = RuntimeRecords::new(&self.conn)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
-        validate_legacy_canonical_target(&target)?;
+        validate_canonical_lifecycle_target(&target, self.now())?;
         self.ensure_repository_index_current()?;
         let safety_values = vec![
             safety_value(
@@ -591,7 +613,7 @@ impl MemoryService {
         let target = RuntimeRecords::new(&tx)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
-        validate_legacy_canonical_target(&target)?;
+        validate_canonical_lifecycle_target(&target, self.now())?;
         let record = proposals::tombstone_record(&tx, record_id, actor, reason)?;
         let write = self.prepare_record_file_write_with_conn(
             &session,
@@ -644,6 +666,15 @@ impl MemoryService {
     pub fn search_memory(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         self.ensure_repository_index_current()?;
+        search::search_memory_at(&self.conn, input, self.now())
+    }
+
+    /// Runs the query engine against a mechanically seeded derived index.
+    ///
+    /// Production callers must use [`Self::search_memory`], which verifies that
+    /// repository rows still match their canonical OKF sources.
+    #[doc(hidden)]
+    pub fn search_memory_for_benchmark(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
         search::search_memory_at(&self.conn, input, self.now())
     }
 
@@ -721,18 +752,138 @@ impl MemoryService {
     }
 
     pub fn create_checkpoint(&self, actor: &str, input: CheckpointInput) -> Result<MemoryRecord> {
+        let command = CreateCheckpointCommand {
+            operation_id: Uuid::now_v7().to_string(),
+            input,
+        };
+        let result = self.create_checkpoint_command(actor, command)?;
+        RuntimeRecords::new(&self.shared_conn).checkpoint_for_lifecycle(&result.checkpoint_id)
+    }
+
+    pub fn create_checkpoint_command(
+        &self,
+        actor: &str,
+        command: CreateCheckpointCommand,
+    ) -> Result<CheckpointCommandResult> {
+        ensure_non_empty_operation_id(&command.operation_id)?;
         let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
         shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
         let reserved_ids = reserved_runtime_record_ids(&self.paths, &self.conn)?;
-        let now = self.now_timestamp()?;
-        let record = RuntimeRecords::new(&self.shared_conn).create_checkpoint_avoiding(
+        let timestamp = self.now_timestamp()?;
+        let route = crate::OriginRoute::CheckpointCreate;
+        let descriptor = crate::OriginDescriptor::owner_command(&command.operation_id, route);
+        let identity = crate::OriginIdentity::new(self.paths.repository_key(), descriptor.clone());
+        let fingerprint = crate::origin_input_fingerprint(route, &command)?;
+        let tx = self.shared_conn.unchecked_transaction()?;
+        match crate::prepare_origin(&tx, &identity, &fingerprint, &timestamp)? {
+            crate::OriginPreparation::Replay(outcome) => {
+                return checkpoint_result_from_origin(&tx, &command.operation_id, &outcome, true);
+            }
+            crate::OriginPreparation::Pending(_) => {
+                bail!("origin_operation_pending: checkpoint creation is already prepared")
+            }
+            crate::OriginPreparation::Acquired => {}
+        }
+        let record = RuntimeRecords::new(&tx).create_checkpoint_with_metadata_avoiding(
             actor,
-            &input,
-            &now,
+            &command.input,
+            &timestamp,
+            descriptor,
+            None,
             &reserved_ids,
         )?;
+        let event_id = latest_checkpoint_event_id(&tx, &record.id, "memory.checkpoint_created")?;
+        let outcome = crate::OriginOutcome::new(
+            identity,
+            fingerprint,
+            crate::OriginOutcomeKind::Created,
+            &timestamp,
+        )
+        .with_destination(MemoryDestination::Session)
+        .with_record_id(&record.id)
+        .with_lifecycle_event_id(event_id);
+        let outcome = crate::finalize_origin(&tx, &outcome)?;
+        let result = checkpoint_result_from_origin(&tx, &command.operation_id, &outcome, false)?;
+        tx.commit()?;
         shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
-        Ok(record)
+        Ok(result)
+    }
+
+    pub fn create_checkpoint_successor(
+        &self,
+        actor: &str,
+        command: CreateCheckpointSuccessorCommand,
+    ) -> Result<CheckpointCommandResult> {
+        ensure_non_empty_operation_id(&command.operation_id)?;
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let reserved_ids = reserved_runtime_record_ids(&self.paths, &self.conn)?;
+        let now = self.now();
+        let timestamp = expiry::format_timestamp(now)?;
+        let route = crate::OriginRoute::CheckpointSuccessor;
+        let descriptor = crate::OriginDescriptor::owner_command(&command.operation_id, route);
+        let identity = crate::OriginIdentity::new(self.paths.repository_key(), descriptor.clone());
+        let fingerprint = crate::origin_input_fingerprint(route, &command)?;
+        let tx = self.shared_conn.unchecked_transaction()?;
+        match crate::prepare_origin(&tx, &identity, &fingerprint, &timestamp)? {
+            crate::OriginPreparation::Replay(outcome) => {
+                return checkpoint_result_from_origin(&tx, &command.operation_id, &outcome, true);
+            }
+            crate::OriginPreparation::Pending(_) => {
+                bail!("origin_operation_pending: checkpoint successor is already prepared")
+            }
+            crate::OriginPreparation::Acquired => {}
+        }
+        let predecessor =
+            RuntimeRecords::new(&tx).checkpoint_for_lifecycle(&command.predecessor_id)?;
+        RuntimeRecords::ensure_successor_predecessor(
+            &predecessor,
+            &command.expected_predecessor_version,
+            now,
+        )?;
+        let lineage = crate::RecordLineage {
+            kind: crate::RecordLineageKind::SessionSuccessor,
+            predecessor_id: predecessor.id.clone(),
+        };
+        let record = RuntimeRecords::new(&tx).create_checkpoint_with_metadata_avoiding(
+            actor,
+            &command.input,
+            &timestamp,
+            descriptor,
+            Some(lineage),
+            &reserved_ids,
+        )?;
+        let record_version = RuntimeRecords::checkpoint_record_version(&record)?;
+        let handoff_event = append_event(
+            &tx,
+            AppendEvent {
+                event_type: "memory.checkpoint_succeeded".to_owned(),
+                actor: actor.to_owned(),
+                payload: json!({
+                    "operation_id": &command.operation_id,
+                    "predecessor_id": &predecessor.id,
+                    "successor_id": &record.id,
+                    "handoff_at": &timestamp,
+                    "record_version": record_version,
+                }),
+                record_id: Some(record.id.clone()),
+                proposal_id: None,
+            },
+        )?;
+        let outcome = crate::OriginOutcome::new(
+            identity,
+            fingerprint,
+            crate::OriginOutcomeKind::Created,
+            &timestamp,
+        )
+        .with_destination(MemoryDestination::Session)
+        .with_record_id(&record.id)
+        .with_lifecycle_event_id(&handoff_event.id);
+        let outcome = crate::finalize_origin(&tx, &outcome)?;
+        let result = checkpoint_result_from_origin(&tx, &command.operation_id, &outcome, false)?;
+        tx.commit()?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(result)
     }
 
     pub fn list_checkpoints(&self) -> Result<Vec<MemoryRecord>> {
@@ -743,6 +894,112 @@ impl MemoryService {
         RuntimeRecords::new(&self.shared_conn)
             .checkpoint(record_id, self.now())?
             .with_context(|| format!("checkpoint not found: {record_id}"))
+    }
+
+    /// Returns the optimistic-concurrency version for a checkpoint, including
+    /// query-only history needed by owner lifecycle commands.
+    pub fn checkpoint_record_version(&self, record_id: &str) -> Result<String> {
+        let record = RuntimeRecords::new(&self.shared_conn).checkpoint_for_lifecycle(record_id)?;
+        RuntimeRecords::checkpoint_record_version(&record)
+    }
+
+    /// Explicit lifecycle/history inspection; unlike ordinary checkpoint
+    /// reads this includes closed and query-only records by identifier.
+    pub fn inspect_checkpoint(&self, record_id: &str) -> Result<MemoryRecord> {
+        RuntimeRecords::new(&self.shared_conn).checkpoint_for_lifecycle(record_id)
+    }
+
+    pub fn continue_checkpoint(
+        &self,
+        actor: &str,
+        command: ContinueCheckpointCommand,
+    ) -> Result<CheckpointCommandResult> {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let now = self.now();
+        let timestamp = expiry::format_timestamp(now)?;
+        let route = crate::OriginRoute::CheckpointContinue;
+        let identity = crate::OriginIdentity::new(
+            self.paths.repository_key(),
+            crate::OriginDescriptor::owner_command(&command.operation_id, route),
+        );
+        let fingerprint = crate::origin_input_fingerprint(route, &command)?;
+        let tx = self.shared_conn.unchecked_transaction()?;
+        match crate::prepare_origin(&tx, &identity, &fingerprint, &timestamp)? {
+            crate::OriginPreparation::Replay(outcome) => {
+                return checkpoint_result_from_origin(&tx, &command.operation_id, &outcome, true);
+            }
+            crate::OriginPreparation::Pending(_) => {
+                bail!("origin_operation_pending: checkpoint continuation is already prepared")
+            }
+            crate::OriginPreparation::Acquired => {}
+        }
+        let mutation =
+            RuntimeRecords::new(&tx).continue_checkpoint(actor, &command, now, &timestamp)?;
+        let event = mutation
+            .event
+            .as_ref()
+            .context("checkpoint continuation must append a lifecycle event")?;
+        let outcome = crate::OriginOutcome::new(
+            identity,
+            fingerprint,
+            crate::OriginOutcomeKind::Created,
+            &timestamp,
+        )
+        .with_destination(MemoryDestination::Session)
+        .with_record_id(&mutation.record.id)
+        .with_lifecycle_event_id(&event.id);
+        let outcome = crate::finalize_origin(&tx, &outcome)?;
+        let result = checkpoint_result_from_origin(&tx, &command.operation_id, &outcome, false)?;
+        tx.commit()?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(result)
+    }
+
+    pub fn close_checkpoint(
+        &self,
+        actor: &str,
+        command: CloseCheckpointCommand,
+    ) -> Result<CheckpointCommandResult> {
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let now = self.now();
+        let timestamp = expiry::format_timestamp(now)?;
+        let route = crate::OriginRoute::CheckpointClose;
+        let identity = crate::OriginIdentity::new(
+            self.paths.repository_key(),
+            crate::OriginDescriptor::owner_command(&command.operation_id, route),
+        );
+        let fingerprint = crate::origin_input_fingerprint(route, &command)?;
+        let tx = self.shared_conn.unchecked_transaction()?;
+        match crate::prepare_origin(&tx, &identity, &fingerprint, &timestamp)? {
+            crate::OriginPreparation::Replay(outcome) => {
+                return checkpoint_result_from_origin(&tx, &command.operation_id, &outcome, true);
+            }
+            crate::OriginPreparation::Pending(_) => {
+                bail!("origin_operation_pending: checkpoint closure is already prepared")
+            }
+            crate::OriginPreparation::Acquired => {}
+        }
+        let mutation =
+            RuntimeRecords::new(&tx).close_checkpoint(actor, &command, now, &timestamp)?;
+        let outcome_kind = if mutation.applied {
+            crate::OriginOutcomeKind::Created
+        } else {
+            crate::OriginOutcomeKind::ExistingDuplicateNoWrite
+        };
+        let mut outcome =
+            crate::OriginOutcome::new(identity, fingerprint, outcome_kind, &timestamp)
+                .with_destination(MemoryDestination::Session)
+                .with_record_id(&mutation.record.id);
+        if let Some(event) = &mutation.event {
+            outcome = outcome.with_lifecycle_event_id(&event.id);
+        }
+        let outcome = crate::finalize_origin(&tx, &outcome)?;
+        let result = checkpoint_result_from_origin(&tx, &command.operation_id, &outcome, false)?;
+        tx.commit()?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(result)
     }
 
     pub fn promote_session_end(
@@ -758,6 +1015,22 @@ impl MemoryService {
             self.clock.as_ref(),
         )
         .promote(actor, document)
+    }
+
+    pub fn promote_session_end_from_checkpoint(
+        &self,
+        actor: &str,
+        command: SessionEndFromCheckpointCommand,
+    ) -> Result<SessionEndFromCheckpointResult> {
+        ensure_non_empty_operation_id(&command.operation_id)?;
+        self.ensure_repository_index_current()?;
+        SessionEndRouteApply::new(
+            &self.paths,
+            &self.conn,
+            &self.shared_conn,
+            self.clock.as_ref(),
+        )
+        .promote_from_checkpoint(actor, command)
     }
     pub fn plan_import(&self, actor: &str, document: ImportDocument) -> Result<ImportPlan> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
@@ -785,6 +1058,117 @@ impl MemoryService {
             self.clock.as_ref(),
         )
         .apply(actor, document, expected_plan_id)
+    }
+
+    pub fn plan_capture(&self, request: CaptureRequest) -> Result<CapturePlan> {
+        self.plan_capture_with_inputs(request, &CaptureSourceInputs::default())
+    }
+
+    pub fn plan_capture_with_inputs(
+        &self,
+        request: CaptureRequest,
+        source_inputs: &CaptureSourceInputs,
+    ) -> Result<CapturePlan> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
+        let evaluated_at = self.now_timestamp()?;
+        crate::capture::plan_capture_with_connection_and_inputs(
+            &self.paths,
+            &self.conn,
+            request,
+            source_inputs,
+            &evaluated_at,
+        )
+    }
+
+    pub fn build_capture_review(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        self.build_capture_review_with_inputs(
+            plan,
+            input,
+            &CaptureSourceInputs::default(),
+            reviewed_by,
+            reviewed_at,
+        )
+    }
+
+    pub fn build_capture_review_with_inputs(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        source_inputs: &CaptureSourceInputs,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        self.build_capture_review_inner(plan, input, None, source_inputs, reviewed_by, reviewed_at)
+    }
+
+    pub fn build_capture_review_with_prior(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        prior_review: &CaptureReview,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        self.build_capture_review_with_prior_and_inputs(
+            plan,
+            input,
+            prior_review,
+            &CaptureSourceInputs::default(),
+            reviewed_by,
+            reviewed_at,
+        )
+    }
+
+    pub fn build_capture_review_with_prior_and_inputs(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        prior_review: &CaptureReview,
+        source_inputs: &CaptureSourceInputs,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        self.build_capture_review_inner(
+            plan,
+            input,
+            Some(prior_review),
+            source_inputs,
+            reviewed_by,
+            reviewed_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_capture_review_inner(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        prior_review: Option<&CaptureReview>,
+        source_inputs: &CaptureSourceInputs,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
+        let evaluated_at = self.now_timestamp()?;
+        crate::capture::build_capture_review_with_connection_and_inputs(
+            &self.paths,
+            &self.conn,
+            plan,
+            input,
+            prior_review,
+            source_inputs,
+            reviewed_by,
+            reviewed_at,
+            &evaluated_at,
+        )
     }
 
     pub fn apply_capture(
@@ -903,6 +1287,14 @@ impl MemoryService {
         context::build_context_pack_at(&self.conn, input, self.now())
     }
 
+    /// Builds a context pack from a mechanically seeded benchmark index.
+    ///
+    /// Production callers must use [`Self::build_context_pack`].
+    #[doc(hidden)]
+    pub fn build_context_pack_for_benchmark(&self, input: ContextPackInput) -> Result<ContextPack> {
+        context::build_context_pack_at(&self.conn, input, self.now())
+    }
+
     pub fn build_handoff_pack(&self, input: HandoffInput) -> Result<HandoffPack> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         self.ensure_repository_index_current()?;
@@ -912,6 +1304,14 @@ impl MemoryService {
     pub fn precheck(&self, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         self.ensure_repository_index_current()?;
+        precheck::precheck_at(&self.conn, input, self.now())
+    }
+
+    /// Runs precheck against a mechanically seeded benchmark index.
+    ///
+    /// Production callers must use [`Self::precheck`].
+    #[doc(hidden)]
+    pub fn precheck_for_benchmark(&self, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
         precheck::precheck_at(&self.conn, input, self.now())
     }
 
@@ -984,11 +1384,80 @@ impl MemoryService {
     }
 }
 
+fn checkpoint_result_from_origin(
+    conn: &Connection,
+    operation_id: &str,
+    outcome: &crate::OriginOutcome,
+    replayed: bool,
+) -> Result<CheckpointCommandResult> {
+    let checkpoint_id = outcome
+        .record_id
+        .as_deref()
+        .context("checkpoint origin outcome has no record_id")?;
+    let record = RuntimeRecords::new(conn).checkpoint_for_lifecycle(checkpoint_id)?;
+    let current_version = RuntimeRecords::checkpoint_record_version(&record)?;
+    let record_version = match outcome.lifecycle_event_id.as_deref() {
+        Some(event_id) => conn
+            .query_row(
+                "SELECT payload_json FROM event_log WHERE id = ?1",
+                [event_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(&payload).ok())
+            .and_then(|payload| {
+                payload
+                    .get("record_version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or(current_version),
+        None => current_version,
+    };
+    Ok(CheckpointCommandResult {
+        operation_id: operation_id.to_owned(),
+        checkpoint_id: checkpoint_id.to_owned(),
+        record_version,
+        lifecycle_event_id: outcome.lifecycle_event_id.clone(),
+        applied: outcome.outcome == crate::OriginOutcomeKind::Created,
+        replayed,
+    })
+}
+
+fn latest_checkpoint_event_id(
+    conn: &Connection,
+    checkpoint_id: &str,
+    event_type: &str,
+) -> Result<String> {
+    conn.query_row(
+        "SELECT id
+         FROM event_log
+         WHERE record_id = ?1 AND event_type = ?2
+         ORDER BY rowid DESC
+         LIMIT 1",
+        rusqlite::params![checkpoint_id, event_type],
+        |row| row.get(0),
+    )
+    .with_context(|| {
+        format!("checkpoint {checkpoint_id} did not append expected event {event_type}")
+    })
+}
+
+fn ensure_non_empty_operation_id(operation_id: &str) -> Result<()> {
+    if operation_id.trim().is_empty() {
+        bail!("operation_id is required");
+    }
+    Ok(())
+}
+
 pub fn lifecycle_transaction_artifact_count(paths: &MemoryPaths) -> Result<usize> {
     Ok(lifecycle_transaction_artifacts(paths)?.len())
 }
 
-fn validate_legacy_canonical_target(target: &MemoryRecord) -> Result<()> {
+fn validate_canonical_lifecycle_target(
+    target: &MemoryRecord,
+    evaluated_at: OffsetDateTime,
+) -> Result<()> {
     if target.destination != MemoryDestination::Repo {
         bail!(
             "record {} cannot be changed canonically because destination {} is not repo",
@@ -1002,26 +1471,73 @@ fn validate_legacy_canonical_target(target: &MemoryRecord) -> Result<()> {
             target.id
         );
     }
-    if target.status != MemoryStatus::Active {
+    if !crate::evaluate_current_assertion(
+        &target.id,
+        target.status,
+        target.lane,
+        &target.retention,
+        evaluated_at,
+        Vec::new(),
+    )?
+    .is_current
+    {
         bail!(
-            "record {} cannot be changed canonically because status {} is not active",
-            target.id,
-            target.status.as_str()
+            "record {} cannot be changed canonically because it is not a current assertion",
+            target.id
         );
     }
     Ok(())
 }
 
-pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult> {
-    paths.validate_runtime_identity()?;
-    init_bundle_after_migration(paths, force, false)
+fn open_current_shared_database(paths: &MemoryPaths) -> Result<Connection> {
+    let conn = db::open_database(&paths.shared_db_path).with_context(|| {
+        format!(
+            "failed to open current shared database {}",
+            paths.shared_db_path.display()
+        )
+    })?;
+    db::init_database(&conn).with_context(|| {
+        format!(
+            "failed to initialize current shared database {}",
+            paths.shared_db_path.display()
+        )
+    })?;
+    Ok(conn)
 }
 
-fn init_bundle_after_migration(
-    paths: &MemoryPaths,
-    force: bool,
-    migrated: bool,
-) -> Result<InitBundleResult> {
+fn open_disposable_index_if_current(paths: &MemoryPaths) -> Result<Option<Connection>> {
+    if !paths.index_db_path.is_file() {
+        return Ok(None);
+    }
+    match open_current_index_database(paths) {
+        Ok(conn) => Ok(Some(conn)),
+        Err(error) if schema::is_unsupported_schema_error(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn open_current_index_database(paths: &MemoryPaths) -> Result<Connection> {
+    let conn = db::open_database(&paths.index_db_path).with_context(|| {
+        format!(
+            "failed to open current disposable index {}",
+            paths.index_db_path.display()
+        )
+    })?;
+    db::init_database(&conn).with_context(|| {
+        format!(
+            "failed to initialize current disposable index {}",
+            paths.index_db_path.display()
+        )
+    })?;
+    Ok(conn)
+}
+
+pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult> {
+    paths.validate_runtime_identity()?;
+    init_current_bundle(paths, force)
+}
+
+fn init_current_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult> {
     fs::create_dir_all(&paths.memory_dir).with_context(|| {
         format!(
             "failed to create memory directory {}",
@@ -1059,7 +1575,7 @@ fn init_bundle_after_migration(
         )
     })?;
 
-    if paths.config_path.exists() && !force && !migrated {
+    if paths.config_path.exists() && !force {
         bail!(
             "{} already exists; pass --force to overwrite it",
             paths.config_path.display()
@@ -1087,8 +1603,7 @@ fn init_bundle_after_migration(
 }
 
 fn default_config() -> &'static str {
-    r#"version = 1
-scope_kind = "repo"
+    r#"scope_kind = "repo"
 
 [exports]
 okf = "exports/okf"

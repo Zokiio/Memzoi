@@ -59,14 +59,13 @@ fn direct_structured_materialization_is_the_only_direct_attested_record_route() 
 }
 
 #[test]
-fn legacy_direct_proposals_stay_proposal_compatible_without_direct_materialization()
--> anyhow::Result<()> {
+fn proposal_route_stays_compatible_without_direct_materialization() -> anyhow::Result<()> {
     let (_temp, service) = initialized_git_service()?;
     let accepted = service.propose_memory_with_options(
         "agent:route-parity",
         memory_draft(
-            "Accepted legacy direct proposal",
-            "The compatibility route remains an approved proposal until explicit legacy apply.",
+            "Accepted direct proposal",
+            "The proposal route remains approved until explicit apply.",
         ),
         ProposeOptions {
             approval_override: None,
@@ -83,7 +82,7 @@ fn legacy_direct_proposals_stay_proposal_compatible_without_direct_materializati
     );
     assert_eq!(accepted.record, None);
     assert!(!accepted.applied);
-    assert_no_direct_canonical_record(&service, "accepted legacy direct proposal")?;
+    assert_no_direct_canonical_record(&service, "accepted direct proposal")?;
 
     for (label, sensitivity) in [
         ("local", OkfProposalSensitivity::LocalOnly),
@@ -91,7 +90,7 @@ fn legacy_direct_proposals_stay_proposal_compatible_without_direct_materializati
         ("unknown", OkfProposalSensitivity::Unknown),
     ] {
         let mut candidate = memory_draft(
-            &format!("{label} legacy proposal"),
+            &format!("{label} direct proposal"),
             "This candidate must remain outside repository canonical memory.",
         );
         candidate.sensitivity = sensitivity;
@@ -113,15 +112,14 @@ fn legacy_direct_proposals_stay_proposal_compatible_without_direct_materializati
 }
 
 #[test]
-fn rebuild_and_open_recovery_preserve_existing_legacy_records_without_attestation()
--> anyhow::Result<()> {
+fn rebuild_and_open_recovery_preserve_existing_unattested_records() -> anyhow::Result<()> {
     let (_temp, service) = initialized_git_service()?;
     let paths = service.paths().clone();
     let proposal = service.propose_memory(
         "agent:route-parity",
         memory_draft(
-            "Legacy record for rebuild",
-            "Rebuild and recovery may read this pre-existing compatibility record only.",
+            "Unattested record for rebuild",
+            "Rebuild and recovery preserve current records created outside materialization.",
         ),
     )?;
     service.validate_proposal(&proposal.id)?;
@@ -134,7 +132,7 @@ fn rebuild_and_open_recovery_preserve_existing_legacy_records_without_attestatio
         read_okf_record_files(paths.records_dir())?[0]
             .materialization
             .is_none(),
-        "legacy proposal apply must not invent a materialization decision before rebuild",
+        "proposal apply must not invent a materialization decision before rebuild",
     );
 
     drop(service);
@@ -144,7 +142,7 @@ fn rebuild_and_open_recovery_preserve_existing_legacy_records_without_attestatio
     assert_eq!(
         fs::read(&record_path)?,
         before_bytes,
-        "rebuild or open-time recovery must not rewrite an existing legacy record",
+        "rebuild or open-time recovery must not rewrite an existing unattested record",
     );
     assert_eq!(
         git_status(&paths.project_root)?,
@@ -213,7 +211,17 @@ fn materialization_candidate(
             created: "2026-07-16T00:00:00Z".to_owned(),
             updated: None,
             supersedes_id: None,
-            expires_at: None,
+            retention: memzoi_core::retention_facts_for_creation(
+                MemoryLane::Semantic,
+                "2026-07-16T00:00:00Z",
+                None,
+                None,
+            )?,
+            origin: memzoi_core::OriginDescriptor::new(
+                format!("repository-materialization:test:{concept_id}"),
+                memzoi_core::OriginRoute::RepositoryMaterialization,
+            ),
+            lineage: None,
             proposal_id: None,
             capture: None,
         },

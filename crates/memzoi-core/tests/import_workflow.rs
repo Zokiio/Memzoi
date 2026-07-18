@@ -8,7 +8,8 @@ use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
 const MIXED_MANIFEST: &str = r#"
-version: memzoi/import-v1
+schema: memzoi/import
+origin_key: test-import:mixed-manifest
 sources:
   - path: imports/not-read.yml
 candidates:
@@ -250,7 +251,7 @@ fn wrong_or_stale_plan_id_is_a_zero_write_guard() -> anyhow::Result<()> {
 }
 
 #[test]
-fn an_existing_pending_proposal_is_an_exact_duplicate() -> anyhow::Result<()> {
+fn an_exact_import_origin_replays_its_recorded_outcomes() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let service = initialized_service(&temp)?;
     let document = parse_import_document(MIXED_MANIFEST)?;
@@ -264,9 +265,13 @@ fn an_existing_pending_proposal_is_an_exact_duplicate() -> anyhow::Result<()> {
     let second = service.plan_import("test", document)?;
     let second_json = serde_json::to_value(&second)?;
     for index in 0..=2 {
-        assert_eq!(action_kind(candidate(&second_json, index)), "duplicate");
+        assert_eq!(action_kind(candidate(&second_json, index)), "replay");
+        assert_eq!(
+            candidate(&second_json, index)["action"]["outcome"],
+            "created"
+        );
         assert!(
-            !candidate(&second_json, index)["duplicates"]
+            candidate(&second_json, index)["duplicates"]
                 .as_array()
                 .unwrap()
                 .is_empty()
@@ -286,15 +291,16 @@ fn malformed_documents_fail_and_non_safe_repo_candidates_are_explicitly_blocked(
     let before_records = file_names(&service.paths().records_dir())?;
 
     for manifest in [
-        "version: memzoi/import-v1\ncandidates: [",
-        "version: memzoi/import-v1\nsources:\n  - path: ../secret.yml\ncandidates: []",
-        "version: memzoi/import-v1\nunknown: true\nsources: []\ncandidates: []",
+        "schema: incompatible/import\norigin_key: invalid\nsources: []\ncandidates: []",
+        "schema: memzoi/import\norigin_key: test-import:invalid-path\nsources:\n  - path: ../secret.yml\ncandidates: []",
+        "schema: memzoi/import\norigin_key: test-import:unknown-field\nunknown: true\nsources: []\ncandidates: []",
     ] {
         assert!(parse_import_document(manifest).is_err());
     }
 
     let repo_unsafe = r#"
-version: memzoi/import-v1
+schema: memzoi/import
+origin_key: test-import:unsafe-repo
 sources:
   - path: imports/IMPORT-SOURCE-SENTINEL.yml
 candidates:
@@ -364,7 +370,8 @@ fn omitted_repo_content_class_is_blocked_before_import_writes() -> anyhow::Resul
     let service = initialized_service(&temp)?;
     let document = parse_import_document(
         r#"
-version: memzoi/import-v1
+schema: memzoi/import
+origin_key: test-import:omitted-class
 sources:
   - ref: issue://101#classification
 candidates:
@@ -392,7 +399,8 @@ fn mixed_unsafe_repo_manifest_omits_sources_but_keeps_local_and_session_writes()
     let temp = tempdir()?;
     let service = initialized_git_service(&temp)?;
     let manifest = r#"
-version: memzoi/import-v1
+schema: memzoi/import
+origin_key: test-import:mixed-unsafe
 sources:
   - ref: issue://41#mixed-route-provenance
 candidates:
@@ -466,7 +474,7 @@ fn every_non_repo_safe_import_sensitivity_is_blocked() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let service = initialized_service(&temp)?;
         let manifest = format!(
-            "version: memzoi/import-v1\nsources:\n  - ref: issue://41\ncandidates:\n  - destination: repo\n    reason: route parity\n    type: fact\n    title: Blocked import candidate\n    body: blocked body\n    sensitivity: {sensitivity}\n"
+            "schema: memzoi/import\norigin_key: test-import:sensitivity-{sensitivity}\nsources:\n  - ref: issue://41\ncandidates:\n  - destination: repo\n    reason: route parity\n    type: fact\n    title: Blocked import candidate\n    body: blocked body\n    sensitivity: {sensitivity}\n"
         );
         let plan = service.plan_import("test", parse_import_document(&manifest)?)?;
         let value = serde_json::to_value(&plan)?;

@@ -9,14 +9,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MemoryDestination, MemoryDestinationClassification, MemoryDestinationPolicy, MemoryLane,
-    MemoryType, MemoryWriteRoute, OkfProposalSensitivity, OkfProposalSource,
-    RepositoryContentClass, ScopeKind, okf::OkfCreateProposalDraft,
+    MemoryType, MemoryWriteRoute, OkfProposalSensitivity, OkfProposalSource, OriginDescriptor,
+    OriginRoute, RepositoryContentClass, ScopeKind, okf::OkfCreateProposalDraft,
+    retention_facts_for_creation,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportDocument {
-    pub version: String,
+    pub schema: String,
+    pub origin_key: String,
     pub sources: Vec<OkfProposalSource>,
     pub candidates: Vec<ImportCandidateInput>,
 }
@@ -61,6 +63,7 @@ fn default_scope_kind() -> ScopeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportCandidate {
     pub index: usize,
+    pub origin_key: String,
     pub classification: MemoryDestinationClassification,
     pub policy: MemoryDestinationPolicy,
     #[serde(rename = "type")]
@@ -95,6 +98,12 @@ pub struct ImportDuplicate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImportCandidateAction {
+    Replay {
+        outcome: crate::OriginOutcomeKind,
+        destination: Option<MemoryDestination>,
+        record_id: Option<String>,
+        proposal_id: Option<String>,
+    },
     CreateProposal {
         proposal_id: String,
         #[serde(serialize_with = "serialize_posix_relative_path")]
@@ -142,6 +151,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportPlanCandidate {
     pub index: usize,
+    pub origin_key: String,
     pub classification: MemoryDestinationClassification,
     pub policy: MemoryDestinationPolicy,
     #[serde(rename = "type")]
@@ -167,12 +177,14 @@ pub struct ImportPlanSummary {
     pub duplicates: usize,
     pub discarded: usize,
     pub needs_review: usize,
+    pub replays: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportPlan {
     pub schema: String,
     pub plan_id: String,
+    pub origin_key: String,
     pub sources: Vec<OkfProposalSource>,
     pub summary: ImportPlanSummary,
     pub candidates: Vec<ImportPlanCandidate>,
@@ -219,8 +231,11 @@ pub fn parse_import_document(input: &str) -> Result<ImportDocument> {
 }
 
 pub(crate) fn validate_document(doc: &ImportDocument) -> Result<()> {
-    if doc.version != "memzoi/import-v1" {
-        bail!("unsupported import manifest version {:?}", doc.version);
+    if doc.schema != "memzoi/import" {
+        bail!("artifact does not match the current Memzoi import format");
+    }
+    if doc.origin_key.trim().is_empty() || doc.origin_key != doc.origin_key.trim() {
+        bail!("import manifest origin_key must be a non-empty trimmed string");
     }
 
     if doc.sources.is_empty() {
@@ -268,7 +283,7 @@ pub(crate) fn validate_document(doc: &ImportDocument) -> Result<()> {
     }
 
     for (i, raw) in doc.candidates.iter().enumerate() {
-        normalize_candidate(i, raw)?;
+        normalize_candidate(i, raw, &doc.origin_key)?;
     }
     Ok(())
 }
@@ -312,11 +327,15 @@ pub(crate) fn normalize_document(doc: &ImportDocument) -> Result<Vec<ImportCandi
     doc.candidates
         .iter()
         .enumerate()
-        .map(|(i, c)| normalize_candidate(i, c))
+        .map(|(i, c)| normalize_candidate(i, c, &doc.origin_key))
         .collect()
 }
 
-fn normalize_candidate(index: usize, raw: &ImportCandidateInput) -> Result<ImportCandidate> {
+fn normalize_candidate(
+    index: usize,
+    raw: &ImportCandidateInput,
+    origin_key: &str,
+) -> Result<ImportCandidate> {
     let title = raw.title.trim().to_owned();
     if title.is_empty() {
         bail!("candidate {index} title is required");
@@ -379,6 +398,7 @@ fn normalize_candidate(index: usize, raw: &ImportCandidateInput) -> Result<Impor
 
     Ok(ImportCandidate {
         index,
+        origin_key: format!("{origin_key}:{index}"),
         classification,
         policy,
         memory_type,
@@ -432,6 +452,7 @@ pub(crate) fn build_plan(
     existing: &[ExistingDuplicate],
     pending_root: &Path,
     reserved_proposal_ids: &BTreeSet<String>,
+    origin_replays: &BTreeMap<String, crate::OriginOutcome>,
 ) -> Result<ImportPlan> {
     validate_document(doc)?;
     let normalized = normalize_document(doc)?;
@@ -483,16 +504,20 @@ pub(crate) fn build_plan(
     };
     let mut prior: BTreeMap<String, usize> = BTreeMap::new();
     for c in normalized {
+        let replay = origin_replays.get(&c.origin_key);
         let non_repo_safe = c.classification.destination == MemoryDestination::Repo
             && c.sensitivity != OkfProposalSensitivity::RepoSafe;
         let blocked_repo =
             c.classification.destination == MemoryDestination::Repo && has_blocked_repo_candidate;
-        let mut duplicates = if blocked_repo {
+        let mut duplicates = if blocked_repo || replay.is_some() {
             Vec::new()
         } else {
             by_hash.get(&c.content_hash).cloned().unwrap_or_default()
         };
-        if !blocked_repo && let Some(index) = prior.get(&c.content_hash).copied() {
+        if !blocked_repo
+            && replay.is_none()
+            && let Some(index) = prior.get(&c.content_hash).copied()
+        {
             duplicates.push(ImportDuplicate {
                 kind: ImportDuplicateKind::EarlierCandidate,
                 id: format!("candidate-{index}"),
@@ -503,7 +528,15 @@ pub(crate) fn build_plan(
         duplicates.sort_by(|a, b| duplicate_sort_key(a).cmp(&duplicate_sort_key(b)));
         duplicates.dedup_by(|a, b| a.kind == b.kind && a.id == b.id);
 
-        let action = if blocked_repo {
+        let action = if let Some(outcome) = replay {
+            summary.replays += 1;
+            ImportCandidateAction::Replay {
+                outcome: outcome.outcome,
+                destination: outcome.destination,
+                record_id: outcome.record_id.clone(),
+                proposal_id: outcome.proposal_id.clone(),
+            }
+        } else if blocked_repo {
             summary.needs_review += 1;
             ImportCandidateAction::Blocked {
                 reason: if non_repo_safe {
@@ -582,6 +615,7 @@ pub(crate) fn build_plan(
         };
         candidates.push(ImportPlanCandidate {
             index: c.index,
+            origin_key: c.origin_key,
             classification,
             policy: c.policy,
             memory_type: c.memory_type,
@@ -599,8 +633,9 @@ pub(crate) fn build_plan(
     }
 
     let mut plan = ImportPlan {
-        schema: "memzoi/import-plan-v1".to_owned(),
+        schema: "memzoi/import-plan".to_owned(),
         plan_id: String::new(),
+        origin_key: doc.origin_key.clone(),
         sources,
         summary,
         candidates,
@@ -666,8 +701,8 @@ pub(crate) fn proposal_draft(
     timestamp: &str,
     proposal_id: &str,
     sources: &[OkfProposalSource],
-) -> OkfCreateProposalDraft {
-    OkfCreateProposalDraft {
+) -> Result<OkfCreateProposalDraft> {
+    Ok(OkfCreateProposalDraft {
         proposal_id: proposal_id.to_owned(),
         memory_type: candidate.memory_type,
         lane: candidate.lane,
@@ -684,7 +719,10 @@ pub(crate) fn proposal_draft(
         sensitivity: candidate.sensitivity,
         content_class: candidate.content_class,
         capture: None,
-    }
+        retention: retention_facts_for_creation(candidate.lane, timestamp, None, None)?,
+        origin: OriginDescriptor::new(&candidate.origin_key, OriginRoute::Import),
+        lineage: None,
+    })
 }
 
 fn repo_sensitivity_block_reason(sensitivity: OkfProposalSensitivity) -> String {

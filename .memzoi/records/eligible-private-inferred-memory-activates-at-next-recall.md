@@ -1,4 +1,11 @@
 ---
+id: eligible-private-inferred-memory-activates-at-next-recall
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:eligible-private-inferred-memory-activates-at-next-recall
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Eligible private inferred memory activates at next recall"

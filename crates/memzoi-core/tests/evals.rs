@@ -2,8 +2,9 @@ use std::fs;
 
 use memzoi_core::{
     ContextPackInput, InitRequest, MemoryDraft, MemoryLane, MemoryPaths, MemoryService,
-    MemoryStatus, MemoryType, OkfProposalSensitivity, OkfRecordFile, PrecheckInput,
-    RepositoryContentClass, ScopeKind, SearchInput, Visibility, render_okf_record_markdown,
+    MemoryStatus, MemoryType, OkfProposalSensitivity, OkfRecordFile, OriginDescriptor, OriginRoute,
+    PrecheckInput, RepositoryContentClass, RetentionFacts, ScopeKind, SearchInput, Visibility,
+    render_okf_record_markdown,
 };
 use tempfile::TempDir;
 
@@ -227,7 +228,16 @@ fn write_record(paths: &MemoryPaths, record: FixtureRecord) -> anyhow::Result<()
         created: "2026-07-16T00:00:00Z".to_owned(),
         updated: None,
         supersedes_id: None,
-        expires_at: None,
+        retention: RetentionFacts {
+            occurred_at: None,
+            started_at: None,
+            last_continued_at: None,
+            closed_at: None,
+            explicit_expires_at: None,
+            episodic_extension: None,
+        },
+        origin: OriginDescriptor::new(format!("eval:{id}"), OriginRoute::RepositoryMaterialization),
+        lineage: None,
         proposal_id: None,
         capture: None,
         materialization: None,

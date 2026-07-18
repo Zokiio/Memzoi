@@ -8,7 +8,7 @@
 
 ## Summary
 
-Memzoi will add a versioned `memzoi/capture-plan-v1` contract before the
+Memzoi will add a versioned `memzoi/capture-plan` contract before the
 existing classified-import and proposal workflows. A capture planner reads
 only sources explicitly named by the caller, forms typed candidates with
 candidate-scoped evidence, classifies their destination and sensitivity, and
@@ -41,8 +41,8 @@ record.
 
 Memzoi 0.3.1 already has the downstream governance boundary needed by capture:
 
-- `memzoi/import-v1` accepts already-formed, explicitly classified candidates.
-- `memzoi/import-plan-v1` is deterministic and planning is intended to be
+- `memzoi/import` accepts already-formed, explicitly classified candidates.
+- `memzoi/import-plan` is deterministic and planning is intended to be
   mutation-free.
 - destination policy maps `repo` to a file-backed proposal, `local` and
   `session` to private runtime routes, and `discard` and `needs_review` to no
@@ -84,7 +84,7 @@ fills that gap without weakening the review boundary.
 - A new memory destination, a hosted service, provider-specific SDKs in core,
   or credentials in project files.
 - Archive unpacking, OCR, image/audio extraction, lossy text decoding, or
-  arbitrary URL fetching in `capture-plan-v1`.
+  arbitrary URL fetching in `capture-plan`.
 - Cryptographic reviewer authentication. `plan_id` and `review_id` provide
   content identity and stale-input detection, not signatures or identity
   proof.
@@ -121,8 +121,8 @@ explicit capture request
   -> guarded source snapshots
   -> extractor request/response
   -> host validation and classification
-  -> capture-plan-v1 (no writes)
-  -> human review -> capture-review-v1
+  -> capture-plan (no writes)
+  -> human review -> capture-review
   -> explicit CLI route apply
        repo    -> pending OKF proposal -> review -> explicit canonical apply
        local   -> private runtime record
@@ -131,7 +131,7 @@ explicit capture request
 ```
 
 Capture is a distinct stage before import. It does not extend
-`memzoi/import-v1` to read source files, and it does not make the extractor a
+`memzoi/import` to read source files, and it does not make the extractor a
 writer. This keeps already-structured import stable and makes the new trust
 boundary visible.
 
@@ -148,7 +148,7 @@ affected local/session actions to `needs_review`; it does not create state.
 
 ### Explicit source contract
 
-The caller supplies `memzoi/capture-request-v1`. There are no default sources.
+The caller supplies `memzoi/capture-request`. There are no default sources.
 An empty source list is invalid. Source order is preserved because it is an
 extractor input.
 
@@ -158,7 +158,7 @@ and pass prohibited-data checks before they can appear in output. If a locator
 itself is sensitive, blocked output uses only the source ordinal and a stable
 redacted code.
 
-`capture-plan-v1` recognizes these tagged locators:
+`capture-plan` recognizes these tagged locators:
 
 - `project_path`: one POSIX project-relative regular file;
 - `project_directory`: one explicit project-relative directory with a bounded,
@@ -181,7 +181,7 @@ changing candidate semantics. Recognizing a locator does not require an
 implementation to support it; unsupported kinds fail closed.
 
 Remote URLs, chat text, implicit directories, globs, and symbolic links are
-not v1 source locators. A `supplied_bytes` plan stores hashes and allowed
+not alternate source locator formats. A `supplied_bytes` plan stores hashes and allowed
 evidence spans, not the whole payload; route apply requires the exact bytes to
 be supplied again and rejects a hash mismatch before writing. Current OKF
 proposal `url` and `ref` provenance remain valid downstream fields, but they
@@ -190,7 +190,7 @@ do not grant capture permission.
 Example request:
 
 ```yaml
-schema: memzoi/capture-request-v1
+schema: memzoi/capture-request
 sources:
   - source_id: auth-adr
     locator:
@@ -212,7 +212,7 @@ sources:
       kind: project_directory
       path: docs/adr
       recursive: false
-      ignore_policy: git-v1
+      ignore_policy: git
       include: ["*.md"]
   - source_id: reviewed-diff
     locator:
@@ -370,13 +370,13 @@ Changing a source, edit, or classification so that the effective data class
 changes produces a different plan or review identity. Route apply repeats this
 classification and fails closed before writing.
 
-### Example `capture-plan-v1`
+### Example `capture-plan`
 
 This example is abbreviated only by replacing hashes with illustrative values;
 an implementation returns full hashes.
 
 ```yaml
-schema: memzoi/capture-plan-v1
+schema: memzoi/capture-plan
 plan_id: capture_4a26...
 status: ready
 data_class: repo_safe
@@ -389,10 +389,9 @@ sources:
     byte_length: 842
     source_content_hash: blake3:91bf...
 safeguards:
-  policy_version: memzoi/capture-safeguards-v1
   configuration_hash: blake3:6d73...
 preconditions:
-  policy_version: memzoi/destination-policy-v1
+  policy_digest: blake3:90f1...
   candidates:
     candidate_7098...:
       duplicate_match_set_hash: blake3:ee20...
@@ -402,8 +401,7 @@ preconditions:
 extractor:
   kind: deterministic
   id: memzoi-markdown
-  version: 1.0.0
-  configuration_hash: blake3:2718...
+  implementation_digest: blake3:2718...
 candidates:
   - claim_id: claim_61c2...
     candidate_id: candidate_7098...
@@ -433,8 +431,7 @@ candidates:
     extraction:
       kind: deterministic
       id: memzoi-markdown
-      version: 1.0.0
-      configuration_hash: blake3:2718...
+      implementation_digest: blake3:2718...
     confidence: 0.96
     classification:
       destination: repo
@@ -462,10 +459,10 @@ or generation time are outside the plan and outside its identity.
 ### Review selections and edits
 
 Route apply never treats every planned action as implicitly approved. A human
-records one strict `memzoi/capture-review-v1` artifact:
+records one strict `memzoi/capture-review` artifact:
 
 ```yaml
-schema: memzoi/capture-review-v1
+schema: memzoi/capture-review
 review_id: review_8b13...
 plan_id: capture_4a26...
 reviewed_by: maintainer:zoki
@@ -539,7 +536,7 @@ are not reported as rejections.
 ```text
 "capture_" + hex(
   BLAKE3(
-    "memzoi/capture-plan-v1\0" ||
+    "memzoi/capture-plan\0" ||
     RFC8785_JCS(identity_payload)
   )
 )
@@ -605,7 +602,7 @@ inventory. Each candidate records only state capable of changing its action:
 
 ```yaml
 preconditions:
-  policy_version: memzoi/destination-policy-v1
+  policy_digest: blake3:90f1...
   candidates:
     candidate_7098...:
       duplicate_match_set_hash: blake3:...
@@ -633,7 +630,7 @@ exact pinned bytes; their output must be byte-equivalent. A future
 non-deterministic profile must provide a trusted issuance attestation instead.
 Apply always resolves and hashes the non-secret allow-listed profile
 definition. A review edit is validated and fingerprinted through
-`capture-review-v1`; it does not masquerade as extractor output.
+`capture-review`; it does not masquerade as extractor output.
 
 ### Deterministic extractor first
 
@@ -658,7 +655,7 @@ extractor profile in the first tracer:
 
 | Scope | Required capability |
 | --- | --- |
-| Core v1 contract | `capture-plan-v1`, `capture-review-v1`, exact evidence, plan/review identity, data classification, targeted stale checks, safeguards, and governed routing. |
+| Core contract | `capture-plan`, `capture-review`, exact evidence, plan/review identity, data classification, targeted stale checks, safeguards, and governed routing. |
 | Required v0.4 profile | One explicit `project_path`, UTF-8 Markdown, and the deterministic Markdown extractor. |
 | Extension profiles | `project_directory`, instruction and ADR directories, supplied Git diff/bytes, `git_blob`, `git_range`, and model-backed extraction. |
 
@@ -673,7 +670,7 @@ a one-shot, out-of-process adapter using strict JSON on stdin/stdout:
 
 ```json
 {
-  "schema": "memzoi/extractor-request-v1",
+  "schema": "memzoi/extractor-request",
   "request_id": "request_...",
   "sources": [
     {
@@ -683,13 +680,13 @@ a one-shot, out-of-process adapter using strict JSON on stdin/stdout:
       "content": "...bounded, preflighted UTF-8 source bytes..."
     }
   ],
-  "output_schema": "memzoi/extractor-response-v1"
+  "output_schema": "memzoi/extractor-response"
 }
 ```
 
 ```json
 {
-  "schema": "memzoi/extractor-response-v1",
+  "schema": "memzoi/extractor-response",
   "request_id": "request_...",
   "extractor": {
     "id": "example-model-adapter",
@@ -803,11 +800,11 @@ policy make them routeable. Mixed reviewed writes are transactional.
 - A source over a limit is rejected; it is never silently truncated.
 - Size is checked before allocation and while streaming so misleading metadata
   cannot bypass the limit.
-- v1 never decompresses or recursively expands content.
+- The current extractor never decompresses or recursively expands content.
 - Timeouts and process-output limits terminate a model adapter and block the
   batch. Partial responses are discarded.
 
-The proposed `memzoi/capture-safeguards-v1` profile is explicit in every plan:
+The current capture safeguards configuration digest is explicit in every plan:
 
 | Resource | Default | Hard ceiling |
 | --- | ---: | ---: |
@@ -885,7 +882,7 @@ files whose legitimate content consists of agent instructions.
 
 ### Unsupported content
 
-The v1 Markdown path accepts UTF-8 text without NUL bytes. Invalid UTF-8,
+The current Markdown path accepts UTF-8 text without NUL bytes. Invalid UTF-8,
 binary-looking content, a media-type mismatch, unsupported locator/media type,
 or malformed adapter response produces a blocked plan with no extractor
 fallback and no lossy decoding. The error must not echo source content.
@@ -907,7 +904,7 @@ decision. Runtime schemas keep the same provenance for local/session cited
 recall; session routing must not silently rewrite a reviewed capture draft.
 
 For `repo` candidates, #49 adds optional capture provenance to the pending OKF
-proposal packet. That block contains `capture-plan-v1`, `capture-review-v1`,
+proposal packet. That block contains `capture-plan`, `capture-review`,
 claim/candidate/reviewed-candidate IDs, exact repo-safe review evidence,
 extraction identity, confidence, classifications, and the review decision. The
 existing `sources` projection remains populated for older readers. A resolved
@@ -938,7 +935,7 @@ citations expose source/span/hash plus extractor, plan, and review identities.
 Older records without the block remain valid. This extension does not bypass
 the proposal packet or canonical apply.
 
-MCP may accept a capture request and return `capture-plan-v1`. It must not
+MCP may accept a capture request and return `capture-plan`. It must not
 accept route/apply flags, write a plan file, create proposals or runtime rows,
 approve proposals, or apply canonical records. It may return a `private` plan
 only through an explicitly authorised local-client profile whose request and
@@ -1007,19 +1004,17 @@ A model-backed extractor cannot become the default until it clears the same
 corpus and hard gates and materially improves accepted candidate quality or
 review burden over deterministic extraction.
 
-## Migration and compatibility
+## Schema cutovers
 
-- This is an additive contract. Existing `memzoi/import-v1`,
-  `memzoi/import-plan-v1`, session-end documents, OKF records, and proposals
-  keep their current meaning.
-- No existing record or proposal is migrated merely because capture exists.
-- Capture-generated repo proposals add an optional versioned provenance block;
-  non-capture proposals remain valid. Old readers may use the existing
-  `sources` projection, while capture-aware readers validate the full block.
-- The v1 request, extractor, plan, review, and optional OKF evidence schemas
-  reject unknown fields within their versioned blocks. A breaking field,
-  changed span/hash semantics, relaxed source authority, or incompatible
-  locator requires a new schema version.
+- Before v1.0, capture, import, session-end, OKF record, and proposal formats
+  are hard cutovers. Current readers reject older schemas; they do not infer
+  defaults, accept aliases, dual-write, or migrate artifacts automatically.
+- Capture-generated repo proposals carry the current provenance
+  block. Every reader validates that block directly.
+- The current request, plan, review, and OKF evidence schemas reject unknown
+  fields. A breaking field, changed span/hash semantics, relaxed source
+  authority, or incompatible locator updates the one current shape and makes
+  older artifacts unsupported.
 - CLI and MCP share core parsing, normalization, safeguard, and fingerprint
   code. Transport envelopes do not redefine the plan.
 - A plan created under a different safeguard, extractor, destination policy,
@@ -1039,7 +1034,7 @@ review burden over deterministic extraction.
 
 ### Make import read files
 
-Rejected. `import-v1` has a useful, narrow promise: callers supply already
+Rejected. The classified import contract has a useful, narrow promise: callers supply already
 formed candidates. Mixing file IO and extraction into it would make its current
 plan identity and trust boundary ambiguous.
 

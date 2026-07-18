@@ -21,7 +21,7 @@ Memzoi deliberately separates shared Git truth from local runtime continuity:
 Transitional proposal commands remain present in the current implementation and
 may still create a pending file-backed proposal at
 `.memzoi/proposals/pending/<proposal-id>.md`. They are not a pre-1.0
-compatibility commitment and may be versioned or removed without an adapter.
+compatibility commitment and may be changed or removed without an adapter.
 That packet is a review artifact, not a canonical record. New direct repository
 materialization does not require or create a proposal packet: an explicitly
 authorized structured candidate becomes an ordinary working-tree change under
@@ -88,9 +88,10 @@ The following categories are excluded from canonical repo records:
 
 Proposal sensitivity expresses these boundaries as `repo-safe`, `local-only`,
 `sensitive`, `secret`, `raw-transcript`, `private-personal-data`,
-`temporary-state`, or `unknown`. Omitted DB/file values resolve to `unknown`;
-only `repo-safe` can pass canonical apply. This fail-closed behavior does not
-promise continued admission of older pre-1.0 artifacts.
+`temporary-state`, or `unknown`. Current-format proposal files require an
+explicit sensitivity and content class. Interactive proposal inputs may
+represent an omitted sensitivity as `unknown`; only an explicit `repo-safe`
+classification can pass canonical apply.
 
 Do not put these categories in `.memzoi/records/*.md` or a repo-shared pending proposal.
 A blocked sensitivity is not made safe by auto-approval. Classify or sanitize
@@ -105,35 +106,45 @@ runtime continuity. `memzoi session-end` accepts explicit structured input
 and free-text checkpoint bodies are not an extraction source. See
 [OKF profile](./okf-profile.md) for the file-native proposal/record details.
 
-## Authoritative read-time expiry
+## Retention and current assertions
 
-An active record with `expires`/`expires_at` stops participating in normal
-memory reads when the evaluation clock reaches its expiry. The boundary is
-inclusive: a record is expired when `now >= expires_at`. This rule is shared by
-repo, local, and session search; context and handoff packs (including path-only
-candidates); precheck; local lists; checkpoint list/show; and generated OKF,
-`AGENTS.memory.md`, and `CLAUDE.memory.md` exports.
+Every current-format record carries required typed `retention` facts. Retention is
+the lane-specific temporal decision only; it returns `current` or `query_only`
+plus an effective boundary and reason. The complete ordinary-use decision is
+the **current assertion**:
 
-Expiry values use one of two exact forms:
+```text
+active lifecycle status
+AND retention is current
+AND applicability is valid
+AND no conflict suppression
+AND no quarantine or safety suppression
+```
 
-- `YYYY-MM-DD` means `00:00:00Z` at the start of that date; or
-- an RFC 3339 timestamp with `Z` or an explicit numeric UTC offset.
+Search, context, handoff, precheck, exports, local/checkpoint reads, duplicate
+analysis, and conflict analysis all use that shared boundary before ranking or
+limiting. A temporally current record can therefore still be excluded by
+another current-assertion dimension. `include_inactive` does not grant history
+access.
 
-Offsets describe an instant, so `2026-07-10T14:00:00+02:00` expires at the
-same moment as `2026-07-10T12:00:00Z`. Timestamps without a timezone and
-invalid calendar values are rejected rather than treated as unexpired.
-Production services evaluate against `SystemClock`; embedders and tests can
-inject one clock through `MemoryService::open_with_clock` or
-`MemoryService::open_paths_with_clock`, ensuring every surface in one service
-uses the same instant.
+The current retention policy applies these boundaries:
 
-Expiry is a read-time eligibility decision, not an implicit lifecycle write.
-Memzoi leaves the indexed status and canonical `.memzoi/records/*.md` file
-unchanged during search, rebuild, context, precheck, and export. Use
-`memzoi expiry <record-id>` (or MCP `inspect_memory_expiry`) to retrieve the
-record by ID, see the normalized effective instant, and explain why normal
-reads excluded it. Any renewal or status transition remains a separately
-reviewed canonical lifecycle action.
+- session: the earliest of closure, 24 hours after the latest continuation or
+  start, seven days after the original start, and explicit expiry;
+- episodic: 30 days after occurrence, shortened by explicit expiry; extension
+  facts remain unsupported until #121 provides exact owner-authorized creation
+  and verification; and
+- semantic and procedural: no age TTL, while explicit expiry still applies.
+
+The exact boundary is `query_only`. All timestamps are RFC 3339 instants with
+`Z` or an explicit numeric UTC offset. Invalid facts fail with an error naming
+the record; they are never treated as an ordinary non-current result.
+
+Retention evaluation is not an implicit lifecycle write. Memzoi leaves the
+record and canonical `.memzoi/records/*.md` file unchanged during recall. Use
+`memzoi expiry <record-id>` (or MCP `inspect_memory_expiry`) to retrieve a
+record by ID and inspect its retention decision, current assertion, and
+exclusions. Renewal and status transitions remain explicit lifecycle actions.
 
 ## Command boundary
 
@@ -149,13 +160,13 @@ command's JSON output, event, or database row does not change what it writes.
 |  | `memzoi proposal-files apply <proposal-id>` | Explicitly apply one valid repo-safe OKF proposal, update the runtime search index in the same operation, and move the packet from `pending/` to `resolved/applied/`. |
 |  | `memzoi supersede <record-id> --sensitivity repo-safe`; `memzoi tombstone <record-id>` | Explicitly update an active, non-private repo record and its derived row as one staged transaction. Supersede replacements must remain in the target's scope and require an explicit repo-safe classification; local/session, private, and inactive targets are rejected before canonical writes. |
 |  | `memzoi quickstart --apply-sample` | Explicitly creates the quickstart sample as a canonical repo record (and also generates an export). |
-| **Pending file proposal writers — transitional current behavior** | `memzoi session-end --from-file <path>`; `memzoi session-end --from-checkpoint <id>` with a `repo` candidate | Write `.memzoi/proposals/pending/*.md` review packets. They do **not** write `.memzoi/records/*.md`; review and an explicit proposal-file apply are separate steps. These commands may be versioned or removed before 1.0 without an adapter. |
+| **Pending file proposal writers — transitional current behavior** | `memzoi session-end --from-file <path>`; `memzoi session-end --from-checkpoint <id>` with a `repo` candidate | Write `.memzoi/proposals/pending/*.md` review packets. They do **not** write `.memzoi/records/*.md`; review and an explicit proposal-file apply are separate steps. These commands may be changed or removed before 1.0 without an adapter. |
 |  | `memzoi capture apply ...` with an accepted or edited `repo`/`repo-safe` candidate | Write a pending evidence-backed proposal packet after validating pinned plan/review identities and current preconditions. Capture apply never writes the candidate directly to `.memzoi/records/*.md`. |
 | **DB proposal-state writers (not file/canonical writers)** | `memzoi propose`; `memzoi approve <proposal-id>`; `memzoi reject <proposal-id>` | Create or change proposal state in the runtime database. `propose` without `--apply` never writes a canonical record; approval alone never writes one. |
 | **Runtime local/session writers** | `memzoi local add`; `memzoi checkpoint add`; `memzoi session-end ...` with `local` or `session` candidates | Write private runtime rows under the project runtime directory. Session candidates become checkpoints and require `type: episode` plus `lane: session`; neither route writes a Git record. |
 |  | `memzoi capture apply ...` with an accepted or edited `local`/`session` candidate | Write a private runtime record with capture evidence and review provenance. It is never routed through a repo proposal by this command. |
 | **No-write outcomes** | `discard` or `needs_review` candidates in `memzoi session-end` | Write neither a canonical record, pending proposal file, nor runtime memory row. `discard` is skipped; `needs_review` is blocked until a human decides. |
-|  | `memzoi capture plan`; `memzoi capture review`; MCP `plan_capture_v1` | Do not write memory state. CLI `--output` may write a classified plan/review artifact to an allowed caller-selected path outside `.memzoi`, private runtime state, and generated exports; MCP never writes an artifact. |
+|  | `memzoi capture plan`; `memzoi capture review`; MCP `plan_capture` | Do not write memory state. CLI `--output` may write a classified plan/review artifact to an allowed caller-selected path outside `.memzoi`, private runtime state, and generated exports; MCP never writes an artifact. |
 |  | Rejected, deferred, duplicate, conflicting, blocked, or unresolved capture candidates | Write no proposal, canonical record, or runtime record. A stale source, inventory, policy, plan ID, or review ID also fails before writes. |
 | **Operational runtime state** | `memzoi init`; `memzoi rebuild`; `memzoi export`; event recording used by normal operations | Initialize/update bundle directories including `.memzoi/` and `.memzoi/records/`, runtime SQLite/configuration, derived indexes, event rows, and generated files under the runtime project directory. These are operational or derived state, not canonical memory records. `rebuild` reads canonical Git records; it does not write them. |
 | **Non-memory integration-file writes** | `memzoi integrate instructions [--file <path>]` | Update or create an agent instruction file such as `AGENTS.md` or `CLAUDE.md` (or the explicit file). This is an integration-file write, not a canonical memory or proposal write. `memzoi integrate prompt` and `integrate list` print information only. |
@@ -170,7 +181,7 @@ integration/documentation change, not an implicit memory write.
 ## Git-native materialization and Git review
 
 Direct materialization consumes one complete
-`memzoi/repository-materialization-candidate-v1` JSON file. The candidate is
+`memzoi/repository-materialization-candidate` JSON file. The candidate is
 the caller's explicit structured input; it carries the typed canonical content,
 classification, provenance, action, and current-record precondition. It is not
 an inbox packet, and planning does not retain it under `.memzoi`.
@@ -251,7 +262,7 @@ being silently repaired or restored.
 
 These commands document current executable behavior. They are not a pre-1.0
 compatibility route: existing artifacts must satisfy the current schema, and
-the commands or their formats may be versioned or removed without an adapter.
+the commands or their formats may be changed or removed without an adapter.
 
 The effective DB-proposal approval policy is resolved from the built-in default
 (`auto`), then the user-global config, repo config, and a per-call CLI override.
@@ -355,6 +366,9 @@ Use checkpoints for explicit task continuity:
 ```bash
 memzoi checkpoint add --task "..." --note "..."
 memzoi checkpoint add --task "..." --from-file notes.md
+memzoi checkpoint continue <checkpoint-id>
+memzoi checkpoint close <checkpoint-id>
+memzoi checkpoint add --task "..." --note "..." --successor-of <checkpoint-id>
 memzoi checkpoint list
 ```
 
@@ -364,6 +378,14 @@ with explicit `--include-local` or `--include-session`. Their recall and
 precheck citations carry `provenance: runtime`; Git records carry
 `provenance: git`. A runtime row never becomes shared repo truth merely
 because it was recalled, exported, or included in a context pack.
+
+A continuation is accepted only while the checkpoint is open and current;
+the exact retention boundary is too late. Closure is terminal and idempotent.
+A closed or expired checkpoint can be named as `--successor-of` to create a
+new session generation with explicit predecessor lineage. Machine-oriented
+JSON calls require caller-controlled `--operation-id` and observed
+`--expected-version`; an identical retry replays its recorded outcome before
+version checks, while changed parameters with the same operation ID fail.
 
 ## Explicit session-end routing
 
@@ -403,7 +425,7 @@ successful `repo` route still requires the separate review/apply step above.
 
 Import is a strict, compact manifest workflow, not an extractor or automatic
 classifier. The caller supplies a manifest with the exact version
-`memzoi/import-v1`, explicit candidates, and provenance sources. It does not
+`memzoi/import`, a required source-event `origin_key`, explicit candidates, and provenance sources. It does not
 parse `AGENTS.md`, `CLAUDE.md`, Cursor files, ADRs, chats, or other ambient
 project state; it does not infer candidates from those sources.
 

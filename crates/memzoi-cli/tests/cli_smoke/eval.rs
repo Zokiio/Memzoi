@@ -234,7 +234,7 @@ fn eval_capture_json_uses_isolated_state_and_matches_the_exact_baseline() {
 
     assert_eq!(
         report.get("version").and_then(Value::as_str),
-        Some("memzoi-capture-report/v1")
+        Some("memzoi/capture-eval-report")
     );
     assert_eq!(
         report
@@ -298,7 +298,7 @@ fn eval_capture_can_update_and_compare_a_local_baseline() {
     );
     assert_eq!(
         baseline.get("version").and_then(Value::as_str),
-        Some("memzoi-capture-baseline/v1")
+        Some("memzoi/capture-eval-baseline")
     );
     assert_eq!(
         baseline.pointer("/corpus/digest"),

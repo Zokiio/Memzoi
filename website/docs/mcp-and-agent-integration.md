@@ -45,7 +45,7 @@ The server exposes:
 | `search_memory` | Search active, unexpired memory records by text with optional scope, type, path, and limit filters. |
 | `inspect_memory_expiry` | Retrieve a record by ID, including an expired record, and explain normal-read eligibility without mutation. |
 | `build_context_pack` | Build a prompt-ready context pack for a task, with optional local/session memory opt-in. |
-| `plan_capture_v1` | Build a deterministic, evidence-backed capture plan from one explicit project-relative Markdown file without writing memory state. |
+| `plan_capture` | Build a deterministic, evidence-backed capture plan from one explicit project-relative Markdown file without writing memory state. |
 | `propose_memory` | Create a memory proposal using the effective approval policy or an `approval_mode` override. |
 | `precheck_path` | Check a path against warnings, risks, and failed attempts. |
 | `precheck_action` | Check a planned action, optionally scoped to a path. |
@@ -55,13 +55,13 @@ The server does not expose capture review/apply or lifecycle mutation tools such
 
 The CLI-only `memzoi handoff` command is not exposed as a separate MCP tool in this slice. MCP clients that need handoff-style context should call `build_context_pack` with the same task, path, token budget, and explicit opt-in policy. For CLI commands, the opt-in flags are `--include-local` and `--include-session`; for the MCP `build_context_pack` JSON input, use the fields `include_local` and `include_session`. Add any client-specific handoff framing outside Memzoi.
 
-## `plan_capture_v1` contract
+## `plan_capture` contract
 
-`plan_capture_v1` accepts one strict request:
+`plan_capture` accepts one strict request:
 
 ```json
 {
-  "schema": "memzoi/capture-request-v1",
+  "schema": "memzoi/capture-request",
   "sources": [
     {
       "source_id": "session-findings",

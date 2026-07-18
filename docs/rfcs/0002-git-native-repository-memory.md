@@ -291,7 +291,7 @@ Planning must not:
 - perform Git operations; or
 - persist private or blocked plans beneath the repository root.
 
-Saving an explicitly requested, repository-safe, versioned plan is a separate
+Saving an explicitly requested, repository-safe, snapshot-bound plan is a separate
 authorized persistence operation, not a side effect of planning. A saved plan
 does not become active memory and must still be revalidated at materialization.
 
@@ -391,7 +391,7 @@ preserves:
 
 ```yaml
 materialization:
-  schema: memzoi/repository-materialization-v1
+  schema: memzoi/repository-materialization
   action: create
   plan_id: ...
   candidate_id: ...

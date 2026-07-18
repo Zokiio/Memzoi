@@ -11,10 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CaptureProvenance, MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus,
-    MemoryType, RepositoryContentClass, ScopeKind, Visibility, capture, expiry,
+    MemoryType, OriginDescriptor, OriginRoute, RecordLineage, RepositoryContentClass,
+    RetentionFacts, ScopeKind, Visibility, capture,
     materialization::{MaterializationMetadata, canonical_revision_for_okf_record},
     proposals::title_to_concept_slug,
+    retention::evaluate_retention,
 };
+
+pub const OKF_PROFILE: &str = "memzoi";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OkfRecordFile {
@@ -25,7 +29,9 @@ pub struct OkfRecordFile {
     pub created: String,
     pub updated: Option<String>,
     pub supersedes_id: Option<String>,
-    pub expires_at: Option<String>,
+    pub retention: RetentionFacts,
+    pub origin: OriginDescriptor,
+    pub lineage: Option<RecordLineage>,
     pub proposal_id: Option<String>,
     pub capture: Option<CaptureProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,8 +50,7 @@ pub struct OkfProposalFile {
     pub file_id: String,
     pub id: String,
     pub kind: Option<String>,
-    pub version: Option<String>,
-    pub profile: Option<String>,
+    pub profile: String,
     pub memory_type: MemoryType,
     pub lane: MemoryLane,
     pub title: String,
@@ -65,6 +70,9 @@ pub struct OkfProposalFile {
     pub content_class: RepositoryContentClass,
     pub resolution: Option<OkfProposalResolution>,
     pub capture: Option<CaptureProvenance>,
+    pub retention: RetentionFacts,
+    pub origin: OriginDescriptor,
+    pub lineage: Option<RecordLineage>,
 }
 
 /// Minimal, content-free classification used before parsing any reviewable proposal fields.
@@ -126,6 +134,9 @@ pub(crate) struct OkfCreateProposalDraft {
     pub(crate) sensitivity: OkfProposalSensitivity,
     pub(crate) content_class: RepositoryContentClass,
     pub(crate) capture: Option<CaptureProvenance>,
+    pub(crate) retention: RetentionFacts,
+    pub(crate) origin: OriginDescriptor,
+    pub(crate) lineage: Option<RecordLineage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,8 +179,7 @@ pub(crate) fn render_okf_create_proposal_markdown(
     let frontmatter = OkfCreateProposalFrontmatter {
         id: draft.proposal_id.trim().to_owned(),
         kind: "proposal".to_owned(),
-        version: "okf/v0.1".to_owned(),
-        profile: "memzoi/v0".to_owned(),
+        profile: OKF_PROFILE.to_owned(),
         memory_type: draft.memory_type,
         lane: draft.lane,
         title: draft.title.trim().to_owned(),
@@ -206,6 +216,9 @@ pub(crate) fn render_okf_create_proposal_markdown(
         sensitivity: draft.sensitivity,
         content_class: draft.content_class,
         capture: draft.capture.clone(),
+        retention: draft.retention.clone(),
+        origin: draft.origin.clone(),
+        lineage: draft.lineage.clone(),
     };
     let yaml =
         serde_yaml::to_string(&frontmatter).context("failed to render OKF proposal frontmatter")?;
@@ -351,6 +364,14 @@ fn validate_okf_create_proposal_draft(draft: &OkfCreateProposalDraft) -> Result<
     if draft.sensitivity != OkfProposalSensitivity::RepoSafe {
         bail!("OKF create proposal sensitivity must be repo-safe");
     }
+    validate_retention_facts(
+        draft.proposal_id.trim(),
+        draft.lane,
+        &draft.retention,
+        draft.timestamp.trim(),
+    )?;
+    validate_origin_descriptor(draft.proposal_id.trim(), &draft.origin)?;
+    validate_record_lineage(draft.proposal_id.trim(), draft.lineage.as_ref())?;
     Ok(())
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,9 +647,8 @@ pub fn preflight_okf_proposal_markdown(
     let receipt_proposal = OkfProposalFile {
         file_id: receipt_file_id,
         id: receipt_id,
-        kind: None,
-        version: None,
-        profile: None,
+        kind: Some("proposal".to_owned()),
+        profile: OKF_PROFILE.to_owned(),
         memory_type: MemoryType::Fact,
         lane: MemoryLane::Semantic,
         title: "Redacted non-repo-safe proposal".to_owned(),
@@ -657,6 +677,12 @@ pub fn preflight_okf_proposal_markdown(
         content_class: RepositoryContentClass::GeneralRepoKnowledge,
         resolution: None,
         capture: None,
+        retention: durable_retention_facts(),
+        origin: OriginDescriptor::new(
+            format!("rejected-proposal:{digest}"),
+            OriginRoute::RepositoryProposal,
+        ),
+        lineage: None,
     };
     Ok(Some(OkfProposalPreflight {
         sensitivity,
@@ -694,6 +720,78 @@ fn unique_top_level_yaml_scalar(frontmatter: &str, key: &str) -> Option<String> 
     values.next().is_none().then_some(value)
 }
 
+fn durable_retention_facts() -> RetentionFacts {
+    RetentionFacts {
+        occurred_at: None,
+        started_at: None,
+        last_continued_at: None,
+        closed_at: None,
+        explicit_expires_at: None,
+        episodic_extension: None,
+    }
+}
+
+fn validate_schema_identity(
+    id: Option<&str>,
+    kind: Option<&str>,
+    profile: Option<&str>,
+    expected_kind: &str,
+) -> Result<()> {
+    let id = id
+        .context("id is required by the current OKF profile")?
+        .trim();
+    validate_proposal_identifier(id).context("invalid current-profile OKF id")?;
+    let kind = kind
+        .context("kind is required by the current OKF profile")?
+        .trim();
+    if kind != expected_kind {
+        bail!("unsupported OKF kind {kind:?}; expected {expected_kind:?}");
+    }
+    let profile = profile
+        .context("profile is required by the current OKF profile")?
+        .trim();
+    if profile != OKF_PROFILE {
+        bail!(
+            "unsupported OKF profile {profile:?}; expected {OKF_PROFILE}; pre-1.0 artifacts must be manually upgraded or removed"
+        );
+    }
+    Ok(())
+}
+
+fn validate_retention_facts(
+    record_id: &str,
+    lane: MemoryLane,
+    retention: &RetentionFacts,
+    evaluated_at: &str,
+) -> Result<()> {
+    let evaluated_at = time::OffsetDateTime::parse(
+        evaluated_at.trim(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .with_context(|| format!("record {record_id} has an invalid evaluation timestamp"))?;
+    evaluate_retention(record_id, lane, retention, evaluated_at)?;
+    Ok(())
+}
+
+fn validate_origin_descriptor(record_id: &str, origin: &OriginDescriptor) -> Result<()> {
+    origin
+        .validate()
+        .with_context(|| format!("record {record_id} has invalid origin descriptor"))
+}
+
+fn validate_record_lineage(record_id: &str, lineage: Option<&RecordLineage>) -> Result<()> {
+    let Some(lineage) = lineage else {
+        return Ok(());
+    };
+    lineage
+        .validate()
+        .with_context(|| format!("record {record_id} has invalid lineage"))?;
+    if lineage.predecessor_id == record_id {
+        bail!("record {record_id} cannot name itself as its lineage predecessor");
+    }
+    Ok(())
+}
+
 pub fn parse_okf_record_markdown(
     bundle_root: impl AsRef<Path>,
     file_path: impl AsRef<Path>,
@@ -710,65 +808,42 @@ pub fn parse_okf_record_markdown(
     let frontmatter: OkfFrontmatter = serde_yaml::from_str(frontmatter)
         .with_context(|| format!("failed to parse OKF frontmatter for {concept_id}"))?;
 
+    validate_schema_identity(
+        frontmatter.id.as_deref(),
+        frontmatter.kind.as_deref(),
+        frontmatter.profile.as_deref(),
+        "memory",
+    )?;
     let title = required_string(frontmatter.title, "title")?;
     let memory_type = parse_required_enum::<MemoryType>(frontmatter.memory_type, "type")?;
-    let lane = parse_optional_enum::<MemoryLane>(frontmatter.lane, "lane")?.unwrap_or_default();
-    let scope_kind = parse_scope(coalesce_string_aliases(
-        frontmatter.scope_kind,
-        frontmatter.scope,
-        "scope_kind",
-        "scope",
-    )?)?;
+    let lane = parse_required_enum::<MemoryLane>(frontmatter.lane, "lane")?;
+    let scope_kind = parse_required_enum::<ScopeKind>(frontmatter.scope, "scope")?;
     let scope_id = optional_string(frontmatter.scope_id, "scope_id")?;
     let visibility = parse_required_enum::<Visibility>(frontmatter.visibility, "visibility")?;
     let content_class =
-        parse_optional_enum::<RepositoryContentClass>(frontmatter.content_class, "content_class")?
-            .unwrap_or(RepositoryContentClass::Unknown);
-    let status = parse_status(required_string(frontmatter.status, "status")?)?;
+        parse_required_enum::<RepositoryContentClass>(frontmatter.content_class, "content_class")?;
+    let status = parse_required_enum::<MemoryStatus>(frontmatter.status, "status")?;
     let confidence = parse_confidence(frontmatter.confidence)?;
-    let source_kind = coalesce_string_aliases(
-        frontmatter.source,
-        frontmatter.source_kind,
-        "source",
-        "source_kind",
-    )?;
+    let source_kind = optional_string(frontmatter.source, "source")?;
     let source_ref = optional_string(frontmatter.source_ref, "source_ref")?;
-    let created = coalesce_string_aliases(
-        frontmatter.created,
-        frontmatter.created_at,
-        "created",
-        "created_at",
-    )?;
-    let created = coalesce_string_aliases(created, frontmatter.timestamp, "created", "timestamp")?;
-    let created = required_string(created, "created")?;
-    ensure_timestampish(&created, "created")?;
-    let updated = coalesce_string_aliases(
-        frontmatter.updated,
-        frontmatter.updated_at,
-        "updated",
-        "updated_at",
-    )?;
+    let created = required_string(frontmatter.timestamp, "timestamp")?;
+    ensure_timestampish(&created, "timestamp")?;
+    let updated = optional_string(frontmatter.updated, "updated")?;
     if let Some(updated) = updated.as_deref() {
         ensure_timestampish(updated, "updated")?;
     }
     let applies_to = validate_applies_to(frontmatter.applies_to.unwrap_or_default())?;
-    let supersedes_id = coalesce_string_aliases(
-        frontmatter.supersedes,
-        frontmatter.supersedes_id,
-        "supersedes",
-        "supersedes_id",
-    )?;
-    let expires_at = coalesce_string_aliases(
-        frontmatter.expires,
-        frontmatter.expires_at,
-        "expires",
-        "expires_at",
-    )?;
+    let supersedes_id = optional_string(frontmatter.supersedes, "supersedes")?;
+    let retention = frontmatter.retention.ok_or_else(|| {
+        anyhow::anyhow!("record {concept_id} retention is required by the current OKF profile")
+    })?;
+    validate_retention_facts(&concept_id, lane, &retention, &created)?;
+    let origin = frontmatter.origin.ok_or_else(|| {
+        anyhow::anyhow!("record {concept_id} origin is required by the current OKF profile")
+    })?;
+    validate_origin_descriptor(&concept_id, &origin)?;
+    validate_record_lineage(&concept_id, frontmatter.lineage.as_ref())?;
     let proposal_id = optional_string(frontmatter.proposal_id, "proposal_id")?;
-    if let Some(expires_at) = expires_at.as_deref() {
-        expiry::parse_expires_at(expires_at)
-            .with_context(|| format!("invalid OKF expiry for {concept_id}"))?;
-    }
     let body = body_without_matching_h1(body, &title)?;
 
     let record = OkfRecordFile {
@@ -793,7 +868,9 @@ pub fn parse_okf_record_markdown(
         created,
         updated,
         supersedes_id,
-        expires_at,
+        retention,
+        origin,
+        lineage: frontmatter.lineage,
         proposal_id,
         capture: frontmatter.capture,
         materialization: frontmatter.materialization,
@@ -837,6 +914,12 @@ pub fn parse_okf_proposal_markdown(
 
     let id = required_string(frontmatter.id, "id")?;
     validate_proposal_identifier(&id)?;
+    validate_schema_identity(
+        Some(&id),
+        frontmatter.kind.as_deref(),
+        frontmatter.profile.as_deref(),
+        "proposal",
+    )?;
     let title = required_string(frontmatter.title, "title")?;
     let description = required_string(frontmatter.description, "description")?;
     let memory_type = parse_required_enum::<MemoryType>(frontmatter.memory_type, "type")?;
@@ -845,20 +928,23 @@ pub fn parse_okf_proposal_markdown(
     let timestamp = required_string(frontmatter.timestamp, "timestamp")?;
     ensure_timestampish(&timestamp, "timestamp")?;
     let sensitivity =
-        parse_optional_enum::<OkfProposalSensitivity>(frontmatter.sensitivity, "sensitivity")?
-            .unwrap_or_default();
-    let (scope_kind, scope_id, applies_to) = parse_proposal_scope(
-        frontmatter.scope,
-        frontmatter.scope_kind,
-        frontmatter.scope_id,
-        frontmatter.applies_to,
-    )?;
+        parse_required_enum::<OkfProposalSensitivity>(frontmatter.sensitivity, "sensitivity")?;
+    let (scope_kind, scope_id, applies_to) = parse_proposal_scope(frontmatter.scope)?;
     let supersedes =
         validate_string_list(frontmatter.supersedes.unwrap_or_default(), "supersedes")?;
     let proposal = parse_proposal_metadata(frontmatter.proposal)?;
     let sources = validate_proposal_sources(frontmatter.sources.unwrap_or_default())?;
     let resolution = parse_proposal_resolution(frontmatter.resolution)?;
     validate_proposal_resolution(status, resolution.as_ref())?;
+    let retention = frontmatter.retention.ok_or_else(|| {
+        anyhow::anyhow!("record {id} retention is required by the current OKF proposal profile")
+    })?;
+    validate_retention_facts(&id, lane, &retention, &timestamp)?;
+    let origin = frontmatter.origin.ok_or_else(|| {
+        anyhow::anyhow!("record {id} origin is required by the current OKF proposal profile")
+    })?;
+    validate_origin_descriptor(&id, &origin)?;
+    validate_record_lineage(&id, frontmatter.lineage.as_ref())?;
     let body = body_without_matching_h1(body, &title)?;
     if body.trim().is_empty() {
         bail!("OKF proposal body cannot be empty");
@@ -868,8 +954,7 @@ pub fn parse_okf_proposal_markdown(
         file_id,
         id,
         kind: frontmatter.kind,
-        version: frontmatter.version,
-        profile: frontmatter.profile,
+        profile: OKF_PROFILE.to_owned(),
         memory_type,
         lane,
         title,
@@ -886,13 +971,15 @@ pub fn parse_okf_proposal_markdown(
         sources,
         supersedes,
         sensitivity,
-        content_class: parse_optional_enum::<RepositoryContentClass>(
+        content_class: parse_required_enum::<RepositoryContentClass>(
             frontmatter.content_class,
             "content_class",
-        )?
-        .unwrap_or(RepositoryContentClass::Unknown),
+        )?,
         resolution,
         capture: frontmatter.capture,
+        retention,
+        origin,
+        lineage: frontmatter.lineage,
     }))
 }
 
@@ -961,7 +1048,9 @@ fn project_okf_new_record(
         created_at: proposal.timestamp.clone(),
         updated_at: proposal.timestamp.clone(),
         supersedes_id,
-        expires_at: None,
+        retention: proposal.retention.clone(),
+        origin: proposal.origin.clone(),
+        lineage: proposal.lineage.clone(),
     }
 }
 
@@ -989,7 +1078,9 @@ pub(crate) fn project_okf_record(record: &OkfRecordFile) -> MemoryRecord {
             .clone()
             .unwrap_or_else(|| record.created.clone()),
         supersedes_id: record.supersedes_id.clone(),
-        expires_at: record.expires_at.clone(),
+        retention: record.retention.clone(),
+        origin: record.origin.clone(),
+        lineage: record.lineage.clone(),
     }
 }
 
@@ -1031,7 +1122,6 @@ pub(crate) fn render_resolved_okf_proposal_markdown(
     let frontmatter = OkfResolvedProposalFrontmatter {
         id: proposal.id.clone(),
         kind: proposal.kind.clone(),
-        version: proposal.version.clone(),
         profile: proposal.profile.clone(),
         memory_type: proposal.memory_type,
         lane: proposal.lane,
@@ -1060,6 +1150,9 @@ pub(crate) fn render_resolved_okf_proposal_markdown(
         content_class: proposal.content_class,
         resolution: resolution.clone(),
         capture: proposal.capture.clone(),
+        retention: proposal.retention.clone(),
+        origin: proposal.origin.clone(),
+        lineage: proposal.lineage.clone(),
     };
     let yaml = serde_yaml::to_string(&frontmatter)
         .context("failed to render resolved OKF proposal frontmatter")?;
@@ -1132,6 +1225,9 @@ pub fn render_okf_record_markdown(record: &OkfRecordFile) -> Result<String> {
     let draft = &record.draft;
     let mut output = String::new();
     output.push_str("---\n");
+    push_yaml_string(&mut output, "id", &record.concept_id);
+    push_yaml_string(&mut output, "kind", "memory");
+    push_yaml_string(&mut output, "profile", OKF_PROFILE);
     push_yaml_string(&mut output, "type", draft.memory_type.as_str());
     push_yaml_string(&mut output, "lane", draft.lane.as_str());
     push_yaml_string(&mut output, "title", &draft.title);
@@ -1190,8 +1286,13 @@ pub fn render_okf_record_markdown(record: &OkfRecordFile) -> Result<String> {
     if let Some(supersedes_id) = &record.supersedes_id {
         push_yaml_string(&mut output, "supersedes", supersedes_id);
     }
-    if let Some(expires_at) = &record.expires_at {
-        push_yaml_string(&mut output, "expires", expires_at);
+    push_yaml_block(&mut output, "retention", &record.retention)
+        .context("failed to serialize retention facts for canonical record")?;
+    push_yaml_block(&mut output, "origin", &record.origin)
+        .context("failed to serialize origin descriptor for canonical record")?;
+    if let Some(lineage) = &record.lineage {
+        push_yaml_block(&mut output, "lineage", lineage)
+            .context("failed to serialize record lineage for canonical record")?;
     }
     if let Some(materialization) = &record.materialization {
         output.push_str("materialization:\n");
@@ -1252,7 +1353,6 @@ fn proposal_primary_evidence(sources: &[OkfProposalSource]) -> (Option<String>, 
 struct OkfCreateProposalFrontmatter {
     id: String,
     kind: String,
-    version: String,
     profile: String,
     #[serde(rename = "type")]
     memory_type: MemoryType,
@@ -1273,6 +1373,10 @@ struct OkfCreateProposalFrontmatter {
     content_class: RepositoryContentClass,
     #[serde(skip_serializing_if = "Option::is_none")]
     capture: Option<CaptureProvenance>,
+    retention: RetentionFacts,
+    origin: OriginDescriptor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lineage: Option<RecordLineage>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1294,31 +1398,32 @@ struct OkfCreateProposalScope {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OkfFrontmatter {
+    id: Option<String>,
+    kind: Option<String>,
+    profile: Option<String>,
     #[serde(rename = "type")]
     memory_type: Option<String>,
     lane: Option<String>,
     title: Option<String>,
+    #[serde(rename = "description")]
+    _description: Option<String>,
     scope: Option<String>,
-    scope_kind: Option<String>,
     scope_id: Option<String>,
     visibility: Option<String>,
     content_class: Option<String>,
     status: Option<String>,
     confidence: Option<ConfidenceValue>,
     source: Option<String>,
-    source_kind: Option<String>,
     source_ref: Option<String>,
     proposal_id: Option<String>,
     supersedes: Option<String>,
-    supersedes_id: Option<String>,
-    expires: Option<String>,
-    expires_at: Option<String>,
+    retention: Option<RetentionFacts>,
+    origin: Option<OriginDescriptor>,
+    lineage: Option<RecordLineage>,
     timestamp: Option<String>,
-    created: Option<String>,
-    created_at: Option<String>,
     updated: Option<String>,
-    updated_at: Option<String>,
     applies_to: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     capture: Option<CaptureProvenance>,
@@ -1326,10 +1431,10 @@ struct OkfFrontmatter {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OkfProposalFrontmatter {
     id: Option<String>,
     kind: Option<String>,
-    version: Option<String>,
     profile: Option<String>,
     #[serde(rename = "type")]
     memory_type: Option<String>,
@@ -1339,21 +1444,22 @@ struct OkfProposalFrontmatter {
     status: Option<String>,
     proposal: Option<OkfProposalMetadataFrontmatter>,
     scope: Option<OkfProposalScopeFrontmatter>,
-    scope_kind: Option<String>,
-    scope_id: Option<String>,
-    applies_to: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     timestamp: Option<String>,
     created_by: Option<String>,
     sources: Option<Vec<OkfProposalSource>>,
-    supersedes: Option<StringList>,
+    supersedes: Option<Vec<String>>,
     sensitivity: Option<String>,
     content_class: Option<String>,
     resolution: Option<OkfProposalResolutionFrontmatter>,
     capture: Option<CaptureProvenance>,
+    retention: Option<RetentionFacts>,
+    origin: Option<OriginDescriptor>,
+    lineage: Option<RecordLineage>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OkfProposalResolutionFrontmatter {
     outcome: Option<String>,
     resolved_by: Option<String>,
@@ -1368,10 +1474,7 @@ struct OkfResolvedProposalFrontmatter {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    profile: Option<String>,
+    profile: String,
     #[serde(rename = "type")]
     memory_type: MemoryType,
     lane: MemoryLane,
@@ -1393,6 +1496,10 @@ struct OkfResolvedProposalFrontmatter {
     resolution: OkfProposalResolution,
     #[serde(skip_serializing_if = "Option::is_none")]
     capture: Option<CaptureProvenance>,
+    retention: RetentionFacts,
+    origin: OriginDescriptor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lineage: Option<RecordLineage>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1418,6 +1525,7 @@ struct OkfResolvedProposalScope {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OkfProposalMetadataFrontmatter {
     action: Option<String>,
     proposed_by: Option<String>,
@@ -1425,48 +1533,19 @@ struct OkfProposalMetadataFrontmatter {
     reason: Option<String>,
     confidence: Option<String>,
     target: Option<String>,
-    target_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum OkfProposalScopeFrontmatter {
-    Kind(String),
-    Object {
-        kind: Option<String>,
-        id: Option<String>,
-        paths: Option<Vec<String>>,
-    },
+#[serde(deny_unknown_fields)]
+struct OkfProposalScopeFrontmatter {
+    kind: Option<String>,
+    id: Option<String>,
+    paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum StringList {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl Default for StringList {
-    fn default() -> Self {
-        Self::Many(Vec::new())
-    }
-}
-
-impl StringList {
-    fn into_vec(self) -> Vec<String> {
-        match self {
-            Self::One(value) => vec![value],
-            Self::Many(values) => values,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ConfidenceValue {
-    Number(f64),
-    Label(String),
-}
+#[serde(transparent)]
+struct ConfidenceValue(f64);
 
 fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir).context("failed to scan OKF Markdown directory")? {
@@ -1492,11 +1571,22 @@ fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
     let hash = crate::import::content_hash(&record.draft.body);
     let updated = record.updated.as_deref().unwrap_or(record.created.as_str());
+    let retention_json = serde_json::to_string(&record.retention)
+        .context("failed to serialize OKF retention facts for runtime projection")?;
+    let origin_json = serde_json::to_string(&record.origin)
+        .context("failed to serialize OKF origin descriptor for runtime projection")?;
+    let lineage_json = record
+        .lineage
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("failed to serialize OKF record lineage for runtime projection")?;
     let changed = conn.execute(
         "INSERT INTO memory_record (
           id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status, confidence,
-          source_kind, source_ref, proposal_id, content_hash, created_at, updated_at, supersedes_id, expires_at
-        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+          source_kind, source_ref, proposal_id, content_hash, created_at, updated_at, supersedes_id,
+          retention_json, origin_json, lineage_json
+        ) VALUES (?1, ?2, ?3, 'repo', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
         ON CONFLICT(id) DO UPDATE SET
           type = excluded.type,
           lane = excluded.lane,
@@ -1515,7 +1605,9 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
           created_at = excluded.created_at,
           updated_at = excluded.updated_at,
           supersedes_id = excluded.supersedes_id,
-          expires_at = excluded.expires_at
+          retention_json = excluded.retention_json,
+          origin_json = excluded.origin_json,
+          lineage_json = excluded.lineage_json
         WHERE memory_record.destination = 'repo'",
         params![
             record.concept_id,
@@ -1535,7 +1627,9 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
             record.created,
             updated,
             record.supersedes_id,
-            record.expires_at,
+            retention_json,
+            origin_json,
+            lineage_json,
         ],
     )?;
     if changed != 1 {
@@ -1568,6 +1662,9 @@ fn import_okf_record(conn: &Connection, record: &OkfRecordFile) -> Result<()> {
 fn render_memory_record(record: &MemoryRecord, tags: &[String], applies_to: &[String]) -> String {
     let mut output = String::new();
     output.push_str("---\n");
+    push_yaml_string(&mut output, "id", &record.id);
+    push_yaml_string(&mut output, "kind", "memory");
+    push_yaml_string(&mut output, "profile", OKF_PROFILE);
     push_yaml_string(&mut output, "type", record.memory_type.as_str());
     push_yaml_string(&mut output, "lane", record.lane.as_str());
     push_yaml_string(&mut output, "title", &record.title);
@@ -1628,8 +1725,13 @@ fn render_memory_record(record: &MemoryRecord, tags: &[String], applies_to: &[St
     if let Some(supersedes_id) = &record.supersedes_id {
         push_yaml_string(&mut output, "supersedes", supersedes_id);
     }
-    if let Some(expires_at) = &record.expires_at {
-        push_yaml_string(&mut output, "expires", expires_at);
+    push_yaml_block(&mut output, "retention", &record.retention)
+        .expect("retention facts must serialize as canonical record frontmatter");
+    push_yaml_block(&mut output, "origin", &record.origin)
+        .expect("origin descriptor must serialize as canonical record frontmatter");
+    if let Some(lineage) = &record.lineage {
+        push_yaml_block(&mut output, "lineage", lineage)
+            .expect("record lineage must serialize as canonical record frontmatter");
     }
     output.push_str("---\n\n");
     output.push_str(&format!("# {}\n\n{}\n", record.title, record.body.trim()));
@@ -1648,6 +1750,19 @@ fn push_yaml_string(output: &mut String, key: &str, value: &str) {
     output.push_str(": ");
     output.push_str(&quote_yaml_string(value));
     output.push('\n');
+}
+
+fn push_yaml_block<T: Serialize>(output: &mut String, key: &str, value: &T) -> Result<()> {
+    output.push_str(key);
+    output.push_str(":\n");
+    let yaml = serde_yaml::to_string(value)
+        .with_context(|| format!("failed to serialize {key} frontmatter"))?;
+    for line in yaml.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    Ok(())
 }
 
 fn quote_yaml_string(value: &str) -> String {
@@ -1842,23 +1957,6 @@ fn optional_string(value: Option<String>, key: &str) -> Result<Option<String>> {
     Ok(Some(trimmed.to_owned()))
 }
 
-fn coalesce_string_aliases(
-    primary: Option<String>,
-    alias: Option<String>,
-    primary_key: &str,
-    alias_key: &str,
-) -> Result<Option<String>> {
-    let primary = optional_string(primary, primary_key)?;
-    let alias = optional_string(alias, alias_key)?;
-    match (primary, alias) {
-        (Some(primary), Some(alias)) if primary != alias => {
-            bail!("{primary_key} and {alias_key} must match when both are present")
-        }
-        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
-        (None, None) => Ok(None),
-    }
-}
-
 fn parse_required_enum<T>(value: Option<String>, key: &str) -> Result<T>
 where
     T: std::str::FromStr<Err = String>,
@@ -1867,47 +1965,10 @@ where
     value.parse().map_err(anyhow::Error::msg)
 }
 
-fn parse_optional_enum<T>(value: Option<String>, key: &str) -> Result<Option<T>>
-where
-    T: std::str::FromStr<Err = String>,
-{
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        bail!("OKF frontmatter field {key} cannot be empty");
-    }
-    trimmed.parse().map(Some).map_err(anyhow::Error::msg)
-}
-
-fn parse_scope(value: Option<String>) -> Result<ScopeKind> {
-    match value {
-        Some(value) => value.parse().map_err(anyhow::Error::msg),
-        None => Ok(ScopeKind::Repo),
-    }
-}
-
-fn parse_status(value: String) -> Result<MemoryStatus> {
-    match value.as_str() {
-        "current" => Ok(MemoryStatus::Active),
-        other => other.parse().map_err(anyhow::Error::msg),
-    }
-}
-
 fn parse_confidence(value: Option<ConfidenceValue>) -> Result<f64> {
-    let value = value.context("OKF frontmatter missing required field confidence")?;
-    let confidence = match value {
-        ConfidenceValue::Number(value) => value,
-        ConfidenceValue::Label(value) => match value.as_str() {
-            "confirmed" => 1.0,
-            "likely" => 0.75,
-            "uncertain" => 0.4,
-            other => other
-                .parse::<f64>()
-                .with_context(|| format!("unknown OKF confidence label {other:?}"))?,
-        },
-    };
+    let confidence = value
+        .context("OKF frontmatter missing required field confidence")?
+        .0;
     if !(0.0..=1.0).contains(&confidence) {
         bail!("OKF confidence must be between 0.0 and 1.0");
     }
@@ -1924,12 +1985,7 @@ fn parse_proposal_metadata(
     ensure_timestampish(&proposed_at, "proposal.proposed_at")?;
     let reason = optional_string(metadata.reason, "proposal.reason")?;
     let confidence = optional_string(metadata.confidence, "proposal.confidence")?;
-    let target = coalesce_string_aliases(
-        metadata.target,
-        metadata.target_id,
-        "proposal.target",
-        "proposal.target_id",
-    )?;
+    let target = optional_string(metadata.target, "proposal.target")?;
     Ok(OkfProposalMetadata {
         action,
         proposed_by,
@@ -1997,28 +2053,11 @@ fn validate_proposal_resolution(
 
 fn parse_proposal_scope(
     scope: Option<OkfProposalScopeFrontmatter>,
-    scope_kind: Option<String>,
-    scope_id: Option<String>,
-    applies_to: Option<Vec<String>>,
 ) -> Result<(ScopeKind, Option<String>, Vec<String>)> {
-    let mut scope_paths = Vec::new();
-    let (scope_kind_from_scope, scope_id_from_scope) = match scope {
-        Some(OkfProposalScopeFrontmatter::Kind(kind)) => (Some(kind), None),
-        Some(OkfProposalScopeFrontmatter::Object { kind, id, paths }) => {
-            scope_paths = paths.unwrap_or_default();
-            (kind, id)
-        }
-        None => (None, None),
-    };
-    let scope_kind = parse_scope(coalesce_string_aliases(
-        scope_kind,
-        scope_kind_from_scope,
-        "scope_kind",
-        "scope.kind",
-    )?)?;
-    let scope_id = coalesce_string_aliases(scope_id, scope_id_from_scope, "scope_id", "scope.id")?;
-    scope_paths.extend(applies_to.unwrap_or_default());
-    let applies_to = validate_applies_to(scope_paths)?;
+    let scope = scope.context("OKF proposal frontmatter missing required field scope")?;
+    let scope_kind = parse_required_enum::<ScopeKind>(scope.kind, "scope.kind")?;
+    let scope_id = optional_string(scope.id, "scope.id")?;
+    let applies_to = validate_applies_to(scope.paths.unwrap_or_default())?;
     Ok((scope_kind, scope_id, applies_to))
 }
 
@@ -2060,9 +2099,8 @@ fn validate_proposal_action_shape(
     }
 }
 
-fn validate_string_list(values: StringList, key: &str) -> Result<Vec<String>> {
+fn validate_string_list(values: Vec<String>, key: &str) -> Result<Vec<String>> {
     values
-        .into_vec()
         .into_iter()
         .map(|value| {
             let trimmed = value.trim();
@@ -2172,8 +2210,8 @@ mod tests {
     use crate::{
         CANONICAL_REVISION_SCHEMA, CanonicalRevision, MATERIALIZATION_METADATA_SCHEMA,
         MaterializationAction, MaterializationMetadata, MemoryDestination, MemoryLane,
-        MemoryRecord, MemoryStatus, MemoryType, ScopeKind, Visibility,
-        canonical_revision_for_okf_record,
+        MemoryRecord, MemoryStatus, MemoryType, OriginDescriptor, OriginRoute, RetentionFacts,
+        ScopeKind, Visibility, canonical_revision_for_okf_record,
     };
 
     const EXAMPLE_MEMORY: &str = include_str!("../../../examples/example-memory.md");
@@ -2281,7 +2319,19 @@ mod tests {
             created_at: "2026-07-05T00:00:00Z".to_owned(),
             updated_at: "2026-07-06T00:00:00Z".to_owned(),
             supersedes_id: Some("team/old-install-risk".to_owned()),
-            expires_at: Some("2027-01-01".to_owned()),
+            retention: RetentionFacts {
+                occurred_at: None,
+                started_at: None,
+                last_continued_at: None,
+                closed_at: None,
+                explicit_expires_at: Some("2027-01-01T00:00:00Z".to_owned()),
+                episodic_extension: None,
+            },
+            origin: OriginDescriptor::new(
+                "test:team-install-risk",
+                OriginRoute::RepositoryMaterialization,
+            ),
+            lineage: None,
         };
 
         let path = records.join(format!("{}.md", record.id));
@@ -2303,7 +2353,10 @@ mod tests {
             parsed.supersedes_id.as_deref(),
             Some("team/old-install-risk")
         );
-        assert_eq!(parsed.expires_at.as_deref(), Some("2027-01-01"));
+        assert_eq!(
+            parsed.retention.explicit_expires_at.as_deref(),
+            Some("2027-01-01T00:00:00Z")
+        );
         Ok(())
     }
 
@@ -2363,14 +2416,22 @@ mod tests {
         let root = Path::new("/bundle/records");
         let path = root.join("no-evidence.md");
         let markdown = r#"---
+id: no-evidence
+kind: memory
+profile: memzoi
 type: fact
 lane: semantic
 title: No evidence metadata
 scope: repo
 visibility: repo
+content_class: general_repo_knowledge
 status: active
-confidence: confirmed
-created: 2026-07-04T00:00:00Z
+confidence: 1.0
+timestamp: 2026-07-04T00:00:00Z
+retention: {}
+origin:
+  origin_key: test:no-evidence
+  route: repository_materialization
 ---
 
 # No evidence metadata
@@ -2506,30 +2567,42 @@ Nullable provenance remains nullable.
     }
 
     #[test]
-    fn missing_lane_defaults_to_semantic_for_backward_compatibility() -> anyhow::Result<()> {
-        let parsed = super::parse_okf_record_markdown(
+    fn missing_lane_is_rejected_by_the_current_profile() {
+        let error = super::parse_okf_record_markdown(
             Path::new("/bundle"),
-            Path::new("/bundle/memories/legacy.md"),
+            Path::new("/bundle/memories/missing-lane.md"),
             r#"---
+id: missing-lane
+kind: memory
+profile: memzoi
 type: decision
-title: Legacy memory
+title: Missing lane
 scope: repo
 visibility: repo
+content_class: general_repo_knowledge
 source: human
 status: active
-confidence: confirmed
-created: 2026-07-04
+confidence: 1.0
+timestamp: 2026-07-04T00:00:00Z
+retention: {}
+origin:
+  origin_key: test:missing-lane
+  route: repository_materialization
 ---
 
-# Legacy memory
+# Missing lane
 
-Legacy records without lane remain valid.
+The current profile requires an explicit lane.
 "#,
-        )?
-        .expect("legacy memory should parse");
+        )
+        .expect_err("missing lane must fail closed");
 
-        assert_eq!(parsed.draft.lane, MemoryLane::Semantic);
-        Ok(())
+        assert!(
+            error
+                .to_string()
+                .contains("frontmatter missing required field lane"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -2550,14 +2623,23 @@ Legacy records without lane remain valid.
     #[test]
     fn rejects_applies_to_traversal() {
         let invalid = r#"---
+id: unsafe
+kind: memory
+profile: memzoi
 type: preference
+lane: semantic
 title: Unsafe path
 scope: repo
 visibility: team
+content_class: general_repo_knowledge
 source: human-authored
-status: current
-confidence: confirmed
-created: 2026-07-04
+status: active
+confidence: 1.0
+timestamp: 2026-07-04T00:00:00Z
+retention: {}
+origin:
+  origin_key: test:unsafe
+  route: repository_materialization
 applies_to:
   - ../secrets
 ---
@@ -2614,7 +2696,7 @@ Do not import this.
                 .expect("base record should parse");
         assert_eq!(
             record.materialization, None,
-            "legacy records stay unattested"
+            "ordinary current-format records may be unattested"
         );
 
         record.materialization = Some(MaterializationMetadata {
@@ -2624,7 +2706,7 @@ Do not import this.
             candidate_id: format!("blake3:{}", "2".repeat(64)),
             decision_id: format!("blake3:{}", "3".repeat(64)),
             decision_at: "2026-07-16T12:00:00Z".to_owned(),
-            safety_contract: "memzoi/repository-write-safety-v1".to_owned(),
+            safety_contract: crate::REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
             revision: CanonicalRevision {
                 schema: CANONICAL_REVISION_SCHEMA.to_owned(),
                 revision_hash: format!("blake3:{}", "4".repeat(64)),
@@ -2647,7 +2729,7 @@ Do not import this.
 
         let unsupported_schema = rendered.replacen(
             MATERIALIZATION_METADATA_SCHEMA,
-            "memzoi/repository-materialization-v2",
+            "incompatible/repository-materialization",
             1,
         );
         let error = super::parse_okf_record_markdown(root, &path, &unsupported_schema)
@@ -2662,17 +2744,29 @@ Do not import this.
     }
 
     fn record_markdown(lane: &str, memory_type: &str) -> String {
+        let lane_retention = match lane {
+            "session" => "retention:\n  started_at: 2026-07-04T00:00:00Z\n",
+            "episodic" => "retention:\n  occurred_at: 2026-07-04T00:00:00Z\n",
+            _ => "retention: {}\n",
+        };
         format!(
             r#"---
+id: lane-test
+kind: memory
+profile: memzoi
 type: {memory_type}
 lane: {lane}
 title: Lane test
 scope: repo
 visibility: repo
+content_class: general_repo_knowledge
 source: human
 status: active
-confidence: confirmed
-created: 2026-07-04
+confidence: 1.0
+timestamp: 2026-07-04T00:00:00Z
+{lane_retention}origin:
+  origin_key: test:lane-test:{lane}
+  route: repository_materialization
 ---
 
 # Lane test

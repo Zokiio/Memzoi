@@ -1089,6 +1089,7 @@ dependencies = [
  "toml",
  "ureq 2.12.1",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -1,8 +1,11 @@
 ---
 id: mem_2026_07_06_auth_supersede
 kind: proposal
-version: okf/v0.1
-profile: memzoi/v0
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-proposal:mem_2026_07_06_auth_supersede
+  route: repository_proposal
 type: decision
 lane: semantic
 title: Server sessions supersede client auth checks
@@ -28,6 +31,7 @@ sources:
 supersedes:
   - semantic/decisions/auth-client-validation
 sensitivity: repo-safe
+content_class: general_repo_knowledge
 ---
 
 # Server sessions supersede client auth checks

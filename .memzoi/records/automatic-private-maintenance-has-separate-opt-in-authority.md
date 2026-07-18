@@ -1,4 +1,11 @@
 ---
+id: automatic-private-maintenance-has-separate-opt-in-authority
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:automatic-private-maintenance-has-separate-opt-in-authority
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Automatic private maintenance has separate opt-in authority"

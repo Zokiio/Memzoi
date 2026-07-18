@@ -118,7 +118,8 @@ pub(super) fn admit_repository_record_snapshot(
 }
 
 fn verify_existing_materialization_attestation(record: &okf::OkfRecordFile) -> Result<()> {
-    // Legacy records remain compatible; admission verifies only an attestation already in bytes.
+    // Materialization attestations remain optional in the current profile; when present they
+    // must verify exactly against the artifact bytes.
     let Some(metadata) = record.materialization.as_ref() else {
         return Ok(());
     };

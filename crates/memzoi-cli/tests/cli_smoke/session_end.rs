@@ -492,6 +492,8 @@ candidates:
             "Structured checkpoint",
             "--note",
             checkpoint_body,
+            "--operation-id",
+            "session-end-source-checkpoint",
             "--json",
         ],
     );
@@ -503,16 +505,51 @@ candidates:
             "session-end",
             "--from-checkpoint",
             checkpoint_id.as_str(),
+            "--operation-id",
+            "promote-source-checkpoint",
+            "--expected-version",
+            json_string(&checkpoint, "record_version"),
             "--json",
         ],
     );
     assert_json_string_field(&promoted["source"], &["kind"], "checkpoint");
     assert_json_string_field(&promoted["source"], &["record_id"], &checkpoint_id);
+    assert_json_string_field(
+        &promoted["checkpoint_closure"],
+        &["checkpoint_id"],
+        &checkpoint_id,
+    );
+    assert_eq!(promoted["checkpoint_closure"]["applied"], true);
     let candidates = promoted["candidates"]
         .as_array()
         .unwrap_or_else(|| panic!("session-end JSON should include candidates: {promoted}"));
     assert_json_string_field(
         &candidates[0]["write"],
+        &["proposal_id"],
+        "mem_session_checkpoint-session-end-zircon-decision",
+    );
+    let listed_after_promotion = run_json_command(repo, &["checkpoint", "list", "--json"]);
+    assert!(
+        !record_ids_from_json(&listed_after_promotion).contains(&checkpoint_id.as_str()),
+        "successful session-end must atomically close its source checkpoint: {listed_after_promotion}"
+    );
+
+    let replayed = run_json_command(
+        repo,
+        &[
+            "session-end",
+            "--from-checkpoint",
+            checkpoint_id.as_str(),
+            "--operation-id",
+            "promote-source-checkpoint",
+            "--expected-version",
+            json_string(&checkpoint, "record_version"),
+            "--json",
+        ],
+    );
+    assert_eq!(replayed["checkpoint_closure"]["replayed"], true);
+    assert_json_string_field(
+        &replayed["candidates"][0]["write"],
         &["proposal_id"],
         "mem_session_checkpoint-session-end-zircon-decision",
     );
@@ -526,6 +563,8 @@ candidates:
             "Prose checkpoint",
             "--note",
             "This is unstructured prose, not a session-end document.",
+            "--operation-id",
+            "prose-checkpoint",
             "--json",
         ],
     );

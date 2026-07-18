@@ -6,10 +6,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use memzoi_core::{
-    CaptureRequest, CaptureSourceInputs, CaptureSourceLocator, build_capture_review_with_inputs,
-    build_capture_review_with_prior_and_inputs, discover_paths, parse_capture_plan,
+    CaptureRequest, CaptureSourceInputs, CaptureSourceLocator, parse_capture_plan,
     parse_capture_request, parse_capture_review, parse_capture_review_input,
-    plan_capture_with_inputs,
 };
 use serde_json::json;
 
@@ -414,11 +412,9 @@ pub(super) fn plan_command(
     output: Option<PathBuf>,
     as_json: bool,
 ) -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let paths = discover_paths(&cwd)?;
     let request = match (source, request_file) {
         (Some(source), None) => serde_json::from_value::<CaptureRequest>(json!({
-            "schema": "memzoi/capture-request-v1",
+            "schema": memzoi_core::CAPTURE_REQUEST_SCHEMA,
             "sources": [{
                 "source_id": source_id,
                 "locator": {
@@ -438,10 +434,11 @@ pub(super) fn plan_command(
         _ => bail!("capture plan requires exactly one --source or --request-file"),
     };
     let source_inputs = capture_source_inputs(&request, source_bytes.as_deref())?;
-    let plan = plan_capture_with_inputs(&paths, request, &source_inputs)?;
+    let service = open_service()?;
+    let plan = service.plan_capture_with_inputs(request, &source_inputs)?;
     let write_result = output
         .as_deref()
-        .map(|destination| write_classified_capture_artifact(&plan, destination, &paths))
+        .map(|destination| write_classified_capture_artifact(&plan, destination, service.paths()))
         .transpose();
 
     if as_json {
@@ -479,17 +476,15 @@ pub(super) fn review_command(command: ReviewCommand) -> Result<()> {
         &decisions_file,
         "capture decisions",
     )?)?;
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let paths = discover_paths(&cwd)?;
     let source_inputs = capture_source_inputs(&plan.request, source_bytes.as_deref())?;
+    let service = open_service()?;
     let review = match prior_review_file {
         Some(prior_review_file) => {
             let prior = parse_capture_review(&read_capture_artifact(
                 &prior_review_file,
                 "prior capture review",
             )?)?;
-            build_capture_review_with_prior_and_inputs(
-                &paths,
+            service.build_capture_review_with_prior_and_inputs(
                 &plan,
                 input,
                 &prior,
@@ -498,8 +493,7 @@ pub(super) fn review_command(command: ReviewCommand) -> Result<()> {
                 &reviewed_at,
             )?
         }
-        None => build_capture_review_with_inputs(
-            &paths,
+        None => service.build_capture_review_with_inputs(
             &plan,
             input,
             &source_inputs,
@@ -509,7 +503,7 @@ pub(super) fn review_command(command: ReviewCommand) -> Result<()> {
     };
     let write_result = output
         .as_deref()
-        .map(|destination| write_classified_capture_artifact(&review, destination, &paths))
+        .map(|destination| write_classified_capture_artifact(&review, destination, service.paths()))
         .transpose();
 
     if as_json {

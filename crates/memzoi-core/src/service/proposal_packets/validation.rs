@@ -435,7 +435,7 @@ impl MemoryService {
                     );
                 }
                 let target_id = proposal.supersedes[0].clone();
-                let target = self.load_file_proposal_target(proposal, &target_id)?;
+                let target = self.load_file_proposal_target(proposal, &target_id, resolved_at)?;
                 let mut previous = okf::project_okf_record(&target);
                 previous.status = MemoryStatus::Superseded;
                 previous.updated_at = resolved_at.to_owned();
@@ -478,7 +478,7 @@ impl MemoryService {
                     .as_deref()
                     .context("OKF tombstone proposals must include exactly one proposal.target")?
                     .to_owned();
-                let target = self.load_file_proposal_target(proposal, &target_id)?;
+                let target = self.load_file_proposal_target(proposal, &target_id, resolved_at)?;
                 let mut tombstoned = okf::project_okf_record(&target);
                 tombstoned.status = MemoryStatus::Tombstoned;
                 tombstoned.updated_at = resolved_at.to_owned();
@@ -503,6 +503,7 @@ impl MemoryService {
         &self,
         proposal: &OkfProposalFile,
         target_id: &str,
+        evaluated_at: &str,
     ) -> Result<okf::OkfRecordFile> {
         ensure_safe_directory(
             &self.paths.project_root,
@@ -515,11 +516,19 @@ impl MemoryService {
             .into_iter()
             .find(|record| record.concept_id == target_id)
             .with_context(|| format!("proposal target does not exist: {target_id}"))?;
-        if target.status != MemoryStatus::Active {
-            bail!(
-                "proposal target {target_id} is inactive with status {}",
-                target.status.as_str()
-            );
+        let evaluated_at = OffsetDateTime::parse(evaluated_at, &Rfc3339)
+            .context("proposal target evaluation timestamp is invalid")?;
+        if !crate::evaluate_current_assertion(
+            &target.concept_id,
+            target.status,
+            target.draft.lane,
+            &target.retention,
+            evaluated_at,
+            Vec::new(),
+        )?
+        .is_current
+        {
+            bail!("proposal target {target_id} is not a current assertion");
         }
         if target.draft.scope_kind != proposal.scope_kind
             || target.draft.scope_id != proposal.scope_id

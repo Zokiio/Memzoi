@@ -62,10 +62,12 @@ Run `memzoi <command> --help` for exact options.
 | `local add` | `--type`, `--title`, `--body`, `--actor`, `--json` |
 | `local list` | `--json` |
 | `local search` | `<query>`, `--limit`, `--json` |
-| `checkpoint add` | `--task`, `--note` or `--from-file`, `--actor`, `--json` |
+| `checkpoint add` | `--task`, `--note` or `--from-file`, optional `--successor-of`, `--operation-id`, `--expected-version`, `--actor`, `--json` |
+| `checkpoint continue` | `<checkpoint-id>`, `--operation-id`, `--expected-version`, `--actor`, `--json` |
+| `checkpoint close` | `<checkpoint-id>`, `--operation-id`, `--expected-version`, `--actor`, `--json` |
 | `checkpoint list` | `--json` |
 | `events export` | `--jsonl` |
-| `session-end` | `--from-file <path>` or `--from-checkpoint <checkpoint-id>`, `--actor`, `--json` |
+| `session-end` | `--from-file <path>` or `--from-checkpoint <checkpoint-id>`, `--operation-id`, `--expected-version`, `--actor`, `--json` |
 | `capture plan` | `--source <project-relative.md>` or `--request-file <capture-request.{json,yaml}>`, `--source-bytes <path\|->` for `supplied_bytes`, `--source-id`, `--output`, `--json` |
 | `capture review` | `--plan-file`, `--decisions-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--reviewed-by`, `--reviewed-at`, `--output`, `--json` |
 | `capture apply` | `--plan-file`, `--review-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--plan-id`, `--review-id`, `--actor`, `--json` |
@@ -98,15 +100,15 @@ project's canonical records, proposal inbox, runtime database, exports, or event
 log:
 
 ```bash
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --json
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json --json
 ```
 
 `--baseline` is optional. `--update-baseline` requires it and is the only mode
 that writes the selected baseline. A threshold-failing run is never written:
 
 ```bash
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --update-baseline
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json --update-baseline
 ```
 
 The explicit corpus is strict YAML with version
@@ -203,12 +205,12 @@ Run the checked-in capture quality gate from isolated temporary projects:
 
 ```bash
 memzoi eval capture \
-  --corpus evals/capture/v1/corpus.yaml \
-  --baseline evals/capture/v1/baseline.json
+  --corpus evals/capture/corpus.yaml \
+  --baseline evals/capture/baseline.json
 
 memzoi eval capture \
-  --corpus evals/capture/v1/corpus.yaml \
-  --baseline evals/capture/v1/baseline.json \
+  --corpus evals/capture/corpus.yaml \
+  --baseline evals/capture/baseline.json \
   --json
 ```
 
@@ -234,8 +236,8 @@ after every gate passes:
 
 ```bash
 memzoi eval capture \
-  --corpus evals/capture/v1/corpus.yaml \
-  --baseline evals/capture/v1/baseline.json \
+  --corpus evals/capture/corpus.yaml \
+  --baseline evals/capture/baseline.json \
   --update-baseline
 ```
 
@@ -246,7 +248,7 @@ for metric definitions and fixture guidance.
 
 Capture turns one explicitly named project source into evidence-linked memory
 candidates without ambient repository scanning or inference from chat, shell
-history, or hidden agent state. The legacy `--source` shorthand selects the
+history, or hidden agent state. The convenience `--source` form selects the
 `markdown-deterministic` profile; `--request-file` accepts the complete strict
 JSON or YAML request needed by instruction, ADR, and Git-change profiles. Its
 three CLI stages keep extraction, human judgment, and writes separate:
@@ -339,11 +341,11 @@ same identity they would have against an empty runtime inventory.
 
 ### Instruction, ADR, and Git-change profiles
 
-Extension profiles use a complete `memzoi/capture-request-v1` artifact. For
+Extension profiles use a complete `memzoi/capture-request` artifact. For
 example, this request captures one explicitly named agent instruction file:
 
 ```yaml
-schema: memzoi/capture-request-v1
+schema: memzoi/capture-request
 sources:
   - source_id: agent-rules
     locator:
@@ -453,7 +455,7 @@ accepts one candidate:
 
 ```json
 {
-  "schema": "memzoi/capture-review-input-v1",
+  "schema": "memzoi/capture-review-input",
   "plan_id": "capture_...",
   "decisions": [
     {
@@ -473,7 +475,7 @@ explicit RFC 3339 time. The resulting `review_id` pins the plan, reviewer, time,
 set, and any reviewed candidate edits.
 
 A later review may replace deferred decisions only. Set `prior_review_id` in the next
-`capture-review-input-v1` artifact and pass the complete predecessor with
+`capture-review-input` artifact and pass the complete predecessor with
 `--prior-review-file <capture-review.json>`. Core verifies the prior review identity, requires the
 same plan, preserves every terminal decision byte-for-byte after normalization, and binds the new
 review ID to its predecessor. Applying that later review also requires the immediate predecessor
@@ -503,7 +505,7 @@ Proposal-file and runtime writes are one crash-recoverable guarded operation. A 
 fsynced journal and a SQLite commit marker let the next service open roll back an interrupted
 uncommitted batch or finish a committed proposal install without exposing private bodies in the
 journal. The result uses schema
-`memzoi/capture-apply-result-v1` and lists each proposal file or runtime record written.
+`memzoi/capture-apply-result` and lists each proposal file or runtime record written.
 
 Capture provenance records the plan/review, original and reviewed candidate identities, extractor,
 evidence locator/spans/hashes, confidence, destination, sensitivity, and review outcome. Pending
@@ -512,11 +514,11 @@ compact form without copied evidence text; its evidence identity and lineage rem
 rebuild, recall citations, and later audits. Private runtime records retain the same provenance
 through runtime preservation and rebuild.
 
-MCP exposes only the original read-only Markdown/project-path planner as
-`plan_capture_v1`; instruction, ADR, directory, supplied-byte, and Git-range
+MCP exposes only the read-only Markdown/project-path planner as
+`plan_capture`; instruction, ADR, directory, supplied-byte, and Git-range
 requests remain CLI-only and are rejected at the MCP boundary. MCP deliberately
 exposes no capture review or apply tool and denies `private` results by default. See
-[MCP and agent integration](./mcp-and-agent-integration.md#plan_capture_v1-contract).
+[MCP and agent integration](./mcp-and-agent-integration.md#plan_capture-contract).
 
 ## Classified import
 
@@ -539,12 +541,13 @@ object instead of the human-readable summary. `plan` is the review step and is
 mutation-free. `apply` recomputes the plan from the manifest and current memory state,
 then requires the supplied `--plan-id` to match before it writes anything.
 
-### Manifest (`memzoi/import-v1`)
+### Manifest (`memzoi/import`)
 
 The YAML document has exactly these top-level keys; unknown keys are rejected:
 
 ```yaml
-version: memzoi/import-v1
+schema: memzoi/import
+origin_key: integration:event:123
 sources:
   - path: imports/source.yml       # or url: https://… or ref: issue://123
 candidates:
@@ -592,7 +595,7 @@ Inference is deliberately narrow and deterministic:
 
 ### Plan and apply semantics
 
-`import plan` returns schema `memzoi/import-plan-v1`, a deterministic `plan_id`, the
+`import plan` returns schema `memzoi/import-plan`, a deterministic `plan_id`, the
 normalized `sources`, a `summary`, and one normalized result per candidate. With `--json`,
 the plan envelope also includes `mode: "plan"`, the effective `actor`, and the manifest
 `source_file`; the plan envelope has no `writes` field.
@@ -709,8 +712,8 @@ The policy mapping is:
 | `discard` | `null` (no plane) | `no_write` | `no_review` |
 | `needs_review` | `null` (no plane) | `no_write` | `human_decision` |
 
-This mapping is the normal destination-policy contract. During the compatibility
-period, direct `memzoi materialize` uses a separate explicit structured-candidate
+This mapping is the normal destination-policy contract. Direct `memzoi materialize`
+uses a separate explicit structured-candidate
 decision and the `materialization` repository-write route; it does not expand
 `MemoryDestination::policy()` or grant other callers direct Git-write authority.
 
@@ -861,7 +864,7 @@ memzoi proposal-files reject <proposal-id> --reason "..."
 
 `apply` accepts a `status: proposed`, `sensitivity: repo-safe` packet, holds the repo lifecycle lock, writes its canonical changes and derived SQLite rows with rollback for reported failures, then moves the packet to `.memzoi/proposals/resolved/applied/`. Create writes one active record; supersede preserves the target as `superseded` and creates one lineage-linked active replacement; tombstone preserves the target evidence with `status: tombstoned`. `reject` holds the same lock, creates no canonical record, and moves the packet to `.memzoi/proposals/resolved/rejected/` with an explicit reason. A rejected non-repo-safe packet is archived as a create-shaped hash receipt: its original title, body, source, scope, authorship, action target, lineage, proposal ID, and file ID are not copied into Git-visible history or command output. The receipt uses deterministic `redacted-identity-…` identities, and replay can match either original alias by hashing the lookup without printing it. Repeating an applied outcome checks create/replacement bytes plus lifecycle status, scope, and lineage while treating current canonical target bytes as file-native source of truth; it repairs relational and full-text SQLite drift transactionally. Repeating a rejection is an auditable no-op, and requesting the opposite outcome is refused. Session-end and import proposal writers hold the same lifecycle lock while reserving identities and installing pending files. Reported rollback or cleanup failures are surfaced. The multi-file filesystem and SQLite operation is not crash-atomic across process termination or power loss; `memzoi doctor` warns about index drift and hidden transaction artifacts without printing unsafe artifact identities.
 
-Git-plane apply blocks every value except `repo-safe`, including `secret`, `sensitive`, `local-only`, `raw-transcript`, `private-personal-data`, `temporary-state`, and `unknown`; there is no override flag. Missing legacy sensitivity is treated as `unknown`. Classify or sanitize blocked proposals before repo apply, or route local/session content to the runtime plane.
+Git-plane apply blocks every value except `repo-safe`, including `secret`, `sensitive`, `local-only`, `raw-transcript`, `private-personal-data`, `temporary-state`, and `unknown`; there is no override flag. Current-format proposal packets must provide sensitivity explicitly. Classify or sanitize blocked proposals before repo apply, or route local/session content to the runtime plane.
 
 With `--json`, sensitivity-blocked `apply`, `supersede`, and `proposal-files apply`
 commands exit nonzero after emitting a content-free error object on stdout. The envelope
@@ -890,6 +893,9 @@ Checkpoint commands:
 ```bash
 memzoi checkpoint add --task "..." --note "..."
 memzoi checkpoint add --task "..." --from-file notes.md
+memzoi checkpoint continue <checkpoint-id>
+memzoi checkpoint close <checkpoint-id>
+memzoi checkpoint add --task "..." --note "..." --successor-of <checkpoint-id>
 memzoi checkpoint list
 ```
 
@@ -897,13 +903,26 @@ Checkpoints are stored in the repository-shared runtime database under `${MEMZOI
 
 Checkpoints store only explicit `--note` or `--from-file` content. They are not written to `.memzoi/records/**`, are not returned by global `memzoi search`, and are not exported into repo-shared agent files. `memzoi context` is repo-only by default and includes checkpoints only with `--include-session`. Use later session-end proposal workflows to promote durable findings into repo memory.
 
+The session retention boundary is the earliest of closure, 24 hours after the
+latest continuation or start, seven days after the original start, and an
+explicit expiry. Continuation is allowed only while open and current; closure
+is terminal and idempotent. `--successor-of` creates a new generation from a
+closed or expired checkpoint and records its predecessor lineage.
+
+For `--json`, lifecycle commands require caller-controlled `--operation-id`
+and the current `--expected-version` (except a new checkpoint without a
+predecessor, which has no expected version). An exact retry returns the prior
+outcome before checking the now-stale version. Reusing an operation ID with
+changed parameters fails with `origin_reuse_mismatch` and performs no writes.
+
 ## Session-end promotion
 
 Session-end promotion reads only explicit structured YAML, either from a file or from an existing checkpoint body:
 
 ```bash
 memzoi session-end --from-file notes.yml
-memzoi session-end --from-checkpoint <checkpoint-id>
+memzoi session-end --from-checkpoint <checkpoint-id> \
+  --operation-id <operation-id> --expected-version <record-version>
 ```
 
 The input must include a `task` and a `candidates` list:

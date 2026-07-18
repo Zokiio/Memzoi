@@ -1,4 +1,11 @@
 ---
+id: example-memory-is-documentation-and-an-okf-parser-fixture
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:example-memory-is-documentation-and-an-okf-parser-fixture
+  route: repository_materialization
 type: warning
 lane: semantic
 title: "Example memory is documentation and an OKF parser fixture"

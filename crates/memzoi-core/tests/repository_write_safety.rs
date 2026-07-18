@@ -2,10 +2,10 @@ use std::path::Path;
 
 use memzoi_core::{
     AuthorizationProof, MemoryDestination, OkfProposalSensitivity, ProvenanceAssessment,
-    REPOSITORY_WRITE_DETECTOR_POLICY_VERSION, REPOSITORY_WRITE_SAFETY_SCHEMA,
-    RepositoryContentClass, RepositoryProjection, RepositoryProjectionPurpose, RepositoryScope,
-    RepositoryWriteRequest, RepositoryWriteRoute, SafetyField, SafetyFieldKind, ScopeKind,
-    Visibility, authorize_repository_write, scan_managed_repository_blob, scan_repository_blob,
+    REPOSITORY_WRITE_SAFETY_SCHEMA, RepositoryContentClass, RepositoryProjection,
+    RepositoryProjectionPurpose, RepositoryScope, RepositoryWriteRequest, RepositoryWriteRoute,
+    SafetyField, SafetyFieldKind, ScopeKind, Visibility, authorize_repository_write,
+    scan_managed_repository_blob, scan_repository_blob,
 };
 
 fn safe_request<'a>(
@@ -100,10 +100,6 @@ fn prohibited_content_reports_are_stable_and_redacted() {
         let json = serde_json::to_string(&report).unwrap();
         assert!(!json.contains("SECRET-SENTINEL"), "fixture {name} leaked");
         assert_eq!(report.schema, REPOSITORY_WRITE_SAFETY_SCHEMA);
-        assert_eq!(
-            report.detector_policy_version,
-            REPOSITORY_WRITE_DETECTOR_POLICY_VERSION
-        );
     }
 }
 
@@ -252,12 +248,12 @@ fn canonical_record_markdown(body: &str, content_class: Option<&str>) -> String 
         .map(|value| format!("content_class: {value}\n"))
         .unwrap_or_default();
     format!(
-        "---\ntype: fact\ntitle: Candidate\ntimestamp: 2026-07-14T00:00:00Z\nupdated: 2026-07-14T00:00:00Z\nstatus: active\nscope: repo\nvisibility: repo\n{content_class}confidence: 1\n---\n\n# Candidate\n\n{body}\n"
+        "---\nid: candidate\nkind: memory\nprofile: memzoi\nretention: {{}}\norigin:\n  origin_key: test-record:candidate\n  route: repository_materialization\ntype: fact\nlane: semantic\ntitle: Candidate\ntimestamp: 2026-07-14T00:00:00Z\nupdated: 2026-07-14T00:00:00Z\nstatus: active\nscope: repo\nvisibility: repo\n{content_class}confidence: 1\nsource: test\nsource_ref: fixture://candidate\n---\n\n# Candidate\n\n{body}\n"
     )
 }
 
 fn proposal_markdown(sensitivity: &str) -> String {
     format!(
-        "---\nid: mem_scan_candidate\nkind: proposal\nversion: okf/v0.1\nprofile: memzoi/v0\ntype: fact\nlane: semantic\ntitle: Candidate\ndescription: Candidate description.\nstatus: proposed\nproposal:\n  action: create\n  proposed_by: test\n  proposed_at: 2026-07-14T00:00:00Z\nscope:\n  kind: repo\n  paths: []\ntags: []\ntimestamp: 2026-07-14T00:00:00Z\ncreated_by: test\nsources: []\nsupersedes: []\nsensitivity: {sensitivity}\ncontent_class: general_repo_knowledge\n---\n\n# Candidate\n\nDurable repository knowledge.\n"
+        "---\nid: mem_scan_candidate\nkind: proposal\nprofile: memzoi\nretention: {{}}\norigin:\n  origin_key: test:mem-scan-candidate\n  route: repository_proposal\ntype: fact\nlane: semantic\ntitle: Candidate\ndescription: Candidate description.\nstatus: proposed\nproposal:\n  action: create\n  proposed_by: test\n  proposed_at: 2026-07-14T00:00:00Z\nscope:\n  kind: repo\n  paths: []\ntags: []\ntimestamp: 2026-07-14T00:00:00Z\ncreated_by: test\nsources: []\nsupersedes: []\nsensitivity: {sensitivity}\ncontent_class: general_repo_knowledge\n---\n\n# Candidate\n\nDurable repository knowledge.\n"
     )
 }

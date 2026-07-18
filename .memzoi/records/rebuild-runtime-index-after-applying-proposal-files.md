@@ -1,4 +1,11 @@
 ---
+id: rebuild-runtime-index-after-applying-proposal-files
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:rebuild-runtime-index-after-applying-proposal-files
+  route: repository_materialization
 type: procedure
 lane: procedural
 title: "Rebuild runtime index after applying proposal files"

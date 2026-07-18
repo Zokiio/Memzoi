@@ -1,4 +1,11 @@
 ---
+id: memzoi-is-primary-local-first-memory-with-selective-git-truth
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:memzoi-is-primary-local-first-memory-with-selective-git-truth
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Memzoi is primary local-first memory with selective Git truth"

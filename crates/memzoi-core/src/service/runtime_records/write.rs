@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::{
     CaptureCandidate, CaptureProvenance, MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus,
-    MemoryType, ScopeKind, Visibility,
+    MemoryType, OriginDescriptor, OriginRoute, RecordLineage, RetentionFacts, ScopeKind,
+    Visibility,
     events::{AppendEvent, append_event},
     proposals,
 };
@@ -37,6 +38,29 @@ pub(super) fn create_local_memory_avoiding(
     now: &str,
     reserved_ids: &BTreeSet<String>,
 ) -> Result<MemoryRecord> {
+    create_local_memory_with_metadata_avoiding(
+        conn,
+        actor,
+        input,
+        now,
+        OriginDescriptor::new(
+            format!("runtime-local:{}", Uuid::now_v7()),
+            OriginRoute::LocalMemory,
+        ),
+        None,
+        reserved_ids,
+    )
+}
+
+pub(super) fn create_local_memory_with_metadata_avoiding(
+    conn: &Connection,
+    actor: &str,
+    input: &LocalMemoryInput,
+    now: &str,
+    origin: OriginDescriptor,
+    lineage: Option<RecordLineage>,
+    reserved_ids: &BTreeSet<String>,
+) -> Result<MemoryRecord> {
     validate_local_memory_input(input)?;
     let id = next_prefixed_record_id(conn, "local", &input.title, reserved_ids)?;
     let body = input.body.trim().to_owned();
@@ -62,7 +86,9 @@ pub(super) fn create_local_memory_avoiding(
         created_at: now.to_owned(),
         updated_at: now.to_owned(),
         supersedes_id: None,
-        expires_at: None,
+        retention: retention_facts_for_lane(input.lane, now),
+        origin,
+        lineage,
     };
     insert_memory_record_row(conn, &record, InsertMode::Create)?;
     append_event(
@@ -87,6 +113,26 @@ pub(super) fn create_checkpoint_avoiding(
     actor: &str,
     input: &CheckpointInput,
     now: &str,
+    reserved_ids: &BTreeSet<String>,
+) -> Result<MemoryRecord> {
+    create_checkpoint_with_metadata_avoiding(
+        conn,
+        actor,
+        input,
+        now,
+        OriginDescriptor::owner_command(Uuid::now_v7().to_string(), OriginRoute::CheckpointCreate),
+        None,
+        reserved_ids,
+    )
+}
+
+pub(super) fn create_checkpoint_with_metadata_avoiding(
+    conn: &Connection,
+    actor: &str,
+    input: &CheckpointInput,
+    now: &str,
+    origin: OriginDescriptor,
+    lineage: Option<RecordLineage>,
     reserved_ids: &BTreeSet<String>,
 ) -> Result<MemoryRecord> {
     validate_checkpoint_input(input)?;
@@ -114,9 +160,12 @@ pub(super) fn create_checkpoint_avoiding(
         created_at: now.to_owned(),
         updated_at: now.to_owned(),
         supersedes_id: None,
-        expires_at: None,
+        retention: retention_facts_for_lane(MemoryLane::Session, now),
+        origin,
+        lineage,
     };
     insert_memory_record_row(conn, &record, InsertMode::Create)?;
+    let record_version = super::lifecycle::checkpoint_record_version(&record)?;
     append_event(
         conn,
         AppendEvent {
@@ -126,6 +175,9 @@ pub(super) fn create_checkpoint_avoiding(
                 "record_id": &record.id,
                 "destination": record.destination.as_str(),
                 "title": &record.title,
+                "origin": &record.origin,
+                "lineage": &record.lineage,
+                "record_version": record_version,
             }),
             record_id: Some(record.id.clone()),
             proposal_id: None,
@@ -196,8 +248,8 @@ pub(super) fn insert_memory_record_row(
         "{verb} memory_record (
           id, type, lane, destination, scope_kind, scope_id, visibility, title, body, status,
           confidence, source_kind, source_ref, proposal_id, content_hash, created_at, updated_at,
-          supersedes_id, expires_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
+          supersedes_id, retention_json, origin_json, lineage_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"
     );
     let inserted = conn.execute(
         &sql,
@@ -220,7 +272,13 @@ pub(super) fn insert_memory_record_row(
             &record.created_at,
             &record.updated_at,
             &record.supersedes_id,
-            &record.expires_at,
+            serde_json::to_string(&record.retention)?,
+            serde_json::to_string(&record.origin)?,
+            record
+                .lineage
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     if inserted == 1 {
@@ -249,6 +307,10 @@ pub(super) fn create_capture(
         MemoryDestination::Session => "session",
         _ => unreachable!("destination is checked above"),
     };
+    let origin = OriginDescriptor::new(
+        format!("capture:{}", provenance.claim_id),
+        OriginRoute::Capture,
+    );
     let record = MemoryRecord {
         id: next_prefixed_record_id(conn, prefix, &candidate.memory.title, reserved_ids)?,
         memory_type: candidate.memory.memory_type,
@@ -272,7 +334,9 @@ pub(super) fn create_capture(
         created_at: now.to_owned(),
         updated_at: now.to_owned(),
         supersedes_id: None,
-        expires_at: None,
+        retention: retention_facts_for_lane(candidate.memory.lane, now),
+        origin,
+        lineage: None,
     };
     insert_memory_record_row(conn, &record, InsertMode::Create)?;
     for tag in &candidate.memory.tags {
@@ -308,4 +372,15 @@ pub(super) fn create_capture(
         },
     )?;
     Ok(record)
+}
+
+fn retention_facts_for_lane(lane: MemoryLane, now: &str) -> RetentionFacts {
+    RetentionFacts {
+        occurred_at: (lane == MemoryLane::Episodic).then(|| now.to_owned()),
+        started_at: (lane == MemoryLane::Session).then(|| now.to_owned()),
+        last_continued_at: None,
+        closed_at: None,
+        explicit_expires_at: None,
+        episodic_extension: None,
+    }
 }

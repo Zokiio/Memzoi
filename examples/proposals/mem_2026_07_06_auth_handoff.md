@@ -1,8 +1,12 @@
 ---
 id: mem_2026_07_06_auth_handoff
 kind: proposal
-version: okf/v0.1
-profile: memzoi/v0
+profile: memzoi
+retention:
+  occurred_at: 2026-07-06T00:15:00Z
+origin:
+  origin_key: repository-proposal:mem_2026_07_06_auth_handoff
+  route: repository_proposal
 type: episode
 lane: episodic
 title: Auth migration handoff notes
@@ -27,6 +31,7 @@ sources:
   - path: src/auth/session.ts
 supersedes: []
 sensitivity: repo-safe
+content_class: general_repo_knowledge
 ---
 
 # Auth migration handoff notes

@@ -1,5 +1,13 @@
 ---
+id: use-memzoi-for-project-memory-in-this-repo
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:use-memzoi-for-project-memory-in-this-repo
+  route: repository_materialization
 type: decision
+lane: semantic
 title: "Use Memzoi for project memory in this repo"
 description: "This repo is initialized with Memzoi. Durable project memory should be stored as reviewed OKF-profile Markdown records under .memzoi/records/. Local runtime state lives outside the repo under the Memzoi home directory; rebuild it from canonical records with memzoi rebuild."
 timestamp: "2026-07-05T11:31:45.871789Z"

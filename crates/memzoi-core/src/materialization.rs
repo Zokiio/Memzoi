@@ -6,27 +6,26 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     CaptureProvenance, MemoryDestination, MemoryDraft, MemoryLane, MemoryStatus, MemoryType,
-    OkfProposalSensitivity, OkfRecordFile, REPOSITORY_WRITE_SAFETY_SCHEMA,
-    REPOSITORY_WRITE_SAFETY_VERSION, RepositoryContentClass, ScopeKind, Visibility,
-    capture::validate_capture_provenance,
+    OkfProposalSensitivity, OkfRecordFile, OriginDescriptor, REPOSITORY_WRITE_SAFETY_SCHEMA,
+    RecordLineage, RepositoryContentClass, RetentionFacts, ScopeKind, Visibility,
+    capture::validate_capture_provenance, retention::evaluate_retention,
 };
 
-pub const REPOSITORY_MATERIALIZATION_PLAN_SCHEMA: &str =
-    "memzoi/repository-materialization-plan-v1";
+pub const REPOSITORY_MATERIALIZATION_PLAN_SCHEMA: &str = "memzoi/repository-materialization-plan";
 pub const REPOSITORY_MATERIALIZATION_DECISION_SCHEMA: &str =
-    "memzoi/repository-materialization-decision-v1";
+    "memzoi/repository-materialization-decision";
 pub const REPOSITORY_MATERIALIZATION_RESULT_SCHEMA: &str =
-    "memzoi/repository-materialization-result-v1";
-pub const CANONICAL_REVISION_SCHEMA: &str = "memzoi/repository-canonical-revision-v1";
-pub const MATERIALIZATION_METADATA_SCHEMA: &str = "memzoi/repository-materialization-v1";
+    "memzoi/repository-materialization-result";
+pub const CANONICAL_REVISION_SCHEMA: &str = "memzoi/repository-canonical-revision";
+pub const MATERIALIZATION_METADATA_SCHEMA: &str = "memzoi/repository-materialization";
 pub const MAX_MATERIALIZATION_REASON_BYTES: usize = 280;
 pub const REPOSITORY_MATERIALIZATION_CANDIDATE_SCHEMA: &str =
-    "memzoi/repository-materialization-candidate-v1";
+    "memzoi/repository-materialization-candidate";
 
-const PLAN_ID_DOMAIN: &str = "memzoi.repository-materialization.plan-id.v1";
-const DECISION_ID_DOMAIN: &str = "memzoi.repository-materialization.decision-id.v1";
-const REVISION_ID_DOMAIN: &str = "memzoi.repository-materialization.revision-id.v1";
-const CANDIDATE_ID_DOMAIN: &str = "memzoi.repository-materialization.candidate-id.v1";
+const PLAN_ID_DOMAIN: &str = "memzoi.repository-materialization.plan-id";
+const DECISION_ID_DOMAIN: &str = "memzoi.repository-materialization.decision-id";
+const REVISION_ID_DOMAIN: &str = "memzoi.repository-materialization.revision-id";
+const CANDIDATE_ID_DOMAIN: &str = "memzoi.repository-materialization.candidate-id";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -312,8 +311,10 @@ pub struct RepositoryMaterializationCandidateRecord {
     pub updated: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supersedes_id: Option<String>,
+    pub retention: RetentionFacts,
+    pub origin: OriginDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
+    pub lineage: Option<RecordLineage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -367,7 +368,9 @@ pub struct CanonicalRecordSemanticContent {
     pub created: String,
     pub updated: Option<String>,
     pub supersedes_id: Option<String>,
-    pub expires_at: Option<String>,
+    pub retention: RetentionFacts,
+    pub origin: OriginDescriptor,
+    pub lineage: Option<RecordLineage>,
     pub proposal_id: Option<String>,
     pub capture: Option<CaptureProvenance>,
 }
@@ -392,7 +395,9 @@ impl From<&OkfRecordFile> for CanonicalRecordSemanticContent {
             created: record.created.clone(),
             updated: record.updated.clone(),
             supersedes_id: record.supersedes_id.clone(),
-            expires_at: record.expires_at.clone(),
+            retention: record.retention.clone(),
+            origin: record.origin.clone(),
+            lineage: record.lineage.clone(),
             proposal_id: record.proposal_id.clone(),
             capture: record.capture.clone(),
         }
@@ -616,7 +621,9 @@ pub fn repository_materialization_candidate_to_okf_record(
         created: candidate.record.created.clone(),
         updated: candidate.record.updated.clone(),
         supersedes_id: candidate.record.supersedes_id.clone(),
-        expires_at: candidate.record.expires_at.clone(),
+        retention: candidate.record.retention.clone(),
+        origin: candidate.record.origin.clone(),
+        lineage: candidate.record.lineage.clone(),
         proposal_id: candidate.record.proposal_id.clone(),
         capture: candidate.record.capture.clone(),
         materialization: None,
@@ -651,7 +658,7 @@ pub fn repository_materialization_candidate_plan(
 /// Returns the immutable policy label for repository materialization decisions.
 pub fn repository_materialization_policy() -> MaterializationPolicy {
     MaterializationPolicy {
-        policy_id: format!("{REPOSITORY_WRITE_SAFETY_SCHEMA}@{REPOSITORY_WRITE_SAFETY_VERSION}"),
+        policy_id: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
         safety_contract: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
     }
 }
@@ -814,9 +821,23 @@ fn validate_candidate_record(record: &RepositoryMaterializationCandidateRecord) 
     if let Some(supersedes_id) = record.supersedes_id.as_deref() {
         validate_canonical_record_id(supersedes_id)?;
     }
-    if let Some(expires_at) = record.expires_at.as_deref() {
-        crate::expiry::parse_expires_at(expires_at)
-            .with_context(|| "candidate record expires_at is invalid")?;
+    let created_at = OffsetDateTime::parse(&record.created, &Rfc3339)
+        .with_context(|| "candidate record created is invalid")?;
+    evaluate_retention(
+        &record.concept_id,
+        record.draft.lane,
+        &record.retention,
+        created_at,
+    )
+    .with_context(|| "candidate record retention is invalid")?;
+    record
+        .origin
+        .validate()
+        .with_context(|| "candidate record origin is invalid")?;
+    if let Some(lineage) = record.lineage.as_ref() {
+        lineage
+            .validate()
+            .with_context(|| "candidate record lineage is invalid")?;
     }
     if let Some(proposal_id) = record.proposal_id.as_deref() {
         validate_nonempty(proposal_id, "candidate record proposal_id")?;
@@ -1111,7 +1132,19 @@ mod tests {
             created: "2026-07-16T12:00:00Z".to_owned(),
             updated: None,
             supersedes_id: None,
-            expires_at: None,
+            retention: RetentionFacts {
+                occurred_at: None,
+                started_at: None,
+                last_continued_at: None,
+                closed_at: None,
+                explicit_expires_at: None,
+                episodic_extension: None,
+            },
+            origin: OriginDescriptor::new(
+                "repository-materialization:test-attested",
+                crate::OriginRoute::RepositoryMaterialization,
+            ),
+            lineage: None,
             proposal_id: None,
             capture: None,
             materialization: Some(MaterializationMetadata {
@@ -1121,7 +1154,7 @@ mod tests {
                 candidate_id: identity('c'),
                 decision_id,
                 decision_at: "2026-07-16T12:00:00Z".to_owned(),
-                safety_contract: "memzoi/repository-write-safety-v1".to_owned(),
+                safety_contract: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
                 revision: revision('d'),
                 target: None,
                 reason: None,
@@ -1136,8 +1169,8 @@ mod tests {
             vec![output(".memzoi/records/team/install-risk.md")],
         )?;
         let policy = MaterializationPolicy {
-            policy_id: "repo-safe-v1".to_owned(),
-            safety_contract: "memzoi/repository-write-safety-v1".to_owned(),
+            policy_id: "repo-safe".to_owned(),
+            safety_contract: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
         };
         let first = build_repository_materialization_decision(
             &plan,
@@ -1174,7 +1207,7 @@ mod tests {
         metadata.candidate_id = identity('0');
         metadata.decision_id = identity('1');
         metadata.decision_at = "2026-07-17T12:00:00Z".to_owned();
-        metadata.safety_contract = "memzoi/repository-write-safety-v2".to_owned();
+        metadata.safety_contract = "foreign/repository-write-safety".to_owned();
 
         assert_eq!(
             canonical_revision_for_okf_record(&first)?,
@@ -1205,7 +1238,19 @@ mod tests {
             created: "2026-07-16T12:00:00Z".to_owned(),
             updated: None,
             supersedes_id: None,
-            expires_at: None,
+            retention: RetentionFacts {
+                occurred_at: None,
+                started_at: None,
+                last_continued_at: None,
+                closed_at: None,
+                explicit_expires_at: None,
+                episodic_extension: None,
+            },
+            origin: OriginDescriptor::new(
+                "repository-materialization:test-candidate",
+                crate::OriginRoute::RepositoryMaterialization,
+            ),
+            lineage: None,
             proposal_id: Some("direct-proposal-100".to_owned()),
             capture: None,
         }
@@ -1213,7 +1258,7 @@ mod tests {
 
     fn capture_provenance() -> CaptureProvenance {
         CaptureProvenance {
-            schema: "memzoi/capture-provenance-v1".to_owned(),
+            schema: crate::CAPTURE_PROVENANCE_SCHEMA.to_owned(),
             plan_id: identity('a'),
             review_id: identity('b'),
             claim_id: identity('c'),
@@ -1222,9 +1267,8 @@ mod tests {
             reviewed_candidate_id: identity('f'),
             extraction: CaptureExtractorIdentity {
                 kind: "markdown".to_owned(),
-                id: "markdown-v1".to_owned(),
-                version: "1".to_owned(),
-                configuration_hash: identity('0'),
+                id: "markdown".to_owned(),
+                implementation_digest: identity('0'),
             },
             evidence: vec![CaptureEvidence {
                 source_id: "source-1".to_owned(),
@@ -1447,7 +1491,7 @@ mod tests {
         );
         assert_eq!(
             repository_materialization_policy().policy_id,
-            format!("{REPOSITORY_WRITE_SAFETY_SCHEMA}@{REPOSITORY_WRITE_SAFETY_VERSION}")
+            REPOSITORY_WRITE_SAFETY_SCHEMA
         );
         Ok(())
     }

@@ -9,16 +9,56 @@ use anyhow::Context;
 use memzoi_core::{
     CAPTURE_MAX_INVENTORY_FILE_BYTES, CAPTURE_MAX_SOURCE_BYTES, CAPTURE_REQUEST_SCHEMA,
     CAPTURE_REVIEW_INPUT_SCHEMA, CaptureAction, CaptureDataClass, CaptureExtractorRequest,
-    CaptureMemoryDraft, CapturePlanStatus, CaptureRequest, CaptureReview,
+    CaptureMemoryDraft, CapturePlan, CapturePlanStatus, CaptureRequest, CaptureReview,
     CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome, CaptureSourceLocator,
-    CaptureSourceRequest, CaptureWrite, InitRequest, MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination,
-    MemoryPaths, MemoryService, SearchInput, build_capture_review, build_capture_review_with_prior,
-    plan_capture, read_okf_proposal_files, read_okf_record_files,
+    CaptureSourceRequest, CaptureWrite, FixedClock, InitRequest, LocalMemoryInput,
+    MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryLane, MemoryPaths, MemoryService,
+    MemoryType, SearchInput, build_capture_review_at, build_capture_review_with_prior_at,
+    plan_capture_at, read_okf_proposal_files, read_okf_record_files,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
 
 const REVIEWED_AT: &str = "2026-07-10T12:00:00Z";
+const EVALUATED_AT: &str = "2026-07-18T12:00:00Z";
+
+fn evaluated_at() -> time::OffsetDateTime {
+    time::OffsetDateTime::parse(EVALUATED_AT, &time::format_description::well_known::Rfc3339)
+        .expect("capture test evaluated_at must be valid")
+}
+
+fn plan_capture(paths: &MemoryPaths, request: CaptureRequest) -> anyhow::Result<CapturePlan> {
+    plan_capture_at(paths, request, evaluated_at())
+}
+
+fn build_capture_review(
+    paths: &MemoryPaths,
+    plan: &CapturePlan,
+    input: CaptureReviewInput,
+    reviewed_by: &str,
+    reviewed_at: &str,
+) -> anyhow::Result<CaptureReview> {
+    build_capture_review_at(paths, plan, input, reviewed_by, reviewed_at, evaluated_at())
+}
+
+fn build_capture_review_with_prior(
+    paths: &MemoryPaths,
+    plan: &CapturePlan,
+    input: CaptureReviewInput,
+    prior_review: &CaptureReview,
+    reviewed_by: &str,
+    reviewed_at: &str,
+) -> anyhow::Result<CaptureReview> {
+    build_capture_review_with_prior_at(
+        paths,
+        plan,
+        input,
+        prior_review,
+        reviewed_by,
+        reviewed_at,
+        evaluated_at(),
+    )
+}
 
 #[test]
 fn one_markdown_source_plans_deterministically_with_exact_evidence_and_stale_identity_guards()
@@ -633,6 +673,84 @@ fn missing_runtime_inventory_warns_and_forces_private_routes_to_no_write() -> an
 }
 
 #[test]
+fn reviewed_at_cannot_select_current_assertions_during_review() -> anyhow::Result<()> {
+    let fixture = CaptureFixture::new()?;
+    fixture.write_source(
+        "clock-authority.md",
+        "# Preference: Clock authority\nThe trustedclocktoken remains local.\n",
+    )?;
+
+    let creator = MemoryService::open_paths_with_clock(
+        fixture.paths.clone(),
+        FixedClock::from_rfc3339("2026-07-18T10:00:00Z")?,
+    )?;
+    let existing = creator.create_local_memory(
+        "capture-test",
+        LocalMemoryInput {
+            memory_type: MemoryType::Preference,
+            lane: MemoryLane::Semantic,
+            title: "Clock authority".to_owned(),
+            body: "The trustedclocktoken remains local.".to_owned(),
+        },
+    )?;
+    drop(creator);
+
+    let shared = Connection::open(&fixture.paths.shared_db_path)?;
+    shared.execute(
+        "UPDATE memory_record
+         SET retention_json = ?1, scope_kind = 'repo', scope_id = NULL
+         WHERE id = ?2",
+        rusqlite::params![
+            serde_json::json!({"explicit_expires_at": "2026-07-18T11:00:00Z"}).to_string(),
+            existing.id,
+        ],
+    )?;
+    shared.execute(
+        "INSERT INTO memory_path(id, record_id, path)
+         VALUES ('path-clock-authority', ?1, 'clock-authority.md')",
+        [&existing.id],
+    )?;
+    drop(shared);
+
+    let planner = MemoryService::open_paths_with_clock(
+        fixture.paths.clone(),
+        FixedClock::from_rfc3339("2026-07-18T10:30:00Z")?,
+    )?;
+    let plan = planner.plan_capture(capture_request("clock-authority.md"))?;
+    assert!(
+        matches!(plan.candidates[0].action, CaptureAction::Duplicate { .. }),
+        "expected a current duplicate, got action={:?}, memory={:?}",
+        plan.candidates[0].action,
+        plan.candidates[0].memory
+    );
+    drop(planner);
+
+    let reviewer = MemoryService::open_paths_with_clock(
+        fixture.paths.clone(),
+        FixedClock::from_rfc3339("2026-07-18T12:00:00Z")?,
+    )?;
+    let error = reviewer
+        .build_capture_review(
+            &plan,
+            review_input(
+                &plan,
+                vec![decision(
+                    &plan.candidates[0],
+                    CaptureReviewOutcome::Reject,
+                    Some("existing-duplicate"),
+                    None,
+                    None,
+                )],
+            ),
+            "capture-reviewer",
+            "2026-07-18T10:45:00Z",
+        )
+        .expect_err("backdated reviewed_at must not keep an expired record current");
+    assert!(error.to_string().contains("stale capture plan"));
+    Ok(())
+}
+
+#[test]
 fn plan_reports_earlier_candidate_duplicates_and_conflicts_with_targeted_preconditions()
 -> anyhow::Result<()> {
     let fixture = CaptureFixture::new()?;
@@ -969,7 +1087,7 @@ fn typed_markdown_requires_explicit_contextual_classification_for_repo() -> anyh
 }
 
 #[test]
-fn repeated_private_capture_is_planned_as_an_idempotent_runtime_duplicate() -> anyhow::Result<()> {
+fn repeated_private_capture_is_planned_as_an_exact_origin_replay() -> anyhow::Result<()> {
     let fixture = CaptureFixture::new()?;
     fixture.write_source(
         "private-repeat.md",
@@ -999,18 +1117,21 @@ fn repeated_private_capture_is_planned_as_an_idempotent_runtime_duplicate() -> a
     let repeated = plan_capture(&fixture.paths, request)?;
     let after = file_snapshot(fixture.temp.path())?;
     assert_eq!(before, after, "WAL-aware planning must remain read-only");
-    assert_eq!(repeated.summary.duplicates, 1);
+    assert_eq!(repeated.summary.replays, 1);
+    assert_eq!(repeated.summary.duplicates, 0);
     assert_eq!(repeated.summary.runtime_writes, 0);
     match &repeated.candidates[0].action {
-        CaptureAction::Duplicate { matches } => {
-            assert_eq!(matches.len(), 1);
-            assert_eq!(
-                matches[0].kind,
-                memzoi_core::CaptureMatchKind::RuntimeRecord
-            );
-            assert_eq!(matches[0].destination, Some(MemoryDestination::Local));
+        CaptureAction::Replay {
+            outcome,
+            destination,
+            record_id,
+            ..
+        } => {
+            assert_eq!(*outcome, memzoi_core::OriginOutcomeKind::Created);
+            assert_eq!(*destination, Some(MemoryDestination::Local));
+            assert_eq!(record_id.as_deref(), Some("local-repeated-private-capture"));
         }
-        action => panic!("expected an idempotent runtime duplicate, got {action:?}"),
+        action => panic!("expected an exact origin replay, got {action:?}"),
     }
     Ok(())
 }
@@ -1082,17 +1203,18 @@ fn linked_worktree_standalone_plan_and_review_use_shared_runtime_inventory() -> 
     drop(service);
 
     let linked_duplicate = plan_capture(&linked_paths, request)?;
-    assert_eq!(linked_duplicate.summary.duplicates, 1);
+    assert_eq!(linked_duplicate.summary.replays, 1);
+    assert_eq!(linked_duplicate.summary.duplicates, 0);
     match &linked_duplicate.candidates[0].action {
-        CaptureAction::Duplicate { matches } => {
-            assert_eq!(matches.len(), 1);
-            assert_eq!(
-                matches[0].kind,
-                memzoi_core::CaptureMatchKind::RuntimeRecord
-            );
-            assert_eq!(matches[0].destination, Some(MemoryDestination::Local));
+        CaptureAction::Replay {
+            outcome,
+            destination,
+            ..
+        } => {
+            assert_eq!(*outcome, memzoi_core::OriginOutcomeKind::Created);
+            assert_eq!(*destination, Some(MemoryDestination::Local));
         }
-        action => panic!("expected a shared runtime duplicate, got {action:?}"),
+        action => panic!("expected a shared origin replay, got {action:?}"),
     }
 
     let stale_error = build_capture_review(
@@ -1527,7 +1649,7 @@ fn reidentify_review(review: &mut CaptureReview) -> anyhow::Result<()> {
     review.review_id.clear();
     let canonical = serde_json_canonicalizer::to_vec(&*review)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-review-v1");
+    hasher.update(b"memzoi/capture-review");
     hasher.update(&[0]);
     hasher.update(&canonical);
     review.review_id = format!("review_{}", hasher.finalize().to_hex());
@@ -1542,7 +1664,7 @@ fn reidentify_candidate(candidate: &mut memzoi_core::CaptureCandidate) -> anyhow
         &candidate.action,
     ))?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-candidate-v1");
+    hasher.update(b"memzoi/capture-candidate");
     hasher.update(&[0]);
     hasher.update(&canonical);
     candidate.candidate_id = format!("candidate_{}", hasher.finalize().to_hex());
@@ -1556,7 +1678,7 @@ fn reidentify_claim(candidate: &mut memzoi_core::CaptureCandidate) -> anyhow::Re
         &candidate.extraction,
     ))?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-claim-v1");
+    hasher.update(b"memzoi/capture-claim");
     hasher.update(&[0]);
     hasher.update(&canonical);
     candidate.claim_id = format!("claim_{}", hasher.finalize().to_hex());
@@ -1567,7 +1689,7 @@ fn reidentify_plan(plan: &mut memzoi_core::CapturePlan) -> anyhow::Result<()> {
     plan.plan_id.clear();
     let canonical = serde_json_canonicalizer::to_vec(&*plan)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"memzoi/capture-plan-v1");
+    hasher.update(b"memzoi/capture-plan");
     hasher.update(&[0]);
     hasher.update(&canonical);
     plan.plan_id = format!("capture_{}", hasher.finalize().to_hex());

@@ -1,4 +1,11 @@
 ---
+id: private-reader-identity-requires-an-authenticated-integration-binding
+kind: memory
+profile: memzoi
+retention: {}
+origin:
+  origin_key: repository-record:private-reader-identity-requires-an-authenticated-integration-binding
+  route: repository_materialization
 type: decision
 lane: semantic
 title: "Private reader identity requires an authenticated integration binding"
