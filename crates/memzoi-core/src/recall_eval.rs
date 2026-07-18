@@ -2835,7 +2835,7 @@ unexpected: true
     #[test]
     fn representative_corpus_is_valid() -> anyhow::Result<()> {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../evals/recall/v2/corpus.yaml");
+            .join("../../evals/recall/quality/corpus.yaml");
         if !path.exists() {
             return Ok(());
         }

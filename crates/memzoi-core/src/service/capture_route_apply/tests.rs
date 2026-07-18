@@ -17,12 +17,43 @@ use super::super::{
 use super::journal::*;
 use crate::{
     AuthorizationProof, CAPTURE_REQUEST_SCHEMA, CAPTURE_REVIEW_INPUT_SCHEMA,
-    CaptureExtractorRequest, CaptureMemoryScope, CaptureRequest, CaptureReviewDecisionInput,
-    CaptureReviewInput, CaptureReviewOutcome, CaptureSourceLocator, CaptureSourceRequest,
-    MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryLane, MemoryPaths, MemoryType,
-    OkfProposalSensitivity, OriginDescriptor, OriginRoute, RepositoryContentClass,
-    RepositoryWriteRoute, ScopeKind, Visibility, build_capture_review, okf, plan_capture,
+    CaptureExtractorRequest, CaptureMemoryScope, CapturePlan, CaptureRequest, CaptureReview,
+    CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome, CaptureSourceLocator,
+    CaptureSourceRequest, MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryLane, MemoryPaths,
+    MemoryType, OkfProposalSensitivity, OriginDescriptor, OriginRoute, RepositoryContentClass,
+    RepositoryWriteRoute, ScopeKind, Visibility, build_capture_review_at, okf, plan_capture_at,
 };
+
+const CAPTURE_EVALUATED_AT: &str = "2026-07-18T12:00:00Z";
+
+fn capture_evaluated_at() -> time::OffsetDateTime {
+    time::OffsetDateTime::parse(
+        CAPTURE_EVALUATED_AT,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .expect("capture test evaluated_at must be valid")
+}
+
+fn plan_capture(paths: &MemoryPaths, request: CaptureRequest) -> anyhow::Result<CapturePlan> {
+    plan_capture_at(paths, request, capture_evaluated_at())
+}
+
+fn build_capture_review(
+    paths: &MemoryPaths,
+    plan: &CapturePlan,
+    input: CaptureReviewInput,
+    reviewed_by: &str,
+    reviewed_at: &str,
+) -> anyhow::Result<CaptureReview> {
+    build_capture_review_at(
+        paths,
+        plan,
+        input,
+        reviewed_by,
+        reviewed_at,
+        capture_evaluated_at(),
+    )
+}
 
 #[test]
 fn capture_apply_rejects_non_repo_proposal_scope() {
@@ -858,8 +889,6 @@ fn test_capture_apply_journal(
 ) -> CaptureApplyJournal {
     CaptureApplyJournal {
         schema: CAPTURE_APPLY_JOURNAL_SCHEMA.to_owned(),
-        safety_contract_version: crate::REPOSITORY_WRITE_SAFETY_VERSION.to_owned(),
-        detector_policy_version: crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.to_owned(),
         route: crate::RepositoryWriteRoute::CaptureApply
             .as_str()
             .to_owned(),

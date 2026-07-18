@@ -150,6 +150,7 @@ impl<'a> CaptureRouteApply<'a> {
             source_inputs,
             &review.reviewed_by,
             &review.reviewed_at,
+            &evaluated_at,
         )?;
         if rebuilt_review.review_id != review.review_id || rebuilt_review != review {
             bail!("stale or modified capture review");
@@ -359,6 +360,7 @@ impl<'a> CaptureRouteApply<'a> {
                     source_inputs,
                     &review.reviewed_by,
                     &review.reviewed_at,
+                    &evaluated_at,
                 )?;
             if transactional_review.review_id != review.review_id || transactional_review != review
             {

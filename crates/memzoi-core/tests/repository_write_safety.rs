@@ -2,10 +2,10 @@ use std::path::Path;
 
 use memzoi_core::{
     AuthorizationProof, MemoryDestination, OkfProposalSensitivity, ProvenanceAssessment,
-    REPOSITORY_WRITE_DETECTOR_POLICY_VERSION, REPOSITORY_WRITE_SAFETY_SCHEMA,
-    RepositoryContentClass, RepositoryProjection, RepositoryProjectionPurpose, RepositoryScope,
-    RepositoryWriteRequest, RepositoryWriteRoute, SafetyField, SafetyFieldKind, ScopeKind,
-    Visibility, authorize_repository_write, scan_managed_repository_blob, scan_repository_blob,
+    REPOSITORY_WRITE_SAFETY_SCHEMA, RepositoryContentClass, RepositoryProjection,
+    RepositoryProjectionPurpose, RepositoryScope, RepositoryWriteRequest, RepositoryWriteRoute,
+    SafetyField, SafetyFieldKind, ScopeKind, Visibility, authorize_repository_write,
+    scan_managed_repository_blob, scan_repository_blob,
 };
 
 fn safe_request<'a>(
@@ -100,10 +100,6 @@ fn prohibited_content_reports_are_stable_and_redacted() {
         let json = serde_json::to_string(&report).unwrap();
         assert!(!json.contains("SECRET-SENTINEL"), "fixture {name} leaked");
         assert_eq!(report.schema, REPOSITORY_WRITE_SAFETY_SCHEMA);
-        assert_eq!(
-            report.detector_policy_version,
-            REPOSITORY_WRITE_DETECTOR_POLICY_VERSION
-        );
     }
 }
 

@@ -320,13 +320,13 @@ fn rebuild_refuses_ignored_untracked_repository_record() -> anyhow::Result<()> {
 }
 
 #[test]
-fn rebuild_admits_legacy_record_without_materialization_attestation() -> anyhow::Result<()> {
+fn rebuild_admits_unattested_record_without_materialization_attestation() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let record = apply_test_record(
         &service,
         sample_memory_draft(
-            "Legacy record admission",
-            "Legacy canonical records have no materialization metadata.",
+            "Unattested record admission",
+            "Canonical records created outside materialization have no materialization metadata.",
         ),
     )?;
     let record_path = service
@@ -340,7 +340,7 @@ fn rebuild_admits_legacy_record_without_materialization_attestation() -> anyhow:
     assert_eq!(
         fs::read(record_path)?,
         before,
-        "admission must not synthesize a legacy materialization attestation"
+        "admission must not synthesize a materialization attestation"
     );
     Ok(())
 }

@@ -42,8 +42,6 @@ const MAX_CAPTURE_APPLY_JOURNAL_ENTRIES: usize = 128;
 #[serde(deny_unknown_fields)]
 pub(super) struct CaptureApplyJournal {
     pub(super) schema: String,
-    pub(super) safety_contract_version: String,
-    pub(super) detector_policy_version: String,
     pub(super) route: String,
     pub(super) authorization_digest: String,
     pub(super) project_context_digest: String,
@@ -189,8 +187,6 @@ pub(super) fn build_capture_apply_journal(
 ) -> Result<CaptureApplyJournal> {
     let journal = CaptureApplyJournal {
         schema: CAPTURE_APPLY_JOURNAL_SCHEMA.to_owned(),
-        safety_contract_version: crate::REPOSITORY_WRITE_SAFETY_VERSION.to_owned(),
-        detector_policy_version: crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION.to_owned(),
         route: RepositoryWriteRoute::CaptureApply.as_str().to_owned(),
         authorization_digest: authorization.digest(),
         project_context_digest: capture_project_context_digest(paths)?,
@@ -462,10 +458,7 @@ fn validate_capture_apply_journal(journal: &CaptureApplyJournal) -> Result<()> {
     if journal.schema != CAPTURE_APPLY_JOURNAL_SCHEMA {
         bail!("unsupported capture apply journal schema");
     }
-    if journal.safety_contract_version.is_empty()
-        || journal.detector_policy_version.is_empty()
-        || journal.route != RepositoryWriteRoute::CaptureApply.as_str()
-    {
+    if journal.route != RepositoryWriteRoute::CaptureApply.as_str() {
         bail!("capture apply journal safety decision is stale or unsupported");
     }
     for (value, label) in [
@@ -833,10 +826,7 @@ fn capture_recovery_authorization(
     paths: &MemoryPaths,
     journal: &CaptureApplyJournal,
 ) -> Result<Option<CaptureRecoveryAuthorization>> {
-    if journal.safety_contract_version != crate::REPOSITORY_WRITE_SAFETY_VERSION
-        || journal.detector_policy_version != crate::REPOSITORY_WRITE_DETECTOR_POLICY_VERSION
-        || journal.project_context_digest != capture_project_context_digest(paths)?
-    {
+    if journal.project_context_digest != capture_project_context_digest(paths)? {
         return Ok(None);
     }
     let pending_root = paths.proposals_dir().join("pending");

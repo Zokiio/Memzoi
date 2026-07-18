@@ -39,7 +39,7 @@ fn doctor_warns_when_exports_dir_is_missing_even_if_bundle_dir_exists() {
     let paths = test_paths(repo.path());
     fs::create_dir_all(paths.records_dir()).expect("create records dir");
     fs::create_dir_all(&paths.runtime_dir).expect("create runtime dir");
-    fs::write(&paths.config_path, "version = 1\n").expect("write config");
+    fs::write(&paths.config_path, "scope_kind = \"repo\"\n").expect("write config");
 
     let doctor = run_json_command(repo.path(), &["doctor", "--json"]);
 

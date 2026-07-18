@@ -1,27 +1,27 @@
-version: memzoi-capture-corpus/v1
-name: memzoi-capture-v1
+version: memzoi/capture-eval-corpus
+name: memzoi-capture
 evaluated_at: 2026-07-10T12:00:00Z
 profiles:
   - profile: markdown-deterministic
     required: true
     extractor_kind: deterministic
     extractor_id: memzoi-markdown
-    extractor_version: 1.0.0
+    implementation_digest: blake3:cf9248362b99b8410cd26c8349b32c6f84706637016f9c11e89b3486b2fddf2d
   - profile: instruction-deterministic
     required: true
     extractor_kind: deterministic
     extractor_id: memzoi-instructions
-    extractor_version: 1.0.0
+    implementation_digest: blake3:5666bc0611c73ac1cc4782d4b4051ca29d5264778a6c97c209071849f91c7e1f
   - profile: adr-deterministic
     required: true
     extractor_kind: deterministic
     extractor_id: memzoi-adr
-    extractor_version: 1.0.0
+    implementation_digest: blake3:1bc395badb575971a26aedb9825f4dbe88171079d2f24183f95029131dba8fb4
   - profile: git-change-deterministic
     required: true
     extractor_kind: deterministic
     extractor_id: memzoi-git-change
-    extractor_version: 1.0.0
+    implementation_digest: blake3:234bef66fea0ff049a4791dda7c8fb11c19f3919724dca0a74ed46e2945e1305
 thresholds:
   min_candidate_precision: 1.0
   min_candidate_recall: 1.0
@@ -501,7 +501,7 @@ cases:
             kind: project_directory
             path: docs/policy
             recursive: false
-            ignore_policy: git-v1
+            ignore_policy: git
             include: ["*.md"]
           media_type: text/markdown
       extractor: {profile: adr-deterministic}
@@ -1123,11 +1123,11 @@ cases:
           path: docs/rules.md
     expected_policy_inputs:
       - path: .git
-        engine_version: memzoi/git-repository-identity-v1
+        engine_identity: memzoi/git-repository-identity
       - path: .git/config
-        engine_version: memzoi/git-local-config-v1
+        engine_identity: memzoi/git-local-config
       - path: .git/renderer-version
-        engine_version: memzoi/git-unified-renderer-v1+git-
+        engine_identity: memzoi/git-unified-renderer+git-
         engine_match: prefix
     request:
       schema: memzoi/capture-request
@@ -1140,7 +1140,7 @@ cases:
             head: sha1:28b25e8d27d036d59f77903f073fdabf22147108
             merge_parent: base_to_head
             rename_detection: true
-            diff_format: git-unified-v1
+            diff_format: git-unified
           media_type: text/x-diff
       extractor: {profile: git-change-deterministic}
     expected:
@@ -1169,7 +1169,7 @@ cases:
                 head: "sha1:28b25e8d27d036d59f77903f073fdabf22147108"
                 merge_parent: "base_to_head"
                 rename_detection: true
-                diff_format: "git-unified-v1"
+                diff_format: "git-unified"
               source_content_hash: "blake3:f637c42f2eabdae330bd7d01ab20e862ad3f20eef1e18702e2d6cc57425a3c5a"
               span:
                 byte_start: 210

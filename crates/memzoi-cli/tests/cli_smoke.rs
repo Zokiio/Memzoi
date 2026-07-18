@@ -304,19 +304,19 @@ fn run_command_failure_stderr_with_home(repo: &Path, args: &[&str], memzoi_home:
 }
 
 fn checked_recall_corpus() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v2/corpus.yaml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/quality/corpus.yaml")
 }
 
 fn checked_recall_baseline() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v2/baseline.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/quality/baseline.json")
 }
 
 fn checked_capture_corpus() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/v1/corpus.yaml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/corpus.yaml")
 }
 
 fn checked_capture_baseline() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/v1/baseline.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/baseline.json")
 }
 
 fn failing_recall_corpus() -> (tempfile::TempDir, PathBuf) {

@@ -22,8 +22,8 @@ Path filtering matches records bound to the exact path, descendants of the path,
 ## Evaluate trust with a golden corpus
 
 ```bash
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --json
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json --json
 ```
 
 `eval recall` loads the strict v2 YAML corpus and its OKF, proposal, and private
@@ -51,7 +51,7 @@ pass/fail only when the corpus declares an explicit threshold.
 Use `--update-baseline` only after reviewing an intentional change:
 
 ```bash
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --update-baseline
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json --update-baseline
 ```
 
 Normal evaluation is read-only. See the

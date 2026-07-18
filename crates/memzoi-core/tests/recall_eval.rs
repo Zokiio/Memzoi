@@ -59,9 +59,9 @@ fn checked_trust_corpus_passes_with_safety_and_integrity_metrics() -> anyhow::Re
 }
 
 fn checked_corpus() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v2/corpus.yaml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/quality/corpus.yaml")
 }
 
 fn checked_baseline() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/v2/baseline.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/recall/quality/baseline.json")
 }

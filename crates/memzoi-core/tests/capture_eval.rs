@@ -166,7 +166,7 @@ fn required_profiles_without_cases_cannot_run_or_replace_the_baseline() -> anyho
             "    required: true\n",
             "    extractor_kind: deterministic\n",
             "    extractor_id: memzoi-empty\n",
-            "    extractor_version: 1.0.0\n",
+            "    implementation_digest: blake3:1111111111111111111111111111111111111111111111111111111111111111\n",
             "thresholds:\n",
         ),
     )?;
@@ -252,14 +252,14 @@ fn locator_hash_and_semantic_evidence_mismatches_fail_exact_candidate_matching()
 }
 
 fn checked_corpus() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/v1/corpus.yaml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/corpus.yaml")
 }
 
 fn checked_baseline() -> PathBuf {
     if let Some(path) = std::env::var_os("MEMZOI_CAPTURE_EVAL_BASELINE_PATH") {
         return PathBuf::from(path);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/v1/baseline.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../evals/capture/baseline.json")
 }
 
 fn copied_corpus() -> anyhow::Result<(tempfile::TempDir, PathBuf)> {

@@ -10,7 +10,6 @@ pub const SQL_RETENTION_STATE: &str = "memzoi_retention_state";
 const SESSION_INACTIVITY_HOURS: i64 = 24;
 const SESSION_MAXIMUM_DAYS: i64 = 7;
 const EPISODIC_ORDINARY_DAYS: i64 = 30;
-const EPISODIC_MAXIMUM_DAYS: i64 = 90;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,8 +224,10 @@ pub(crate) fn register_sqlite_functions(conn: &Connection) -> Result<()> {
                 .map(|state| state.as_str().to_owned())
                 .map_err(|error| {
                     rusqlite::Error::UserFunctionError(
-                        anyhow::anyhow!("record {record_id} retention evaluation failed: {error}")
-                            .into(),
+                        anyhow::anyhow!(
+                            "record {record_id} retention evaluation failed: {error:#}"
+                        )
+                        .into(),
                     )
                 })
         },
@@ -369,35 +370,13 @@ fn episodic_boundary(
         Duration::days(EPISODIC_ORDINARY_DAYS),
         "ordinary episodic window",
     )?;
-    let maximum = add_duration(
-        occurred,
-        Duration::days(EPISODIC_MAXIMUM_DAYS),
-        "maximum episodic window",
-    )?;
-
-    let policy = if let Some(extension) = &facts.episodic_extension {
-        ensure!(
-            !extension.authorization_event_id.trim().is_empty(),
-            "episodic_extension.authorization_event_id cannot be empty"
-        );
-        let until = parse_timestamp(&extension.until, "episodic_extension.until")?;
-        ensure!(
-            until > ordinary,
-            "episodic extension must extend beyond the ordinary 30-day boundary"
-        );
-        ensure!(
-            until <= maximum,
-            "episodic extension exceeds the 90-day maximum boundary"
-        );
-        Boundary {
-            at: until,
-            reason: RetentionReason::EpisodicAuthorizedExtension,
-        }
-    } else {
-        Boundary {
-            at: ordinary,
-            reason: RetentionReason::EpisodicOrdinaryWindow,
-        }
+    ensure!(
+        facts.episodic_extension.is_none(),
+        "episodic_extension is unsupported until an owner-authorized extension event can be verified"
+    );
+    let policy = Boundary {
+        at: ordinary,
+        reason: RetentionReason::EpisodicOrdinaryWindow,
     };
 
     Ok(Some(min_with_explicit(policy, explicit)))
@@ -533,8 +512,8 @@ mod tests {
     }
 
     #[test]
-    fn authorized_episodic_extension_is_capped_at_ninety_days() -> Result<()> {
-        let extended = RetentionFacts {
+    fn episodic_extension_is_rejected_without_authorization_verification() -> Result<()> {
+        let facts = RetentionFacts {
             occurred_at: Some("2026-01-01T00:00:00Z".to_owned()),
             episodic_extension: Some(EpisodicRetentionExtension {
                 until: "2026-03-31T00:00:00Z".to_owned(),
@@ -542,32 +521,16 @@ mod tests {
             }),
             ..facts()
         };
-        assert_eq!(
-            evaluate_retention(
-                "episode-extended",
-                MemoryLane::Episodic,
-                &extended,
-                instant("2026-03-30T23:59:59Z")?,
-            )?
-            .state,
-            RetentionState::Current
-        );
-
-        let invalid = RetentionFacts {
-            episodic_extension: Some(EpisodicRetentionExtension {
-                until: "2026-04-02T00:00:00Z".to_owned(),
-                authorization_event_id: "event-owner-grant".to_owned(),
-            }),
-            ..extended
-        };
         let error = evaluate_retention(
-            "episode-over-cap",
+            "episode-unverified-extension",
             MemoryLane::Episodic,
-            &invalid,
+            &facts,
             instant("2026-02-01T00:00:00Z")?,
         )
-        .expect_err("extensions over 90 days must fail");
-        assert!(error.to_string().contains("episode-over-cap"));
+        .expect_err("unverified extensions must fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("episode-unverified-extension"));
+        assert!(message.contains("owner-authorized extension event"));
         Ok(())
     }
 

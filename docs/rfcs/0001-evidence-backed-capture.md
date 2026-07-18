@@ -181,7 +181,7 @@ changing candidate semantics. Recognizing a locator does not require an
 implementation to support it; unsupported kinds fail closed.
 
 Remote URLs, chat text, implicit directories, globs, and symbolic links are
-not v1 source locators. A `supplied_bytes` plan stores hashes and allowed
+not alternate source locator formats. A `supplied_bytes` plan stores hashes and allowed
 evidence spans, not the whole payload; route apply requires the exact bytes to
 be supplied again and rejects a hash mismatch before writing. Current OKF
 proposal `url` and `ref` provenance remain valid downstream fields, but they
@@ -212,7 +212,7 @@ sources:
       kind: project_directory
       path: docs/adr
       recursive: false
-      ignore_policy: git-v1
+      ignore_policy: git
       include: ["*.md"]
   - source_id: reviewed-diff
     locator:
@@ -389,10 +389,9 @@ sources:
     byte_length: 842
     source_content_hash: blake3:91bf...
 safeguards:
-  policy_version: memzoi/capture-safeguards-v1
   configuration_hash: blake3:6d73...
 preconditions:
-  policy_version: memzoi/destination-policy-v1
+  policy_digest: blake3:90f1...
   candidates:
     candidate_7098...:
       duplicate_match_set_hash: blake3:ee20...
@@ -402,8 +401,7 @@ preconditions:
 extractor:
   kind: deterministic
   id: memzoi-markdown
-  version: 1.0.0
-  configuration_hash: blake3:2718...
+  implementation_digest: blake3:2718...
 candidates:
   - claim_id: claim_61c2...
     candidate_id: candidate_7098...
@@ -433,8 +431,7 @@ candidates:
     extraction:
       kind: deterministic
       id: memzoi-markdown
-      version: 1.0.0
-      configuration_hash: blake3:2718...
+      implementation_digest: blake3:2718...
     confidence: 0.96
     classification:
       destination: repo
@@ -605,7 +602,7 @@ inventory. Each candidate records only state capable of changing its action:
 
 ```yaml
 preconditions:
-  policy_version: memzoi/destination-policy-v1
+  policy_digest: blake3:90f1...
   candidates:
     candidate_7098...:
       duplicate_match_set_hash: blake3:...
@@ -673,7 +670,7 @@ a one-shot, out-of-process adapter using strict JSON on stdin/stdout:
 
 ```json
 {
-  "schema": "memzoi/extractor-request-v1",
+  "schema": "memzoi/extractor-request",
   "request_id": "request_...",
   "sources": [
     {
@@ -683,13 +680,13 @@ a one-shot, out-of-process adapter using strict JSON on stdin/stdout:
       "content": "...bounded, preflighted UTF-8 source bytes..."
     }
   ],
-  "output_schema": "memzoi/extractor-response-v1"
+  "output_schema": "memzoi/extractor-response"
 }
 ```
 
 ```json
 {
-  "schema": "memzoi/extractor-response-v1",
+  "schema": "memzoi/extractor-response",
   "request_id": "request_...",
   "extractor": {
     "id": "example-model-adapter",
@@ -803,11 +800,11 @@ policy make them routeable. Mixed reviewed writes are transactional.
 - A source over a limit is rejected; it is never silently truncated.
 - Size is checked before allocation and while streaming so misleading metadata
   cannot bypass the limit.
-- v1 never decompresses or recursively expands content.
+- The current extractor never decompresses or recursively expands content.
 - Timeouts and process-output limits terminate a model adapter and block the
   batch. Partial responses are discarded.
 
-The proposed `memzoi/capture-safeguards-v1` profile is explicit in every plan:
+The current capture safeguards configuration digest is explicit in every plan:
 
 | Resource | Default | Hard ceiling |
 | --- | ---: | ---: |
@@ -885,7 +882,7 @@ files whose legitimate content consists of agent instructions.
 
 ### Unsupported content
 
-The v1 Markdown path accepts UTF-8 text without NUL bytes. Invalid UTF-8,
+The current Markdown path accepts UTF-8 text without NUL bytes. Invalid UTF-8,
 binary-looking content, a media-type mismatch, unsupported locator/media type,
 or malformed adapter response produces a blocked plan with no extractor
 fallback and no lossy decoding. The error must not echo source content.

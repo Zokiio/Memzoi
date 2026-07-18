@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::{NamedTempFile, TempDir};
 
 use crate::{
-    FixedClock, InitRequest, MemoryDestination, MemoryEvent, MemoryPaths, MemoryRecord,
+    Clock, FixedClock, InitRequest, MemoryDestination, MemoryEvent, MemoryPaths, MemoryRecord,
     MemoryService, MemoryWriteRoute, OkfProposalSensitivity, SearchInput,
     capture::{
         CaptureAction, CaptureApplyResult, CaptureCandidate, CaptureDataClass, CaptureEvidence,
@@ -20,24 +20,24 @@ use crate::{
         CapturePlan, CapturePlanStatus, CapturePolicyInputSnapshot, CaptureProvenance,
         CaptureRequest, CaptureReview, CaptureReviewDecisionInput, CaptureReviewInput,
         CaptureReviewOutcome, CaptureSemanticLocation, CaptureSourceInputs, CaptureSourceLocator,
-        CaptureWrite, build_capture_review_with_inputs, plan_capture_with_inputs,
+        CaptureWrite, plan_capture_with_inputs_at,
     },
 };
 
-pub const CAPTURE_EVAL_CORPUS_VERSION: &str = "memzoi-capture-corpus/v1";
-pub const CAPTURE_EVAL_REPORT_VERSION: &str = "memzoi-capture-report/v1";
-pub const CAPTURE_EVAL_METRIC_DEFINITIONS_VERSION: &str = "memzoi-capture-metrics/v1";
-pub const CAPTURE_EVAL_BASELINE_VERSION: &str = "memzoi-capture-baseline/v1";
+pub const CAPTURE_EVAL_CORPUS_VERSION: &str = "memzoi/capture-eval-corpus";
+pub const CAPTURE_EVAL_REPORT_VERSION: &str = "memzoi/capture-eval-report";
+pub const CAPTURE_EVAL_METRIC_DEFINITIONS_VERSION: &str = "memzoi/capture-eval-metrics";
+pub const CAPTURE_EVAL_BASELINE_VERSION: &str = "memzoi/capture-eval-baseline";
 
 const MAX_CORPUS_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FIXTURE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_FIXTURE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CASES: usize = 256;
-const ADR_GITIGNORE_ENGINE: &str = "memzoi/gitignore-v1+ignore-0.4.28";
-const GIT_TREE_GITIGNORE_ENGINE: &str = "memzoi/gitignore-v1+ignore-0.4.28+git-tree-v1";
-const GIT_REPOSITORY_IDENTITY_ENGINE: &str = "memzoi/git-repository-identity-v1";
-const GIT_LOCAL_CONFIG_ENGINE: &str = "memzoi/git-local-config-v1";
-const GIT_RENDERER_ENGINE_PREFIX: &str = "memzoi/git-unified-renderer-v1+git-";
+const ADR_GITIGNORE_ENGINE: &str = "memzoi/gitignore+ignore-0.4.28";
+const GIT_TREE_GITIGNORE_ENGINE: &str = "memzoi/gitignore+ignore-0.4.28+git-tree";
+const GIT_REPOSITORY_IDENTITY_ENGINE: &str = "memzoi/git-repository-identity";
+const GIT_LOCAL_CONFIG_ENGINE: &str = "memzoi/git-local-config";
+const GIT_RENDERER_ENGINE_PREFIX: &str = "memzoi/git-unified-renderer+git-";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,9 +59,7 @@ pub struct CaptureEvalProfileExpectation {
     pub required: bool,
     pub extractor_kind: String,
     pub extractor_id: String,
-    pub extractor_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub configuration_hash: Option<String>,
+    pub implementation_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,7 +128,7 @@ pub enum CaptureEvalEngineMatch {
 #[serde(deny_unknown_fields)]
 pub struct CaptureEvalExpectedPolicyInput {
     pub path: String,
-    pub engine_version: String,
+    pub engine_identity: String,
     #[serde(default)]
     pub engine_match: CaptureEvalEngineMatch,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,10 +357,8 @@ pub struct CaptureEvalProfileFingerprint {
     pub required: bool,
     pub extractor_kind: String,
     pub extractor_id: String,
-    pub extractor_version: String,
-    pub extractor_configuration_hash: String,
-    pub safeguard_policy_version: String,
-    pub safeguard_configuration_hash: String,
+    pub extractor_implementation_digest: String,
+    pub safeguard_configuration_digest: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -927,10 +923,13 @@ fn validate_corpus(corpus: &CaptureEvalCorpus) -> Result<()> {
             ("profile", profile.profile.as_str()),
             ("extractor kind", profile.extractor_kind.as_str()),
             ("extractor id", profile.extractor_id.as_str()),
-            ("extractor version", profile.extractor_version.as_str()),
         ] {
             validate_safe_id(value, label)?;
         }
+        validate_content_hash(
+            &profile.implementation_digest,
+            "extractor implementation digest",
+        )?;
         if !profile_names.insert(profile.profile.as_str()) {
             bail!("capture corpus contains a duplicate profile");
         }
@@ -1323,9 +1322,9 @@ fn validate_expected_policy_inputs(case: &CaptureEvalCase) -> Result<()> {
     let mut paths = BTreeSet::new();
     for input in &case.expected_policy_inputs {
         validate_fixture_path(Path::new(&input.path))?;
-        if input.engine_version.trim().is_empty()
-            || input.engine_version.len() > 256
-            || input.engine_version.chars().any(char::is_control)
+        if input.engine_identity.trim().is_empty()
+            || input.engine_identity.len() > 256
+            || input.engine_identity.chars().any(char::is_control)
         {
             bail!("expected capture policy-input engine is invalid");
         }
@@ -1338,7 +1337,7 @@ fn validate_expected_policy_inputs(case: &CaptureEvalCase) -> Result<()> {
         let Some(rule) = policy_engine_rule(case, &input.path) else {
             bail!("capture case declares an unsupported policy input");
         };
-        if input.engine_match != rule.match_kind || input.engine_version != rule.value {
+        if input.engine_match != rule.match_kind || input.engine_identity != rule.value {
             bail!("capture case declares an unsupported policy-input engine");
         }
         if Path::new(&input.path)
@@ -1478,7 +1477,7 @@ fn policy_input_set_violations(
             violations += 1;
         }
         let allowed = policy_engine_rule(case, &input.path).is_some_and(|rule| {
-            engine_version_matches(rule.match_kind, rule.value, &input.engine_version)
+            engine_identity_matches(rule.match_kind, rule.value, &input.engine_identity)
         });
         if !allowed
             || validate_content_hash(
@@ -1501,10 +1500,10 @@ fn policy_input_set_violations(
             violations += 1;
             continue;
         };
-        if !engine_version_matches(
+        if !engine_identity_matches(
             expected.engine_match,
-            &expected.engine_version,
-            &actual.engine_version,
+            &expected.engine_identity,
+            &actual.engine_identity,
         ) || expected
             .source_content_hash
             .as_ref()
@@ -1520,7 +1519,7 @@ fn policy_input_set_violations(
             .count()
 }
 
-fn engine_version_matches(
+fn engine_identity_matches(
     match_kind: CaptureEvalEngineMatch,
     expected: &str,
     actual: &str,
@@ -1830,7 +1829,12 @@ fn evaluate_case(
     let (source_inputs, source_input_bytes) = build_source_inputs(corpus_root, case, &paths)?;
     let before = file_snapshot(&isolated_root)?;
     let started = Instant::now();
-    let first = plan_capture_with_inputs(&paths, case.request.clone(), &source_inputs);
+    let first = plan_capture_with_inputs_at(
+        &paths,
+        case.request.clone(),
+        &source_inputs,
+        clock.now_utc(),
+    );
     let latency_ms = started.elapsed().as_secs_f64() * 1_000.0;
     let first = match first {
         Ok(plan) => plan,
@@ -1847,7 +1851,12 @@ fn evaluate_case(
             });
         }
     };
-    let second = plan_capture_with_inputs(&paths, case.request.clone(), &source_inputs);
+    let second = plan_capture_with_inputs_at(
+        &paths,
+        case.request.clone(),
+        &source_inputs,
+        clock.now_utc(),
+    );
     let after = file_snapshot(&isolated_root)?;
     let deterministic = second.as_ref().is_ok_and(|plan| plan == &first);
     let planning_no_write = before == after;
@@ -2008,10 +2017,8 @@ fn evaluate_case(
         required: profile.required,
         extractor_kind: first.extractor.kind.clone(),
         extractor_id: first.extractor.id.clone(),
-        extractor_version: first.extractor.version.clone(),
-        extractor_configuration_hash: first.extractor.configuration_hash.clone(),
-        safeguard_policy_version: first.safeguards.policy_version.clone(),
-        safeguard_configuration_hash: first.safeguards.configuration_hash.clone(),
+        extractor_implementation_digest: first.extractor.implementation_digest.clone(),
+        safeguard_configuration_digest: first.safeguards.configuration_hash.clone(),
     };
     Ok(EvaluatedCase {
         report: CaptureEvalCaseReport {
@@ -2514,8 +2521,11 @@ fn exercise_review_apply_workflow(
             ..WorkflowChecks::default()
         });
     };
-    let review = match build_capture_review_with_inputs(
-        paths,
+    let service = MemoryService::open_paths_with_clock(
+        paths.clone(),
+        FixedClock::from_rfc3339(evaluated_at)?,
+    )?;
+    let review = match service.build_capture_review_with_inputs(
         plan,
         review_input.clone(),
         source_inputs,
@@ -2536,10 +2546,6 @@ fn exercise_review_apply_workflow(
         review_valid: review_matches_expectations(case, plan, matched, &review),
         ..WorkflowChecks::default()
     };
-    let service = MemoryService::open_paths_with_clock(
-        paths.clone(),
-        FixedClock::from_rfc3339(evaluated_at)?,
-    )?;
     let isolated_root = paths
         .project_root
         .parent()
@@ -2586,8 +2592,7 @@ fn exercise_review_apply_workflow(
         }
         let stale_source_inputs = replacement_inputs.as_ref().unwrap_or(source_inputs);
         let stale_before = file_snapshot(isolated_root)?;
-        let stale_review = build_capture_review_with_inputs(
-            paths,
+        let stale_review = service.build_capture_review_with_inputs(
             plan,
             review_input.clone(),
             stale_source_inputs,
@@ -3406,11 +3411,7 @@ fn profile_matches(
 ) -> bool {
     actual.kind == expected.extractor_kind
         && actual.id == expected.extractor_id
-        && actual.version == expected.extractor_version
-        && expected
-            .configuration_hash
-            .as_ref()
-            .is_none_or(|hash| hash == &actual.configuration_hash)
+        && actual.implementation_digest == expected.implementation_digest
 }
 
 fn evidence_counts(
@@ -4242,7 +4243,7 @@ expected:
             path: ".git/config".to_owned(),
             source_content_hash:
                 "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-            engine_version: GIT_LOCAL_CONFIG_ENGINE.to_owned(),
+            engine_identity: GIT_LOCAL_CONFIG_ENGINE.to_owned(),
         };
 
         assert!(policy_input_set_violations(&case, &[forged]) > 0);
@@ -4254,10 +4255,10 @@ expected:
             r#"
 id: git-policy-reads
 expected_policy_inputs:
-  - {path: .git, engine_version: memzoi/git-repository-identity-v1}
-  - {path: .git/config, engine_version: memzoi/git-local-config-v1}
+  - {path: .git, engine_identity: memzoi/git-repository-identity}
+  - {path: .git/config, engine_identity: memzoi/git-local-config}
   - path: .git/renderer-version
-    engine_version: memzoi/git-unified-renderer-v1+git-
+    engine_identity: memzoi/git-unified-renderer+git-
     engine_match: prefix
 request:
   schema: memzoi/capture-request
@@ -4270,7 +4271,7 @@ request:
         head: sha1:2222222222222222222222222222222222222222
         merge_parent: base_to_head
         rename_detection: true
-        diff_format: git-unified-v1
+        diff_format: git-unified
       media_type: text/x-diff
   extractor: {profile: git-change-deterministic}
 expected:
@@ -4279,17 +4280,17 @@ expected:
 "#,
         )
         .expect("parse Git policy evaluation case");
-        let policy = |path: &str, engine_version: &str, digest: char| CapturePolicyInputSnapshot {
+        let policy = |path: &str, engine_identity: &str, digest: char| CapturePolicyInputSnapshot {
             path: path.to_owned(),
             source_content_hash: format!("blake3:{}", digest.to_string().repeat(64)),
-            engine_version: engine_version.to_owned(),
+            engine_identity: engine_identity.to_owned(),
         };
         let expected = vec![
             policy(".git", GIT_REPOSITORY_IDENTITY_ENGINE, 'a'),
             policy(".git/config", GIT_LOCAL_CONFIG_ENGINE, 'b'),
             policy(
                 ".git/renderer-version",
-                "memzoi/git-unified-renderer-v1+git-2.50.1",
+                "memzoi/git-unified-renderer+git-2.50.1",
                 'c',
             ),
         ];

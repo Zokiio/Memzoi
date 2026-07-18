@@ -30,62 +30,62 @@ eval: eval-recall eval-capture eval-v0.5-foundation
 
 .PHONY: eval-recall-v3
 eval-recall-v3:
-	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/development/corpus.yaml
 
 .PHONY: eval-recall-v3-candidate eval-recall-v3-candidate-matrix recall-v3-model-install recall-v3-model-inspect recall-v3-development-run recall-v3-development-freeze recall-v3-development-publish
 eval-recall-v3-candidate:
-	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml --candidate evals/recall/v3/candidates/exact-union.json --require-ready-candidates
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/development/corpus.yaml --candidate evals/recall/development/candidates/exact-union.json --require-ready-candidates
 
 eval-recall-v3-candidate-matrix:
-	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/v3/corpus.yaml --candidate evals/recall/v3/candidates/semantic-only.json --candidate evals/recall/v3/candidates/lexical-rerank.json --candidate evals/recall/v3/candidates/lexical-union.json --require-ready-candidates
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 --corpus evals/recall/development/corpus.yaml --candidate evals/recall/development/candidates/semantic-only.json --candidate evals/recall/development/candidates/lexical-rerank.json --candidate evals/recall/development/candidates/lexical-union.json --require-ready-candidates
 
 # Explicit network step. Model files remain under the ignored research root.
 recall-v3-model-install:
-	@set -e; for profile in evals/recall/v3/profiles/*.json; do \
+	@set -e; for profile in evals/recall/development/profiles/*.json; do \
 		cargo run --locked -q -p memzoi-cli -- eval recall-v3 model install --profile "$$profile" --model-root .research/recall-v3/models; \
 	done
 
 # Offline integrity check for all explicitly installed profiles.
 recall-v3-model-inspect:
-	@set -e; for profile in evals/recall/v3/profiles/*.json; do \
+	@set -e; for profile in evals/recall/development/profiles/*.json; do \
 		cargo run --locked -q -p memzoi-cli -- eval recall-v3 model inspect --profile "$$profile" --model-root .research/recall-v3/models; \
 	done
 
 recall-v3-development-run:
 	@test -n "$(RECALL_V3_ATTEMPTED_AT)" || (echo 'RECALL_V3_ATTEMPTED_AT=<RFC3339> is required' >&2; exit 2)
-	cargo run --release --locked -q -p memzoi-cli --features recall-models -- eval recall-v3 development run --matrix evals/recall/v3/development-matrix.json --corpus evals/recall/v3/corpus.yaml --model-root .research/recall-v3/models --output .research/recall-v3/observed --attempted-at "$(RECALL_V3_ATTEMPTED_AT)"
+	cargo run --release --locked -q -p memzoi-cli --features recall-models -- eval recall-v3 development run --matrix evals/recall/development/development-matrix.json --corpus evals/recall/development/corpus.yaml --model-root .research/recall-v3/models --output .research/recall-v3/observed --attempted-at "$(RECALL_V3_ATTEMPTED_AT)"
 
 recall-v3-development-freeze:
 	@test -n "$(RECALL_V3_FROZEN_AT)" || (echo 'RECALL_V3_FROZEN_AT=<RFC3339> is required' >&2; exit 2)
-	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development freeze --run .research/recall-v3/observed --corpus evals/recall/v3/corpus.yaml --matrix evals/recall/v3/development-matrix.json --profile-root evals/recall/v3/profiles --output .research/recall-v3/observed/frozen-candidates.json --frozen-at "$(RECALL_V3_FROZEN_AT)"
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development freeze --run .research/recall-v3/observed --corpus evals/recall/development/corpus.yaml --matrix evals/recall/development/development-matrix.json --profile-root evals/recall/development/profiles --output .research/recall-v3/observed/frozen-candidates.json --frozen-at "$(RECALL_V3_FROZEN_AT)"
 
 recall-v3-development-publish:
-	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development publish --run .research/recall-v3/observed --corpus evals/recall/v3/corpus.yaml --matrix evals/recall/v3/development-matrix.json --profile-root evals/recall/v3/profiles --output "$${RECALL_V3_PUBLISH_OUTPUT:-evals/recall/v3/observed}"
+	cargo run --locked -q -p memzoi-cli -- eval recall-v3 development publish --run .research/recall-v3/observed --corpus evals/recall/development/corpus.yaml --matrix evals/recall/development/development-matrix.json --profile-root evals/recall/development/profiles --output "$${RECALL_V3_PUBLISH_OUTPUT:-evals/recall/development/observed}"
 
 .PHONY: eval-recall-operational
 eval-recall-operational:
-	cargo run --locked -q -p memzoi-cli -- eval recall-operational --evidence evals/recall/v3/operational/evidence.json
+	cargo run --locked -q -p memzoi-cli -- eval recall-operational --evidence evals/recall/development/operational/evidence.json
 
 .PHONY: eval-recall-competitors
 eval-recall-competitors:
-	cargo run --locked -q -p memzoi-cli -- eval recall-competitors --evidence evals/recall/v3/competitors/fixture-evidence.json
+	cargo run --locked -q -p memzoi-cli -- eval recall-competitors --evidence evals/recall/development/competitors/fixture-evidence.json
 
 .PHONY: eval-v0.5-foundation
 eval-v0.5-foundation: eval-recall-v3 eval-recall-v3-candidate-matrix eval-recall-operational eval-recall-competitors
 
 eval-recall:
-	cargo run --locked -q -p memzoi-cli -- eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json
+	cargo run --locked -q -p memzoi-cli -- eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json
 
 eval-capture:
-	cargo run --locked -q -p memzoi-cli -- eval capture --corpus evals/capture/v1/corpus.yaml --baseline evals/capture/v1/baseline.json
+	cargo run --locked -q -p memzoi-cli -- eval capture --corpus evals/capture/corpus.yaml --baseline evals/capture/baseline.json
 
 eval-update-baseline: eval-update-recall-baseline eval-update-capture-baseline
 
 eval-update-recall-baseline:
-	cargo run --locked -q -p memzoi-cli -- eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --update-baseline
+	cargo run --locked -q -p memzoi-cli -- eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json --update-baseline
 
 eval-update-capture-baseline:
-	cargo run --locked -q -p memzoi-cli -- eval capture --corpus evals/capture/v1/corpus.yaml --baseline evals/capture/v1/baseline.json --update-baseline
+	cargo run --locked -q -p memzoi-cli -- eval capture --corpus evals/capture/corpus.yaml --baseline evals/capture/baseline.json --update-baseline
 
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings

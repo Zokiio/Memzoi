@@ -2223,31 +2223,6 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
         "ok",
         paths.project_root.display().to_string(),
     ));
-    let legacy_runtime_dirs = paths
-        .legacy_runtime_dirs
-        .iter()
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-    if !legacy_runtime_dirs.is_empty() {
-        checks.push(check(
-            "incompatible_worktree_runtime",
-            "warning",
-            format!(
-                "unsupported path-keyed runtime state detected (directories={})",
-                legacy_runtime_dirs.len(),
-            ),
-        ));
-        push_next_step(
-            &mut next_steps,
-            "manually upgrade or remove the unsupported runtime state before opening Memzoi",
-        );
-    } else {
-        checks.push(check(
-            "incompatible_worktree_runtime",
-            "ok",
-            "no incompatible path-keyed runtime directories detected",
-        ));
-    }
     if paths.records_dir().is_dir() {
         checks.push(check(
             "records",
@@ -2419,7 +2394,7 @@ fn doctor_command(project_root: Option<PathBuf>, as_json: bool) -> Result<()> {
                 "lifecycle_transactions",
                 "warning",
                 format!(
-                    "{} hidden lifecycle transaction artifact{} require inspection in local runtime storage or the legacy records/proposals roots",
+                    "{} hidden lifecycle transaction artifact{} require inspection in local runtime storage or the current records/proposals roots",
                     count,
                     if count == 1 { "" } else { "s" },
                 ),

@@ -92,4 +92,4 @@ Project root discovery prefers an ancestor with `.memzoi/records/`, then an ance
 memzoi doctor --json
 ```
 
-`doctor` checks the project root, records directory, shared runtime, current worktree index, legacy path-keyed runtimes, exports directory, and whether `memzoi-mcp` is available on `PATH`. Missing canonical records and missing shared runtime are reported separately.
+`doctor` checks the project root, records directory, shared runtime, current worktree index, exports directory, and whether `memzoi-mcp` is available on `PATH`. Missing canonical records and missing shared runtime are reported separately.

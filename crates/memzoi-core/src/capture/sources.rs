@@ -27,14 +27,14 @@ use super::{
     content_hash, domain_hash, normalize_absolute_path, open_capture_source, prohibited_finding,
 };
 
-const GITIGNORE_ENGINE_VERSION: &str = "memzoi/gitignore-v1+ignore-0.4.28";
+const GITIGNORE_ENGINE_IDENTITY: &str = "memzoi/gitignore+ignore-0.4.28";
 const MAX_DIRECTORY_ENTRIES: usize = CAPTURE_MAX_DIRECTORY_FILES * 32;
 const MAX_GIT_STDERR_BYTES: usize = 64 * 1024;
 const MAX_GIT_COMMIT_BYTES: usize = 1024 * 1024;
 const MAX_GITFILE_BYTES: u64 = 4096;
 const GIT_PROCESS_TIMEOUT: Duration = Duration::from_millis(CAPTURE_GIT_PROCESS_TIMEOUT_MILLIS);
 const GIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
-const GIT_REPOSITORY_IDENTITY_VERSION: &str = "memzoi/git-repository-identity-v1";
+const GIT_REPOSITORY_IDENTITY: &str = "memzoi/git-repository-identity";
 
 #[derive(Debug, Clone)]
 struct ResolvedGitDirectory {
@@ -93,7 +93,7 @@ pub(super) fn load_capture_source(
             include,
         } => {
             require_no_supplied_bytes(source_inputs)?;
-            if ignore_policy != "git-v1" || include.as_slice() != ["*.md"] {
+            if ignore_policy != "git" || include.as_slice() != ["*.md"] {
                 bail!("capture directory policy is unsupported");
             }
             load_project_directory(paths, source, path, *recursive, control)
@@ -359,7 +359,7 @@ fn load_project_directory(
         locator: source.locator.clone(),
         media_type: source.media_type.clone(),
         byte_length: aggregate_bytes,
-        source_content_hash: domain_hash("memzoi/capture-directory-manifest-v1", &manifest),
+        source_content_hash: domain_hash("memzoi/capture-directory-manifest", &manifest),
         members,
         policy_inputs: first.policy_inputs,
     };
@@ -513,7 +513,7 @@ impl DirectoryWalk<'_> {
             CapturePolicyInputSnapshot {
                 path: relative_string,
                 source_content_hash: content_hash(&bytes),
-                engine_version: GITIGNORE_ENGINE_VERSION.to_owned(),
+                engine_identity: GITIGNORE_ENGINE_IDENTITY.to_owned(),
             },
         );
         Ok(())
@@ -717,7 +717,7 @@ fn git_range_ignore_policy(
         snapshots.push(CapturePolicyInputSnapshot {
             path: relative_string,
             source_content_hash: content_hash(&policy_bytes),
-            engine_version: format!("{GITIGNORE_ENGINE_VERSION}+git-tree-v1"),
+            engine_identity: format!("{GITIGNORE_ENGINE_IDENTITY}+git-tree"),
         });
     }
     for changed_path in changed_paths {
@@ -802,7 +802,7 @@ fn load_git_range(
     control: Option<&CapturePlanningControl>,
 ) -> Result<CaptureLoadedSource> {
     check_planning_control(control)?;
-    if repository != "." || diff_format != "git-unified-v1" {
+    if repository != "." || diff_format != "git-unified" {
         bail!("capture git_range configuration is unsupported");
     }
     let (base_algorithm, base_oid) = split_object_id(base)?;
@@ -975,7 +975,7 @@ fn git_renderer_policy_input(
     Ok(CapturePolicyInputSnapshot {
         path: ".git/renderer-version".to_owned(),
         source_content_hash: content_hash(&version),
-        engine_version: format!("memzoi/git-unified-renderer-v1+git-{token}"),
+        engine_identity: format!("memzoi/git-unified-renderer+git-{token}"),
     })
 }
 
@@ -1336,7 +1336,7 @@ fn resolved_git_directory(
     let local_config_policy_input = CapturePolicyInputSnapshot {
         path: ".git/config".to_owned(),
         source_content_hash: local_config_identity.source_content_hash.clone(),
-        engine_version: "memzoi/git-local-config-v1".to_owned(),
+        engine_identity: "memzoi/git-local-config".to_owned(),
     };
     let mut identity = Vec::new();
     append_path_identity(&mut identity, &git_dir);
@@ -1356,8 +1356,8 @@ fn resolved_git_directory(
         local_config_policy_input,
         policy_input: CapturePolicyInputSnapshot {
             path: ".git".to_owned(),
-            source_content_hash: domain_hash(GIT_REPOSITORY_IDENTITY_VERSION, &identity),
-            engine_version: GIT_REPOSITORY_IDENTITY_VERSION.to_owned(),
+            source_content_hash: domain_hash(GIT_REPOSITORY_IDENTITY, &identity),
+            engine_identity: GIT_REPOSITORY_IDENTITY.to_owned(),
         },
     })
 }
@@ -1718,7 +1718,7 @@ mod tests {
                 head: format!("sha1:{head}"),
                 merge_parent: "base_to_head".to_owned(),
                 rename_detection: false,
-                diff_format: "git-unified-v1".to_owned(),
+                diff_format: "git-unified".to_owned(),
             },
             "text/x-diff",
         )
@@ -1795,7 +1795,7 @@ mod tests {
             CaptureSourceLocator::ProjectDirectory {
                 path: "docs/adr".to_owned(),
                 recursive: false,
-                ignore_policy: "git-v1".to_owned(),
+                ignore_policy: "git".to_owned(),
                 include: vec!["*.md".to_owned()],
             },
             "text/markdown",
@@ -1825,7 +1825,7 @@ mod tests {
             CaptureSourceLocator::ProjectDirectory {
                 path: "docs/adr".to_owned(),
                 recursive: false,
-                ignore_policy: "git-v1".to_owned(),
+                ignore_policy: "git".to_owned(),
                 include: vec!["*.md".to_owned()],
             },
             "text/markdown",
@@ -1870,7 +1870,7 @@ mod tests {
                 head: format!("sha1:{head}"),
                 merge_parent: "base_to_head".to_owned(),
                 rename_detection: false,
-                diff_format: "git-unified-v1".to_owned(),
+                diff_format: "git-unified".to_owned(),
             },
             media_type: "text/x-diff".to_owned(),
             git: None,
@@ -1885,16 +1885,16 @@ mod tests {
         assert_eq!(first.snapshot, second.snapshot);
         assert_eq!(first.snapshot.policy_inputs.len(), 3);
         assert!(first.snapshot.policy_inputs.iter().any(|input| {
-            input.path == ".git" && input.engine_version == "memzoi/git-repository-identity-v1"
+            input.path == ".git" && input.engine_identity == "memzoi/git-repository-identity"
         }));
         assert!(first.snapshot.policy_inputs.iter().any(|input| {
-            input.path == ".git/config" && input.engine_version == "memzoi/git-local-config-v1"
+            input.path == ".git/config" && input.engine_identity == "memzoi/git-local-config"
         }));
         assert!(first.snapshot.policy_inputs.iter().any(|input| {
             input.path == ".git/renderer-version"
                 && input
-                    .engine_version
-                    .starts_with("memzoi/git-unified-renderer-v1+git-")
+                    .engine_identity
+                    .starts_with("memzoi/git-unified-renderer+git-")
         }));
         assert_eq!(first.documents[0].bytes, second.documents[0].bytes);
         assert!(String::from_utf8_lossy(&first.documents[0].bytes).contains("-before"));
@@ -1945,7 +1945,7 @@ mod tests {
                 head: format!("sha1:{head}"),
                 merge_parent: "base_to_head".to_owned(),
                 rename_detection: false,
-                diff_format: "git-unified-v1".to_owned(),
+                diff_format: "git-unified".to_owned(),
             },
             "text/x-diff",
         );
@@ -2297,7 +2297,7 @@ mod tests {
                 head: format!("sha1:{head}"),
                 merge_parent: "base_to_head".to_owned(),
                 rename_detection: false,
-                diff_format: "git-unified-v1".to_owned(),
+                diff_format: "git-unified".to_owned(),
             },
             "text/x-diff",
         );
@@ -2382,7 +2382,7 @@ mod tests {
                 head: format!("sha1:{head}"),
                 merge_parent: "base_to_head".to_owned(),
                 rename_detection: false,
-                diff_format: "git-unified-v1".to_owned(),
+                diff_format: "git-unified".to_owned(),
             },
             "text/x-diff",
         );

@@ -15,13 +15,14 @@ use time::{Date, OffsetDateTime, Time, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
-    AuthorizationProof, CaptureApplyResult, CapturePlan, CaptureReview, CaptureSourceInputs,
-    ContextPack, ContextPackInput, HandoffInput, HandoffPack, ImportApplyResult, ImportDocument,
-    ImportPlan, MemoryDestination, MemoryDraft, MemoryEvent, MemoryPaths, MemoryRecord,
-    MemoryStatus, OkfProposalAction, OkfProposalFile, OkfProposalOutcome, OkfProposalResolution,
-    OkfProposalSensitivity, PrecheckInput, PrecheckWarning, Proposal, ProposalStatus,
-    ProposalStatusFilter, RepositoryContentClass, RepositoryWriteRoute, SafetyFieldKind, ScopeKind,
-    SearchInput, SearchResult, SupersedeResult, ValidationResult, Visibility,
+    AuthorizationProof, CaptureApplyResult, CapturePlan, CaptureRequest, CaptureReview,
+    CaptureReviewInput, CaptureSourceInputs, ContextPack, ContextPackInput, HandoffInput,
+    HandoffPack, ImportApplyResult, ImportDocument, ImportPlan, MemoryDestination, MemoryDraft,
+    MemoryEvent, MemoryPaths, MemoryRecord, MemoryStatus, OkfProposalAction, OkfProposalFile,
+    OkfProposalOutcome, OkfProposalResolution, OkfProposalSensitivity, PrecheckInput,
+    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, RepositoryContentClass,
+    RepositoryWriteRoute, SafetyFieldKind, ScopeKind, SearchInput, SearchResult, SupersedeResult,
+    ValidationResult, Visibility,
 };
 use crate::{
     config::{
@@ -208,7 +209,6 @@ impl MemoryService {
         trusted_recall_evaluation: bool,
     ) -> Result<Self> {
         paths.validate_runtime_identity()?;
-        shared_runtime::reject_unsupported_runtime_layout(&paths)?;
         if !paths.config_path.is_file() {
             bail!(
                 "Memzoi bundle is not initialized at {}; run `memzoi init` first",
@@ -216,21 +216,9 @@ impl MemoryService {
             );
         }
 
-        let shared_conn = db::open_database(&paths.shared_db_path)?;
-        db::init_database(&shared_conn)?;
-        let mut index_conn = None;
-        let mut rebuild_index = !paths.index_db_path.is_file();
-        if !rebuild_index {
-            let candidate = db::open_database(&paths.index_db_path)?;
-            match db::init_database(&candidate) {
-                Ok(()) => index_conn = Some(candidate),
-                Err(error) if schema::is_unsupported_schema_error(&error) => {
-                    rebuild_index = true;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        if rebuild_index {
+        let shared_conn = open_current_shared_database(&paths)?;
+        let index_conn = open_disposable_index_if_current(&paths)?;
+        if index_conn.is_none() {
             if trusted_recall_evaluation {
                 derived_index::rebuild_for_trusted_recall_eval(paths.clone())?;
             } else {
@@ -239,11 +227,7 @@ impl MemoryService {
         }
         let conn = match index_conn {
             Some(conn) => conn,
-            None => {
-                let conn = db::open_database(&paths.index_db_path)?;
-                db::init_database(&conn)?;
-                conn
-            }
+            None => open_current_index_database(&paths)?,
         };
         import_origin_journal::recover_on_open(&paths, &shared_conn)?;
         shared_runtime::refresh_index_mirrors(&paths, &shared_conn, &conn)?;
@@ -265,7 +249,6 @@ impl MemoryService {
 
     pub fn initialize_paths(paths: MemoryPaths, request: InitRequest) -> Result<InitResult> {
         paths.validate_runtime_identity()?;
-        shared_runtime::reject_unsupported_runtime_layout(&paths)?;
         init_current_bundle(&paths, request.force)?;
         Ok(InitResult { paths })
     }
@@ -502,7 +485,7 @@ impl MemoryService {
         let target = RuntimeRecords::new(&self.conn)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
-        validate_legacy_canonical_target(&target, self.now())?;
+        validate_canonical_lifecycle_target(&target, self.now())?;
         if target.scope_kind != draft.scope_kind || target.scope_id != draft.scope_id {
             bail!(
                 "cannot supersede record {record_id} cross-scope: target={}:{}, replacement={}:{}",
@@ -537,7 +520,7 @@ impl MemoryService {
         let target = RuntimeRecords::new(&tx)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
-        validate_legacy_canonical_target(&target, self.now())?;
+        validate_canonical_lifecycle_target(&target, self.now())?;
         if target.scope_kind != draft.scope_kind || target.scope_id != draft.scope_id {
             bail!(
                 "cannot supersede record {record_id} cross-scope: target={}:{}, replacement={}:{}",
@@ -598,7 +581,7 @@ impl MemoryService {
         let target = RuntimeRecords::new(&self.conn)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
-        validate_legacy_canonical_target(&target, self.now())?;
+        validate_canonical_lifecycle_target(&target, self.now())?;
         self.ensure_repository_index_current()?;
         let safety_values = vec![
             safety_value(
@@ -630,7 +613,7 @@ impl MemoryService {
         let target = RuntimeRecords::new(&tx)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
-        validate_legacy_canonical_target(&target, self.now())?;
+        validate_canonical_lifecycle_target(&target, self.now())?;
         let record = proposals::tombstone_record(&tx, record_id, actor, reason)?;
         let write = self.prepare_record_file_write_with_conn(
             &session,
@@ -1077,6 +1060,117 @@ impl MemoryService {
         .apply(actor, document, expected_plan_id)
     }
 
+    pub fn plan_capture(&self, request: CaptureRequest) -> Result<CapturePlan> {
+        self.plan_capture_with_inputs(request, &CaptureSourceInputs::default())
+    }
+
+    pub fn plan_capture_with_inputs(
+        &self,
+        request: CaptureRequest,
+        source_inputs: &CaptureSourceInputs,
+    ) -> Result<CapturePlan> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
+        let evaluated_at = self.now_timestamp()?;
+        crate::capture::plan_capture_with_connection_and_inputs(
+            &self.paths,
+            &self.conn,
+            request,
+            source_inputs,
+            &evaluated_at,
+        )
+    }
+
+    pub fn build_capture_review(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        self.build_capture_review_with_inputs(
+            plan,
+            input,
+            &CaptureSourceInputs::default(),
+            reviewed_by,
+            reviewed_at,
+        )
+    }
+
+    pub fn build_capture_review_with_inputs(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        source_inputs: &CaptureSourceInputs,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        self.build_capture_review_inner(plan, input, None, source_inputs, reviewed_by, reviewed_at)
+    }
+
+    pub fn build_capture_review_with_prior(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        prior_review: &CaptureReview,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        self.build_capture_review_with_prior_and_inputs(
+            plan,
+            input,
+            prior_review,
+            &CaptureSourceInputs::default(),
+            reviewed_by,
+            reviewed_at,
+        )
+    }
+
+    pub fn build_capture_review_with_prior_and_inputs(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        prior_review: &CaptureReview,
+        source_inputs: &CaptureSourceInputs,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        self.build_capture_review_inner(
+            plan,
+            input,
+            Some(prior_review),
+            source_inputs,
+            reviewed_by,
+            reviewed_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_capture_review_inner(
+        &self,
+        plan: &CapturePlan,
+        input: CaptureReviewInput,
+        prior_review: Option<&CaptureReview>,
+        source_inputs: &CaptureSourceInputs,
+        reviewed_by: &str,
+        reviewed_at: &str,
+    ) -> Result<CaptureReview> {
+        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+        self.ensure_repository_index_current()?;
+        let evaluated_at = self.now_timestamp()?;
+        crate::capture::build_capture_review_with_connection_and_inputs(
+            &self.paths,
+            &self.conn,
+            plan,
+            input,
+            prior_review,
+            source_inputs,
+            reviewed_by,
+            reviewed_at,
+            &evaluated_at,
+        )
+    }
+
     pub fn apply_capture(
         &self,
         actor: &str,
@@ -1360,7 +1454,7 @@ pub fn lifecycle_transaction_artifact_count(paths: &MemoryPaths) -> Result<usize
     Ok(lifecycle_transaction_artifacts(paths)?.len())
 }
 
-fn validate_legacy_canonical_target(
+fn validate_canonical_lifecycle_target(
     target: &MemoryRecord,
     evaluated_at: OffsetDateTime,
 ) -> Result<()> {
@@ -1395,9 +1489,51 @@ fn validate_legacy_canonical_target(
     Ok(())
 }
 
+fn open_current_shared_database(paths: &MemoryPaths) -> Result<Connection> {
+    let conn = db::open_database(&paths.shared_db_path).with_context(|| {
+        format!(
+            "failed to open current shared database {}",
+            paths.shared_db_path.display()
+        )
+    })?;
+    db::init_database(&conn).with_context(|| {
+        format!(
+            "failed to initialize current shared database {}",
+            paths.shared_db_path.display()
+        )
+    })?;
+    Ok(conn)
+}
+
+fn open_disposable_index_if_current(paths: &MemoryPaths) -> Result<Option<Connection>> {
+    if !paths.index_db_path.is_file() {
+        return Ok(None);
+    }
+    match open_current_index_database(paths) {
+        Ok(conn) => Ok(Some(conn)),
+        Err(error) if schema::is_unsupported_schema_error(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn open_current_index_database(paths: &MemoryPaths) -> Result<Connection> {
+    let conn = db::open_database(&paths.index_db_path).with_context(|| {
+        format!(
+            "failed to open current disposable index {}",
+            paths.index_db_path.display()
+        )
+    })?;
+    db::init_database(&conn).with_context(|| {
+        format!(
+            "failed to initialize current disposable index {}",
+            paths.index_db_path.display()
+        )
+    })?;
+    Ok(conn)
+}
+
 pub fn init_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleResult> {
     paths.validate_runtime_identity()?;
-    shared_runtime::reject_unsupported_runtime_layout(paths)?;
     init_current_bundle(paths, force)
 }
 
@@ -1467,8 +1603,7 @@ fn init_current_bundle(paths: &MemoryPaths, force: bool) -> Result<InitBundleRes
 }
 
 fn default_config() -> &'static str {
-    r#"version = 1
-scope_kind = "repo"
+    r#"scope_kind = "repo"
 
 [exports]
 okf = "exports/okf"

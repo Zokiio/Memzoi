@@ -217,7 +217,7 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
   - `search_memory`
   - `inspect_memory_expiry`
   - `build_context_pack`
-  - `plan_capture_v1`
+  - `plan_capture`
   - `propose_memory`
   - `precheck_path`
   - `precheck_action`

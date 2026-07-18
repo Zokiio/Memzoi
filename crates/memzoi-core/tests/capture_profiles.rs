@@ -12,14 +12,62 @@ use memzoi_core::{
     CaptureReviewDecisionInput, CaptureReviewInput, CaptureReviewOutcome, CaptureSemanticLocation,
     CaptureSourceInputs, CaptureSourceLocator, CaptureSourceRequest, GIT_CHANGE_EXTRACTOR_PROFILE,
     INSTRUCTION_EXTRACTOR_PROFILE, InitRequest, MemoryDestination, MemoryPaths, MemoryService,
-    OkfProposalSensitivity, SearchInput, build_capture_review, build_capture_review_with_inputs,
-    plan_capture, plan_capture_with_inputs, read_okf_proposal_files, read_okf_record_files,
+    OkfProposalSensitivity, SearchInput, build_capture_review_at,
+    build_capture_review_with_inputs_at, plan_capture_at, plan_capture_with_inputs_at,
+    read_okf_proposal_files, read_okf_record_files,
 };
 use tempfile::TempDir;
 
 const REVIEWED_AT: &str = "2026-07-11T12:00:00Z";
+const EVALUATED_AT: &str = "2026-07-18T12:00:00Z";
 const BASE: &str = "sha1:1111111111111111111111111111111111111111";
 const HEAD: &str = "sha1:2222222222222222222222222222222222222222";
+
+fn evaluated_at() -> time::OffsetDateTime {
+    time::OffsetDateTime::parse(EVALUATED_AT, &time::format_description::well_known::Rfc3339)
+        .expect("capture test evaluated_at must be valid")
+}
+
+fn plan_capture(paths: &MemoryPaths, request: CaptureRequest) -> anyhow::Result<CapturePlan> {
+    plan_capture_at(paths, request, evaluated_at())
+}
+
+fn plan_capture_with_inputs(
+    paths: &MemoryPaths,
+    request: CaptureRequest,
+    source_inputs: &CaptureSourceInputs,
+) -> anyhow::Result<CapturePlan> {
+    plan_capture_with_inputs_at(paths, request, source_inputs, evaluated_at())
+}
+
+fn build_capture_review(
+    paths: &MemoryPaths,
+    plan: &CapturePlan,
+    input: CaptureReviewInput,
+    reviewed_by: &str,
+    reviewed_at: &str,
+) -> anyhow::Result<memzoi_core::CaptureReview> {
+    build_capture_review_at(paths, plan, input, reviewed_by, reviewed_at, evaluated_at())
+}
+
+fn build_capture_review_with_inputs(
+    paths: &MemoryPaths,
+    plan: &CapturePlan,
+    input: CaptureReviewInput,
+    source_inputs: &CaptureSourceInputs,
+    reviewed_by: &str,
+    reviewed_at: &str,
+) -> anyhow::Result<memzoi_core::CaptureReview> {
+    build_capture_review_with_inputs_at(
+        paths,
+        plan,
+        input,
+        source_inputs,
+        reviewed_by,
+        reviewed_at,
+        evaluated_at(),
+    )
+}
 
 #[test]
 fn instruction_profile_is_explicit_nested_feedback_safe_reviewed_and_cited() -> anyhow::Result<()> {
@@ -816,8 +864,8 @@ fn git_range_is_pinned_read_only_reviewed_and_cited_with_delete_provenance() -> 
     assert_eq!(plan.status, CapturePlanStatus::Ready);
     assert!(plan.sources[0].policy_inputs.iter().any(|input| {
         input
-            .engine_version
-            .starts_with("memzoi/git-unified-renderer-v1+git-")
+            .engine_identity
+            .starts_with("memzoi/git-unified-renderer+git-")
     }));
     assert!(
         plan.diagnostics
@@ -1127,7 +1175,7 @@ fn adr_directory_request() -> CaptureRequest {
             locator: CaptureSourceLocator::ProjectDirectory {
                 path: "docs/adr".to_owned(),
                 recursive: false,
-                ignore_policy: "git-v1".to_owned(),
+                ignore_policy: "git".to_owned(),
                 include: vec!["*.md".to_owned()],
             },
             media_type: "text/markdown".to_owned(),
@@ -1227,7 +1275,7 @@ fn git_range_request(
                 head: format!("sha1:{head}"),
                 merge_parent: merge_parent.to_owned(),
                 rename_detection,
-                diff_format: "git-unified-v1".to_owned(),
+                diff_format: "git-unified".to_owned(),
             },
             media_type: "text/x-diff".to_owned(),
             git: None,

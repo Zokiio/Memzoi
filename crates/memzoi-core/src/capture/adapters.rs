@@ -221,7 +221,7 @@ mod tests {
             head: format!("{algorithm}:{}", "2".repeat(digest_len)),
             merge_parent: "base_to_head".to_owned(),
             rename_detection: false,
-            diff_format: "git-unified-v1".to_owned(),
+            diff_format: "git-unified".to_owned(),
         };
         let mut document = path_document("reviewed.diff", text);
         document.request.locator = locator.clone();
@@ -709,8 +709,8 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_keeps_markdown_adapter_on_legacy_path() {
-        let document = path_document("notes.md", "# Fact: Existing\n\nLegacy behavior.\n");
+    fn dispatch_keeps_markdown_adapter_on_default_path() {
+        let document = path_document("notes.md", "# Fact: Existing\n\nDefault behavior.\n");
         let source = document.request.clone();
         let loaded = loaded(document);
         let extractor = extractor_identity(MARKDOWN_EXTRACTOR_PROFILE).unwrap();

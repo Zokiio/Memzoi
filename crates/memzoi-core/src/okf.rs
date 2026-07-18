@@ -2706,7 +2706,7 @@ Do not import this.
             candidate_id: format!("blake3:{}", "2".repeat(64)),
             decision_id: format!("blake3:{}", "3".repeat(64)),
             decision_at: "2026-07-16T12:00:00Z".to_owned(),
-            safety_contract: "memzoi/repository-write-safety-v1".to_owned(),
+            safety_contract: crate::REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
             revision: CanonicalRevision {
                 schema: CANONICAL_REVISION_SCHEMA.to_owned(),
                 revision_hash: format!("blake3:{}", "4".repeat(64)),

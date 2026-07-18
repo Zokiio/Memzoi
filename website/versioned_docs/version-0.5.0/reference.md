@@ -94,15 +94,15 @@ project's canonical records, proposal inbox, runtime database, exports, or event
 log:
 
 ```bash
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --json
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json --json
 ```
 
 `--baseline` is optional. `--update-baseline` requires it and is the only mode
 that writes the selected baseline. A threshold-failing run is never written:
 
 ```bash
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --update-baseline
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json --update-baseline
 ```
 
 The explicit corpus is strict YAML with version
@@ -199,12 +199,12 @@ Run the checked-in capture quality gate from isolated temporary projects:
 
 ```bash
 memzoi eval capture \
-  --corpus evals/capture/v1/corpus.yaml \
-  --baseline evals/capture/v1/baseline.json
+  --corpus evals/capture/corpus.yaml \
+  --baseline evals/capture/baseline.json
 
 memzoi eval capture \
-  --corpus evals/capture/v1/corpus.yaml \
-  --baseline evals/capture/v1/baseline.json \
+  --corpus evals/capture/corpus.yaml \
+  --baseline evals/capture/baseline.json \
   --json
 ```
 
@@ -230,8 +230,8 @@ after every gate passes:
 
 ```bash
 memzoi eval capture \
-  --corpus evals/capture/v1/corpus.yaml \
-  --baseline evals/capture/v1/baseline.json \
+  --corpus evals/capture/corpus.yaml \
+  --baseline evals/capture/baseline.json \
   --update-baseline
 ```
 

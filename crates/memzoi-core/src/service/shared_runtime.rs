@@ -130,20 +130,6 @@ fn run_after_shared_sync_marker_cleanup_hook() -> Result<()> {
     })
 }
 
-pub(super) fn reject_unsupported_runtime_layout(paths: &MemoryPaths) -> Result<()> {
-    let retained_legacy_sources = paths.legacy_runtime_dirs.iter().any(|path| {
-        path.join("config.toml").is_file()
-            || path.join("memory.db").is_file()
-            || path.join("shared.db").is_file()
-    });
-    if retained_legacy_sources {
-        bail!(
-            "unsupported runtime layout; manually remove or upgrade incompatible runtime databases"
-        );
-    }
-    Ok(())
-}
-
 pub(super) fn refresh_index_mirrors(
     paths: &MemoryPaths,
     shared: &Connection,
@@ -1644,51 +1630,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn initialize_rejects_incompatible_runtime_without_translating_or_mutating_it() -> Result<()> {
-        let (_temp, paths, _local_id, _proposal_id) = legacy_git_fixture()?;
-        let legacy_database = paths.legacy_runtime_dirs[0].join("memory.db");
-        let before = fs::read(&legacy_database)?;
-
-        let error = MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })
-            .expect_err("incompatible runtime layouts must be rejected");
-        assert!(
-            format!("{error:#}").contains("unsupported runtime layout"),
-            "{error:#}"
-        );
-        assert_eq!(fs::read(&legacy_database)?, before);
-        assert!(!paths.shared_db_path.exists());
-        assert!(paths.legacy_runtime_dirs[0].is_dir());
-        Ok(())
-    }
-
-    fn legacy_git_paths_fixture() -> Result<(TempDir, MemoryPaths, PathBuf)> {
-        if Command::new("git").arg("--version").output().is_err() {
-            bail!("Git is required for the legacy migration fixture");
-        }
-        let temp = TempDir::new()?;
-        let project = temp.path().join("project");
-        fs::create_dir_all(project.join(".memzoi/records"))?;
-        run_git(&project, &["init", "-q"])?;
-        run_git(&project, &["config", "user.email", "fixture@example.test"])?;
-        run_git(&project, &["config", "user.name", "Fixture"])?;
-        fs::write(project.join(".memzoi/records/.gitkeep"), "")?;
-        run_git(&project, &["add", ".memzoi"])?;
-        run_git(&project, &["commit", "-qm", "base"])?;
-
-        let paths = MemoryPaths::with_runtime_home(
-            project.canonicalize()?,
-            temp.path().join("runtime-home"),
-        );
-        let legacy_dir = paths
-            .legacy_runtime_dirs
-            .first()
-            .context("Git fixture should expose its path-keyed legacy runtime")?
-            .clone();
-        fs::create_dir_all(&legacy_dir)?;
-        Ok((temp, paths, legacy_dir))
-    }
-
     fn linked_worktree_paths_fixture() -> Result<(TempDir, MemoryPaths, MemoryPaths)> {
         if Command::new("git").arg("--version").output().is_err() {
             bail!("Git is required for the linked-worktree fixture");
@@ -1730,33 +1671,6 @@ mod tests {
         Ok((temp, source_paths, recovery_paths))
     }
 
-    fn legacy_git_fixture() -> Result<(TempDir, MemoryPaths, String, String)> {
-        let (temp, paths, legacy_dir) = legacy_git_paths_fixture()?;
-        fs::write(
-            legacy_dir.join("config.toml"),
-            super::super::default_config(),
-        )?;
-        let legacy = db::open_database(&legacy_dir.join("memory.db"))?;
-        db::init_database(&legacy)?;
-        let local = RuntimeRecords::new(&legacy).create_local(
-            "agent:migration-test",
-            &LocalMemoryInput {
-                memory_type: MemoryType::Preference,
-                lane: MemoryLane::Semantic,
-                title: "Migrated local memory".to_owned(),
-                body: "Linked worktrees must retain this local memory.".to_owned(),
-            },
-            "2026-07-14T12:00:00Z",
-        )?;
-        let proposal = proposals::propose_memory(
-            &legacy,
-            "agent:migration-test",
-            sample_memory_draft("Migrated proposal", "Migration preserves proposal state"),
-        )?;
-        drop(legacy);
-        Ok((temp, paths, local.id, proposal.id))
-    }
-
     fn run_git(directory: &Path, args: &[&str]) -> Result<()> {
         let output = Command::new("git")
             .args(args)
@@ -1782,7 +1696,7 @@ mod tests {
             body: body.to_owned(),
             tags: vec!["migration".to_owned()],
             source_kind: Some("test".to_owned()),
-            source_ref: Some("legacy-runtime".to_owned()),
+            source_ref: Some("runtime-record".to_owned()),
             sensitivity: OkfProposalSensitivity::RepoSafe,
             content_class: RepositoryContentClass::GeneralRepoKnowledge,
             confidence: 1.0,

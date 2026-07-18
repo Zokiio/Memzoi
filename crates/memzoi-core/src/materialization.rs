@@ -7,8 +7,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     CaptureProvenance, MemoryDestination, MemoryDraft, MemoryLane, MemoryStatus, MemoryType,
     OkfProposalSensitivity, OkfRecordFile, OriginDescriptor, REPOSITORY_WRITE_SAFETY_SCHEMA,
-    REPOSITORY_WRITE_SAFETY_VERSION, RecordLineage, RepositoryContentClass, RetentionFacts,
-    ScopeKind, Visibility, capture::validate_capture_provenance, retention::evaluate_retention,
+    RecordLineage, RepositoryContentClass, RetentionFacts, ScopeKind, Visibility,
+    capture::validate_capture_provenance, retention::evaluate_retention,
 };
 
 pub const REPOSITORY_MATERIALIZATION_PLAN_SCHEMA: &str = "memzoi/repository-materialization-plan";
@@ -658,7 +658,7 @@ pub fn repository_materialization_candidate_plan(
 /// Returns the immutable policy label for repository materialization decisions.
 pub fn repository_materialization_policy() -> MaterializationPolicy {
     MaterializationPolicy {
-        policy_id: format!("{REPOSITORY_WRITE_SAFETY_SCHEMA}@{REPOSITORY_WRITE_SAFETY_VERSION}"),
+        policy_id: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
         safety_contract: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
     }
 }
@@ -1154,7 +1154,7 @@ mod tests {
                 candidate_id: identity('c'),
                 decision_id,
                 decision_at: "2026-07-16T12:00:00Z".to_owned(),
-                safety_contract: "memzoi/repository-write-safety-v1".to_owned(),
+                safety_contract: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
                 revision: revision('d'),
                 target: None,
                 reason: None,
@@ -1169,8 +1169,8 @@ mod tests {
             vec![output(".memzoi/records/team/install-risk.md")],
         )?;
         let policy = MaterializationPolicy {
-            policy_id: "repo-safe-v1".to_owned(),
-            safety_contract: "memzoi/repository-write-safety-v1".to_owned(),
+            policy_id: "repo-safe".to_owned(),
+            safety_contract: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
         };
         let first = build_repository_materialization_decision(
             &plan,
@@ -1207,7 +1207,7 @@ mod tests {
         metadata.candidate_id = identity('0');
         metadata.decision_id = identity('1');
         metadata.decision_at = "2026-07-17T12:00:00Z".to_owned();
-        metadata.safety_contract = "memzoi/repository-write-safety-v2".to_owned();
+        metadata.safety_contract = "foreign/repository-write-safety".to_owned();
 
         assert_eq!(
             canonical_revision_for_okf_record(&first)?,
@@ -1267,9 +1267,8 @@ mod tests {
             reviewed_candidate_id: identity('f'),
             extraction: CaptureExtractorIdentity {
                 kind: "markdown".to_owned(),
-                id: "markdown-v1".to_owned(),
-                version: "1".to_owned(),
-                configuration_hash: identity('0'),
+                id: "markdown".to_owned(),
+                implementation_digest: identity('0'),
             },
             evidence: vec![CaptureEvidence {
                 source_id: "source-1".to_owned(),
@@ -1492,7 +1491,7 @@ mod tests {
         );
         assert_eq!(
             repository_materialization_policy().policy_id,
-            format!("{REPOSITORY_WRITE_SAFETY_SCHEMA}@{REPOSITORY_WRITE_SAFETY_VERSION}")
+            REPOSITORY_WRITE_SAFETY_SCHEMA
         );
         Ok(())
     }

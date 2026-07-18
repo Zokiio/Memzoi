@@ -8,11 +8,11 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
-    CaptureDataClass, CapturePlanningControl, CaptureRequest, CaptureSourceLocator,
+    CaptureDataClass, CapturePlanningControl, CaptureRequest, CaptureSourceLocator, Clock,
     ContextPackInput, MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryDraft, MemoryLane,
     MemoryPaths, MemoryService, MemoryType, OkfProposalSensitivity, PrecheckInput, Proposal,
-    ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, Visibility, plan_capture,
-    plan_capture_with_control,
+    ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, SystemClock, Visibility,
+    plan_capture_at, plan_capture_with_control_at,
 };
 use serde_json::{Value, json};
 
@@ -313,7 +313,7 @@ fn valid_jsonrpc_id(id: &Value) -> bool {
 fn is_capture_tool_request(request: &Value) -> bool {
     request.get("id").is_some()
         && request.get("method").and_then(Value::as_str) == Some("tools/call")
-        && request.pointer("/params/name").and_then(Value::as_str) == Some("plan_capture_v1")
+        && request.pointer("/params/name").and_then(Value::as_str) == Some("plan_capture")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -682,7 +682,7 @@ fn tools_list_result() -> Value {
                 })
             ),
             tool_schema(
-                "plan_capture_v1",
+                "plan_capture",
                 "Plan evidence-backed capture from exactly one explicit project-relative Markdown file. This tool is read-only and never applies, approves, or writes memory state.",
                 json!({
                     "type": "object",
@@ -829,7 +829,7 @@ fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
         "description": description,
         "inputSchema": input_schema,
     });
-    if name == "plan_capture_v1" {
+    if name == "plan_capture" {
         tool["outputSchema"] = json!({
             "type": "object",
             "properties": {
@@ -879,7 +879,7 @@ fn tools_call(
                 .memory_service()?
                 .build_context_pack(context_input(&arguments)?)?,
         )?,
-        "plan_capture_v1" => match plan_capture_output(state, &arguments, capture_control) {
+        "plan_capture" => match plan_capture_output(state, &arguments, capture_control) {
             Ok(plan) => plan,
             Err(error) if error.to_string() == INVALID_CAPTURE_REQUEST => return Err(error),
             Err(error) => return Ok(tool_error_result(&error.to_string())),
@@ -912,7 +912,7 @@ fn tools_call(
         _ => bail!("unknown tool: {name}"),
     };
 
-    let text = if name == "plan_capture_v1" {
+    let text = if name == "plan_capture" {
         capture_text_content(&structured)?
     } else {
         serde_json::to_string_pretty(&structured)?
@@ -969,9 +969,10 @@ fn plan_capture_output(
     let request = serde_json::from_value::<CaptureRequest>(arguments.clone())
         .map_err(|_| anyhow!(INVALID_CAPTURE_REQUEST))?;
     validate_mcp_capture_authority(&request)?;
+    let evaluated_at = SystemClock.now_utc();
     let plan = match control {
-        Some(control) => plan_capture_with_control(&state.paths, request, control),
-        None => plan_capture(&state.paths, request),
+        Some(control) => plan_capture_with_control_at(&state.paths, request, evaluated_at, control),
+        None => plan_capture_at(&state.paths, request, evaluated_at),
     }
     .map_err(|error| {
         if control.is_some_and(CapturePlanningControl::is_cancelled) {
@@ -1305,7 +1306,7 @@ mod tests {
                 "id": id,
                 "method": "tools/call",
                 "params": {
-                    "name": "plan_capture_v1",
+                    "name": "plan_capture",
                     "arguments": arguments
                 }
             }),
@@ -1500,7 +1501,7 @@ mod tests {
                     "id": "cancel-active",
                     "method": "tools/call",
                     "params": {
-                        "name": "plan_capture_v1",
+                        "name": "plan_capture",
                         "arguments": capture_arguments(source_path)
                     }
                 })
@@ -1550,7 +1551,7 @@ mod tests {
                     "id": "timeout-active",
                     "method": "tools/call",
                     "params": {
-                        "name": "plan_capture_v1",
+                        "name": "plan_capture",
                         "arguments": capture_arguments(source_path)
                     }
                 })
@@ -1745,7 +1746,7 @@ mod tests {
             "search_memory",
             "inspect_memory_expiry",
             "build_context_pack",
-            "plan_capture_v1",
+            "plan_capture",
             "propose_memory",
             "precheck_path",
             "precheck_action",
@@ -1769,8 +1770,8 @@ mod tests {
 
         let capture_tool = tools
             .iter()
-            .find(|tool| tool["name"].as_str() == Some("plan_capture_v1"))
-            .unwrap_or_else(|| panic!("plan_capture_v1 tool should be exposed: {tools:?}"));
+            .find(|tool| tool["name"].as_str() == Some("plan_capture"))
+            .unwrap_or_else(|| panic!("plan_capture tool should be exposed: {tools:?}"));
         let schema = &capture_tool["inputSchema"];
         assert_eq!(
             capture_tool["outputSchema"]["properties"]["schema"]["const"],
@@ -1905,7 +1906,7 @@ mod tests {
         let before = managed_state_snapshot(&state);
 
         let request = serde_json::from_value::<CaptureRequest>(arguments.clone()).unwrap();
-        let expected = plan_capture(&state.paths, request).unwrap();
+        let expected = plan_capture_at(&state.paths, request, SystemClock.now_utc()).unwrap();
         assert_eq!(expected.data_class, CaptureDataClass::Private);
         assert_eq!(expected.candidates.len(), 1);
         assert_eq!(

@@ -16,7 +16,7 @@ make eval-recall-v3
 ### Recall-v3 development candidates
 
 Issue #77 uses the checked-in 3 × 2 × 3 matrix in
-`evals/recall/v3/development-matrix.json`: three pinned offline embedding
+`evals/recall/development/development-matrix.json`: three pinned offline embedding
 profiles, two deterministic document templates, and three retrieval
 architectures. Model weights and generated vectors are research artifacts and
 stay below the ignored `.research/recall-v3/` path.
@@ -85,7 +85,7 @@ loaded against a separately regenerated local artifact directory:
 ```bash
 memzoi eval recall-v3 \
   --corpus .research/recall-v3/locked/corpus.yaml \
-  --candidate evals/recall/v3/observed/frozen-manifests/semantic_only.json \
+  --candidate evals/recall/development/observed/frozen-manifests/semantic_only.json \
   --artifact-root .research/recall-v3/locked-artifacts/semantic_only \
   --require-ready-candidates
 ```
@@ -94,7 +94,7 @@ Emit the stable JSON report and a separately reviewable digest commitment:
 
 ```bash
 cargo run --locked -q -p memzoi-cli -- eval recall-v3 \
-  --corpus evals/recall/v3/corpus.yaml \
+  --corpus evals/recall/development/corpus.yaml \
   --commitment /tmp/recall-v3-commitment.json \
   --json
 ```
@@ -156,8 +156,8 @@ Pass one or more strict candidate manifests after the lexical baseline:
 
 ```bash
 cargo run --locked -q -p memzoi-cli -- eval recall-v3 \
-  --corpus evals/recall/v3/corpus.yaml \
-  --candidate evals/recall/v3/candidates/exact-union.json \
+  --corpus evals/recall/development/corpus.yaml \
+  --candidate evals/recall/development/candidates/exact-union.json \
   --json
 ```
 
@@ -191,7 +191,7 @@ also require every supplied candidate to be ready.
 
 ```bash
 cargo run --locked -q -p memzoi-cli -- eval recall-operational \
-  --evidence evals/recall/v3/operational/evidence.json --json
+  --evidence evals/recall/development/operational/evidence.json --json
 ```
 
 The strict schema requires answer and coding utility; every lifecycle, failure,
@@ -208,7 +208,7 @@ measurements before it becomes release evidence.
 
 ```bash
 cargo run --locked -q -p memzoi-cli -- eval recall-competitors \
-  --evidence evals/recall/v3/competitors/fixture-evidence.json --json
+  --evidence evals/recall/development/competitors/fixture-evidence.json --json
 ```
 
 Retrieval results require NDCG, recall, MRR, eligibility/forbidden behavior,
@@ -299,11 +299,11 @@ access unnecessary.
 
 ## Add a recall case
 
-1. Add the smallest OKF Markdown fixture under `evals/recall/v2/records/`.
+1. Add the smallest OKF Markdown fixture under `evals/recall/quality/records/`.
    Proposal round-trip cases may also need a fixture under
-   `evals/recall/v2/proposals/`. Never add secrets or private personal data.
+   `evals/recall/quality/proposals/`. Never add secrets or private personal data.
 2. List the fixture and add a uniquely named case in
-   `evals/recall/v2/corpus.yaml`. Declare relevant and forbidden IDs plus the
+   `evals/recall/quality/corpus.yaml`. Declare relevant and forbidden IDs plus the
    scope, lifecycle, precheck, citation, or provenance expectations needed by
    that case. The corpus is strict: unknown fields and missing fixture IDs are
    errors.
@@ -318,11 +318,11 @@ for expiry-boundary cases.
 ## Add a capture case
 
 1. Add the smallest synthetic source fixture under
-   `evals/capture/v1/fixtures/`. Canonical inventory fixtures belong under
-   `evals/capture/v1/records/`. Never add real credentials, private personal
+   `evals/capture/fixtures/`. Canonical inventory fixtures belong under
+   `evals/capture/records/`. Never add real credentials, private personal
    data, raw chats, or hidden agent state; use an obvious synthetic canary when
    testing redaction.
-2. Add one strict case to `evals/capture/v1/corpus.yaml`. Name the extractor
+2. Add one strict case to `evals/capture/corpus.yaml`. Name the extractor
    profile and explicit source request, then declare the expected plan status,
    data class, diagnostics, candidates, exact evidence spans, classification,
    routing action, forbidden candidates, review outcomes, or stale-source
@@ -354,7 +354,7 @@ make eval-update-capture-baseline
 ```
 
 These are the only normal workflows that write
-`evals/recall/v2/baseline.json` or `evals/capture/v1/baseline.json`; `make eval`
+`evals/recall/quality/baseline.json` or `evals/capture/baseline.json`; `make eval`
 and CI remain read-only. Inspect every baseline diff, explain any threshold or
 review-burden change in the pull request, then rerun:
 

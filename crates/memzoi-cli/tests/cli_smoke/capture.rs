@@ -71,7 +71,7 @@ fn capture_plan_requires_exactly_one_explicit_source_argument() {
 }
 
 #[test]
-fn capture_plan_does_not_create_an_absent_reserved_memory_root_for_private_output() {
+fn capture_plan_requires_the_initialized_service_clock_before_output_validation() {
     let repo = tempfile::tempdir().expect("temp repo");
     run_git_fixture(repo.path(), &["init", "-q"]);
     fs::write(
@@ -92,7 +92,7 @@ fn capture_plan_does_not_create_an_absent_reserved_memory_root_for_private_outpu
             forbidden.to_str().expect("reserved path utf-8"),
         ],
     );
-    assert!(error.contains("private runtime directory"), "{error}");
+    assert!(error.contains("bundle is not initialized"), "{error}");
     assert!(!forbidden.exists());
 }
 

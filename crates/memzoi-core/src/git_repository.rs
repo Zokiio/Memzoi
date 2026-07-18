@@ -281,61 +281,6 @@ pub(crate) fn discover_git_repository(start: &Path) -> Result<Option<GitReposito
     }))
 }
 
-pub(crate) fn list_git_worktree_roots(start: &Path) -> Result<Vec<PathBuf>> {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(start)
-        .args(["worktree", "list", "--porcelain", "-z"]);
-    configure_discovery_command(&mut command);
-    let output = command.output().context("failed to list Git worktrees")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Git worktree discovery failed: {}",
-            stderr.trim().trim_end_matches('.')
-        );
-    }
-    parse_git_worktree_roots(&output.stdout)
-}
-
-fn parse_git_worktree_roots(stdout: &[u8]) -> Result<Vec<PathBuf>> {
-    if stdout.last() != Some(&0) {
-        bail!("Git worktree discovery returned malformed non-NUL-terminated output");
-    }
-    let mut roots = Vec::new();
-    for field in stdout.split(|byte| *byte == 0) {
-        let Some(path) = field.strip_prefix(b"worktree ") else {
-            continue;
-        };
-        if path.is_empty() {
-            bail!("Git worktree discovery returned an empty worktree path");
-        }
-        let path = git_output_path(path)?;
-        roots.push(path.canonicalize().unwrap_or(path));
-    }
-    roots.sort();
-    roots.dedup();
-    if roots.is_empty() {
-        bail!("Git worktree discovery returned no worktrees");
-    }
-    Ok(roots)
-}
-
-#[cfg(unix)]
-fn git_output_path(bytes: &[u8]) -> Result<PathBuf> {
-    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
-
-    Ok(PathBuf::from(OsString::from_vec(bytes.to_vec())))
-}
-
-#[cfg(not(unix))]
-fn git_output_path(bytes: &[u8]) -> Result<PathBuf> {
-    let path = std::str::from_utf8(bytes)
-        .context("Git worktree discovery returned a path unsupported by this platform")?;
-    Ok(PathBuf::from(path))
-}
-
 fn git_path(start: &Path, argument: &str) -> Result<Option<PathBuf>> {
     let mut command = Command::new("git");
     command.arg("-C").arg(start).args(["rev-parse", argument]);
@@ -404,21 +349,9 @@ fn canonicalize_git_path(path: &Path, start: &Path, label: &str) -> Result<PathB
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, fs};
+    use std::fs;
 
     use super::*;
-
-    #[test]
-    fn worktree_listing_failure_is_not_treated_as_an_empty_repository() {
-        let temp = tempfile::TempDir::new().unwrap();
-
-        let result = list_git_worktree_roots(temp.path());
-
-        assert!(
-            result.is_err(),
-            "a failed Git command must not look like a repository with no worktrees"
-        );
-    }
 
     #[test]
     fn discovery_command_ignores_inherited_repository_context() -> Result<()> {
@@ -443,37 +376,6 @@ mod tests {
         assert_eq!(
             PathBuf::from(std::str::from_utf8(&output.stdout)?.trim()).canonicalize()?,
             expected.canonicalize()?
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn nul_porcelain_parser_preserves_newlines_in_worktree_paths() -> Result<()> {
-        let roots = parse_git_worktree_roots(
-            b"worktree /tmp/memzoi-worktree\nwith-newline\0HEAD deadbeef\0detached\0\0",
-        )?;
-
-        assert_eq!(
-            roots,
-            vec![PathBuf::from(OsStr::new(
-                "/tmp/memzoi-worktree\nwith-newline"
-            ))]
-        );
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn nul_porcelain_parser_preserves_non_utf8_worktree_paths() -> Result<()> {
-        use std::os::unix::ffi::OsStrExt;
-
-        let roots = parse_git_worktree_roots(
-            b"worktree /tmp/memzoi-worktree-\xff\0HEAD deadbeef\0detached\0\0",
-        )?;
-
-        assert_eq!(
-            roots[0].as_os_str().as_bytes(),
-            b"/tmp/memzoi-worktree-\xff"
         );
         Ok(())
     }

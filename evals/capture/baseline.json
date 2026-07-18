@@ -1,11 +1,11 @@
 {
-  "version": "memzoi-capture-baseline/v1",
-  "report_version": "memzoi-capture-report/v1",
-  "definitions_version": "memzoi-capture-metrics/v1",
+  "version": "memzoi/capture-eval-baseline",
+  "report_version": "memzoi/capture-eval-report",
+  "definitions_version": "memzoi/capture-eval-metrics",
   "corpus": {
-    "name": "memzoi-capture-v1",
-    "version": "memzoi-capture-corpus/v1",
-    "digest": "blake3:4821c7a64747d6fb44107c6982639cc90ea0b5f0e8b4978a0b0d959bdb3e02af"
+    "name": "memzoi-capture",
+    "version": "memzoi/capture-eval-corpus",
+    "digest": "blake3:3fc7e6fb3735b5624946d3a523a75bb4ea0928e2e175b7403a55ac26e7330e48"
   },
   "profiles": [
     {
@@ -13,40 +13,32 @@
       "required": true,
       "extractor_kind": "deterministic",
       "extractor_id": "memzoi-adr",
-      "extractor_version": "1.0.0",
-      "extractor_configuration_hash": "blake3:bbc05fdd209998376a8de65a0d108f98644cbb087ea2398a6ad027f16aadd356",
-      "safeguard_policy_version": "memzoi/capture-safeguards-v1",
-      "safeguard_configuration_hash": "blake3:8b913b116512a4a530291e251e86a8e10473fb6f6b09d9edd09b91c258b75556"
+      "extractor_implementation_digest": "blake3:1bc395badb575971a26aedb9825f4dbe88171079d2f24183f95029131dba8fb4",
+      "safeguard_configuration_digest": "blake3:0324147010d769909106394ad21417a470e5243bb435c71767659e6681631606"
     },
     {
       "profile": "git-change-deterministic",
       "required": true,
       "extractor_kind": "deterministic",
       "extractor_id": "memzoi-git-change",
-      "extractor_version": "1.0.0",
-      "extractor_configuration_hash": "blake3:0e0a910cb7a2604bfc04eb085e0d47eb032b28df1661e8d14a9d67a05dbf24eb",
-      "safeguard_policy_version": "memzoi/capture-safeguards-v1",
-      "safeguard_configuration_hash": "blake3:e752c60517d1eb6a708ca857aaac6aa65b644c5779fcafa7b58e41332dbcb0c0"
+      "extractor_implementation_digest": "blake3:234bef66fea0ff049a4791dda7c8fb11c19f3919724dca0a74ed46e2945e1305",
+      "safeguard_configuration_digest": "blake3:e691ba4172ca5d45f3c36a6b1c01ee8569d4f713ecc4005ff5b62ce0a1764d2f"
     },
     {
       "profile": "instruction-deterministic",
       "required": true,
       "extractor_kind": "deterministic",
       "extractor_id": "memzoi-instructions",
-      "extractor_version": "1.0.0",
-      "extractor_configuration_hash": "blake3:45c14a84a015ba48f5e76b58b4419b2c4fc119a287c24263024a1a4bc8352688",
-      "safeguard_policy_version": "memzoi/capture-safeguards-v1",
-      "safeguard_configuration_hash": "blake3:25f352d74e458b06305a300bf5bdb158f6936c93b76600b49bfecbebf153070c"
+      "extractor_implementation_digest": "blake3:5666bc0611c73ac1cc4782d4b4051ca29d5264778a6c97c209071849f91c7e1f",
+      "safeguard_configuration_digest": "blake3:cc20614e212c2d1b3a0647602ec0265c53ac6c463e12a5841a2fafe79e79e219"
     },
     {
       "profile": "markdown-deterministic",
       "required": true,
       "extractor_kind": "deterministic",
       "extractor_id": "memzoi-markdown",
-      "extractor_version": "1.0.0",
-      "extractor_configuration_hash": "blake3:eead488340e992f9eb29bba06b417f4e7fb5abc52fa2ffd8c627e2f1c691119a",
-      "safeguard_policy_version": "memzoi/capture-safeguards-v1",
-      "safeguard_configuration_hash": "blake3:25f352d74e458b06305a300bf5bdb158f6936c93b76600b49bfecbebf153070c"
+      "extractor_implementation_digest": "blake3:cf9248362b99b8410cd26c8349b32c6f84706637016f9c11e89b3486b2fddf2d",
+      "safeguard_configuration_digest": "blake3:cc20614e212c2d1b3a0647602ec0265c53ac6c463e12a5841a2fafe79e79e219"
     }
   ],
   "metrics": {

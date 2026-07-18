@@ -6,7 +6,7 @@ use memzoi_core::{
 #[test]
 fn complete_operational_evidence_passes_every_gate() -> anyhow::Result<()> {
     let evidence = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/operational/evidence.json");
+        .join("../../evals/recall/development/operational/evidence.json");
     let report = run_recall_operational_eval(evidence)?;
 
     assert_eq!(report.version, RECALL_OPERATIONAL_REPORT_VERSION);
@@ -30,7 +30,7 @@ fn complete_operational_evidence_passes_every_gate() -> anyhow::Result<()> {
 #[test]
 fn operational_evidence_digest_ignores_json_formatting() -> anyhow::Result<()> {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/operational/evidence.json");
+        .join("../../evals/recall/development/operational/evidence.json");
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&fixture)?)?;
     let dir = tempfile::tempdir()?;
     let compact = dir.path().join("compact.json");
@@ -46,7 +46,7 @@ fn operational_evidence_digest_ignores_json_formatting() -> anyhow::Result<()> {
 #[test]
 fn operational_evidence_rejects_raw_unknown_trace_fields() {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/operational/evidence.json");
+        .join("../../evals/recall/development/operational/evidence.json");
     let bytes = std::fs::read(fixture).unwrap();
     let mut evidence: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     evidence["trace_counters"][0]["raw_query"] = serde_json::json!("secret");
@@ -60,7 +60,7 @@ fn operational_evidence_rejects_raw_unknown_trace_fields() {
 #[test]
 fn operational_evidence_rejects_unregistered_trace_reason_codes() {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/operational/evidence.json");
+        .join("../../evals/recall/development/operational/evidence.json");
     let bytes = std::fs::read(fixture).unwrap();
     let mut evidence: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     evidence["trace_counters"][0]["reason_code"] = serde_json::json!("private_identifier_123");
@@ -75,7 +75,7 @@ fn operational_evidence_rejects_unregistered_trace_reason_codes() {
 #[test]
 fn operational_evidence_requires_complete_environment_identity() {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../evals/recall/v3/operational/evidence.json");
+        .join("../../evals/recall/development/operational/evidence.json");
     let bytes = std::fs::read(fixture).unwrap();
     let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let invalid = [

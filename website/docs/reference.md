@@ -100,15 +100,15 @@ project's canonical records, proposal inbox, runtime database, exports, or event
 log:
 
 ```bash
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --json
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json --json
 ```
 
 `--baseline` is optional. `--update-baseline` requires it and is the only mode
 that writes the selected baseline. A threshold-failing run is never written:
 
 ```bash
-memzoi eval recall --corpus evals/recall/v2/corpus.yaml --baseline evals/recall/v2/baseline.json --update-baseline
+memzoi eval recall --corpus evals/recall/quality/corpus.yaml --baseline evals/recall/quality/baseline.json --update-baseline
 ```
 
 The explicit corpus is strict YAML with version
@@ -205,12 +205,12 @@ Run the checked-in capture quality gate from isolated temporary projects:
 
 ```bash
 memzoi eval capture \
-  --corpus evals/capture/v1/corpus.yaml \
-  --baseline evals/capture/v1/baseline.json
+  --corpus evals/capture/corpus.yaml \
+  --baseline evals/capture/baseline.json
 
 memzoi eval capture \
-  --corpus evals/capture/v1/corpus.yaml \
-  --baseline evals/capture/v1/baseline.json \
+  --corpus evals/capture/corpus.yaml \
+  --baseline evals/capture/baseline.json \
   --json
 ```
 
@@ -236,8 +236,8 @@ after every gate passes:
 
 ```bash
 memzoi eval capture \
-  --corpus evals/capture/v1/corpus.yaml \
-  --baseline evals/capture/v1/baseline.json \
+  --corpus evals/capture/corpus.yaml \
+  --baseline evals/capture/baseline.json \
   --update-baseline
 ```
 
@@ -514,11 +514,11 @@ compact form without copied evidence text; its evidence identity and lineage rem
 rebuild, recall citations, and later audits. Private runtime records retain the same provenance
 through runtime preservation and rebuild.
 
-MCP exposes only the original read-only Markdown/project-path planner as
-`plan_capture_v1`; instruction, ADR, directory, supplied-byte, and Git-range
+MCP exposes only the read-only Markdown/project-path planner as
+`plan_capture`; instruction, ADR, directory, supplied-byte, and Git-range
 requests remain CLI-only and are rejected at the MCP boundary. MCP deliberately
 exposes no capture review or apply tool and denies `private` results by default. See
-[MCP and agent integration](./mcp-and-agent-integration.md#plan_capture_v1-contract).
+[MCP and agent integration](./mcp-and-agent-integration.md#plan_capture-contract).
 
 ## Classified import
 

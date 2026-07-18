@@ -112,7 +112,19 @@ pub(crate) fn search_memory_at(
     };
 
     let sql = format!(
-        "SELECT memory_record.id, memory_record.type, memory_record.lane, memory_record.destination,
+        "WITH filtered_fts AS MATERIALIZED (
+           SELECT memory_record.rowid, bm25(memory_fts) AS rank
+           FROM memory_fts
+           JOIN memory_record ON memory_record.rowid = memory_fts.rowid
+           WHERE memory_fts MATCH ?1
+             AND {destination_filter}
+             AND {scope_filter}
+             AND {scope_id_filter}
+             AND {type_filter}
+             AND {lane_filter}
+             AND {path_filter}
+         )
+         SELECT memory_record.id, memory_record.type, memory_record.lane, memory_record.destination,
                 memory_record.scope_kind, memory_record.scope_id, memory_record.visibility,
                 memory_record.title, memory_record.body, memory_record.status,
                 memory_record.confidence, memory_record.source_kind, memory_record.source_ref,
@@ -120,18 +132,11 @@ pub(crate) fn search_memory_at(
                 memory_record.supersedes_id, memory_record.proposal_id,
                 memory_record.retention_json, memory_record.origin_json,
                 memory_record.lineage_json,
-                bm25(memory_fts) AS rank
-         FROM memory_fts
-         JOIN memory_record ON memory_record.rowid = memory_fts.rowid
-         WHERE memory_fts MATCH ?1
-           AND {current_assertion}
-           AND {destination_filter}
-           AND {scope_filter}
-           AND {scope_id_filter}
-           AND {type_filter}
-           AND {lane_filter}
-           AND {path_filter}
-         ORDER BY rank ASC, memory_record.updated_at DESC, memory_record.id ASC
+                filtered_fts.rank
+         FROM filtered_fts
+         JOIN memory_record ON memory_record.rowid = filtered_fts.rowid
+         WHERE {current_assertion}
+         ORDER BY filtered_fts.rank ASC, memory_record.updated_at DESC, memory_record.id ASC
          LIMIT ?7"
     );
 
