@@ -213,7 +213,6 @@ Required proposal fields:
 
 - `id`
 - `kind`
-- `version`
 - `profile`
 - `type`
 - `title`

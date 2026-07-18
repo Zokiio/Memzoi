@@ -41,7 +41,7 @@ fn proposal_files_apply_repo_safe_create_resolves_packet_and_updates_runtime_ind
     assert!(rendered.contains("source_ref: src/lib.rs\n"));
     assert!(rendered.contains("proposal_id: mem_test_valid\n"));
     assert!(rendered.contains("kind: memory\n"));
-    assert!(rendered.contains(""));
+    assert!(rendered.contains("id: valid-proposal\n"));
     assert!(rendered.contains("profile: memzoi\n"));
     assert!(rendered.contains("retention:\n"));
     assert!(rendered.contains("origin:\n"));
