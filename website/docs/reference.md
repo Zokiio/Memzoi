@@ -271,9 +271,12 @@ option narrows the targets while retaining their comparison neighbourhood.
 Omit `--evaluated-at` to capture the system clock once; supplying it supports
 byte-identical replay against the same snapshot and policy.
 
-Planning admits at most 256 canonical records and fails closed when the bounded
-repository inventory, per-file, aggregate-input, work, diagnostic, or artifact
-limits are exceeded.
+Planning scans at most 10,000 filesystem entries but admits at most 256
+canonical records. The limits are deliberately separate: the inventory ceiling
+bounds traversal, while the admitted-record ceiling bounds synchronous
+per-record Git review checks, pairwise detector work, and the serialized
+artifact (just under 2 MiB). Planning fails closed when any repository-inventory,
+per-file, aggregate-input, work, diagnostic, or artifact limit is exceeded.
 
 Without `--json`, stdout contains only the plan identity, validity timestamps,
 and aggregate counts. `--json` emits the complete repository-safe artifact.
