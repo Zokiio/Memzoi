@@ -51,6 +51,9 @@ mod shared_runtime;
 mod tests;
 
 pub use self::derived_index::{RebuildResult, RepoIndexDrift};
+pub(crate) use self::derived_index::{
+    admit_repository_record_snapshot, ensure_repository_records_root_safe,
+};
 pub use self::proposal_packets::{
     FileProposalInventory, FileProposalInventoryEntry, FileProposalInventoryError,
     FileProposalResolutionResult, scan_file_proposal_inventory,

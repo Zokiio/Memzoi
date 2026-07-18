@@ -20,6 +20,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi events` | Export runtime event-log rows. |
 | `memzoi session-end` | Promote explicit structured session-end candidates into proposal files or runtime memory. |
 | `memzoi capture` | Plan evidence-backed capture from one explicit Markdown, instruction, ADR, or Git-change source; record a complete review; and route reviewed candidates. |
+| `memzoi maintenance` | Generate an immutable, repository-only maintenance evidence plan without applying or authorizing any action. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
@@ -71,6 +72,7 @@ Run `memzoi <command> --help` for exact options.
 | `capture plan` | `--source <project-relative.md>` or `--request-file <capture-request.{json,yaml}>`, `--source-bytes <path\|->` for `supplied_bytes`, `--source-id`, `--output`, `--json` |
 | `capture review` | `--plan-file`, `--decisions-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--reviewed-by`, `--reviewed-at`, `--output`, `--json` |
 | `capture apply` | `--plan-file`, `--review-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--plan-id`, `--review-id`, `--actor`, `--json` |
+| `maintenance plan` | repeated `--record-id`, `--evaluated-at <RFC3339>`, `--output`, `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
@@ -243,6 +245,51 @@ memzoi eval capture \
 
 See the [evaluation contributor guide](https://github.com/Zokiio/Memzoi/blob/main/docs/evaluation.md)
 for metric definitions and fixture guidance.
+
+## Repository maintenance planning
+
+`memzoi maintenance plan` reads admitted canonical repository records directly
+and emits an immutable `memzoi/maintenance-plan` evidence artifact. It reports
+exact duplicates, conservative high-confidence contradictions, staleness,
+expiry, renewal candidates, and typed action candidates. These are reviewable
+findings, not execution authority: this command has no apply mode and never
+mutates a record, proposal, index, private runtime row, overlay, WAL/event log,
+or Git state.
+
+```bash
+memzoi maintenance plan \
+  --evaluated-at 2026-07-18T12:00:00Z \
+  --json
+
+memzoi maintenance plan \
+  --record-id mem_repository_policy \
+  --output /path/outside/the/worktree/maintenance-plan.json
+```
+
+Omit `--record-id` to evaluate every admitted repository record. Repeating the
+option narrows the targets while retaining their comparison neighbourhood.
+Omit `--evaluated-at` to capture the system clock once; supplying it supports
+byte-identical replay against the same snapshot and policy.
+
+Planning scans at most 10,000 filesystem entries but admits at most 256
+canonical records. The limits are deliberately separate: the inventory ceiling
+bounds traversal, while the admitted-record ceiling bounds synchronous
+per-record Git review checks, pairwise detector work, and the serialized
+artifact (just under 2 MiB). Planning fails closed when any repository-inventory,
+per-file, aggregate-input, work, diagnostic, or artifact limit is exceeded.
+
+Without `--json`, stdout contains only the plan identity, validity timestamps,
+and aggregate counts. `--json` emits the complete repository-safe artifact.
+`--output` atomically creates the same pretty JSON without replacing an
+existing file. Its parent must already be a real directory, and the destination
+must be outside the Git worktree and all Memzoi-managed runtime roots.
+
+The artifact schema reserves separate repository materialization, private
+derived-state, and owner-authorized private action groups for downstream work.
+The current CLI is deliberately repository-only: it exposes no private flags,
+private output, private mutation path, revalidation/apply command, or retention
+extension. Private release boundaries belong to #116–#118; execution belongs
+to #121–#123.
 
 ## Evidence-backed capture
 

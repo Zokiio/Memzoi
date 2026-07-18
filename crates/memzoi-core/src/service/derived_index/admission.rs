@@ -27,14 +27,8 @@ pub(super) fn read_admitted_repository_record_snapshots(
     admission: RepositoryRecordAdmission,
     after_snapshot: impl FnOnce() -> Result<()>,
 ) -> Result<Vec<okf::OkfRecordSnapshot>> {
+    ensure_repository_records_root_safe(paths)?;
     let records_root = paths.records_dir();
-    super::super::safe_files::ensure_safe_directory(
-        &paths.project_root,
-        &records_root,
-        false,
-        "canonical record root",
-    )
-    .map_err(|_| redacted_refusal("canonical-root"))?;
 
     let snapshots = okf::read_okf_record_snapshots(&records_root)
         .map_err(|_| redacted_refusal("typed-record"))?;
@@ -47,7 +41,17 @@ pub(super) fn read_admitted_repository_record_snapshots(
     Ok(snapshots)
 }
 
-pub(super) fn admit_repository_record_snapshot(
+pub(crate) fn ensure_repository_records_root_safe(paths: &MemoryPaths) -> Result<()> {
+    super::super::safe_files::ensure_safe_directory(
+        &paths.project_root,
+        &paths.records_dir(),
+        false,
+        "canonical record root",
+    )
+    .map_err(|_| redacted_refusal("canonical-root"))
+}
+
+pub(crate) fn admit_repository_record_snapshot(
     paths: &MemoryPaths,
     snapshot: &okf::OkfRecordSnapshot,
 ) -> Result<()> {

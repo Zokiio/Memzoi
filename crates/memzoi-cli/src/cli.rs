@@ -109,6 +109,12 @@ pub(crate) enum Commands {
         command: CaptureCommands,
     },
 
+    /// Build immutable, repository-only maintenance evidence plans.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommands,
+    },
+
     /// Plan, decide, and apply direct Git-native record materialization.
     Materialize {
         #[command(subcommand)]
@@ -688,6 +694,25 @@ pub(crate) enum CaptureCommands {
         #[arg(long, default_value = "cli")]
         actor: String,
         /// Emit the complete apply result as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MaintenanceCommands {
+    /// Evaluate repository records without applying or authorizing maintenance.
+    Plan {
+        /// Restrict targets to these record IDs while retaining their comparison neighbourhood.
+        #[arg(long = "record-id", value_name = "ID")]
+        record_ids: Vec<String>,
+        /// Explicit RFC 3339 evaluation instant for deterministic replay.
+        #[arg(long = "evaluated-at", value_name = "RFC3339")]
+        evaluated_at: Option<String>,
+        /// Existing-parent destination outside the Git worktree and Memzoi runtime.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Emit the complete repository-safe plan as machine-readable JSON.
         #[arg(long)]
         json: bool,
     },

@@ -55,6 +55,8 @@ mod export;
 mod init;
 #[path = "cli_smoke/integrate.rs"]
 mod integrate;
+#[path = "cli_smoke/maintenance.rs"]
+mod maintenance;
 #[path = "cli_smoke/proposal_files_apply.rs"]
 mod proposal_files_apply;
 #[path = "cli_smoke/proposal_files_inventory.rs"]

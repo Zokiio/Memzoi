@@ -1,5 +1,6 @@
 use std::{
     cell::OnceCell,
+    collections::BTreeSet,
     io::{self, BufRead, Write},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
@@ -8,11 +9,15 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
-    CaptureDataClass, CapturePlanningControl, CaptureRequest, CaptureSourceLocator, Clock,
-    ContextPackInput, MARKDOWN_EXTRACTOR_PROFILE, MemoryDestination, MemoryDraft, MemoryLane,
-    MemoryPaths, MemoryService, MemoryType, OkfProposalSensitivity, PrecheckInput, Proposal,
+    CANONICAL_REVISION_SCHEMA, CaptureDataClass, CapturePlanningControl, CaptureRequest,
+    CaptureSourceLocator, Clock, ContextPackInput, FixedClock, MAINTENANCE_CONTRACT_VERSION,
+    MAINTENANCE_MAX_RECORDS, MAINTENANCE_PLAN_SCHEMA, MAINTENANCE_POLICY_VERSION,
+    MAINTENANCE_REQUEST_SCHEMA, MARKDOWN_EXTRACTOR_PROFILE, MaintenancePlanRequest,
+    MaintenancePlanningControl, MemoryDestination, MemoryDraft, MemoryLane, MemoryPaths,
+    MemoryService, MemoryType, OkfProposalSensitivity, PrecheckInput, Proposal,
     ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, SystemClock, Visibility,
-    plan_capture_at, plan_capture_with_control_at,
+    plan_capture_at, plan_capture_with_control_at, plan_maintenance, plan_maintenance_with_control,
+    validate_canonical_record_id,
 };
 use serde_json::{Value, json};
 
@@ -21,22 +26,32 @@ const SERVER_NAME: &str = "memzoi";
 const DEFAULT_ACTOR: &str = "mcp";
 const INVALID_CAPTURE_REQUEST: &str = "invalid memzoi/capture-request request";
 const CAPTURE_PLANNING_FAILED: &str = "capture planning failed safely";
+const INVALID_MAINTENANCE_REQUEST: &str = "invalid memzoi/maintenance-request request";
+const MAINTENANCE_PLANNING_FAILED: &str = "maintenance planning failed safely";
 const PRIVATE_CAPTURE_DENIED: &str = "private capture plans are not available to this MCP client";
 const MAX_JSONRPC_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const JSONRPC_MESSAGE_TOO_LARGE: &str = "JSON-RPC message exceeds the 2 MiB limit";
 const JSONRPC_RESPONSE_TOO_LARGE: &str = "JSON-RPC response exceeds the 2 MiB limit";
-const CAPTURE_PLANNING_TIMEOUT: Duration = Duration::from_secs(60);
-const CAPTURE_TERMINATION_GRACE: Duration = Duration::from_secs(2);
+const PLANNING_TIMEOUT: Duration = Duration::from_secs(60);
+const PLANNING_TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const CAPTURE_CANCELLED: &str = "capture planning cancelled";
 const CAPTURE_TIMED_OUT: &str = "capture planning timed out";
-const CAPTURE_BUSY: &str = "another capture plan is already running";
+const CAPTURE_BUSY: &str = "cannot start another plan while capture planning is running";
 const CAPTURE_TERMINATION_FAILED: &str =
     "capture planner did not terminate within the cancellation grace period";
+const MAINTENANCE_CANCELLED: &str = "maintenance planning cancelled";
+const MAINTENANCE_TIMED_OUT: &str = "maintenance planning timed out";
+const MAINTENANCE_BUSY: &str = "cannot start another plan while maintenance planning is running";
+const MAINTENANCE_TERMINATION_FAILED: &str =
+    "maintenance planner did not terminate within the cancellation grace period";
 const STDIO_INPUT_CAPACITY: usize = 16;
 const MAX_JSONRPC_ID_BYTES: usize = 256;
 const INVALID_JSONRPC_ID: &str = "JSON-RPC id must be a number or at most 256 UTF-8 bytes";
 const STDOUT_QUEUE_CAPACITY: usize = 4;
 const STDOUT_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
+const CANONICAL_RECORD_ID_PATTERN: &str =
+    "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$";
+const BLAKE3_IDENTITY_PATTERN: &str = "^blake3:[0-9a-f]{64}$";
 
 pub(crate) struct ProtocolState {
     paths: MemoryPaths,
@@ -97,9 +112,9 @@ impl std::ops::Deref for ProtocolState {
 pub(crate) fn serve_stdio(state: ProtocolState) -> Result<()> {
     let input = spawn_stdio_reader();
     let (mut stdout, writer_finished) = spawn_stdout_writer();
-    let result = serve_event_loop(&state, &input, &mut stdout, CAPTURE_PLANNING_TIMEOUT);
+    let result = serve_event_loop(&state, &input, &mut stdout, PLANNING_TIMEOUT);
     drop(stdout);
-    let writer_result = writer_finished.recv_timeout(CAPTURE_TERMINATION_GRACE);
+    let writer_result = writer_finished.recv_timeout(PLANNING_TERMINATION_GRACE);
     match (result, writer_result) {
         (Err(error), _) => Err(error),
         (Ok(()), Ok(Ok(()))) => Ok(()),
@@ -222,7 +237,7 @@ fn serve_event_loop(
     state: &ProtocolState,
     input: &Receiver<InputEvent>,
     mut output: impl Write,
-    capture_timeout: Duration,
+    planning_timeout: Duration,
 ) -> Result<()> {
     loop {
         let event = input.recv().context("stdin reader stopped unexpectedly")?;
@@ -260,11 +275,11 @@ fn serve_event_loop(
                 continue;
             }
         };
-        if is_capture_tool_request(&request) {
-            match wait_for_capture_request(state, request, input, &mut output, capture_timeout)? {
-                CaptureWaitEnd::Continue => {}
-                CaptureWaitEnd::Eof => break,
-                CaptureWaitEnd::ReadError(error) => bail!("failed to read stdin: {error}"),
+        if is_planning_tool_request(&request) {
+            match wait_for_planning_request(state, request, input, &mut output, planning_timeout)? {
+                PlanningWaitEnd::Continue => {}
+                PlanningWaitEnd::Eof => break,
+                PlanningWaitEnd::ReadError(error) => bail!("failed to read stdin: {error}"),
             }
             continue;
         }
@@ -310,31 +325,102 @@ fn valid_jsonrpc_id(id: &Value) -> bool {
             .is_some_and(|value| value.len() <= MAX_JSONRPC_ID_BYTES)
 }
 
-fn is_capture_tool_request(request: &Value) -> bool {
+fn is_planning_tool_request(request: &Value) -> bool {
     request.get("id").is_some()
         && request.get("method").and_then(Value::as_str) == Some("tools/call")
-        && request.pointer("/params/name").and_then(Value::as_str) == Some("plan_capture")
+        && matches!(
+            request.pointer("/params/name").and_then(Value::as_str),
+            Some("plan_capture" | "plan_maintenance_v1")
+        )
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum CaptureWaitEnd {
+enum PlanningWaitEnd {
     Continue,
     Eof,
     ReadError(String),
 }
 
-fn wait_for_capture_request(
+#[derive(Debug, Clone)]
+enum ActivePlanningControl {
+    Capture(CapturePlanningControl),
+    Maintenance(MaintenancePlanningControl),
+}
+
+impl ActivePlanningControl {
+    fn for_request(request: &Value, deadline: Instant) -> Option<Self> {
+        match request.pointer("/params/name").and_then(Value::as_str) {
+            Some("plan_capture") => Some(Self::Capture(CapturePlanningControl::new(deadline))),
+            Some("plan_maintenance_v1") => {
+                Some(Self::Maintenance(MaintenancePlanningControl::new(deadline)))
+            }
+            _ => None,
+        }
+    }
+
+    fn cancel(&self) {
+        match self {
+            Self::Capture(control) => control.cancel(),
+            Self::Maintenance(control) => control.cancel(),
+        }
+    }
+
+    fn planning_failed(&self) -> &'static str {
+        match self {
+            Self::Capture(_) => CAPTURE_PLANNING_FAILED,
+            Self::Maintenance(_) => MAINTENANCE_PLANNING_FAILED,
+        }
+    }
+
+    fn timed_out(&self) -> &'static str {
+        match self {
+            Self::Capture(_) => CAPTURE_TIMED_OUT,
+            Self::Maintenance(_) => MAINTENANCE_TIMED_OUT,
+        }
+    }
+
+    fn active_planner_busy_message(&self) -> &'static str {
+        match self {
+            Self::Capture(_) => CAPTURE_BUSY,
+            Self::Maintenance(_) => MAINTENANCE_BUSY,
+        }
+    }
+
+    fn termination_failed(&self) -> &'static str {
+        match self {
+            Self::Capture(_) => CAPTURE_TERMINATION_FAILED,
+            Self::Maintenance(_) => MAINTENANCE_TERMINATION_FAILED,
+        }
+    }
+
+    fn capture(&self) -> Option<&CapturePlanningControl> {
+        match self {
+            Self::Capture(control) => Some(control),
+            Self::Maintenance(_) => None,
+        }
+    }
+
+    fn maintenance(&self) -> Option<&MaintenancePlanningControl> {
+        match self {
+            Self::Capture(_) => None,
+            Self::Maintenance(control) => Some(control),
+        }
+    }
+}
+
+fn wait_for_planning_request(
     state: &ProtocolState,
     request: Value,
     input: &Receiver<InputEvent>,
     mut output: impl Write,
     timeout: Duration,
-) -> Result<CaptureWaitEnd> {
+) -> Result<PlanningWaitEnd> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let deadline = Instant::now()
         .checked_add(timeout)
         .unwrap_or_else(Instant::now);
-    let control = CapturePlanningControl::new(deadline);
+    let control = ActivePlanningControl::for_request(&request, deadline)
+        .ok_or_else(|| anyhow!("unsupported planning tool request"))?;
     let worker_control = control.clone();
     let paths = state.paths.clone();
     let (result_sender, result_receiver) = mpsc::sync_channel(1);
@@ -346,20 +432,20 @@ fn wait_for_capture_request(
 
     let mut terminal_sent = false;
     let mut termination_deadline = None;
-    let mut input_end = CaptureWaitEnd::Continue;
+    let mut input_end = PlanningWaitEnd::Continue;
     loop {
         let now = Instant::now();
         if !terminal_sent && now >= deadline {
             control.cancel();
             write_protocol_response(
                 &mut output,
-                &jsonrpc_error(id.clone(), -32001, CAPTURE_TIMED_OUT.to_owned()),
+                &jsonrpc_error(id.clone(), -32001, control.timed_out().to_owned()),
             )?;
             terminal_sent = true;
-            termination_deadline = now.checked_add(CAPTURE_TERMINATION_GRACE);
+            termination_deadline = now.checked_add(PLANNING_TERMINATION_GRACE);
         }
         if terminal_sent && termination_deadline.is_some_and(|end| now >= end) {
-            bail!(CAPTURE_TERMINATION_FAILED);
+            bail!(control.termination_failed());
         }
 
         match result_receiver.try_recv() {
@@ -390,7 +476,7 @@ fn wait_for_capture_request(
                 if !terminal_sent {
                     write_protocol_response(
                         &mut output,
-                        &jsonrpc_error(id.clone(), -32603, CAPTURE_PLANNING_FAILED.to_owned()),
+                        &jsonrpc_error(id.clone(), -32603, control.planning_failed().to_owned()),
                     )?;
                 }
                 return Ok(input_end);
@@ -398,7 +484,7 @@ fn wait_for_capture_request(
             Err(mpsc::TryRecvError::Empty) => {}
         }
 
-        if input_end != CaptureWaitEnd::Continue {
+        if input_end != PlanningWaitEnd::Continue {
             thread::sleep(Duration::from_millis(1));
             continue;
         }
@@ -413,10 +499,10 @@ fn wait_for_capture_request(
                         control.cancel();
                         terminal_sent = true;
                         termination_deadline =
-                            Instant::now().checked_add(CAPTURE_TERMINATION_GRACE);
+                            Instant::now().checked_add(PLANNING_TERMINATION_GRACE);
                     }
                 } else {
-                    reject_concurrent_input(&mut output, &line)?;
+                    reject_concurrent_input(&mut output, &line, &control)?;
                 }
             }
             Ok(InputEvent::TooLarge) => write_json_line(
@@ -434,21 +520,21 @@ fn wait_for_capture_request(
             Ok(InputEvent::Eof) => {
                 control.cancel();
                 terminal_sent = true;
-                termination_deadline = Instant::now().checked_add(CAPTURE_TERMINATION_GRACE);
-                input_end = CaptureWaitEnd::Eof;
+                termination_deadline = Instant::now().checked_add(PLANNING_TERMINATION_GRACE);
+                input_end = PlanningWaitEnd::Eof;
             }
             Ok(InputEvent::ReadError(error)) => {
                 control.cancel();
                 terminal_sent = true;
-                termination_deadline = Instant::now().checked_add(CAPTURE_TERMINATION_GRACE);
-                input_end = CaptureWaitEnd::ReadError(error);
+                termination_deadline = Instant::now().checked_add(PLANNING_TERMINATION_GRACE);
+                input_end = PlanningWaitEnd::ReadError(error);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 control.cancel();
                 terminal_sent = true;
-                termination_deadline = Instant::now().checked_add(CAPTURE_TERMINATION_GRACE);
-                input_end = CaptureWaitEnd::Eof;
+                termination_deadline = Instant::now().checked_add(PLANNING_TERMINATION_GRACE);
+                input_end = PlanningWaitEnd::Eof;
             }
         }
     }
@@ -462,13 +548,21 @@ fn cancellation_targets_request(line: &str, active_id: &Value) -> bool {
         && request.pointer("/params/requestId") == Some(active_id)
 }
 
-fn reject_concurrent_input(mut output: impl Write, line: &str) -> Result<()> {
+fn reject_concurrent_input(
+    mut output: impl Write,
+    line: &str,
+    active_control: &ActivePlanningControl,
+) -> Result<()> {
     match parse_jsonrpc_line(line) {
         Ok(request) => {
             if let Some(id) = request.get("id").cloned() {
                 write_protocol_response(
                     &mut output,
-                    &jsonrpc_error(id, -32002, CAPTURE_BUSY.to_owned()),
+                    &jsonrpc_error(
+                        id,
+                        -32002,
+                        active_control.active_planner_busy_message().to_owned(),
+                    ),
                 )?;
             }
         }
@@ -574,7 +668,7 @@ fn handle_message(state: &ProtocolState, request: Value) -> Result<Option<Value>
 fn handle_message_with_control(
     state: &ProtocolState,
     request: Value,
-    capture_control: Option<&CapturePlanningControl>,
+    planning_control: Option<&ActivePlanningControl>,
 ) -> Result<Option<Value>> {
     let id = request.get("id").cloned();
     let method = request
@@ -591,7 +685,7 @@ fn handle_message_with_control(
         "initialize" => initialize_result(),
         "ping" => json!({}),
         "tools/list" => tools_list_result(),
-        "tools/call" => match tools_call(state, params, capture_control) {
+        "tools/call" => match tools_call(state, params, planning_control) {
             Ok(result) => result,
             Err(error) => return Ok(Some(jsonrpc_error(id, -32602, error.to_string()))),
         },
@@ -743,6 +837,37 @@ fn tools_list_result() -> Value {
                 })
             ),
             tool_schema(
+                "plan_maintenance_v1",
+                "Generate an immutable repository-memory maintenance plan from snapshot-bound evidence. This tool is read-only and only reports findings and candidate actions; it never executes or mutates them.",
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "schema": {
+                            "type": "string",
+                            "const": MAINTENANCE_REQUEST_SCHEMA
+                        },
+                        "evaluated_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Optional fixed RFC 3339 evaluation instant for deterministic replay."
+                        },
+                        "record_ids": {
+                            "type": "array",
+                            "maxItems": MAINTENANCE_MAX_RECORDS,
+                            "uniqueItems": true,
+                            "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "pattern": CANONICAL_RECORD_ID_PATTERN
+                            },
+                            "description": "Optional repository record IDs to target; their complete comparison neighbourhood remains in scope."
+                        }
+                    },
+                    "required": ["schema"]
+                })
+            ),
+            tool_schema(
                 "propose_memory",
                 "Create a memory proposal under the effective approval policy. Never applies canonical records.",
                 json!({
@@ -850,14 +975,486 @@ fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
                 "preconditions", "extractor", "candidates", "summary", "diagnostics"
             ]
         });
+    } else if name == "plan_maintenance_v1" {
+        tool["outputSchema"] = maintenance_output_schema();
     }
     tool
 }
 
+fn maintenance_identity_schema() -> Value {
+    json!({
+        "type": "string",
+        "pattern": BLAKE3_IDENTITY_PATTERN
+    })
+}
+
+fn maintenance_record_id_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": CANONICAL_RECORD_ID_PATTERN
+    })
+}
+
+fn maintenance_timestamp_schema() -> Value {
+    json!({
+        "type": "string",
+        "format": "date-time"
+    })
+}
+
+fn maintenance_record_versions_schema() -> Value {
+    json!({
+        "type": "object",
+        "propertyNames": {
+            "pattern": CANONICAL_RECORD_ID_PATTERN
+        },
+        "additionalProperties": maintenance_identity_schema()
+    })
+}
+
+fn maintenance_closed_object(properties: Vec<(&'static str, Value)>, required: &[&str]) -> Value {
+    let properties = properties
+        .into_iter()
+        .map(|(name, schema)| (name.to_owned(), schema))
+        .collect::<serde_json::Map<_, _>>();
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": properties,
+        "required": required
+    })
+}
+
+fn maintenance_array_schema(items: Value) -> Value {
+    json!({
+        "type": "array",
+        "items": items
+    })
+}
+
+fn maintenance_enum_schema(values: &[&str]) -> Value {
+    json!({
+        "type": "string",
+        "enum": values
+    })
+}
+
+fn maintenance_constant_schema(value: &str) -> Value {
+    json!({
+        "type": "string",
+        "const": value
+    })
+}
+
+fn maintenance_nonempty_string_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1
+    })
+}
+
+fn maintenance_count_schema() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 0
+    })
+}
+
+fn maintenance_record_ids_schema(bounded: bool) -> Value {
+    let mut schema = maintenance_array_schema(maintenance_record_id_schema());
+    schema["uniqueItems"] = Value::Bool(true);
+    if bounded {
+        schema["maxItems"] = json!(MAINTENANCE_MAX_RECORDS);
+    }
+    schema
+}
+
+fn maintenance_identity_array_schema() -> Value {
+    let mut schema = maintenance_array_schema(maintenance_identity_schema());
+    schema["uniqueItems"] = Value::Bool(true);
+    schema
+}
+
+fn maintenance_request_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            (
+                "schema",
+                maintenance_constant_schema(MAINTENANCE_REQUEST_SCHEMA),
+            ),
+            ("evaluated_at", maintenance_timestamp_schema()),
+            ("record_ids", maintenance_record_ids_schema(true)),
+        ],
+        &["schema", "evaluated_at", "record_ids"],
+    )
+}
+
+fn maintenance_scope_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("kind", maintenance_constant_schema("repository")),
+            ("repository_fingerprint", maintenance_identity_schema()),
+            ("target_record_ids", maintenance_record_ids_schema(true)),
+        ],
+        &["kind", "repository_fingerprint", "target_record_ids"],
+    )
+}
+
+fn maintenance_policy_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            (
+                "contract_version",
+                maintenance_constant_schema(MAINTENANCE_CONTRACT_VERSION),
+            ),
+            (
+                "policy_version",
+                maintenance_constant_schema(MAINTENANCE_POLICY_VERSION),
+            ),
+            ("maximum_validity_seconds", maintenance_count_schema()),
+            ("stale_after_seconds", maintenance_count_schema()),
+            ("policy_digest", maintenance_identity_schema()),
+        ],
+        &[
+            "contract_version",
+            "policy_version",
+            "maximum_validity_seconds",
+            "stale_after_seconds",
+            "policy_digest",
+        ],
+    )
+}
+
+fn maintenance_finding_kind_schema() -> Value {
+    maintenance_enum_schema(&[
+        "exact_duplicate",
+        "high_confidence_contradiction",
+        "stale",
+        "expired",
+        "renewal_candidate",
+    ])
+}
+
+fn maintenance_detector_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("kind", maintenance_finding_kind_schema()),
+            ("version", maintenance_nonempty_string_schema()),
+            ("configuration_digest", maintenance_identity_schema()),
+        ],
+        &["kind", "version", "configuration_digest"],
+    )
+}
+
+fn maintenance_authority_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("mode", maintenance_constant_schema("report_only")),
+            ("grant_fingerprint", maintenance_identity_schema()),
+        ],
+        &["mode", "grant_fingerprint"],
+    )
+}
+
+fn maintenance_revision_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            (
+                "schema",
+                maintenance_constant_schema(CANONICAL_REVISION_SCHEMA),
+            ),
+            ("revision_hash", maintenance_identity_schema()),
+        ],
+        &["schema", "revision_hash"],
+    )
+}
+
+fn maintenance_record_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("record_id", maintenance_record_id_schema()),
+            ("source_path", maintenance_nonempty_string_schema()),
+            ("revision", maintenance_revision_output_schema()),
+            ("content_hash", maintenance_identity_schema()),
+            ("claim_digest", maintenance_identity_schema()),
+            ("applicability_digest", maintenance_identity_schema()),
+            ("temporal_digest", maintenance_identity_schema()),
+            (
+                "status",
+                maintenance_enum_schema(&[
+                    "proposed",
+                    "active",
+                    "rejected",
+                    "superseded",
+                    "expired",
+                    "tombstoned",
+                    "redacted",
+                ]),
+            ),
+            ("current_assertion", json!({ "type": "boolean" })),
+            (
+                "retention_state",
+                maintenance_enum_schema(&["current", "query_only"]),
+            ),
+            (
+                "retention_reason",
+                maintenance_enum_schema(&[
+                    "no_age_limit",
+                    "explicit_expiry",
+                    "session_closed",
+                    "session_inactivity_lease",
+                    "session_maximum_age",
+                    "episodic_ordinary_window",
+                    "episodic_authorized_extension",
+                ]),
+            ),
+            ("retention_boundary", maintenance_timestamp_schema()),
+            ("target", json!({ "type": "boolean" })),
+        ],
+        &[
+            "record_id",
+            "source_path",
+            "revision",
+            "content_hash",
+            "claim_digest",
+            "applicability_digest",
+            "temporal_digest",
+            "status",
+            "current_assertion",
+            "retention_state",
+            "retention_reason",
+            "target",
+        ],
+    )
+}
+
+fn maintenance_evidence_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("code", maintenance_nonempty_string_schema()),
+            ("digest", maintenance_identity_schema()),
+            ("boundary", maintenance_timestamp_schema()),
+        ],
+        &["code", "digest"],
+    )
+}
+
+fn maintenance_finding_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("finding_id", maintenance_identity_schema()),
+            ("kind", maintenance_finding_kind_schema()),
+            ("record_ids", maintenance_record_ids_schema(false)),
+            ("comparison_set_digest", maintenance_identity_schema()),
+            (
+                "evidence",
+                maintenance_array_schema(maintenance_evidence_output_schema()),
+            ),
+            (
+                "confidence",
+                maintenance_enum_schema(&["exact", "high", "report_only"]),
+            ),
+            ("proposed_action_ids", maintenance_identity_array_schema()),
+        ],
+        &[
+            "finding_id",
+            "kind",
+            "record_ids",
+            "comparison_set_digest",
+            "evidence",
+            "confidence",
+            "proposed_action_ids",
+        ],
+    )
+}
+
+fn maintenance_action_preconditions_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("comparison_set_digest", maintenance_identity_schema()),
+            ("record_versions", maintenance_record_versions_schema()),
+        ],
+        &["comparison_set_digest", "record_versions"],
+    )
+}
+
+fn maintenance_action_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("action_id", maintenance_identity_schema()),
+            (
+                "class",
+                maintenance_enum_schema(&[
+                    "consolidate_exact_duplicates",
+                    "create_renewal_successor",
+                    "suppress_unresolved_conflict",
+                    "owner_consolidate_exact_duplicates",
+                    "owner_create_renewal_successor",
+                ]),
+            ),
+            ("finding_id", maintenance_identity_schema()),
+            ("record_ids", maintenance_record_ids_schema(false)),
+            ("keeper_record_id", maintenance_record_id_schema()),
+            ("predecessor_record_id", maintenance_record_id_schema()),
+            ("evidence_record_id", maintenance_record_id_schema()),
+            (
+                "preconditions",
+                maintenance_action_preconditions_output_schema(),
+            ),
+        ],
+        &[
+            "action_id",
+            "class",
+            "finding_id",
+            "record_ids",
+            "preconditions",
+        ],
+    )
+}
+
+fn maintenance_action_group_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            (
+                "kind",
+                maintenance_enum_schema(&[
+                    "repository_materialization",
+                    "private_derived_state",
+                    "owner_authorized_private_mutation",
+                ]),
+            ),
+            (
+                "actions",
+                maintenance_array_schema(maintenance_action_output_schema()),
+            ),
+        ],
+        &["kind", "actions"],
+    )
+}
+
+fn maintenance_action_groups_output_schema() -> Value {
+    let mut schema = maintenance_array_schema(maintenance_action_group_output_schema());
+    schema["minItems"] = json!(3);
+    schema["maxItems"] = json!(3);
+    schema
+}
+
+fn maintenance_preconditions_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("repository_fingerprint", maintenance_identity_schema()),
+            ("target_versions", maintenance_record_versions_schema()),
+            ("comparison_set_digest", maintenance_identity_schema()),
+            ("detector_digest", maintenance_identity_schema()),
+            ("policy_digest", maintenance_identity_schema()),
+            ("grant_fingerprint", maintenance_identity_schema()),
+            ("not_after", maintenance_timestamp_schema()),
+        ],
+        &[
+            "repository_fingerprint",
+            "target_versions",
+            "comparison_set_digest",
+            "detector_digest",
+            "policy_digest",
+            "grant_fingerprint",
+            "not_after",
+        ],
+    )
+}
+
+fn maintenance_summary_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("records", maintenance_count_schema()),
+            ("exact_duplicates", maintenance_count_schema()),
+            ("contradictions", maintenance_count_schema()),
+            ("stale", maintenance_count_schema()),
+            ("expired", maintenance_count_schema()),
+            ("renewal_candidates", maintenance_count_schema()),
+            ("action_candidates", maintenance_count_schema()),
+        ],
+        &[
+            "records",
+            "exact_duplicates",
+            "contradictions",
+            "stale",
+            "expired",
+            "renewal_candidates",
+            "action_candidates",
+        ],
+    )
+}
+
+fn maintenance_diagnostic_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("code", maintenance_nonempty_string_schema()),
+            ("count", maintenance_count_schema()),
+            ("digest", maintenance_identity_schema()),
+        ],
+        &["code", "count", "digest"],
+    )
+}
+
+fn maintenance_output_schema() -> Value {
+    let mut records = maintenance_array_schema(maintenance_record_output_schema());
+    records["maxItems"] = json!(MAINTENANCE_MAX_RECORDS);
+    maintenance_closed_object(
+        vec![
+            (
+                "schema",
+                maintenance_constant_schema(MAINTENANCE_PLAN_SCHEMA),
+            ),
+            ("plan_id", maintenance_identity_schema()),
+            ("request", maintenance_request_output_schema()),
+            ("evaluated_at", maintenance_timestamp_schema()),
+            ("not_after", maintenance_timestamp_schema()),
+            ("scope", maintenance_scope_output_schema()),
+            ("policy", maintenance_policy_output_schema()),
+            (
+                "detectors",
+                maintenance_array_schema(maintenance_detector_output_schema()),
+            ),
+            ("authority", maintenance_authority_output_schema()),
+            ("records", records),
+            ("comparison_set_digest", maintenance_identity_schema()),
+            (
+                "findings",
+                maintenance_array_schema(maintenance_finding_output_schema()),
+            ),
+            ("action_groups", maintenance_action_groups_output_schema()),
+            ("preconditions", maintenance_preconditions_output_schema()),
+            ("summary", maintenance_summary_output_schema()),
+            (
+                "diagnostics",
+                maintenance_array_schema(maintenance_diagnostic_output_schema()),
+            ),
+        ],
+        &[
+            "schema",
+            "plan_id",
+            "request",
+            "evaluated_at",
+            "not_after",
+            "scope",
+            "policy",
+            "detectors",
+            "authority",
+            "records",
+            "comparison_set_digest",
+            "findings",
+            "action_groups",
+            "preconditions",
+            "summary",
+            "diagnostics",
+        ],
+    )
+}
 fn tools_call(
     state: &ProtocolState,
     params: Value,
-    capture_control: Option<&CapturePlanningControl>,
+    planning_control: Option<&ActivePlanningControl>,
 ) -> Result<Value> {
     let name = required_str(&params, "name")?;
     let arguments = params
@@ -879,9 +1476,22 @@ fn tools_call(
                 .memory_service()?
                 .build_context_pack(context_input(&arguments)?)?,
         )?,
-        "plan_capture" => match plan_capture_output(state, &arguments, capture_control) {
+        "plan_capture" => match plan_capture_output(
+            state,
+            &arguments,
+            planning_control.and_then(ActivePlanningControl::capture),
+        ) {
             Ok(plan) => plan,
             Err(error) if error.to_string() == INVALID_CAPTURE_REQUEST => return Err(error),
+            Err(error) => return Ok(tool_error_result(&error.to_string())),
+        },
+        "plan_maintenance_v1" => match plan_maintenance_output(
+            state,
+            &arguments,
+            planning_control.and_then(ActivePlanningControl::maintenance),
+        ) {
+            Ok(plan) => plan,
+            Err(error) if error.to_string() == INVALID_MAINTENANCE_REQUEST => return Err(error),
             Err(error) => return Ok(tool_error_result(&error.to_string())),
         },
         "propose_memory" => propose_memory_output(state.memory_service()?, &arguments)?,
@@ -912,10 +1522,10 @@ fn tools_call(
         _ => bail!("unknown tool: {name}"),
     };
 
-    let text = if name == "plan_capture" {
-        capture_text_content(&structured)?
-    } else {
-        serde_json::to_string_pretty(&structured)?
+    let text = match name {
+        "plan_capture" => capture_text_content(&structured)?,
+        "plan_maintenance_v1" => maintenance_text_content(&structured),
+        _ => serde_json::to_string_pretty(&structured)?,
     };
     Ok(json!({
         "content": [
@@ -947,6 +1557,48 @@ fn capture_text_content(structured: &Value) -> Result<String> {
         "message": "Full capture plan is available in structuredContent"
     }))
     .map_err(Into::into)
+}
+
+fn maintenance_text_content(structured: &Value) -> String {
+    let plan_id = structured
+        .get("plan_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable")
+        .chars()
+        .take(96)
+        .collect::<String>();
+    let evaluated_at = structured
+        .get("evaluated_at")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable")
+        .chars()
+        .take(48)
+        .collect::<String>();
+    let not_after = structured
+        .get("not_after")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable")
+        .chars()
+        .take(48)
+        .collect::<String>();
+    let finding_count = structured
+        .get("findings")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let action_count = structured
+        .get("action_groups")
+        .and_then(Value::as_array)
+        .map(|groups| {
+            groups
+                .iter()
+                .filter_map(|group| group.get("actions").and_then(Value::as_array))
+                .map(Vec::len)
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    format!(
+        "Immutable maintenance plan {plan_id}, evaluated at {evaluated_at} and valid before {not_after}: {finding_count} finding(s), {action_count} candidate action(s). Full artifact is available in structuredContent; no action was executed."
+    )
 }
 
 fn tool_error_result(message: &str) -> Value {
@@ -986,6 +1638,51 @@ fn plan_capture_output(
     })?;
     ensure_capture_data_class(&plan.data_class)?;
     serde_json::to_value(plan).map_err(|_| anyhow!(CAPTURE_PLANNING_FAILED))
+}
+
+fn plan_maintenance_output(
+    state: &ProtocolState,
+    arguments: &Value,
+    control: Option<&MaintenancePlanningControl>,
+) -> Result<Value> {
+    let request = serde_json::from_value::<MaintenancePlanRequest>(arguments.clone())
+        .map_err(|_| anyhow!(INVALID_MAINTENANCE_REQUEST))?;
+    validate_mcp_maintenance_request(&request)?;
+    let plan = match control {
+        Some(control) => plan_maintenance_with_control(&state.paths, request, control),
+        None => plan_maintenance(&state.paths, request),
+    }
+    .map_err(|error| {
+        if control.is_some_and(MaintenancePlanningControl::is_cancelled) {
+            anyhow!(MAINTENANCE_CANCELLED)
+        } else if control.is_some_and(|control| Instant::now() >= control.deadline()) {
+            anyhow!(MAINTENANCE_TIMED_OUT)
+        } else {
+            let _ = error;
+            anyhow!(MAINTENANCE_PLANNING_FAILED)
+        }
+    })?;
+    serde_json::to_value(plan).map_err(|_| anyhow!(MAINTENANCE_PLANNING_FAILED))
+}
+
+fn validate_mcp_maintenance_request(request: &MaintenancePlanRequest) -> Result<()> {
+    let unique_record_ids = request.record_ids.iter().collect::<BTreeSet<_>>();
+    let evaluated_at_is_valid = request
+        .evaluated_at
+        .as_deref()
+        .is_none_or(|value| FixedClock::from_rfc3339(value).is_ok());
+    if request.schema != MAINTENANCE_REQUEST_SCHEMA
+        || request.record_ids.len() > MAINTENANCE_MAX_RECORDS
+        || request
+            .record_ids
+            .iter()
+            .any(|record_id| validate_canonical_record_id(record_id).is_err())
+        || unique_record_ids.len() != request.record_ids.len()
+        || !evaluated_at_is_valid
+    {
+        bail!(INVALID_MAINTENANCE_REQUEST);
+    }
+    Ok(())
 }
 
 fn validate_mcp_capture_authority(request: &CaptureRequest) -> Result<()> {
@@ -1232,7 +1929,9 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use memzoi_core::InitRequest;
+    use memzoi_core::{
+        InitRequest, RepositoryContentClass, SessionEndCandidate, SessionEndDocument,
+    };
     use serde_json::{Value, json};
     use tempfile::TempDir;
 
@@ -1313,12 +2012,65 @@ mod tests {
         )
     }
 
+    fn maintenance_arguments() -> Value {
+        json!({
+            "schema": "memzoi/maintenance-request",
+            "evaluated_at": "2026-07-18T10:00:00Z",
+            "record_ids": []
+        })
+    }
+
+    fn maintenance_response(state: &ProtocolState, id: &str, arguments: Value) -> Value {
+        response(
+            state,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "plan_maintenance_v1",
+                    "arguments": arguments
+                }
+            }),
+        )
+    }
+
+    fn concurrent_busy_response(
+        active_control: &ActivePlanningControl,
+        incoming_id: &str,
+        incoming_tool: &str,
+        arguments: Value,
+    ) -> Value {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": incoming_id,
+            "method": "tools/call",
+            "params": {
+                "name": incoming_tool,
+                "arguments": arguments
+            }
+        })
+        .to_string();
+        let mut output = Vec::new();
+        reject_concurrent_input(&mut output, &line, active_control).unwrap();
+        serde_json::from_slice(&output).unwrap()
+    }
+
     fn managed_state_snapshot(state: &ProtocolState) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut snapshot = BTreeMap::new();
-        snapshot_tree(&state.paths.memory_dir, Path::new("repo"), &mut snapshot);
+        snapshot_tree(
+            &state.paths.project_root,
+            Path::new("project"),
+            &mut snapshot,
+        );
+        snapshot_tree(
+            &state.paths.repository_runtime_dir,
+            Path::new("repository-runtime"),
+            &mut snapshot,
+        );
         snapshot_tree(
             &state.paths.runtime_dir,
-            Path::new("runtime"),
+            Path::new("worktree-runtime"),
             &mut snapshot,
         );
         snapshot
@@ -1362,6 +2114,39 @@ mod tests {
             "{context}: {}",
             differences.join(", ")
         );
+    }
+
+    fn assert_schema_recursively_closed(schema: &Value, path: &str) {
+        match schema.get("type").and_then(Value::as_str) {
+            Some("object") => {
+                if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                    assert_eq!(
+                        schema.get("additionalProperties"),
+                        Some(&Value::Bool(false)),
+                        "object schema {path} must reject unknown fields"
+                    );
+                    for (name, property) in properties {
+                        assert_schema_recursively_closed(property, &format!("{path}.{name}"));
+                    }
+                } else {
+                    let value_schema = schema
+                        .get("additionalProperties")
+                        .unwrap_or_else(|| panic!("map schema {path} must constrain its values"));
+                    assert!(
+                        value_schema.is_object(),
+                        "map schema {path} must use a typed value schema"
+                    );
+                    assert_schema_recursively_closed(value_schema, &format!("{path}.*"));
+                }
+            }
+            Some("array") => {
+                let items = schema
+                    .get("items")
+                    .unwrap_or_else(|| panic!("array schema {path} must constrain its items"));
+                assert_schema_recursively_closed(items, &format!("{path}[]"));
+            }
+            _ => {}
+        }
     }
 
     fn snapshot_tree(root: &Path, label: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
@@ -1481,6 +2266,42 @@ mod tests {
     }
 
     #[test]
+    fn active_capture_reports_capture_busy_to_concurrent_maintenance() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let active = ActivePlanningControl::Capture(CapturePlanningControl::new(deadline));
+
+        let response = concurrent_busy_response(
+            &active,
+            "maintenance-while-capture",
+            "plan_maintenance_v1",
+            maintenance_arguments(),
+        );
+
+        assert_eq!(response["id"], "maintenance-while-capture");
+        assert_eq!(response["error"]["code"], -32002);
+        assert_eq!(response["error"]["message"], CAPTURE_BUSY);
+        assert_ne!(response["error"]["message"], MAINTENANCE_BUSY);
+    }
+
+    #[test]
+    fn active_maintenance_reports_maintenance_busy_to_concurrent_capture() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let active = ActivePlanningControl::Maintenance(MaintenancePlanningControl::new(deadline));
+
+        let response = concurrent_busy_response(
+            &active,
+            "capture-while-maintenance",
+            "plan_capture",
+            capture_arguments("concurrent-capture.md"),
+        );
+
+        assert_eq!(response["id"], "capture-while-maintenance");
+        assert_eq!(response["error"]["code"], -32002);
+        assert_eq!(response["error"]["message"], MAINTENANCE_BUSY);
+        assert_ne!(response["error"]["message"], CAPTURE_BUSY);
+    }
+
+    #[test]
     fn in_flight_capture_can_be_cancelled_without_mutation() {
         let (_temp, state) = capture_test_state();
         let source_path = "cancel-capture.md";
@@ -1522,7 +2343,7 @@ mod tests {
         drop(sender);
         let mut output = Vec::new();
 
-        serve_event_loop(&state, &receiver, &mut output, CAPTURE_PLANNING_TIMEOUT).unwrap();
+        serve_event_loop(&state, &receiver, &mut output, PLANNING_TIMEOUT).unwrap();
 
         assert!(
             output.is_empty(),
@@ -1747,6 +2568,7 @@ mod tests {
             "inspect_memory_expiry",
             "build_context_pack",
             "plan_capture",
+            "plan_maintenance_v1",
             "propose_memory",
             "precheck_path",
             "precheck_action",
@@ -1810,6 +2632,316 @@ mod tests {
             schema["properties"]["extractor"]["properties"]["profile"]["const"],
             "markdown-deterministic"
         );
+
+        let maintenance_tool = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("plan_maintenance_v1"))
+            .unwrap_or_else(|| panic!("plan_maintenance_v1 tool should be exposed: {tools:?}"));
+        let schema = &maintenance_tool["inputSchema"];
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], json!(["schema"]));
+        assert_eq!(
+            schema["properties"]["schema"]["const"],
+            "memzoi/maintenance-request"
+        );
+        assert_eq!(schema["properties"]["record_ids"]["uniqueItems"], true);
+        assert_eq!(
+            schema["properties"]["record_ids"]["items"]["pattern"],
+            CANONICAL_RECORD_ID_PATTERN
+        );
+        assert_eq!(
+            maintenance_tool["outputSchema"]["properties"]["schema"]["const"],
+            "memzoi/maintenance-plan"
+        );
+        assert_eq!(
+            maintenance_tool["outputSchema"]["properties"]["action_groups"]["type"],
+            "array"
+        );
+        assert_schema_recursively_closed(
+            &maintenance_tool["outputSchema"],
+            "plan_maintenance_v1.outputSchema",
+        );
+        assert_eq!(
+            maintenance_tool["outputSchema"]["properties"]["records"]["items"]["required"],
+            json!([
+                "record_id",
+                "source_path",
+                "revision",
+                "content_hash",
+                "claim_digest",
+                "applicability_digest",
+                "temporal_digest",
+                "status",
+                "current_assertion",
+                "retention_state",
+                "retention_reason",
+                "target"
+            ])
+        );
+        assert_eq!(
+            maintenance_tool["outputSchema"]["properties"]["action_groups"]["items"]["properties"]
+                ["actions"]["items"]["additionalProperties"],
+            false
+        );
+    }
+
+    #[test]
+    fn maintenance_tool_rejects_private_output_and_mutation_arguments_without_opening_service() {
+        let (_temp, state) = capture_test_state();
+
+        for field in [
+            "scope",
+            "include_private",
+            "include_local",
+            "include_session",
+            "apply",
+            "execute",
+            "output_path",
+        ] {
+            let mut arguments = maintenance_arguments();
+            arguments[field] = json!(true);
+
+            let response = maintenance_response(&state, field, arguments);
+
+            assert_eq!(response["error"]["code"], -32602);
+            assert_eq!(response["error"]["message"], INVALID_MAINTENANCE_REQUEST);
+            assert!(
+                state.service.get().is_none(),
+                "rejected maintenance arguments must not open mutable memory state"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_tool_enforces_the_closed_request_constraints_at_runtime() {
+        let (_temp, state) = capture_test_state();
+        let mut wrong_schema = maintenance_arguments();
+        wrong_schema["schema"] = json!("memzoi/maintenance-request-v1");
+        let mut invalid_time = maintenance_arguments();
+        invalid_time["evaluated_at"] = json!("tomorrow");
+        let mut duplicate_ids = maintenance_arguments();
+        duplicate_ids["record_ids"] = json!(["same-record", "same-record"]);
+        let mut empty_id = maintenance_arguments();
+        empty_id["record_ids"] = json!([""]);
+
+        for (id, arguments) in [
+            ("wrong-schema", wrong_schema),
+            ("invalid-time", invalid_time),
+            ("duplicate-ids", duplicate_ids),
+            ("empty-id", empty_id),
+        ] {
+            let response = maintenance_response(&state, id, arguments);
+            assert_eq!(response["error"]["code"], -32602);
+            assert_eq!(response["error"]["message"], INVALID_MAINTENANCE_REQUEST);
+            assert!(state.service.get().is_none());
+        }
+
+        for (id, invalid_record_id) in [
+            ("uppercase-id", "Private-Record"),
+            ("whitespace-id", " private-record"),
+            ("empty-segment-id", "private//record"),
+            ("traversal-id", "../private-record"),
+        ] {
+            let mut arguments = maintenance_arguments();
+            arguments["record_ids"] = json!([invalid_record_id]);
+            let response = maintenance_response(&state, id, arguments);
+            assert_eq!(response["error"]["code"], -32602);
+            assert_eq!(response["error"]["message"], INVALID_MAINTENANCE_REQUEST);
+            assert!(
+                !serde_json::to_string(&response)
+                    .unwrap()
+                    .contains(invalid_record_id),
+                "invalid record ID must not be echoed"
+            );
+            assert!(state.service.get().is_none());
+        }
+    }
+
+    #[test]
+    fn maintenance_tool_returns_a_bounded_repository_plan_without_mutation() {
+        let (_temp, state) = capture_test_state();
+        let before = managed_state_snapshot(&state);
+        let arguments = maintenance_arguments();
+        let expected = serde_json::to_value(
+            plan_maintenance(
+                &state.paths,
+                serde_json::from_value(arguments.clone()).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let response = maintenance_response(&state, "maintenance-empty", arguments);
+
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "MCP maintenance planning mutated state");
+        assert!(
+            state.service.get().is_none(),
+            "maintenance planning must not initialize mutable MemoryService state"
+        );
+        assert!(response.get("error").is_none(), "{response}");
+        let result = &response["result"];
+        assert_eq!(result["isError"], false);
+        assert_eq!(
+            result["structuredContent"]["schema"],
+            "memzoi/maintenance-plan"
+        );
+        assert_eq!(
+            result["structuredContent"]["request"]["record_ids"],
+            json!([])
+        );
+        assert_eq!(
+            result["structuredContent"]["action_groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|group| group["kind"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "repository_materialization",
+                "private_derived_state",
+                "owner_authorized_private_mutation",
+            ]
+        );
+        assert_eq!(result["structuredContent"], expected);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.len() < 512, "maintenance summary must remain bounded");
+        assert!(text.contains("evaluated at 2026-07-18T10:00:00Z"));
+        assert!(text.contains("valid before 2026-07-19T10:00:00Z"));
+        assert!(text.contains("Full artifact is available in structuredContent"));
+        assert!(text.contains("no action was executed"));
+        assert!(
+            !text.contains("comparison_set_digest"),
+            "summary text must not duplicate the full plan"
+        );
+    }
+
+    #[test]
+    fn maintenance_tool_defaults_optional_record_ids_and_evaluation_time() {
+        let (_temp, state) = capture_test_state();
+        let before = managed_state_snapshot(&state);
+
+        let response = maintenance_response(
+            &state,
+            "maintenance-defaults",
+            json!({ "schema": "memzoi/maintenance-request" }),
+        );
+
+        assert!(response.get("error").is_none(), "{response}");
+        assert_eq!(response["result"]["isError"], false);
+        assert_eq!(
+            response["result"]["structuredContent"]["request"]["record_ids"],
+            json!([])
+        );
+        assert!(state.service.get().is_none());
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "default MCP maintenance mutated state");
+    }
+
+    #[test]
+    fn maintenance_tool_never_reads_or_releases_private_runtime_records() {
+        let temp = TempDir::new().unwrap();
+        let project_root = temp.path().join("repo");
+        fs::create_dir(&project_root).unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        let paths = MemoryPaths::with_runtime_home(project_root, temp.path().join("runtime-home"));
+        MemoryService::initialize_paths(paths.clone(), InitRequest { force: false }).unwrap();
+        let service = MemoryService::open_paths(paths.clone()).unwrap();
+        let private_sentinel = "PRIVATE-MAINTENANCE-RUNTIME-SENTINEL";
+        service
+            .promote_session_end(
+                "mcp-private-maintenance-test",
+                SessionEndDocument {
+                    task: "Create private maintenance test memory".to_owned(),
+                    candidates: vec![SessionEndCandidate {
+                        destination: MemoryDestination::Local,
+                        memory_type: MemoryType::Preference,
+                        lane: MemoryLane::Semantic,
+                        title: "Private maintenance preference".to_owned(),
+                        body: private_sentinel.to_owned(),
+                        sensitivity: OkfProposalSensitivity::LocalOnly,
+                        content_class: RepositoryContentClass::LocalOnlyState,
+                        reason: Some("MCP release-boundary regression fixture".to_owned()),
+                        scope: None,
+                        tags: Vec::new(),
+                    }],
+                },
+            )
+            .unwrap();
+        let private_record_id = service.list_local_memory().unwrap()[0].id.clone();
+        drop(service);
+        let state = ProtocolState::new(paths);
+        let before = managed_state_snapshot(&state);
+
+        let response = maintenance_response(&state, "maintenance-private", maintenance_arguments());
+
+        let rendered = serde_json::to_string(&response).unwrap();
+        assert!(response.get("error").is_none(), "{response}");
+        assert_eq!(response["result"]["isError"], false);
+        assert!(!rendered.contains(private_sentinel));
+        assert!(!rendered.contains(&private_record_id));
+        assert!(state.service.get().is_none());
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "private MCP maintenance mutated state");
+    }
+
+    #[test]
+    fn maintenance_planning_failures_are_constant_and_content_free() {
+        let (_temp, state) = capture_test_state();
+        let missing_sentinel = "private-missing-maintenance-sentinel";
+        let before = managed_state_snapshot(&state);
+        let mut arguments = maintenance_arguments();
+        arguments["record_ids"] = json!([missing_sentinel]);
+
+        let response = maintenance_response(&state, "maintenance-missing", arguments);
+
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "failed MCP maintenance mutated state");
+        assert!(state.service.get().is_none());
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            MAINTENANCE_PLANNING_FAILED
+        );
+        assert!(
+            !serde_json::to_string(&response)
+                .unwrap()
+                .contains(missing_sentinel)
+        );
+    }
+
+    #[test]
+    fn maintenance_timeout_returns_a_bounded_error_without_mutation() {
+        let (_temp, state) = capture_test_state();
+        let before = managed_state_snapshot(&state);
+        let (sender, receiver) = mpsc::sync_channel(2);
+        sender
+            .send(InputEvent::Line(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "maintenance-timeout",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "plan_maintenance_v1",
+                        "arguments": maintenance_arguments()
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        sender.send(InputEvent::Eof).unwrap();
+        drop(sender);
+        let mut output = Vec::new();
+
+        serve_event_loop(&state, &receiver, &mut output, Duration::ZERO).unwrap();
+
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["id"], "maintenance-timeout");
+        assert_eq!(response["error"]["code"], -32001);
+        assert_eq!(response["error"]["message"], MAINTENANCE_TIMED_OUT);
+        assert!(state.service.get().is_none());
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(&before, &after, "timed-out MCP maintenance mutated state");
     }
 
     #[test]
