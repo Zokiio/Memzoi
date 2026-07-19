@@ -2438,6 +2438,56 @@ mod tests {
         service.apply_private_lifecycle(&request, &grant.grant_id, None)
     }
 
+    fn assert_mirrored_lifecycle_authority_event(
+        service: &MemoryService,
+        record_id: &str,
+        event_id: Option<&str>,
+        expected_action_kind: &str,
+    ) -> Result<String> {
+        let event_id = event_id.context("mirrored lifecycle state has no authority event")?;
+        let event_row = |conn: &Connection| -> Result<String> {
+            conn.query_row(
+                "SELECT json_object(
+                   'id', id, 'event_type', event_type, 'actor', actor,
+                   'data_class', data_class, 'payload_json', payload_json,
+                   'record_id', record_id, 'proposal_id', proposal_id,
+                   'created_at', created_at
+                 )
+                 FROM event_log
+                 WHERE id = ?1 AND event_type = 'memory.private_lifecycle_applied'",
+                [event_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("referenced private lifecycle authority event is absent")
+        };
+        let shared_event = event_row(&service.shared_conn)?;
+        let mirrored_event = event_row(&service.conn)?;
+        assert_eq!(mirrored_event, shared_event);
+        assert_eq!(
+            PrivateLifecycleStorage::new(&service.conn).require_state(record_id)?,
+            PrivateLifecycleStorage::new(&service.shared_conn).require_state(record_id)?
+        );
+        assert!(shared_runtime::lifecycle_generations_match(
+            &service.shared_conn,
+            &service.conn,
+        )?);
+        let payload_json: String = service.conn.query_row(
+            "SELECT payload_json FROM event_log WHERE id = ?1",
+            [event_id],
+            |row| row.get(0),
+        )?;
+        let payload: LifecycleAuditPayload = serde_json::from_str(&payload_json)?;
+        assert!(
+            payload
+                .action_kinds
+                .iter()
+                .any(|kind| kind == expected_action_kind)
+        );
+        assert!(payload.target_record_ids.iter().any(|id| id == record_id));
+        Ok(event_id.to_owned())
+    }
+
     fn timestamp_after(days: i64) -> Result<String> {
         let now = crate::private_lifecycle::parse_timestamp("2026-07-19T12:00:00Z", "test clock")?;
         crate::expiry::format_timestamp(now + Duration::days(days))
@@ -2918,13 +2968,14 @@ mod tests {
         )?;
         let grant = service.authorize_private_lifecycle(&request, None, None)?;
         service.apply_private_lifecycle(&request, &grant.grant_id, None)?;
-        let mirrored_authority_events: i64 = service.conn.query_row(
-            "SELECT COUNT(*) FROM event_log
-             WHERE event_type = 'memory.private_lifecycle_applied'",
-            [],
-            |row| row.get(0),
+        let quarantined_mirror_state =
+            PrivateLifecycleStorage::new(&service.conn).require_state(&record.id)?;
+        let quarantine_event_id = assert_mirrored_lifecycle_authority_event(
+            &service,
+            &record.id,
+            quarantined_mirror_state.quarantine_event_id.as_deref(),
+            "quarantine",
         )?;
-        assert_eq!(mirrored_authority_events, 1);
         assert!(service.list_local_memory()?.is_empty());
         assert!(
             service
@@ -2947,6 +2998,15 @@ mod tests {
         service.apply_private_lifecycle(&release, &grant.grant_id, None)?;
         let released = service.inspect_private_lifecycle_record(&record.id)?;
         assert!(!released.state.quarantined);
+        let released_mirror_state =
+            PrivateLifecycleStorage::new(&service.conn).require_state(&record.id)?;
+        let release_event_id = assert_mirrored_lifecycle_authority_event(
+            &service,
+            &record.id,
+            released_mirror_state.quarantine_event_id.as_deref(),
+            "release_quarantine",
+        )?;
+        assert_ne!(release_event_id, quarantine_event_id);
         assert_eq!(service.list_local_memory()?.len(), 1);
         Ok(())
     }
@@ -3700,6 +3760,14 @@ mod tests {
                 retain_until: retained_until.clone(),
             }],
         )?;
+        let retained_mirror_state =
+            PrivateLifecycleStorage::new(&service.conn).require_state(&record.id)?;
+        assert_mirrored_lifecycle_authority_event(
+            &service,
+            &record.id,
+            retained_mirror_state.retention_event_id.as_deref(),
+            "retain_until",
+        )?;
         authorize_and_apply(
             &service,
             "operation-pin-independent",
@@ -3707,6 +3775,14 @@ mod tests {
                 record_id: record.id.clone(),
                 expected_version: record_version(&service, &record.id)?,
             }],
+        )?;
+        let pinned_mirror_state =
+            PrivateLifecycleStorage::new(&service.conn).require_state(&record.id)?;
+        assert_mirrored_lifecycle_authority_event(
+            &service,
+            &record.id,
+            pinned_mirror_state.retention_event_id.as_deref(),
+            "pin",
         )?;
         authorize_and_apply(
             &service,
@@ -3740,6 +3816,14 @@ mod tests {
                 expected_version: before_unpin.version,
             }],
         )?;
+        let unpinned_mirror_state =
+            PrivateLifecycleStorage::new(&service.conn).require_state(&record.id)?;
+        assert_mirrored_lifecycle_authority_event(
+            &service,
+            &record.id,
+            unpinned_mirror_state.retention_event_id.as_deref(),
+            "unpin",
+        )?;
         let after_unpin = service.inspect_private_lifecycle_record(&record.id)?;
         assert!(!after_unpin.state.pinned);
         assert_eq!(after_unpin.state.retain_until, Some(retained_until.clone()));
@@ -3765,6 +3849,44 @@ mod tests {
                 .retain_until,
             Some(retained_until)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unpin_without_finite_retention_keeps_mirrored_authority_event() -> Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let record = local(
+            &service,
+            "Pin-only authority",
+            "Unpinning without finite retention still has an authoritative lifecycle event.",
+        )?;
+        authorize_and_apply(
+            &service,
+            "operation-pin-only",
+            vec![PrivateLifecycleAction::Pin {
+                record_id: record.id.clone(),
+                expected_version: record_version(&service, &record.id)?,
+            }],
+        )?;
+        let pinned = service.inspect_private_lifecycle_record(&record.id)?;
+        authorize_and_apply(
+            &service,
+            "operation-unpin-only",
+            vec![PrivateLifecycleAction::Unpin {
+                record_id: record.id.clone(),
+                expected_version: pinned.version,
+            }],
+        )?;
+
+        let mirror_state = PrivateLifecycleStorage::new(&service.conn).require_state(&record.id)?;
+        assert!(!mirror_state.pinned);
+        assert_eq!(mirror_state.retain_until, None);
+        assert_mirrored_lifecycle_authority_event(
+            &service,
+            &record.id,
+            mirror_state.retention_event_id.as_deref(),
+            "unpin",
+        )?;
         Ok(())
     }
 

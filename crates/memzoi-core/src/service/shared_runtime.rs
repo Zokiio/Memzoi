@@ -1058,15 +1058,19 @@ fn read_private_lifecycle_authority_events(conn: &Connection) -> Result<Vec<Even
            AND id IN (
              SELECT automatic_recall_event_id
              FROM private_lifecycle_state
-             WHERE automatic_recall_until IS NOT NULL
+             WHERE automatic_recall_event_id IS NOT NULL
              UNION
              SELECT validity_event_id
              FROM private_lifecycle_state
-             WHERE validity_until IS NOT NULL
+             WHERE validity_event_id IS NOT NULL
+             UNION
+             SELECT retention_event_id
+             FROM private_lifecycle_state
+             WHERE retention_event_id IS NOT NULL
              UNION
              SELECT quarantine_event_id
              FROM private_lifecycle_state
-             WHERE quarantined = 1
+             WHERE quarantine_event_id IS NOT NULL
            )
          ORDER BY created_at, id",
     )?;
