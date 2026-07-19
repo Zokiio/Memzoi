@@ -1,7 +1,7 @@
-use std::path::Path;
+use std::{ffi::OsString, path::Path};
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::{retention, schema, search};
 
@@ -18,6 +18,58 @@ pub fn open_database(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Open an already-existing current-schema database without creating files,
+/// initializing schema, changing persistent journal mode, or running recovery.
+/// Lifecycle commands use this boundary so invalid artifacts and read-only
+/// operations cannot trigger unrelated database mutations.
+pub(crate) fn open_existing_database(path: &Path, read_only: bool) -> Result<Connection> {
+    if !path.is_file() {
+        anyhow::bail!("current SQLite database does not exist: {}", path.display());
+    }
+    let conn = if read_only {
+        ensure_checkpointed_database(path)?;
+        let mut uri = url::Url::from_file_path(path)
+            .map_err(|_| anyhow::anyhow!("SQLite path cannot be represented as a file URI"))?;
+        uri.query_pairs_mut().append_pair("immutable", "1");
+        Connection::open_with_flags(
+            uri.as_str(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+    } else {
+        Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+    }
+    .with_context(|| format!("failed to open existing SQLite database {}", path.display()))?;
+    schema::validate_current(&conn)?;
+    configure_existing_connection(&conn)?;
+    Ok(conn)
+}
+
+fn ensure_checkpointed_database(path: &Path) -> Result<()> {
+    for suffix in ["-wal", "-journal"] {
+        let mut sidecar_name = OsString::from(path.as_os_str());
+        sidecar_name.push(suffix);
+        let sidecar_path = std::path::PathBuf::from(sidecar_name);
+        match std::fs::symlink_metadata(&sidecar_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != 0 {
+                    anyhow::bail!(
+                        "read-only lifecycle access requires a checkpointed SQLite database; recovery or checkpoint is required for {}",
+                        path.display()
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to inspect SQLite journal state"),
+        }
+    }
+    Ok(())
+}
+
 pub fn init_database(conn: &Connection) -> Result<()> {
     schema::init(conn)
 }
@@ -29,6 +81,18 @@ fn configure_connection(conn: &Connection) -> Result<()> {
         .context("failed to set SQLite busy timeout")?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("failed to enable SQLite WAL journal mode")?;
+    retention::register_sqlite_functions(conn)
+        .context("failed to register SQLite retention functions")?;
+    search::register_sqlite_functions(conn)
+        .context("failed to register SQLite path applicability functions")?;
+    Ok(())
+}
+
+fn configure_existing_connection(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .context("failed to enable SQLite foreign keys")?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .context("failed to set SQLite busy timeout")?;
     retention::register_sqlite_functions(conn)
         .context("failed to register SQLite retention functions")?;
     search::register_sqlite_functions(conn)
@@ -52,6 +116,11 @@ mod tests {
         "memory_tag",
         "memory_capture",
         "runtime_mirror_state",
+        "private_lifecycle_generation",
+        "private_lifecycle_state",
+        "private_lifecycle_relation",
+        "owner_action_grant",
+        "private_lifecycle_application",
         "read_audit",
         "memory_fts",
     ];
@@ -63,6 +132,9 @@ mod tests {
         let conn = open_database(&db_path)?;
 
         init_database(&conn)?;
+        let schema_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(schema_version, crate::schema::CURRENT_SCHEMA_VERSION);
         conn.execute(
             "INSERT INTO memory_record(
                id, type, scope_kind, title, body, status, retention_json, origin_json, content_hash
@@ -156,6 +228,24 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM memory_record", [], |row| row.get(0))?;
         assert_eq!(records, 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn open_database_rejects_wrong_user_version_without_modifying_it() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("memory.db");
+        let conn = open_database(&db_path)?;
+        init_database(&conn)?;
+        conn.pragma_update(None, "user_version", 1_i64)?;
+        drop(conn);
+
+        let error = open_database(&db_path).expect_err("old user_version must be rejected");
+        assert!(format!("{error:#}").contains("user_version 1"));
+
+        let conn = Connection::open(&db_path)?;
+        let actual: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(actual, 1);
         Ok(())
     }
 

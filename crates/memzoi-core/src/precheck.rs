@@ -16,7 +16,7 @@ use crate::{
     retention,
     search::{
         SearchInput, citation_for, load_paths, path_matches_request, record_from_row,
-        search_memory_at,
+        search_memory_at, search_memory_at_without_audit,
     },
 };
 
@@ -40,6 +40,23 @@ pub(crate) fn precheck_at(
     input: PrecheckInput,
     now: OffsetDateTime,
 ) -> Result<Vec<PrecheckWarning>> {
+    precheck_at_with_audit(conn, input, now, true)
+}
+
+pub(crate) fn precheck_at_without_audit(
+    conn: &Connection,
+    input: PrecheckInput,
+    now: OffsetDateTime,
+) -> Result<Vec<PrecheckWarning>> {
+    precheck_at_with_audit(conn, input, now, false)
+}
+
+fn precheck_at_with_audit(
+    conn: &Connection,
+    input: PrecheckInput,
+    now: OffsetDateTime,
+    append_read_audit: bool,
+) -> Result<Vec<PrecheckWarning>> {
     let requested_path = normalized_path(input.path.as_deref());
     let mut candidates = BTreeMap::<String, PrecheckCandidate>::new();
     let evaluated_at = expiry::format_timestamp(now)?;
@@ -60,21 +77,20 @@ pub(crate) fn precheck_at(
     }
 
     if let Some(query) = lexical_query(&input) {
-        for result in search_memory_at(
-            conn,
-            SearchInput {
-                query,
-                scope_kind: input.scope_kind,
-                path_prefix: requested_path.map(ToOwned::to_owned),
-                limit: 100,
-                include_inactive: false,
-                ..SearchInput::default()
-            },
-            now,
-        )?
-        .into_iter()
-        .filter(is_governance_memory)
-        {
+        let search = SearchInput {
+            query,
+            scope_kind: input.scope_kind,
+            path_prefix: requested_path.map(ToOwned::to_owned),
+            limit: 100,
+            include_inactive: false,
+            ..SearchInput::default()
+        };
+        let results = if append_read_audit {
+            search_memory_at(conn, search, now)?
+        } else {
+            search_memory_at_without_audit(conn, search, now)?
+        };
+        for result in results.into_iter().filter(is_governance_memory) {
             let lexical_score = result.score;
             candidates
                 .entry(result.record.id.clone())
@@ -101,7 +117,9 @@ pub(crate) fn precheck_at(
         .map(|candidate| warning_from_result(candidate.result))
         .collect::<Result<Vec<_>>>()?;
 
-    append_precheck_event(conn, &input, &warnings)?;
+    if append_read_audit {
+        append_precheck_event(conn, &input, &warnings)?;
+    }
     Ok(warnings)
 }
 

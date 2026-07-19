@@ -5,11 +5,14 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     MemoryDestination, MemoryEvent, MemoryLane, MemoryRecord, MemoryStatus, RetentionState,
-    evaluate_current_assertion, evaluate_retention,
+    evaluate_retention,
     events::{AppendEvent, append_event},
 };
 
-use super::{CloseCheckpointCommand, ContinueCheckpointCommand, query};
+use super::{
+    CloseCheckpointCommand, ContinueCheckpointCommand,
+    private_lifecycle_storage::PrivateLifecycleStorage, query,
+};
 
 #[derive(Debug)]
 pub(in crate::service) struct CheckpointLifecycleMutation {
@@ -25,25 +28,10 @@ pub(super) fn checkpoint_for_lifecycle(conn: &Connection, record_id: &str) -> Re
     Ok(record)
 }
 
-pub(super) fn checkpoint_record_version(record: &MemoryRecord) -> Result<String> {
-    ensure_checkpoint_shape(record)?;
-    let encoded = serde_json::to_vec(&json!({
-        "schema": "memzoi/checkpoint-record-version",
-        "record_id": &record.id,
-        "status": record.status.as_str(),
-        "destination": record.destination.as_str(),
-        "lane": record.lane.as_str(),
-        "source_kind": &record.source_kind,
-        "content_hash": &record.content_hash,
-        "updated_at": &record.updated_at,
-        "retention": &record.retention,
-        "origin": &record.origin,
-        "lineage": &record.lineage,
-    }))?;
-    Ok(format!(
-        "memzoi/checkpoint-record:{}",
-        blake3::hash(&encoded).to_hex()
-    ))
+pub(super) fn checkpoint_record_version(conn: &Connection, record_id: &str) -> Result<String> {
+    let record = checkpoint_for_lifecycle(conn, record_id)?;
+    ensure_checkpoint_shape(&record)?;
+    super::private_lifecycle_storage::private_record_version(conn, record_id)
 }
 
 pub(super) fn continue_checkpoint(
@@ -55,23 +43,16 @@ pub(super) fn continue_checkpoint(
 ) -> Result<CheckpointLifecycleMutation> {
     validate_operation(&command.operation_id, &command.expected_version)?;
     let previous = checkpoint_for_lifecycle(conn, &command.checkpoint_id)?;
-    ensure_expected_version(&previous, &command.expected_version)?;
+    ensure_expected_version(conn, &previous, &command.expected_version)?;
+    let previous_version = checkpoint_record_version(conn, &previous.id)?;
     ensure!(
         previous.retention.closed_at.is_none(),
         "checkpoint {} is closed and cannot be reopened",
         previous.id
     );
 
-    let decision = evaluate_current_assertion(
-        &previous.id,
-        previous.status,
-        previous.lane,
-        &previous.retention,
-        now,
-        Vec::new(),
-    )?;
     ensure!(
-        decision.is_current,
+        query::checkpoint_record(conn, &previous.id, now)?.is_some(),
         "checkpoint {} is not a current assertion and cannot be continued",
         previous.id
     );
@@ -93,8 +74,7 @@ pub(super) fn continue_checkpoint(
     retention.last_continued_at = Some(timestamp.to_owned());
     update_retention(conn, &previous.id, &retention, timestamp)?;
     let record = checkpoint_for_lifecycle(conn, &previous.id)?;
-    let previous_version = checkpoint_record_version(&previous)?;
-    let record_version = checkpoint_record_version(&record)?;
+    let record_version = checkpoint_record_version(conn, &record.id)?;
     let event = append_event(
         conn,
         AppendEvent {
@@ -127,7 +107,14 @@ pub(super) fn close_checkpoint(
 ) -> Result<CheckpointLifecycleMutation> {
     validate_operation(&command.operation_id, &command.expected_version)?;
     let previous = checkpoint_for_lifecycle(conn, &command.checkpoint_id)?;
-    ensure_expected_version(&previous, &command.expected_version)?;
+    ensure_expected_version(conn, &previous, &command.expected_version)?;
+    let previous_version = checkpoint_record_version(conn, &previous.id)?;
+    let lifecycle = PrivateLifecycleStorage::new(conn).require_state(&previous.id)?;
+    ensure!(
+        !lifecycle.quarantined,
+        "checkpoint {} is quarantined and cannot be closed",
+        previous.id
+    );
     ensure!(
         previous.status == MemoryStatus::Active,
         "checkpoint {} has lifecycle status {} and cannot be closed",
@@ -151,8 +138,7 @@ pub(super) fn close_checkpoint(
     retention.closed_at = Some(timestamp.to_owned());
     update_retention(conn, &previous.id, &retention, timestamp)?;
     let record = checkpoint_for_lifecycle(conn, &previous.id)?;
-    let previous_version = checkpoint_record_version(&previous)?;
-    let record_version = checkpoint_record_version(&record)?;
+    let record_version = checkpoint_record_version(conn, &record.id)?;
     let event = append_event(
         conn,
         AppendEvent {
@@ -177,16 +163,23 @@ pub(super) fn close_checkpoint(
 }
 
 pub(super) fn ensure_successor_predecessor(
+    conn: &Connection,
     record: &MemoryRecord,
     expected_version: &str,
     now: OffsetDateTime,
 ) -> Result<()> {
-    ensure_expected_version(record, expected_version)?;
+    ensure_expected_version(conn, record, expected_version)?;
     ensure!(
         record.status == MemoryStatus::Active,
         "checkpoint {} has lifecycle status {} and cannot be succeeded",
         record.id,
         record.status.as_str()
+    );
+    let lifecycle = PrivateLifecycleStorage::new(conn).require_state(&record.id)?;
+    ensure!(
+        !lifecycle.quarantined,
+        "checkpoint {} is quarantined and cannot be succeeded",
+        record.id
     );
     let retention = evaluate_retention(&record.id, record.lane, &record.retention, now)?;
     ensure!(
@@ -197,8 +190,12 @@ pub(super) fn ensure_successor_predecessor(
     Ok(())
 }
 
-pub(super) fn ensure_expected_version(record: &MemoryRecord, expected: &str) -> Result<()> {
-    let actual = checkpoint_record_version(record)?;
+pub(super) fn ensure_expected_version(
+    conn: &Connection,
+    record: &MemoryRecord,
+    expected: &str,
+) -> Result<()> {
+    let actual = checkpoint_record_version(conn, &record.id)?;
     if actual != expected {
         bail!(
             "checkpoint {} version mismatch: expected {}, current {}",
@@ -288,8 +285,15 @@ mod tests {
     fn continuation_changes_version_and_exact_boundary_is_rejected() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         db::init_database(&conn)?;
+        crate::retention::register_sqlite_functions(&conn)?;
         let original = checkpoint(&conn, "continuation", "2026-07-01T00:00:00Z");
-        let initial_version = checkpoint_record_version(&original)?;
+        let initial_version = checkpoint_record_version(&conn, &original.id)?;
+        assert_eq!(initial_version.len(), 32);
+        assert!(
+            initial_version
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
         let continued = continue_checkpoint(
             &conn,
             "owner",
@@ -303,7 +307,7 @@ mod tests {
         )?;
         assert!(continued.applied);
         assert_ne!(
-            checkpoint_record_version(&continued.record)?,
+            checkpoint_record_version(&conn, &continued.record.id)?,
             initial_version
         );
         assert_eq!(
@@ -318,7 +322,7 @@ mod tests {
             &ContinueCheckpointCommand {
                 operation_id: "continue-at-boundary".to_owned(),
                 checkpoint_id: boundary.id.clone(),
-                expected_version: checkpoint_record_version(&boundary)?,
+                expected_version: checkpoint_record_version(&conn, &boundary.id)?,
             },
             at("2026-07-03T00:00:00Z"),
             "2026-07-03T00:00:00Z",
@@ -329,9 +333,75 @@ mod tests {
     }
 
     #[test]
+    fn quarantined_checkpoint_cannot_be_continued_closed_or_succeeded() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        db::init_database(&conn)?;
+        crate::retention::register_sqlite_functions(&conn)?;
+        let original = checkpoint(&conn, "quarantined", "2026-07-01T00:00:00Z");
+        conn.execute(
+            "UPDATE private_lifecycle_state
+             SET quarantined = 1,
+                 quarantine_reason_code = 'owner_quarantine',
+                 quarantine_event_id = 'event-quarantine'
+             WHERE record_id = ?1",
+            [&original.id],
+        )?;
+        let version = checkpoint_record_version(&conn, &original.id)?;
+
+        let error = continue_checkpoint(
+            &conn,
+            "owner",
+            &ContinueCheckpointCommand {
+                operation_id: "continue-quarantined".to_owned(),
+                checkpoint_id: original.id.clone(),
+                expected_version: version.clone(),
+            },
+            at("2026-07-01T12:00:00Z"),
+            "2026-07-01T12:00:00Z",
+        )
+        .expect_err("quarantined checkpoint must not be continued");
+        assert!(format!("{error:#}").contains("not a current assertion"));
+
+        let error = close_checkpoint(
+            &conn,
+            "owner",
+            &CloseCheckpointCommand {
+                operation_id: "close-quarantined".to_owned(),
+                checkpoint_id: original.id.clone(),
+                expected_version: version.clone(),
+            },
+            at("2026-07-01T12:00:00Z"),
+            "2026-07-01T12:00:00Z",
+        )
+        .expect_err("quarantined checkpoint must not be closed");
+        assert!(format!("{error:#}").contains("quarantined"));
+        assert_eq!(checkpoint_record_version(&conn, &original.id)?, version);
+        assert!(
+            checkpoint_for_lifecycle(&conn, &original.id)?
+                .retention
+                .closed_at
+                .is_none()
+        );
+        let close_events: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM event_log
+             WHERE record_id = ?1 AND event_type = 'memory.checkpoint_closed'",
+            [&original.id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(close_events, 0);
+
+        let error =
+            ensure_successor_predecessor(&conn, &original, &version, at("2026-07-03T00:00:00Z"))
+                .expect_err("quarantined checkpoint must not be used as a successor predecessor");
+        assert!(format!("{error:#}").contains("quarantined"));
+        Ok(())
+    }
+
+    #[test]
     fn closure_is_terminal_and_state_idempotent() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         db::init_database(&conn)?;
+        crate::retention::register_sqlite_functions(&conn)?;
         let original = checkpoint(&conn, "closure", "2026-07-01T00:00:00Z");
         let closed = close_checkpoint(
             &conn,
@@ -339,7 +409,7 @@ mod tests {
             &CloseCheckpointCommand {
                 operation_id: "close-1".to_owned(),
                 checkpoint_id: original.id.clone(),
-                expected_version: checkpoint_record_version(&original)?,
+                expected_version: checkpoint_record_version(&conn, &original.id)?,
             },
             at("2026-07-01T01:00:00Z"),
             "2026-07-01T01:00:00Z",
@@ -350,7 +420,7 @@ mod tests {
             Some("2026-07-01T01:00:00Z")
         );
 
-        let closed_version = checkpoint_record_version(&closed.record)?;
+        let closed_version = checkpoint_record_version(&conn, &closed.record.id)?;
         let repeated = close_checkpoint(
             &conn,
             "owner",
@@ -363,7 +433,10 @@ mod tests {
             "2026-07-01T02:00:00Z",
         )?;
         assert!(!repeated.applied);
-        assert_eq!(checkpoint_record_version(&repeated.record)?, closed_version);
+        assert_eq!(
+            checkpoint_record_version(&conn, &repeated.record.id)?,
+            closed_version
+        );
 
         let error = continue_checkpoint(
             &conn,
@@ -385,11 +458,17 @@ mod tests {
     fn successor_requires_terminal_predecessor_and_preserves_lineage() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         db::init_database(&conn)?;
+        crate::retention::register_sqlite_functions(&conn)?;
         let predecessor = checkpoint(&conn, "predecessor", "2026-07-01T00:00:00Z");
-        let active_version = checkpoint_record_version(&predecessor)?;
+        let active_version = checkpoint_record_version(&conn, &predecessor.id)?;
         assert!(
-            ensure_successor_predecessor(&predecessor, &active_version, at("2026-07-01T01:00:00Z"))
-                .is_err()
+            ensure_successor_predecessor(
+                &conn,
+                &predecessor,
+                &active_version,
+                at("2026-07-01T01:00:00Z")
+            )
+            .is_err()
         );
         let closed = close_checkpoint(
             &conn,
@@ -403,8 +482,9 @@ mod tests {
             "2026-07-01T01:00:00Z",
         )?;
         ensure_successor_predecessor(
+            &conn,
             &closed.record,
-            &checkpoint_record_version(&closed.record)?,
+            &checkpoint_record_version(&conn, &closed.record.id)?,
             at("2026-07-01T01:00:00Z"),
         )?;
 

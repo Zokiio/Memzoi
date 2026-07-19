@@ -168,8 +168,19 @@ impl<'a> SessionEndRouteApply<'a> {
                 OriginLookup::Unseen => match artifact_state(self.paths, &journal)? {
                     ArtifactState::NoneInstalled => remove_journal(self.paths, &journal)?,
                     ArtifactState::AllInstalled => {
+                        let evaluated_at = time::OffsetDateTime::parse(
+                            &journal.evaluated_at,
+                            &time::format_description::well_known::Rfc3339,
+                        )
+                        .context("session-end recovery journal evaluated_at is invalid")?;
                         let checkpoint = RuntimeRecords::new(self.shared_conn)
-                            .checkpoint_for_lifecycle(&journal.checkpoint_id)?;
+                            .checkpoint(&journal.checkpoint_id, evaluated_at)?
+                            .with_context(|| {
+                                format!(
+                                    "checkpoint {} is not eligible for ordinary session-end recovery",
+                                    journal.checkpoint_id
+                                )
+                            })?;
                         let document = crate::parse_session_end_document(&checkpoint.body)?;
                         let command = SessionEndFromCheckpointCommand {
                             operation_id: journal.operation_id.clone(),
@@ -357,6 +368,28 @@ impl<'a> SessionEndRouteApply<'a> {
             .transpose()?
             .unwrap_or_else(|| self.clock.now_utc());
         let timestamp = expiry::format_timestamp(evaluated_at)?;
+        if let Some(checkpoint) = checkpoint_promotion.as_ref() {
+            let record = RuntimeRecords::new(self.shared_conn)
+                .checkpoint(&checkpoint.checkpoint_id, evaluated_at)?
+                .with_context(|| {
+                    format!(
+                        "checkpoint {} is not eligible for ordinary session-end promotion",
+                        checkpoint.checkpoint_id
+                    )
+                })?;
+            let stored_document = crate::parse_session_end_document(&record.body)?;
+            anyhow::ensure!(
+                stored_document == document,
+                "session-end document does not match checkpoint {}",
+                checkpoint.checkpoint_id
+            );
+            anyhow::ensure!(
+                RuntimeRecords::new(self.shared_conn).checkpoint_record_version(&record.id)?
+                    == checkpoint.expected_version,
+                "checkpoint {} version mismatch before session-end promotion",
+                checkpoint.checkpoint_id
+            );
+        }
         let pending_root = self.paths.proposals_dir().join("pending");
         let mut reserved_proposal_ids = if has_repo_writes {
             proposal_packets.prepare_identity_space()?
@@ -612,7 +645,8 @@ impl<'a> SessionEndRouteApply<'a> {
                 )?;
                 let promotion =
                     successful_session_end_result(&document, &repo_writes, &runtime_writes)?;
-                let record_version = RuntimeRecords::checkpoint_record_version(&mutation.record)?;
+                let record_version =
+                    RuntimeRecords::new(&tx).checkpoint_record_version(&mutation.record.id)?;
                 let summary_event = append_event(
                     &tx,
                     AppendEvent {

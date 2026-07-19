@@ -27,8 +27,9 @@ use serde_json::json;
 use crate::{
     cli::{
         CaptureCommands, CheckpointCommands, Cli, Commands, DraftCommand, EvalCommands,
-        EventCommands, ImportCommands, IntegrateCommands, LocalCommands, MaintenanceCommands,
-        MaterializeCommands, McpCommands, ProposalCommands, ProposalFileCommands, SafetyCommands,
+        EventCommands, ImportCommands, IntegrateCommands, LifecycleCommands,
+        LifecycleInspectCommands, LocalCommands, MaintenanceCommands, MaterializeCommands,
+        McpCommands, ProposalCommands, ProposalFileCommands, SafetyCommands,
     },
     eval, integrate, mcp,
     output::{print_json, print_jsonl_row},
@@ -36,6 +37,7 @@ use crate::{
 };
 
 mod capture;
+mod lifecycle;
 mod maintenance;
 mod materialize;
 mod proposal_files;
@@ -771,6 +773,37 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 output,
                 json,
             } => maintenance::plan_command(record_ids, evaluated_at, output, json),
+        },
+        Commands::Lifecycle { command } => match command {
+            LifecycleCommands::Plan {
+                record_ids,
+                evaluated_at,
+                output,
+                json,
+            } => lifecycle::plan_command(record_ids, evaluated_at, output, json),
+            LifecycleCommands::Authorize {
+                request_file,
+                plan_file,
+                expires_at,
+                json,
+            } => lifecycle::authorize_command(request_file, plan_file, expires_at, json),
+            LifecycleCommands::Revoke { grant_id, json } => {
+                lifecycle::revoke_command(&grant_id, json)
+            }
+            LifecycleCommands::Inspect { command } => match command {
+                LifecycleInspectCommands::Record { record_id, json } => {
+                    lifecycle::inspect_record_command(&record_id, json)
+                }
+                LifecycleInspectCommands::Grant { grant_id, json } => {
+                    lifecycle::inspect_grant_command(&grant_id, json)
+                }
+            },
+            LifecycleCommands::Apply {
+                request_file,
+                grant_id,
+                plan_file,
+                json,
+            } => lifecycle::apply_command(request_file, &grant_id, plan_file, json),
         },
         Commands::Materialize { command } => match command {
             MaterializeCommands::Plan {
@@ -1666,7 +1699,7 @@ fn checkpoint_command_result_json(
     service: &MemoryService,
     result: &memzoi_core::CheckpointCommandResult,
 ) -> Result<serde_json::Value> {
-    let record = service.inspect_checkpoint(&result.checkpoint_id)?;
+    let record = service.checkpoint_for_owner_operation(&result.checkpoint_id)?;
     let mut value = runtime_record_json(&record);
     let object = value
         .as_object_mut()
@@ -1765,7 +1798,7 @@ fn session_end_command(
             let operation_id = checkpoint_operation_id(operation_id, as_json)?;
             let expected_version =
                 checkpoint_expected_version(&service, &record_id, expected_version, as_json)?;
-            let checkpoint = service.inspect_checkpoint(&record_id)?;
+            let checkpoint = service.checkpoint_for_owner_operation(&record_id)?;
             (
                 parse_session_end_document(&checkpoint.body)?,
                 json!({

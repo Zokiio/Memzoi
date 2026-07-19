@@ -17,6 +17,7 @@ mod models;
 mod okf;
 mod origin;
 mod precheck;
+mod private_lifecycle;
 mod proposals;
 mod recall_candidate_eval;
 mod recall_competitor_eval;
@@ -123,6 +124,7 @@ pub use origin::{
     record_origin_outcome,
 };
 pub use precheck::PrecheckInput;
+pub use private_lifecycle::*;
 pub use proposals::{
     MemoryDraft, Proposal, ProposalStatus, ProposalStatusFilter, SupersedeResult, ValidationIssue,
     ValidationResult,

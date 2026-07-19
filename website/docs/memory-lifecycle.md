@@ -131,9 +131,10 @@ The current retention policy applies these boundaries:
 
 - session: the earliest of closure, 24 hours after the latest continuation or
   start, seven days after the original start, and explicit expiry;
-- episodic: 30 days after occurrence, shortened by explicit expiry; extension
-  facts remain unsupported until #121 provides exact owner-authorized creation
-  and verification; and
+- episodic: 30 days after occurrence, shortened by explicit expiry; an exact
+  owner-authorized private lifecycle action may extend automatic recall, but
+  never later than 90 days after occurrence and without changing validity or
+  physical retention; and
 - semantic and procedural: no age TTL, while explicit expiry still applies.
 
 The exact boundary is `query_only`. All timestamps are RFC 3339 instants with
@@ -142,9 +143,11 @@ the record; they are never treated as an ordinary non-current result.
 
 Retention evaluation is not an implicit lifecycle write. Memzoi leaves the
 record and canonical `.memzoi/records/*.md` file unchanged during recall. Use
-`memzoi expiry <record-id>` (or MCP `inspect_memory_expiry`) to retrieve a
-record by ID and inspect its retention decision, current assertion, and
-exclusions. Renewal and status transitions remain explicit lifecycle actions.
+`memzoi expiry <record-id>` (or MCP `inspect_memory_expiry`) for ordinary
+repository-record expiry inspection. Only explicit local CLI
+`memzoi lifecycle inspect record <record-id>` may retrieve quarantined or
+superseded private history. Renewal and status transitions remain explicit
+lifecycle actions.
 
 ## Command boundary
 
@@ -165,9 +168,13 @@ command's JSON output, event, or database row does not change what it writes.
 | **DB proposal-state writers (not file/canonical writers)** | `memzoi propose`; `memzoi approve <proposal-id>`; `memzoi reject <proposal-id>` | Create or change proposal state in the runtime database. `propose` without `--apply` never writes a canonical record; approval alone never writes one. |
 | **Runtime local/session writers** | `memzoi local add`; `memzoi checkpoint add`; `memzoi session-end ...` with `local` or `session` candidates | Write private runtime rows under the project runtime directory. Session candidates become checkpoints and require `type: episode` plus `lane: session`; neither route writes a Git record. |
 |  | `memzoi capture apply ...` with an accepted or edited `local`/`session` candidate | Write a private runtime record with capture evidence and review provenance. It is never routed through a repo proposal by this command. |
+| **Private lifecycle evidence and inspection** | `memzoi lifecycle plan`; `memzoi lifecycle inspect record`; `memzoi lifecycle inspect grant` | Strictly read-only. Private plan output is content-free and may be installed only at a caller-selected path outside the Git worktree and all Memzoi-managed runtime directories. Explicit record inspection is the only route that may return quarantined or superseded private history. |
+| **Private lifecycle authority** | `memzoi lifecycle authorize` | Validate the exact request, optional source plan, policy, scope, lane, and version bindings, then create only one `owner_action_grant` row. It performs no private-record or lifecycle change. |
+|  | `memzoi lifecycle revoke` | Update only `owner_action_grant`; it never rewrites private records, lifecycle state, relations, receipts, or audit events. |
+| **Private lifecycle execution** | `memzoi lifecycle apply` | Atomically consume exactly one active grant and apply its complete action group. This is the only command that mutates private records, lifecycle state or relations, ordinary-read eligibility, lifecycle application receipts, or lifecycle audit events. Any failed revalidation rolls back the complete group and leaves the grant unconsumed. |
 | **No-write outcomes** | `discard` or `needs_review` candidates in `memzoi session-end` | Write neither a canonical record, pending proposal file, nor runtime memory row. `discard` is skipped; `needs_review` is blocked until a human decides. |
 |  | `memzoi capture plan`; `memzoi capture review`; MCP `plan_capture` | Do not write memory state. CLI `--output` may write a classified plan/review artifact to an allowed caller-selected path outside `.memzoi`, private runtime state, and generated exports; MCP never writes an artifact. |
-|  | `memzoi maintenance plan`; MCP `plan_maintenance_v1` | Read canonical repository records directly and emit an immutable report/candidate artifact. They do not open a writable service or mutate records, proposals, indexes, overlays, private runtime, WAL/event logs, or Git. CLI `--output` is the sole optional write and must be outside the Git worktree and all managed runtime roots; MCP never writes an artifact. |
+|  | `memzoi maintenance plan`; MCP `plan_maintenance` | Read canonical repository records directly and emit an immutable report/candidate artifact. They do not open a writable service or mutate records, proposals, indexes, overlays, private runtime, WAL/event logs, or Git. CLI `--output` is the sole optional write and must be outside the Git worktree and all managed runtime roots; MCP never writes an artifact. |
 |  | Rejected, deferred, duplicate, conflicting, blocked, or unresolved capture candidates | Write no proposal, canonical record, or runtime record. A stale source, inventory, policy, plan ID, or review ID also fails before writes. |
 | **Operational runtime state** | `memzoi init`; `memzoi rebuild`; `memzoi export`; event recording used by normal operations | Initialize/update bundle directories including `.memzoi/` and `.memzoi/records/`, runtime SQLite/configuration, derived indexes, event rows, and generated files under the runtime project directory. These are operational or derived state, not canonical memory records. `rebuild` reads canonical Git records; it does not write them. |
 | **Non-memory integration-file writes** | `memzoi integrate instructions [--file <path>]` | Update or create an agent instruction file such as `AGENTS.md` or `CLAUDE.md` (or the explicit file). This is an integration-file write, not a canonical memory or proposal write. `memzoi integrate prompt` and `integrate list` print information only. |
@@ -194,13 +201,89 @@ the full set and choose no winner. Staleness and expiry are report-only, and a
 renewal candidate never extends or otherwise changes its predecessor's
 retention.
 
-The schema can represent repository materialization, private derived state, and
-owner-authorized private mutation as separate groups, with no cross-storage
-transaction. The #120 surface is narrower: CLI and MCP planning are
-repository-only. Internal private snapshot support is allowed only when needed
-to shape the shared artifact or test execution-domain separation; no private
-CLI/MCP output, private persistence, or mutation path is exposed. Private
-release controls remain in #116–#118, and all execution remains in #121–#123.
+The current contract is `maintenance-plan/2`; the stable artifact identifiers
+remain `memzoi/maintenance-request` and `memzoi/maintenance-plan`. Repository
+CLI and MCP planning remain repository-only and read-only. The separate local
+`memzoi lifecycle plan` command uses the same v2 contract over private runtime
+snapshots, with opaque IDs and random version tokens instead of bodies or
+titles. Neither detector selects a duplicate keeper or contradiction winner;
+only an exact owner request may make that choice.
+
+Memzoi is pre-1.0 and current-schema-only. V1 maintenance artifacts and old
+SQLite schemas are rejected before any write. There are no compatibility
+readers, schema aliases, fallbacks, or automatic migrations; manually remove
+or regenerate incompatible runtime databases and artifacts before retrying.
+
+## Exact owner-authorized private lifecycle
+
+Private lifecycle changes follow one explicit authority chain:
+
+```text
+plan = evidence
+request = exact owner intent
+grant = temporary one-shot authority
+apply = revalidation + atomic execution
+result = idempotent receipt
+```
+
+`memzoi lifecycle plan` is optional evidence. It is deterministic for a fixed
+snapshot and evaluation time, contains no private body or title, and never
+chooses a duplicate keeper or contradiction winner. The owner supplies a
+strict `memzoi/private-lifecycle-request` with a caller-controlled
+`operation_id`, recomputable `request_id`, direct or selected-plan source, one
+to 64 tagged actions, and exact random version tokens for every target and
+evidence record. A request may touch at most 256 distinct mutation targets,
+and a record may not participate in overlapping actions.
+
+`authorize` captures its own system-clock instant. An optional requested
+expiry may only shorten authority; a grant expires at the earliest of 24 hours
+after authorization, the requested expiry, and the source plan's `not_after`.
+An identical active grant is reused. The stored `owner_action_grant` row—not
+printed JSON—is authoritative for active, revoked, consumed, and expired
+state. `revoke` is idempotent for already-revoked or consumed grants.
+
+`apply` holds the lifecycle lock and uses one shared SQLite transaction. It
+checks operation replay or conflict, the authoritative grant, exact request and
+plan binding, policy and lane rules, the complete comparison neighbourhood,
+and every target/evidence version before changing anything. A successful
+transaction applies the whole action group, writes one content-free event and
+one replayable receipt, consumes the grant, and advances the shared lifecycle
+generation. Any stale, unauthorized, expired, revoked, overlapping, or
+partially invalid request performs zero lifecycle writes and leaves the grant
+unconsumed. Reusing an `operation_id` with the same `request_id` returns the
+recorded result; reusing it with another request is a zero-write conflict.
+
+The action rules preserve independent clocks and owner choice:
+
+- automatic episodic recall may extend only through 90 days after occurrence;
+  validity extension requires a later existing finite boundary and rejects
+  session records; `retain_until` may only increase;
+- indefinite pinning accepts episodic, semantic, and procedural records but
+  not session records; unpinning preserves any finite retention boundary;
+- renewal uses distinct fresh accepted evidence to promote that evidence and
+  supersede an expired semantic/procedural predecessor, without creating a
+  third record;
+- correction creates a classification-preserving replacement; supersession
+  requires compatible existing records;
+- consolidation and contradiction resolution revalidate the complete member
+  set and preserve the owner's explicit keeper or winner; and
+- quarantine preserves content and history while excluding the record from
+  ordinary reads; release removes only quarantine.
+
+`shared.db` is authoritative and every worktree mirror records the lifecycle
+generation it reflects. Mirror-backed reads compare generations before serving
+results, refresh on mismatch, and fail with a mirror-refresh-required error if
+convergence cannot be completed. Exact apply replay also retries convergence,
+so a committed quarantine or eligibility change is never served from a stale
+mirror.
+
+Lifecycle audit events are deliberately content-free: they may contain only
+random grant/application IDs, operation IDs, action kinds, opaque target IDs,
+and timestamps. They never contain private bodies or titles, evidence text or
+IDs, provenance payloads, request digests, content hashes, or content-derived
+versions. Private planning, authority, inspection, and execution are local
+CLI/core only; MCP exposes repository-only `plan_maintenance` and no private
+lifecycle tool.
 
 
 ## Git-native materialization and Git review
@@ -372,8 +455,10 @@ automatic write from runtime state. A `needs_review` candidate stops before
 any write and requires a human decision; a `discard` candidate is intentionally
 lost.
 
-MCP clients can propose and recall memory but cannot apply canonical records.
-Use the CLI-side review/apply workflow for durable Git writes. See
+MCP clients can recall repository memory and create read-only capture and
+repository-maintenance plans, but they cannot create proposal state or apply
+canonical records. Proposal creation, review, and apply remain local CLI/core
+workflows for durable Git writes. See
 [MCP and agent integration](./mcp-and-agent-integration.md) for that boundary.
 
 ## Runtime local and session continuity

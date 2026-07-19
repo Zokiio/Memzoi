@@ -15,7 +15,9 @@ use crate::{MemoryPaths, db, okf, repository_io};
 
 use super::{
     canonical_write::{CanonicalFileWrite, FileWriteMode},
-    runtime_records::{RuntimeRecordSnapshot, RuntimeRecords},
+    runtime_records::{
+        RuntimeRecordSnapshot, RuntimeRecords, lifecycle_generation, set_lifecycle_generation,
+    },
     safe_files::{RepoLifecycleLock, sync_directory},
 };
 
@@ -142,6 +144,22 @@ pub(super) fn refresh_index_mirrors(
     refresh_index_mirrors_locked(paths, shared, index)
 }
 
+pub(super) fn ensure_read_only_lifecycle_snapshot_ready(paths: &MemoryPaths) -> Result<()> {
+    if shared_sync_journal_entry_exists(paths)? {
+        bail!(
+            "read-only lifecycle access requires shared runtime recovery; run a normal Memzoi command first"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_read_only_mirror_ready(shared: &Connection, index: &Connection) -> Result<()> {
+    if !runtime_mirror_revisions_match(shared, index)? {
+        bail!("mirror refresh required before read-only access");
+    }
+    Ok(())
+}
+
 pub(super) fn refresh_index_mirrors_locked(
     paths: &MemoryPaths,
     shared: &Connection,
@@ -152,8 +170,11 @@ pub(super) fn refresh_index_mirrors_locked(
         return Ok(());
     }
     let shared_revision = ensure_runtime_mirror_revision(shared)?;
+    let shared_lifecycle_generation = lifecycle_generation(shared)?;
     let shared_records = RuntimeRecords::new(shared).snapshots()?;
     let indexed_records = RuntimeRecords::new(index).snapshots()?;
+    let shared_lifecycle_events = read_private_lifecycle_authority_events(shared)?;
+    let indexed_lifecycle_events = read_private_lifecycle_authority_events(index)?;
     let non_runtime_ids = RuntimeRecords::new(index)
         .indexed_non_runtime_record_ids()?
         .into_iter()
@@ -178,12 +199,26 @@ pub(super) fn refresh_index_mirrors_locked(
     let indexed_proposals = read_proposals(index)?;
 
     let tx = index.unchecked_transaction()?;
+    // Runtime records may carry cross-record supersession/lineage foreign
+    // keys. The complete authoritative snapshot is installed atomically, so
+    // validate those references at commit rather than making ID sort order a
+    // hidden materialization constraint.
+    tx.pragma_update(None, "defer_foreign_keys", "ON")
+        .context("failed to defer runtime mirror foreign keys")?;
     if shared_records != indexed_records {
         tx.execute(
             "DELETE FROM memory_record WHERE destination IN ('local', 'session')",
             [],
         )?;
         RuntimeRecords::new(&tx).restore_snapshots(&shared_records)?;
+    }
+    if shared_lifecycle_events != indexed_lifecycle_events {
+        tx.execute(
+            "DELETE FROM event_log
+             WHERE event_type = 'memory.private_lifecycle_applied'",
+            [],
+        )?;
+        insert_events_exact(&tx, &shared_lifecycle_events)?;
     }
     if shared_proposals != indexed_proposals {
         replace_proposals(&tx, &shared_proposals)?;
@@ -193,6 +228,10 @@ pub(super) fn refresh_index_mirrors_locked(
     if current_shared_revision != shared_revision {
         bail!("shared runtime mirror revision changed during reconciliation");
     }
+    if lifecycle_generation(shared)? != shared_lifecycle_generation {
+        bail!("shared private lifecycle generation changed during reconciliation");
+    }
+    set_lifecycle_generation(&tx, shared_lifecycle_generation)?;
     set_runtime_mirror_revision(&tx, &shared_revision)?;
     tx.commit()?;
     Ok(())
@@ -220,7 +259,13 @@ fn runtime_mirror_revision(conn: &Connection) -> Result<Option<String>> {
 
 fn runtime_mirror_revisions_match(shared: &Connection, index: &Connection) -> Result<bool> {
     let shared_revision = runtime_mirror_revision(shared)?;
-    Ok(shared_revision.is_some() && shared_revision == runtime_mirror_revision(index)?)
+    Ok(shared_revision.is_some()
+        && shared_revision == runtime_mirror_revision(index)?
+        && lifecycle_generations_match(shared, index)?)
+}
+
+pub(super) fn lifecycle_generations_match(shared: &Connection, index: &Connection) -> Result<bool> {
+    Ok(lifecycle_generation(shared)? == lifecycle_generation(index)?)
 }
 
 fn ensure_runtime_mirror_revision(conn: &Connection) -> Result<String> {
@@ -1002,6 +1047,30 @@ fn read_events_for_record_ids(
     Ok(events)
 }
 
+fn read_private_lifecycle_authority_events(conn: &Connection) -> Result<Vec<EventRow>> {
+    let mut statement = conn.prepare(
+        "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
+         FROM event_log
+         WHERE event_type = 'memory.private_lifecycle_applied'
+           AND id IN (
+             SELECT automatic_recall_event_id
+             FROM private_lifecycle_state
+             WHERE automatic_recall_until IS NOT NULL
+             UNION
+             SELECT validity_event_id
+             FROM private_lifecycle_state
+             WHERE validity_until IS NOT NULL
+             UNION
+             SELECT quarantine_event_id
+             FROM private_lifecycle_state
+             WHERE quarantined = 1
+           )
+         ORDER BY created_at, id",
+    )?;
+    let rows = statement.query_map([], event_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn read_proposal_apply_events(conn: &Connection, proposal_id: &str) -> Result<Vec<EventRow>> {
     let mut statement = conn.prepare(
         "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
@@ -1231,9 +1300,9 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        InitRequest, LocalMemoryInput, MemoryDraft, MemoryLane, MemoryService, MemoryType,
-        OkfProposalSensitivity, ProposalStatus, RepositoryContentClass, ScopeKind, Visibility,
-        proposals,
+        ContextPackInput, InitRequest, LocalMemoryInput, MemoryDraft, MemoryLane, MemoryService,
+        MemoryType, OkfProposalSensitivity, ProposalStatus, RepositoryContentClass, ScopeKind,
+        Visibility, proposals,
     };
 
     use super::*;
@@ -1627,6 +1696,313 @@ mod tests {
             RuntimeRecords::new(&index).tags(&record.id)?,
             vec!["revision-tracked"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mirror_copies_lifecycle_state_and_relations_but_not_authority() -> Result<()> {
+        use crate::service::runtime_records::{
+            OwnerActionGrantRow, OwnerActionGrantState, PrivateLifecycleRelation,
+            PrivateLifecycleRelationKind, PrivateLifecycleStorage,
+        };
+
+        let project = TempDir::new()?;
+        let runtime_home = TempDir::new()?;
+        let paths = MemoryPaths::with_runtime_home(
+            project.path().canonicalize()?,
+            runtime_home.path().to_path_buf(),
+        );
+        MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
+        let shared = db::open_database(&paths.shared_db_path)?;
+        db::init_database(&shared)?;
+        let index = db::open_database(&paths.index_db_path)?;
+        db::init_database(&index)?;
+
+        let subject = RuntimeRecords::new(&shared).create_local(
+            "agent:lifecycle-mirror-test",
+            &LocalMemoryInput {
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                title: "Lifecycle mirror subject".to_owned(),
+                body: "Lifecycle state and relations are authoritative shared facts.".to_owned(),
+            },
+            "2026-07-19T10:00:00Z",
+        )?;
+        let related = RuntimeRecords::new(&shared).create_local(
+            "agent:lifecycle-mirror-test",
+            &LocalMemoryInput {
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                title: "Lifecycle mirror successor".to_owned(),
+                body: "The related endpoint must be restored before its relation.".to_owned(),
+            },
+            "2026-07-19T10:00:00Z",
+        )?;
+        refresh_index_mirrors(&paths, &shared, &index)?;
+
+        shared.execute(
+            "UPDATE private_lifecycle_state
+             SET quarantined = 1,
+                 quarantine_reason_code = 'owner_review',
+                 quarantine_event_id = 'event-quarantine-1',
+                 updated_at = '2026-07-19T10:30:00Z'
+             WHERE record_id = ?1",
+            [&subject.id],
+        )?;
+        let relation = PrivateLifecycleRelation {
+            id: "relation-lifecycle-mirror".to_owned(),
+            relation_kind: PrivateLifecycleRelationKind::SupersededBy,
+            subject_record_id: subject.id.clone(),
+            related_record_id: related.id.clone(),
+            application_id: "application-lifecycle-mirror".to_owned(),
+            created_at: "2026-07-19T10:30:00Z".to_owned(),
+        };
+        PrivateLifecycleStorage::new(&shared).insert_relation(&relation)?;
+        assert!(!lifecycle_generations_match(&shared, &index)?);
+
+        refresh_index_mirrors(&paths, &shared, &index)?;
+        assert!(runtime_mirror_revisions_match(&shared, &index)?);
+        let shared_store = PrivateLifecycleStorage::new(&shared);
+        let index_store = PrivateLifecycleStorage::new(&index);
+        assert_eq!(
+            index_store.require_state(&subject.id)?,
+            shared_store.require_state(&subject.id)?
+        );
+        assert_eq!(
+            index_store.relations_for_record(&subject.id)?,
+            vec![relation]
+        );
+
+        let generation_before_grant = lifecycle_generation(&shared)?;
+        let revision_before_grant = runtime_mirror_revision(&shared)?;
+        shared_store.insert_grant(&OwnerActionGrantRow {
+            grant_id: "grant-shared-only".to_owned(),
+            request_id: "request-shared-only".to_owned(),
+            request_json: r#"{"request_id":"request-shared-only"}"#.to_owned(),
+            state: OwnerActionGrantState::Active,
+            authorized_at: "2026-07-19T10:30:00Z".to_owned(),
+            expires_at: "2026-07-19T11:30:00Z".to_owned(),
+            revoked_at: None,
+            consumed_at: None,
+            consumed_application_id: None,
+        })?;
+        assert_eq!(lifecycle_generation(&shared)?, generation_before_grant);
+        assert_eq!(runtime_mirror_revision(&shared)?, revision_before_grant);
+        refresh_index_mirrors(&paths, &shared, &index)?;
+        assert!(index_store.grant("grant-shared-only")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_open_rejects_old_shared_or_index_schema_without_database_writes() -> Result<()> {
+        for old_shared in [true, false] {
+            let project = TempDir::new()?;
+            let runtime_home = TempDir::new()?;
+            let paths = MemoryPaths::with_runtime_home(
+                project.path().canonicalize()?,
+                runtime_home.path().to_path_buf(),
+            );
+            MemoryService::initialize_paths(paths.clone(), InitRequest { force: false })?;
+
+            let old_path = if old_shared {
+                &paths.shared_db_path
+            } else {
+                &paths.index_db_path
+            };
+            let old = Connection::open(old_path)?;
+            old.pragma_update(None, "user_version", 1_i64)?;
+            old.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            drop(old);
+
+            let shared_before = fs::read(&paths.shared_db_path)?;
+            let index_before = fs::read(&paths.index_db_path)?;
+            let error =
+                match MemoryService::open_paths_for_private_lifecycle_authority(paths.clone()) {
+                    Ok(_) => bail!("a lifecycle open accepted an old schema"),
+                    Err(error) => error,
+                };
+            assert!(
+                format!("{error:#}").contains("user_version 1"),
+                "unexpected schema rejection: {error:#}"
+            );
+            assert_eq!(fs::read(&paths.shared_db_path)?, shared_before);
+            assert_eq!(fs::read(&paths.index_db_path)?, index_before);
+
+            let unchanged = Connection::open(old_path)?;
+            let actual: i64 =
+                unchanged.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            assert_eq!(actual, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn linked_worktrees_share_grants_and_receipts_without_mirroring_authority() -> Result<()> {
+        use crate::service::runtime_records::{
+            OwnerActionGrantRow, OwnerActionGrantState, PrivateLifecycleApplicationRow,
+            PrivateLifecycleStorage,
+        };
+
+        let (_temp, source_paths, sibling_paths) = linked_worktree_paths_fixture()?;
+        MemoryService::initialize_paths(source_paths.clone(), InitRequest { force: false })?;
+        let source = MemoryService::open_paths(source_paths)?;
+        let sibling = MemoryService::open_paths(sibling_paths)?;
+        assert_eq!(source.paths.shared_db_path, sibling.paths.shared_db_path);
+        assert_ne!(source.paths.index_db_path, sibling.paths.index_db_path);
+
+        RuntimeRecords::new(&source.shared_conn).create_local(
+            "agent:linked-authority-test",
+            &LocalMemoryInput {
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                title: "Shared lifecycle authority".to_owned(),
+                body: "One authority database serves every linked worktree.".to_owned(),
+            },
+            "2026-07-19T10:00:00Z",
+        )?;
+        let source_authority = PrivateLifecycleStorage::new(&source.shared_conn);
+        let grant = OwnerActionGrantRow {
+            grant_id: "grant-linked-authority".to_owned(),
+            request_id: "request-linked-authority".to_owned(),
+            request_json: r#"{"request_id":"request-linked-authority"}"#.to_owned(),
+            state: OwnerActionGrantState::Active,
+            authorized_at: "2026-07-19T10:00:00Z".to_owned(),
+            expires_at: "2026-07-19T11:00:00Z".to_owned(),
+            revoked_at: None,
+            consumed_at: None,
+            consumed_application_id: None,
+        };
+        source_authority.insert_grant(&grant)?;
+        let application = PrivateLifecycleApplicationRow {
+            application_id: "application-linked-authority".to_owned(),
+            operation_id: "operation-linked-authority".to_owned(),
+            request_id: grant.request_id.clone(),
+            grant_id: grant.grant_id.clone(),
+            result_json: r#"{"applied":true}"#.to_owned(),
+            lifecycle_generation: lifecycle_generation(&source.shared_conn)?,
+            applied_at: "2026-07-19T10:05:00Z".to_owned(),
+        };
+        source_authority.insert_application(&application)?;
+        assert!(source_authority.consume_active_grant(
+            &grant.grant_id,
+            &application.application_id,
+            &application.applied_at,
+        )?);
+
+        let sibling_authority = PrivateLifecycleStorage::new(&sibling.shared_conn);
+        assert_eq!(
+            sibling_authority
+                .grant(&grant.grant_id)?
+                .map(|row| row.state),
+            Some(OwnerActionGrantState::Consumed)
+        );
+        assert_eq!(
+            sibling_authority.application_by_operation_id(&application.operation_id)?,
+            Some(application.clone())
+        );
+
+        refresh_index_mirrors(&source.paths, &source.shared_conn, &source.conn)?;
+        refresh_index_mirrors(&sibling.paths, &sibling.shared_conn, &sibling.conn)?;
+        for index in [&source.conn, &sibling.conn] {
+            let mirror = PrivateLifecycleStorage::new(index);
+            assert!(mirror.grant(&grant.grant_id)?.is_none());
+            assert!(
+                mirror
+                    .application_by_operation_id(&application.operation_id)?
+                    .is_none()
+            );
+            assert_eq!(
+                lifecycle_generation(index)?,
+                lifecycle_generation(&source.shared_conn)?
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn linked_worktree_read_refreshes_before_serving_committed_quarantine() -> Result<()> {
+        let (_temp, source_paths, sibling_paths) = linked_worktree_paths_fixture()?;
+        MemoryService::initialize_paths(source_paths.clone(), InitRequest { force: false })?;
+        let source = MemoryService::open_paths(source_paths)?;
+        let sibling = MemoryService::open_paths(sibling_paths)?;
+        let record = source.create_local_memory(
+            "agent:linked-quarantine-test",
+            LocalMemoryInput {
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                title: "Linked quarantine sentinel".to_owned(),
+                body: "A stale sibling mirror must never serve this private record.".to_owned(),
+            },
+        )?;
+
+        let before = sibling.build_context_pack(ContextPackInput {
+            task: "Linked quarantine sentinel".to_owned(),
+            include_local: true,
+            ..ContextPackInput::default()
+        })?;
+        assert!(
+            before
+                .records
+                .iter()
+                .any(|item| item.record.id == record.id),
+            "the sibling did not converge the newly-created private record"
+        );
+
+        let event_id = "event-linked-quarantine";
+        let payload = serde_json::json!({
+            "grant_id": "grant-linked-quarantine",
+            "application_id": "application-linked-quarantine",
+            "operation_id": "operation-linked-quarantine",
+            "action_kinds": ["quarantine"],
+            "target_record_ids": [&record.id],
+            "applied_at": "2026-07-19T10:30:00Z",
+        });
+        let tx = source.shared_conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO event_log(
+               id, event_type, actor, payload_json, record_id, proposal_id, created_at
+             ) VALUES (?1, 'memory.private_lifecycle_applied', 'owner:local-cli', ?2, NULL, NULL, ?3)",
+            rusqlite::params![
+                event_id,
+                serde_json::to_string(&payload)?,
+                "2026-07-19T10:30:00Z"
+            ],
+        )?;
+        tx.execute(
+            "UPDATE private_lifecycle_state
+             SET quarantined = 1,
+                 quarantine_reason_code = 'owner_review',
+                 quarantine_event_id = ?1,
+                 updated_at = ?2
+             WHERE record_id = ?3",
+            rusqlite::params![event_id, "2026-07-19T10:30:00Z", record.id],
+        )?;
+        tx.commit()?;
+        assert!(!lifecycle_generations_match(
+            &source.shared_conn,
+            &sibling.conn
+        )?);
+
+        let after = sibling.build_context_pack(ContextPackInput {
+            task: "Linked quarantine sentinel".to_owned(),
+            include_local: true,
+            ..ContextPackInput::default()
+        })?;
+        assert!(
+            after.records.iter().all(|item| item.record.id != record.id),
+            "the sibling served a quarantined record from its stale mirror"
+        );
+        assert!(lifecycle_generations_match(
+            &source.shared_conn,
+            &sibling.conn
+        )?);
+        let mirrored_event_count: i64 = sibling.conn.query_row(
+            "SELECT COUNT(*) FROM event_log
+             WHERE id = ?1 AND event_type = 'memory.private_lifecycle_applied'",
+            [event_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(mirrored_event_count, 1);
         Ok(())
     }
 

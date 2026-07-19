@@ -1313,22 +1313,26 @@ fn seed_runtime_fixtures(
     let mut records = Vec::with_capacity(fixtures.len());
     for fixture in fixtures {
         let record = match fixture.destination {
-            MemoryDestination::Local => service.create_local_memory(
-                "memzoi-eval",
-                LocalMemoryInput {
-                    memory_type: fixture.memory_type,
-                    lane: fixture.lane,
-                    title: fixture.title.clone(),
-                    body: fixture.body.clone(),
-                },
-            )?,
-            MemoryDestination::Session => service.create_checkpoint(
-                "memzoi-eval",
-                CheckpointInput {
-                    task: fixture.title.clone(),
-                    note: fixture.body.clone(),
-                },
-            )?,
+            MemoryDestination::Local => service
+                .create_local_memory_with_id_for_trusted_recall_eval(
+                    "memzoi-eval",
+                    &fixture.id,
+                    LocalMemoryInput {
+                        memory_type: fixture.memory_type,
+                        lane: fixture.lane,
+                        title: fixture.title.clone(),
+                        body: fixture.body.clone(),
+                    },
+                )?,
+            MemoryDestination::Session => service
+                .create_checkpoint_with_id_for_trusted_recall_eval(
+                    "memzoi-eval",
+                    &fixture.id,
+                    CheckpointInput {
+                        task: fixture.title.clone(),
+                        note: fixture.body.clone(),
+                    },
+                )?,
             _ => unreachable!("runtime fixture destinations are validated"),
         };
         if record.id != fixture.id {

@@ -58,7 +58,7 @@ fn assert_two_plane_policy(output: &str) {
     );
     assert!(
         output.contains(
-            "- `memzoi propose` and MCP proposals are reviewable operational state, not canonical records."
+            "- `memzoi propose` creates reviewable operational state; MCP is read-only and its plans are evidence, not canonical records."
         ),
         "missing proposal operational-state boundary: {output}"
     );
@@ -162,8 +162,8 @@ fn integrate_prompt_profiles_include_canonical_two_plane_policy_and_guidance() {
         (
             "mcp",
             "Memzoi MCP setup and usage guidance for this repo.",
-            "Search Memzoi memory before broad repo scans.",
-            "Build context packs for the current task.",
+            "Search repository memory before broad repo scans.",
+            "Build repository-only context packs for the current task.",
             "Run precheck tools",
         ),
     ] {
@@ -188,10 +188,17 @@ fn integrate_prompt_profiles_include_canonical_two_plane_policy_and_guidance() {
             output.contains(precheck_guidance),
             "{profile} must include precheck guidance: {output}"
         );
-        assert!(
-            output.contains("memzoi propose") || output.contains("proposal requests"),
-            "{profile} must include proposal guidance: {output}"
-        );
+        if profile == "mcp" {
+            assert!(
+                output.contains("Create or change proposal state."),
+                "{profile} must forbid proposal mutation: {output}"
+            );
+        } else {
+            assert!(
+                output.contains("memzoi propose"),
+                "{profile} must include local CLI proposal guidance: {output}"
+            );
+        }
         assert!(
             output.contains(
                 "Canonical repo writes require an explicit CLI apply route: DB proposals use `memzoi apply <proposal-id>` or `memzoi proposals apply --all-approved` after approval, or the one-shot `memzoi propose --apply` route; file-backed proposal packets require review followed by `memzoi proposal-files apply <proposal-id>`. DB proposal state and packet review alone are not canonical."
@@ -201,18 +208,22 @@ fn integrate_prompt_profiles_include_canonical_two_plane_policy_and_guidance() {
         if profile == "mcp" {
             assert!(
                 output.contains("DB proposal state and packet review alone are not canonical."),
-                "{profile} must distinguish non-canonical DB/MCP state from canonical records: {output}"
+                "{profile} must distinguish non-canonical proposal state from canonical records: {output}"
             );
             assert!(
                 output.contains("Apply proposals or write canonical repo records."),
                 "{profile} must forbid MCP from applying or writing canonical records: {output}"
             );
+            assert!(
+                output.contains("Request or expose private local/session memory."),
+                "{profile} must forbid private runtime output: {output}"
+            );
         } else {
             assert!(
                 output.contains(
-                    "The policy block defines the canonical route; DB-local and MCP proposal state are not canonical before an explicit CLI apply."
+                    "The policy block defines the canonical route; DB-local proposal state is not canonical before an explicit CLI apply."
                 ),
-                "{profile} must distinguish pre-apply DB/MCP state from canonical records: {output}"
+                "{profile} must distinguish pre-apply DB state from canonical records: {output}"
             );
         }
 

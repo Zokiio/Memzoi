@@ -14,6 +14,10 @@ pub(super) struct RepoLifecycleLock {
     _file: fs::File,
 }
 
+pub(super) struct RepoLifecycleReadLock {
+    _file: fs::File,
+}
+
 impl RepoLifecycleLock {
     pub(super) fn acquire(paths: &MemoryPaths) -> Result<Self> {
         fs::create_dir_all(&paths.repository_runtime_dir).with_context(|| {
@@ -33,6 +37,41 @@ impl RepoLifecycleLock {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match file.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "another repo lifecycle operation is in progress; retry after {} is unlocked",
+                            lock_path.display()
+                        )
+                    });
+                }
+            }
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+impl RepoLifecycleReadLock {
+    /// Join the lifecycle lock without creating or modifying its file. Bundle
+    /// initialization creates it as part of the first explicit rebuild.
+    pub(super) fn acquire(paths: &MemoryPaths) -> Result<Self> {
+        let lock_path = paths.repository_runtime_dir.join("repo-lifecycle.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&lock_path)
+            .with_context(|| {
+                format!(
+                    "failed to open lifecycle lock {} read-only",
+                    lock_path.display()
+                )
+            })?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match file.try_lock_shared() {
                 Ok(()) => break,
                 Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(5));

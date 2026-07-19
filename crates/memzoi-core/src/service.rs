@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -31,7 +31,7 @@ use crate::{
     context, db,
     events::{AppendEvent, append_event, for_each_merged_event},
     expiry::{self, Clock, ExpiryDiagnostic, SystemClock},
-    exporters, handoff, okf, precheck, proposals, schema, search,
+    exporters, handoff, okf, precheck, proposals, search,
     session_end::{SessionEndDocument, SessionEndResult},
 };
 
@@ -41,6 +41,7 @@ mod derived_index;
 mod import_lifecycle;
 mod import_origin_journal;
 mod materialization;
+mod private_lifecycle;
 mod proposal_packets;
 mod repository_mutation;
 mod runtime_records;
@@ -70,9 +71,41 @@ use self::repository_mutation::{
     explicit_repository_provenance, memory_draft_safety_values, repository_transaction_root,
     safety_value,
 };
-use self::runtime_records::{RuntimeRecords, reserved_runtime_record_ids};
-use self::safe_files::{RepoLifecycleLock, lifecycle_transaction_artifacts};
+use self::runtime_records::{PrivateLifecycleStorage, RuntimeRecords, reserved_runtime_record_ids};
+use self::safe_files::{RepoLifecycleLock, RepoLifecycleReadLock, lifecycle_transaction_artifacts};
 use self::session_end_route_apply::SessionEndRouteApply;
+
+#[cfg(test)]
+type AfterPrivateMirrorReadHook = Box<dyn FnMut(&Connection) -> Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_PRIVATE_MIRROR_READ_HOOK:
+        std::cell::RefCell<Option<AfterPrivateMirrorReadHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn inject_after_private_mirror_read_hook(hook: impl FnMut(&Connection) -> Result<()> + 'static) {
+    AFTER_PRIVATE_MIRROR_READ_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn clear_after_private_mirror_read_hook() {
+    AFTER_PRIVATE_MIRROR_READ_HOOK.with(|slot| {
+        slot.borrow_mut().take();
+    });
+}
+
+#[cfg(test)]
+fn run_after_private_mirror_read_hook(shared_conn: &Connection) -> Result<()> {
+    AFTER_PRIVATE_MIRROR_READ_HOOK.with(|slot| {
+        let mut hook = slot.borrow_mut();
+        hook.as_mut().map_or(Ok(()), |hook| hook(shared_conn))
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InitRequest {
@@ -177,6 +210,14 @@ pub struct MemoryService {
     shared_conn: Connection,
     clock: Arc<dyn Clock>,
     trusted_recall_evaluation: bool,
+    read_mode: ServiceReadMode,
+    _lifecycle_read_lock: Option<RepoLifecycleReadLock>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceReadMode {
+    Audited,
+    ImmutableNoAuditRetainedLock,
 }
 
 impl MemoryService {
@@ -195,6 +236,83 @@ impl MemoryService {
 
     pub fn open_paths_with_clock(paths: MemoryPaths, clock: impl Clock + 'static) -> Result<Self> {
         Self::open_paths_with_clock_and_admission(paths, clock, false)
+    }
+
+    /// Open the current lifecycle authority and mirror without recovery,
+    /// rebuilding, refresh, schema initialization, or persistent SQLite
+    /// configuration changes. The returned connections are read-only.
+    ///
+    /// This is the hard boundary used by `lifecycle plan` and `lifecycle
+    /// inspect`: opening the service cannot mutate private or authority state.
+    pub fn open_paths_for_private_lifecycle_read(paths: MemoryPaths) -> Result<Self> {
+        Self::open_paths_for_private_lifecycle(paths, ServiceReadMode::ImmutableNoAuditRetainedLock)
+    }
+
+    /// Open a current, immutable repository/runtime snapshot for callers that
+    /// must never append ordinary read-audit events. Search, context, and
+    /// precheck still enforce canonical-index and mirror freshness before
+    /// returning structured results.
+    pub fn open_paths_for_immutable_read(paths: MemoryPaths) -> Result<Self> {
+        Self::open_paths_for_private_lifecycle(paths, ServiceReadMode::ImmutableNoAuditRetainedLock)
+    }
+
+    /// Open the current lifecycle authority and mirror without recovery,
+    /// rebuilding, refresh, schema initialization, or persistent SQLite
+    /// configuration changes. The connections may write only through the
+    /// lifecycle methods' narrower transactional contracts.
+    pub fn open_paths_for_private_lifecycle_authority(paths: MemoryPaths) -> Result<Self> {
+        Self::open_paths_for_private_lifecycle(paths, ServiceReadMode::Audited)
+    }
+
+    fn open_paths_for_private_lifecycle(
+        paths: MemoryPaths,
+        read_mode: ServiceReadMode,
+    ) -> Result<Self> {
+        paths.validate_runtime_identity()?;
+        if !paths.config_path.is_file() {
+            bail!(
+                "Memzoi bundle is not initialized at {}; run `memzoi init` first",
+                paths.project_root.display()
+            );
+        }
+        let read_only = read_mode != ServiceReadMode::Audited;
+        let opening_read_lock = if read_only {
+            let read_lock = RepoLifecycleReadLock::acquire(&paths)?;
+            shared_runtime::ensure_read_only_lifecycle_snapshot_ready(&paths)?;
+            Some(read_lock)
+        } else {
+            None
+        };
+        let shared_conn = db::open_existing_database(&paths.shared_db_path, read_only)
+            .with_context(|| {
+                format!(
+                    "failed to open current shared lifecycle authority {}",
+                    paths.shared_db_path.display()
+                )
+            })?;
+        let conn =
+            db::open_existing_database(&paths.index_db_path, read_only).with_context(|| {
+                format!(
+                    "failed to open current lifecycle mirror {}",
+                    paths.index_db_path.display()
+                )
+            })?;
+        if read_only {
+            shared_runtime::ensure_read_only_mirror_ready(&shared_conn, &conn)?;
+        }
+        Ok(Self {
+            paths,
+            conn,
+            shared_conn,
+            clock: Arc::new(SystemClock),
+            trusted_recall_evaluation: false,
+            read_mode,
+            _lifecycle_read_lock: if read_mode == ServiceReadMode::ImmutableNoAuditRetainedLock {
+                opening_read_lock
+            } else {
+                None
+            },
+        })
     }
 
     /// Opens an isolated recall-evaluation fixture whose canonical inputs were
@@ -242,6 +360,8 @@ impl MemoryService {
             shared_conn,
             clock: Arc::new(clock),
             trusted_recall_evaluation,
+            read_mode: ServiceReadMode::Audited,
+            _lifecycle_read_lock: None,
         })
     }
 
@@ -260,7 +380,19 @@ impl MemoryService {
         &self.paths
     }
 
-    pub fn for_each_event(&self, visit: impl FnMut(MemoryEvent) -> Result<()>) -> Result<()> {
+    pub fn for_each_event(&self, mut visit: impl FnMut(MemoryEvent) -> Result<()>) -> Result<()> {
+        for_each_merged_event(&self.shared_conn, &self.conn, |event| {
+            if event_references_private_record(&self.shared_conn, &self.conn, &event)? {
+                return Ok(());
+            }
+            visit(event)
+        })
+    }
+
+    pub(crate) fn for_each_event_including_private(
+        &self,
+        visit: impl FnMut(MemoryEvent) -> Result<()>,
+    ) -> Result<()> {
         for_each_merged_event(&self.shared_conn, &self.conn, visit)
     }
 
@@ -667,9 +799,11 @@ impl MemoryService {
     }
 
     pub fn search_memory(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
-        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
-        self.ensure_repository_index_current()?;
-        search::search_memory_at(&self.conn, input, self.now())
+        if !matches!(input.destination, Some(MemoryDestination::Repo)) {
+            return self.read_private_mirror(|service| service.search_memory_at(input.clone()));
+        }
+        self.prepare_repository_read()?;
+        self.search_memory_at(input)
     }
 
     /// Runs the query engine against a mechanically seeded derived index.
@@ -677,13 +811,35 @@ impl MemoryService {
     /// Production callers must use [`Self::search_memory`], which verifies that
     /// repository rows still match their canonical OKF sources.
     #[doc(hidden)]
-    pub fn search_memory_for_benchmark(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
+    pub fn search_memory_for_benchmark(&self, mut input: SearchInput) -> Result<Vec<SearchResult>> {
+        if matches!(
+            input.destination,
+            Some(MemoryDestination::Local | MemoryDestination::Session)
+        ) {
+            bail!("benchmark search is repository-only");
+        }
+        input.destination = Some(MemoryDestination::Repo);
         search::search_memory_at(&self.conn, input, self.now())
     }
 
     pub fn inspect_expiry(&self, record_id: &str) -> Result<ExpiryDiagnostic> {
-        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
-        self.ensure_repository_index_current()?;
+        self.prepare_repository_read()?;
+        let destination = self
+            .conn
+            .query_row(
+                "SELECT destination FROM memory_record WHERE id = ?1",
+                [record_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match destination.as_deref() {
+            Some("repo") => {}
+            Some("local" | "session") => bail!(
+                "ordinary expiry inspection is repository-only; use `memzoi lifecycle inspect record <ID>` for private runtime history"
+            ),
+            Some(destination) => bail!("memory record has invalid destination: {destination}"),
+            None => bail!("memory record not found: {record_id}"),
+        }
         let record = RuntimeRecords::new(&self.conn)
             .get(record_id)?
             .with_context(|| format!("memory record not found: {record_id}"))?;
@@ -698,11 +854,62 @@ impl MemoryService {
         self.ensure_repository_index_current_with_conn(&self.conn)
     }
 
+    fn prepare_repository_read(&self) -> Result<()> {
+        match self.read_mode {
+            ServiceReadMode::Audited => {
+                shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
+            }
+            ServiceReadMode::ImmutableNoAuditRetainedLock => {
+                shared_runtime::ensure_read_only_mirror_ready(&self.shared_conn, &self.conn)?;
+            }
+        }
+        self.ensure_repository_index_current()
+    }
+
+    fn search_memory_at(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
+        match self.read_mode {
+            ServiceReadMode::Audited => search::search_memory_at(&self.conn, input, self.now()),
+            ServiceReadMode::ImmutableNoAuditRetainedLock => {
+                search::search_memory_at_without_audit(&self.conn, input, self.now())
+            }
+        }
+    }
+
+    fn read_private_mirror<T>(&self, mut read: impl FnMut(&Self) -> Result<T>) -> Result<T> {
+        if self.read_mode == ServiceReadMode::ImmutableNoAuditRetainedLock {
+            shared_runtime::ensure_read_only_mirror_ready(&self.shared_conn, &self.conn)
+                .map_err(|_| anyhow::anyhow!("mirror refresh required"))?;
+            self.ensure_repository_index_current()?;
+            return read(self);
+        }
+        for _attempt in 0..2 {
+            let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+            shared_runtime::refresh_index_mirrors_locked(
+                &self.paths,
+                &self.shared_conn,
+                &self.conn,
+            )
+            .map_err(|_| anyhow::anyhow!("mirror refresh required"))?;
+            self.ensure_repository_index_current()?;
+            let value = read(self)?;
+            #[cfg(test)]
+            run_after_private_mirror_read_hook(&self.shared_conn)?;
+            if shared_runtime::lifecycle_generations_match(&self.shared_conn, &self.conn)
+                .map_err(|_| anyhow::anyhow!("mirror refresh required"))?
+            {
+                return Ok(value);
+            }
+        }
+        bail!("mirror refresh required")
+    }
+
     fn ensure_repository_index_current_with_conn(&self, conn: &Connection) -> Result<()> {
-        let drift = if self.trusted_recall_evaluation {
-            derived_index::inspect_for_trusted_recall_eval(&self.paths, conn)?
-        } else {
-            derived_index::inspect(&self.paths, conn)?
+        let drift = match (self.read_mode, self.trusted_recall_evaluation) {
+            (ServiceReadMode::ImmutableNoAuditRetainedLock, false) => {
+                derived_index::inspect_read_only(&self.paths, conn)?
+            }
+            (_, true) => derived_index::inspect_for_trusted_recall_eval(&self.paths, conn)?,
+            (_, false) => derived_index::inspect(&self.paths, conn)?,
         };
         if drift.is_current() {
             return Ok(());
@@ -735,6 +942,30 @@ impl MemoryService {
         Ok(record)
     }
 
+    pub(crate) fn create_local_memory_with_id_for_trusted_recall_eval(
+        &self,
+        actor: &str,
+        id: &str,
+        input: LocalMemoryInput,
+    ) -> Result<MemoryRecord> {
+        ensure!(
+            self.trusted_recall_evaluation,
+            "caller-selected private record ids are restricted to trusted recall evaluation"
+        );
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let reserved_ids = reserved_runtime_record_ids(&self.paths, &self.conn)?;
+        ensure!(
+            !reserved_ids.contains(id) && RuntimeRecords::new(&self.shared_conn).get(id)?.is_none(),
+            "trusted recall fixture id collides with an existing record: {id}"
+        );
+        let now = self.now_timestamp()?;
+        let record = RuntimeRecords::new(&self.shared_conn)
+            .create_local_with_id_for_trusted_recall_eval(actor, id, &input, &now)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(record)
+    }
+
     pub fn list_local_memory(&self) -> Result<Vec<MemoryRecord>> {
         RuntimeRecords::new(&self.shared_conn)
             .active_for_destination(MemoryDestination::Local, self.now())
@@ -761,6 +992,30 @@ impl MemoryService {
         };
         let result = self.create_checkpoint_command(actor, command)?;
         RuntimeRecords::new(&self.shared_conn).checkpoint_for_lifecycle(&result.checkpoint_id)
+    }
+
+    pub(crate) fn create_checkpoint_with_id_for_trusted_recall_eval(
+        &self,
+        actor: &str,
+        id: &str,
+        input: CheckpointInput,
+    ) -> Result<MemoryRecord> {
+        ensure!(
+            self.trusted_recall_evaluation,
+            "caller-selected private record ids are restricted to trusted recall evaluation"
+        );
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        let reserved_ids = reserved_runtime_record_ids(&self.paths, &self.conn)?;
+        ensure!(
+            !reserved_ids.contains(id) && RuntimeRecords::new(&self.shared_conn).get(id)?.is_none(),
+            "trusted recall fixture id collides with an existing record: {id}"
+        );
+        let now = self.now_timestamp()?;
+        let record = RuntimeRecords::new(&self.shared_conn)
+            .create_checkpoint_with_id_for_trusted_recall_eval(actor, id, &input, &now)?;
+        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)?;
+        Ok(record)
     }
 
     pub fn create_checkpoint_command(
@@ -839,7 +1094,7 @@ impl MemoryService {
         }
         let predecessor =
             RuntimeRecords::new(&tx).checkpoint_for_lifecycle(&command.predecessor_id)?;
-        RuntimeRecords::ensure_successor_predecessor(
+        RuntimeRecords::new(&tx).ensure_successor_predecessor(
             &predecessor,
             &command.expected_predecessor_version,
             now,
@@ -856,7 +1111,7 @@ impl MemoryService {
             Some(lineage),
             &reserved_ids,
         )?;
-        let record_version = RuntimeRecords::checkpoint_record_version(&record)?;
+        let record_version = RuntimeRecords::new(&tx).checkpoint_record_version(&record.id)?;
         let handoff_event = append_event(
             &tx,
             AppendEvent {
@@ -902,14 +1157,33 @@ impl MemoryService {
     /// Returns the optimistic-concurrency version for a checkpoint, including
     /// query-only history needed by owner lifecycle commands.
     pub fn checkpoint_record_version(&self, record_id: &str) -> Result<String> {
-        let record = RuntimeRecords::new(&self.shared_conn).checkpoint_for_lifecycle(record_id)?;
-        RuntimeRecords::checkpoint_record_version(&record)
+        RuntimeRecords::new(&self.shared_conn).checkpoint_record_version(record_id)
     }
 
-    /// Explicit lifecycle/history inspection; unlike ordinary checkpoint
-    /// reads this includes closed and query-only records by identifier.
+    /// Ordinary checkpoint inspection. Query-only, superseded, and
+    /// quarantined history is available only through private lifecycle
+    /// inspection.
     pub fn inspect_checkpoint(&self, record_id: &str) -> Result<MemoryRecord> {
-        RuntimeRecords::new(&self.shared_conn).checkpoint_for_lifecycle(record_id)
+        self.show_checkpoint(record_id)
+    }
+
+    /// Exact checkpoint history needed to render or replay an owner command.
+    ///
+    /// Closed checkpoints remain available because closure itself makes them
+    /// ineligible for ordinary reads. Quarantined or superseded records stay
+    /// behind the explicit `lifecycle inspect record` boundary.
+    pub fn checkpoint_for_owner_operation(&self, record_id: &str) -> Result<MemoryRecord> {
+        let record = RuntimeRecords::new(&self.shared_conn).checkpoint_for_lifecycle(record_id)?;
+        let lifecycle = PrivateLifecycleStorage::new(&self.shared_conn).require_state(record_id)?;
+        ensure!(
+            !lifecycle.quarantined,
+            "checkpoint {record_id} is quarantined; use lifecycle inspect record"
+        );
+        ensure!(
+            record.status == MemoryStatus::Active,
+            "checkpoint {record_id} is historical; use lifecycle inspect record"
+        );
+        Ok(record)
     }
 
     pub fn continue_checkpoint(
@@ -1036,15 +1310,15 @@ impl MemoryService {
         .promote_from_checkpoint(actor, command)
     }
     pub fn plan_import(&self, actor: &str, document: ImportDocument) -> Result<ImportPlan> {
-        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
-        self.ensure_repository_index_current()?;
-        ImportLifecycle::new(
-            &self.paths,
-            &self.conn,
-            &self.shared_conn,
-            self.clock.as_ref(),
-        )
-        .plan(actor, document)
+        self.read_private_mirror(|service| {
+            ImportLifecycle::new(
+                &service.paths,
+                &service.conn,
+                &service.shared_conn,
+                service.clock.as_ref(),
+            )
+            .plan(actor, document.clone())
+        })
     }
 
     pub fn apply_import(
@@ -1072,16 +1346,16 @@ impl MemoryService {
         request: CaptureRequest,
         source_inputs: &CaptureSourceInputs,
     ) -> Result<CapturePlan> {
-        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
-        self.ensure_repository_index_current()?;
-        let evaluated_at = self.now_timestamp()?;
-        crate::capture::plan_capture_with_connection_and_inputs(
-            &self.paths,
-            &self.conn,
-            request,
-            source_inputs,
-            &evaluated_at,
-        )
+        self.read_private_mirror(|service| {
+            let evaluated_at = service.now_timestamp()?;
+            crate::capture::plan_capture_with_connection_and_inputs(
+                &service.paths,
+                &service.conn,
+                request.clone(),
+                source_inputs,
+                &evaluated_at,
+            )
+        })
     }
 
     pub fn build_capture_review(
@@ -1158,20 +1432,20 @@ impl MemoryService {
         reviewed_by: &str,
         reviewed_at: &str,
     ) -> Result<CaptureReview> {
-        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
-        self.ensure_repository_index_current()?;
-        let evaluated_at = self.now_timestamp()?;
-        crate::capture::build_capture_review_with_connection_and_inputs(
-            &self.paths,
-            &self.conn,
-            plan,
-            input,
-            prior_review,
-            source_inputs,
-            reviewed_by,
-            reviewed_at,
-            &evaluated_at,
-        )
+        self.read_private_mirror(|service| {
+            let evaluated_at = service.now_timestamp()?;
+            crate::capture::build_capture_review_with_connection_and_inputs(
+                &service.paths,
+                &service.conn,
+                plan,
+                input.clone(),
+                prior_review,
+                source_inputs,
+                reviewed_by,
+                reviewed_at,
+                &evaluated_at,
+            )
+        })
     }
 
     pub fn apply_capture(
@@ -1285,9 +1559,23 @@ impl MemoryService {
     }
 
     pub fn build_context_pack(&self, input: ContextPackInput) -> Result<ContextPack> {
-        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
-        self.ensure_repository_index_current()?;
-        context::build_context_pack_at(&self.conn, input, self.now())
+        if input.include_local || input.include_session {
+            return self
+                .read_private_mirror(|service| service.build_context_pack_at(input.clone()));
+        }
+        self.prepare_repository_read()?;
+        self.build_context_pack_at(input)
+    }
+
+    fn build_context_pack_at(&self, input: ContextPackInput) -> Result<ContextPack> {
+        match self.read_mode {
+            ServiceReadMode::Audited => {
+                context::build_context_pack_at(&self.conn, input, self.now())
+            }
+            ServiceReadMode::ImmutableNoAuditRetainedLock => {
+                context::build_context_pack_at_without_audit(&self.conn, input, self.now())
+            }
+        }
     }
 
     /// Builds a context pack from a mechanically seeded benchmark index.
@@ -1295,19 +1583,31 @@ impl MemoryService {
     /// Production callers must use [`Self::build_context_pack`].
     #[doc(hidden)]
     pub fn build_context_pack_for_benchmark(&self, input: ContextPackInput) -> Result<ContextPack> {
+        if input.include_local || input.include_session {
+            bail!("benchmark context building is repository-only");
+        }
         context::build_context_pack_at(&self.conn, input, self.now())
     }
 
     pub fn build_handoff_pack(&self, input: HandoffInput) -> Result<HandoffPack> {
+        if input.include_local || input.include_session {
+            return self.read_private_mirror(|service| {
+                handoff::build_handoff_pack_at(&service.conn, input.clone(), service.now())
+            });
+        }
         shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
         self.ensure_repository_index_current()?;
         handoff::build_handoff_pack_at(&self.conn, input, self.now())
     }
 
     pub fn precheck(&self, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
-        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
-        self.ensure_repository_index_current()?;
-        precheck::precheck_at(&self.conn, input, self.now())
+        self.prepare_repository_read()?;
+        match self.read_mode {
+            ServiceReadMode::Audited => precheck::precheck_at(&self.conn, input, self.now()),
+            ServiceReadMode::ImmutableNoAuditRetainedLock => {
+                precheck::precheck_at_without_audit(&self.conn, input, self.now())
+            }
+        }
     }
 
     /// Runs precheck against a mechanically seeded benchmark index.
@@ -1387,6 +1687,29 @@ impl MemoryService {
     }
 }
 
+fn event_references_private_record(
+    shared: &Connection,
+    index: &Connection,
+    event: &MemoryEvent,
+) -> Result<bool> {
+    let Some(record_id) = event.record_id.as_deref() else {
+        return Ok(false);
+    };
+    for conn in [shared, index] {
+        let destination = conn
+            .query_row(
+                "SELECT destination FROM memory_record WHERE id = ?1",
+                [record_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(destination) = destination {
+            return Ok(matches!(destination.as_str(), "local" | "session"));
+        }
+    }
+    Ok(false)
+}
+
 fn checkpoint_result_from_origin(
     conn: &Connection,
     operation_id: &str,
@@ -1397,8 +1720,8 @@ fn checkpoint_result_from_origin(
         .record_id
         .as_deref()
         .context("checkpoint origin outcome has no record_id")?;
-    let record = RuntimeRecords::new(conn).checkpoint_for_lifecycle(checkpoint_id)?;
-    let current_version = RuntimeRecords::checkpoint_record_version(&record)?;
+    RuntimeRecords::new(conn).checkpoint_for_lifecycle(checkpoint_id)?;
+    let current_version = RuntimeRecords::new(conn).checkpoint_record_version(checkpoint_id)?;
     let record_version = match outcome.lifecycle_event_id.as_deref() {
         Some(event_id) => conn
             .query_row(
@@ -1512,11 +1835,11 @@ fn open_disposable_index_if_current(paths: &MemoryPaths) -> Result<Option<Connec
     if !paths.index_db_path.is_file() {
         return Ok(None);
     }
-    match open_current_index_database(paths) {
-        Ok(conn) => Ok(Some(conn)),
-        Err(error) if schema::is_unsupported_schema_error(&error) => Ok(None),
-        Err(error) => Err(error),
-    }
+    // Pre-1.0 storage is deliberately current-schema-only. An existing old
+    // mirror is not silently rebuilt during open because doing so would turn
+    // a schema rejection into a write. Owners must explicitly remove or
+    // regenerate it.
+    open_current_index_database(paths).map(Some)
 }
 
 fn open_current_index_database(paths: &MemoryPaths) -> Result<Connection> {

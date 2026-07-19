@@ -71,20 +71,20 @@ Memzoi is building a unified memory layer for AI agents.
 Today:
 
 - ✅ File-native repository memory
+- ✅ Private local and session runtime memory
 - ✅ Reviewable Git workflow
 - ✅ Agent integrations
 - ✅ Context generation
 - ✅ Memory lifecycle
+- ✅ Exact owner-authorized private lifecycle actions
 - ✅ Provenance
 
 Tomorrow:
 
-- Personal memory
-- Runtime memory
 - Cross-agent memory
 - Intelligent retrieval
-- Automatic capture
-- Memory consolidation
+- Cross-device personal-memory sync
+- Automated capture and consolidation
 - Knowledge promotion
 - Organization memory
 
@@ -205,9 +205,9 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
 
 - File-native canonical memory records under `.memzoi/records/`.
 - Repository-shared local runtime state under `~/.memzoi/projects/<repository-key>/`, with a durable `shared.db` for local/session memory and DB-local proposals plus disposable indexes and exports under `worktrees/<worktree-key>/`.
-- Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
+- Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone for repository records, plus `plan → exact owner request → one-shot grant → atomic apply` for private runtime records. Private lifecycle planning, authority, inspection, and execution are local CLI/core capabilities and are not exposed through MCP. See the [private lifecycle reference](website/docs/reference.md#owner-authorized-private-lifecycle).
 - Evidence-backed capture from explicit Markdown, agent-instruction, ADR, and Git-change sources: deterministic planning, complete human review, exact source replay, and stale-guarded apply. Repo-safe candidates become pending proposal files, private local/session candidates stay in runtime storage, and capture provenance survives later apply and rebuild. See the [capture reference](website/docs/reference.md#evidence-backed-capture).
-- Immutable repository maintenance planning: deterministic duplicate, contradiction, staleness, expiry, and renewal evidence plus report/candidate actions, with no execution or private CLI/MCP surface. See the [maintenance reference](website/docs/reference.md#repository-maintenance-planning).
+- Maintenance v2 planning: deterministic duplicate, contradiction, staleness, expiry, and renewal evidence plus report/candidate actions. Repository planning remains read-only in CLI/MCP; private planning and exact owner-authorized lifecycle execution are local CLI/core only. See the [maintenance reference](website/docs/reference.md#repository-maintenance-planning) and [private lifecycle reference](website/docs/reference.md#owner-authorized-private-lifecycle).
 - Deterministic planning for explicitly classified `memzoi/import` candidates creates reviewable repo proposal files and private local/session runtime records on guarded apply. See the [import reference](website/docs/reference.md#classified-import).
 - Rebuild from canonical records with `memzoi rebuild` when the derived runtime index needs to be regenerated.
 - Text search, prompt-ready context packs, and CLI handoff packs.
@@ -219,8 +219,7 @@ GitHub Pages deployment is configured in [.github/workflows/pages.yml](.github/w
   - `inspect_memory_expiry`
   - `build_context_pack`
   - `plan_capture`
-  - `plan_maintenance_v1`
-  - `propose_memory`
+  - `plan_maintenance`
   - `precheck_path`
   - `precheck_action`
   - `precheck_command`

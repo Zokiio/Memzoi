@@ -61,6 +61,31 @@ fn build_capture_review_with_prior(
 }
 
 #[test]
+fn standalone_capture_planning_rejects_an_old_runtime_schema() -> anyhow::Result<()> {
+    let fixture = CaptureFixture::new()?;
+    fixture.write_source(
+        "old-runtime.md",
+        "# Fact: current schema only\n\nCapture planning must not ignore an old runtime database.\n",
+    )?;
+    let conn = Connection::open(&fixture.paths.shared_db_path)?;
+    conn.pragma_update(None, "user_version", 1_i64)?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    drop(conn);
+
+    let before = file_snapshot(fixture.temp.path())?;
+    let error = plan_capture(&fixture.paths, capture_request("old-runtime.md"))
+        .expect_err("standalone planning must reject an old runtime schema");
+    let after = file_snapshot(fixture.temp.path())?;
+
+    assert!(
+        format!("{error:#}").contains("user_version 1"),
+        "unexpected schema error: {error:#}"
+    );
+    assert_eq!(before, after, "schema rejection must perform zero writes");
+    Ok(())
+}
+
+#[test]
 fn one_markdown_source_plans_deterministically_with_exact_evidence_and_stale_identity_guards()
 -> anyhow::Result<()> {
     let fixture = CaptureFixture::new()?;
@@ -1111,6 +1136,16 @@ fn repeated_private_capture_is_planned_as_an_exact_origin_replay() -> anyhow::Re
         &review.review_id,
     )?;
     assert_eq!(result.writes.len(), 1);
+    let created_record_id = match &result.writes[0] {
+        CaptureWrite::RuntimeRecord { record_id, .. } => record_id.clone(),
+        write => panic!("expected a private runtime write, got {write:?}"),
+    };
+    let opaque_uuid = created_record_id
+        .strip_prefix("local-")
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .context("private capture record ID must be an opaque local UUID")?;
+    assert_eq!(opaque_uuid.get_version_num(), 4);
+    assert!(!created_record_id.contains("repeated-private-capture"));
     drop(service);
 
     let before = file_snapshot(fixture.temp.path())?;
@@ -1129,7 +1164,7 @@ fn repeated_private_capture_is_planned_as_an_exact_origin_replay() -> anyhow::Re
         } => {
             assert_eq!(*outcome, memzoi_core::OriginOutcomeKind::Created);
             assert_eq!(*destination, Some(MemoryDestination::Local));
-            assert_eq!(record_id.as_deref(), Some("local-repeated-private-capture"));
+            assert_eq!(record_id.as_deref(), Some(created_record_id.as_str()));
         }
         action => panic!("expected an exact origin replay, got {action:?}"),
     }

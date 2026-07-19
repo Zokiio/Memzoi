@@ -13,22 +13,22 @@ use memzoi_core::{
     CaptureSourceLocator, Clock, ContextPackInput, FixedClock, MAINTENANCE_CONTRACT_VERSION,
     MAINTENANCE_MAX_RECORDS, MAINTENANCE_PLAN_SCHEMA, MAINTENANCE_POLICY_VERSION,
     MAINTENANCE_REQUEST_SCHEMA, MARKDOWN_EXTRACTOR_PROFILE, MaintenancePlanRequest,
-    MaintenancePlanningControl, MemoryDestination, MemoryDraft, MemoryLane, MemoryPaths,
-    MemoryService, MemoryType, OkfProposalSensitivity, PrecheckInput, Proposal,
-    ProposalApprovalOverride, ProposeOptions, ScopeKind, SearchInput, SystemClock, Visibility,
-    plan_capture_at, plan_capture_with_control_at, plan_maintenance, plan_maintenance_with_control,
+    MaintenancePlanningControl, MemoryDestination, MemoryPaths, MemoryService, MemoryType,
+    PrecheckInput, ScopeKind, SearchInput, SystemClock, plan_capture_at,
+    plan_capture_with_control_at, plan_maintenance, plan_maintenance_with_control,
     validate_canonical_record_id,
 };
 use serde_json::{Value, json};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "memzoi";
-const DEFAULT_ACTOR: &str = "mcp";
 const INVALID_CAPTURE_REQUEST: &str = "invalid memzoi/capture-request request";
 const CAPTURE_PLANNING_FAILED: &str = "capture planning failed safely";
 const INVALID_MAINTENANCE_REQUEST: &str = "invalid memzoi/maintenance-request request";
 const MAINTENANCE_PLANNING_FAILED: &str = "maintenance planning failed safely";
 const PRIVATE_CAPTURE_DENIED: &str = "private capture plans are not available to this MCP client";
+const PRIVATE_CONTEXT_DENIED: &str =
+    "MCP context is repository-only; local and session selectors are unavailable";
 const MAX_JSONRPC_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const JSONRPC_MESSAGE_TOO_LARGE: &str = "JSON-RPC message exceeds the 2 MiB limit";
 const JSONRPC_RESPONSE_TOO_LARGE: &str = "JSON-RPC response exceeds the 2 MiB limit";
@@ -55,7 +55,25 @@ const BLAKE3_IDENTITY_PATTERN: &str = "^blake3:[0-9a-f]{64}$";
 
 pub(crate) struct ProtocolState {
     paths: MemoryPaths,
+    // Production calls deliberately leave this empty and open one immutable
+    // service per tool invocation. Tests may inject a mutable fixture service.
     service: OnceCell<MemoryService>,
+}
+
+enum MemoryServiceHandle<'a> {
+    Owned(Box<MemoryService>),
+    Borrowed(&'a MemoryService),
+}
+
+impl std::ops::Deref for MemoryServiceHandle<'_> {
+    type Target = MemoryService;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(service) => service,
+            Self::Borrowed(service) => service,
+        }
+    }
 }
 
 impl ProtocolState {
@@ -78,23 +96,19 @@ impl ProtocolState {
         }
     }
 
-    fn memory_service(&self) -> Result<&MemoryService> {
+    fn memory_service(&self) -> Result<MemoryServiceHandle<'_>> {
         if let Some(service) = self.service.get() {
-            return Ok(service);
+            return Ok(MemoryServiceHandle::Borrowed(service));
         }
 
-        let service = MemoryService::open_paths(self.paths.clone()).with_context(|| {
-            format!(
-                "failed to open memory service at {}",
-                self.paths.project_root.display()
-            )
-        })?;
-        self.service
-            .set(service)
-            .map_err(|_| anyhow!("memory service was initialized concurrently"))?;
-        self.service
-            .get()
-            .ok_or_else(|| anyhow!("memory service initialization failed"))
+        let service = MemoryService::open_paths_for_immutable_read(self.paths.clone())
+            .with_context(|| {
+                format!(
+                    "failed to open current read-only memory service at {}",
+                    self.paths.project_root.display()
+                )
+            })?;
+        Ok(MemoryServiceHandle::Owned(Box::new(service)))
     }
 }
 
@@ -330,7 +344,7 @@ fn is_planning_tool_request(request: &Value) -> bool {
         && request.get("method").and_then(Value::as_str) == Some("tools/call")
         && matches!(
             request.pointer("/params/name").and_then(Value::as_str),
-            Some("plan_capture" | "plan_maintenance_v1")
+            Some("plan_capture" | "plan_maintenance")
         )
 }
 
@@ -351,7 +365,7 @@ impl ActivePlanningControl {
     fn for_request(request: &Value, deadline: Instant) -> Option<Self> {
         match request.pointer("/params/name").and_then(Value::as_str) {
             Some("plan_capture") => Some(Self::Capture(CapturePlanningControl::new(deadline))),
-            Some("plan_maintenance_v1") => {
+            Some("plan_maintenance") => {
                 Some(Self::Maintenance(MaintenancePlanningControl::new(deadline)))
             }
             _ => None,
@@ -750,9 +764,10 @@ fn tools_list_result() -> Value {
             ),
             tool_schema(
                 "inspect_memory_expiry",
-                "Show a record even when expired and explain why normal reads include or exclude it.",
+                "Show a repository record even when expired and explain why normal reads include or exclude it.",
                 json!({
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
                         "record_id": { "type": "string" }
                     },
@@ -761,16 +776,15 @@ fn tools_list_result() -> Value {
             ),
             tool_schema(
                 "build_context_pack",
-                "Build a prompt-ready context pack for a task.",
+                "Build a repository-only prompt-ready context pack for a task.",
                 json!({
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
                         "task": { "type": "string" },
                         "path": { "type": "string" },
                         "path_prefix": { "type": "string" },
-                        "token_budget": { "type": "integer", "minimum": 1 },
-                        "include_local": { "type": "boolean" },
-                        "include_session": { "type": "boolean" }
+                        "token_budget": { "type": "integer", "minimum": 1 }
                     },
                     "required": ["task"]
                 })
@@ -837,7 +851,7 @@ fn tools_list_result() -> Value {
                 })
             ),
             tool_schema(
-                "plan_maintenance_v1",
+                "plan_maintenance",
                 "Generate an immutable repository-memory maintenance plan from snapshot-bound evidence. This tool is read-only and only reports findings and candidate actions; it never executes or mutates them.",
                 json!({
                     "type": "object",
@@ -865,42 +879,6 @@ fn tools_list_result() -> Value {
                         }
                     },
                     "required": ["schema"]
-                })
-            ),
-            tool_schema(
-                "propose_memory",
-                "Create a memory proposal under the effective approval policy. Never applies canonical records.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "type": { "type": "string" },
-                        "memory_type": { "type": "string" },
-                        "scope_kind": { "type": "string" },
-                        "scope": { "type": "string" },
-                        "scope_id": { "type": "string" },
-                        "visibility": { "type": "string" },
-                        "title": { "type": "string" },
-                        "body": { "type": "string" },
-                        "tags": { "type": "array", "items": { "type": "string" } },
-                        "source_kind": { "type": "string" },
-                        "source_ref": { "type": "string" },
-                        "sensitivity": {
-                            "type": "string",
-                            "enum": ["repo-safe", "local-only", "sensitive", "secret", "raw-transcript", "private-personal-data", "temporary-state", "unknown"]
-                        },
-                        "content_class": {
-                            "type": "string",
-                            "enum": ["general_repo_knowledge", "raw_transcript", "private_personal_data", "screen_or_activity_history", "private_endpoint", "undisclosed_vulnerability", "unminimized_private_evidence", "temporary_task_state", "local_only_state", "unknown"]
-                        },
-                        "confidence": { "type": "number" },
-                        "actor": { "type": "string" },
-                        "approval_mode": {
-                            "type": "string",
-                            "enum": ["auto", "manual"],
-                            "description": "Override the effective proposal approval policy for this proposal. MCP cannot apply records."
-                        }
-                    },
-                    "required": ["title", "body"]
                 })
             ),
             tool_schema(
@@ -975,7 +953,7 @@ fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
                 "preconditions", "extractor", "candidates", "summary", "diagnostics"
             ]
         });
-    } else if name == "plan_maintenance_v1" {
+    } else if name == "plan_maintenance" {
         tool["outputSchema"] = maintenance_output_schema();
     }
     tool
@@ -1009,7 +987,7 @@ fn maintenance_record_versions_schema() -> Value {
         "propertyNames": {
             "pattern": CANONICAL_RECORD_ID_PATTERN
         },
-        "additionalProperties": maintenance_identity_schema()
+        "additionalProperties": maintenance_repository_record_version_output_schema()
     })
 }
 
@@ -1170,12 +1148,25 @@ fn maintenance_revision_output_schema() -> Value {
     )
 }
 
+fn maintenance_repository_record_version_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("kind", maintenance_constant_schema("canonical_repository")),
+            ("source_path", maintenance_nonempty_string_schema()),
+            ("revision", maintenance_revision_output_schema()),
+        ],
+        &["kind", "source_path", "revision"],
+    )
+}
+
 fn maintenance_record_output_schema() -> Value {
     maintenance_closed_object(
         vec![
             ("record_id", maintenance_record_id_schema()),
-            ("source_path", maintenance_nonempty_string_schema()),
-            ("revision", maintenance_revision_output_schema()),
+            (
+                "version",
+                maintenance_repository_record_version_output_schema(),
+            ),
             ("content_hash", maintenance_identity_schema()),
             ("claim_digest", maintenance_identity_schema()),
             ("applicability_digest", maintenance_identity_schema()),
@@ -1214,8 +1205,7 @@ fn maintenance_record_output_schema() -> Value {
         ],
         &[
             "record_id",
-            "source_path",
-            "revision",
+            "version",
             "content_hash",
             "claim_digest",
             "applicability_digest",
@@ -1291,6 +1281,7 @@ fn maintenance_action_output_schema() -> Value {
                     "suppress_unresolved_conflict",
                     "owner_consolidate_exact_duplicates",
                     "owner_create_renewal_successor",
+                    "owner_resolve_contradiction",
                 ]),
             ),
             ("finding_id", maintenance_identity_schema()),
@@ -1343,7 +1334,7 @@ fn maintenance_action_groups_output_schema() -> Value {
 fn maintenance_preconditions_output_schema() -> Value {
     maintenance_closed_object(
         vec![
-            ("repository_fingerprint", maintenance_identity_schema()),
+            ("scope", maintenance_scope_binding_output_schema()),
             ("target_versions", maintenance_record_versions_schema()),
             ("comparison_set_digest", maintenance_identity_schema()),
             ("detector_digest", maintenance_identity_schema()),
@@ -1352,7 +1343,7 @@ fn maintenance_preconditions_output_schema() -> Value {
             ("not_after", maintenance_timestamp_schema()),
         ],
         &[
-            "repository_fingerprint",
+            "scope",
             "target_versions",
             "comparison_set_digest",
             "detector_digest",
@@ -1360,6 +1351,16 @@ fn maintenance_preconditions_output_schema() -> Value {
             "grant_fingerprint",
             "not_after",
         ],
+    )
+}
+
+fn maintenance_scope_binding_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            ("kind", maintenance_constant_schema("repository")),
+            ("repository_fingerprint", maintenance_identity_schema()),
+        ],
+        &["kind", "repository_fingerprint"],
     )
 }
 
@@ -1485,7 +1486,7 @@ fn tools_call(
             Err(error) if error.to_string() == INVALID_CAPTURE_REQUEST => return Err(error),
             Err(error) => return Ok(tool_error_result(&error.to_string())),
         },
-        "plan_maintenance_v1" => match plan_maintenance_output(
+        "plan_maintenance" => match plan_maintenance_output(
             state,
             &arguments,
             planning_control.and_then(ActivePlanningControl::maintenance),
@@ -1494,7 +1495,6 @@ fn tools_call(
             Err(error) if error.to_string() == INVALID_MAINTENANCE_REQUEST => return Err(error),
             Err(error) => return Ok(tool_error_result(&error.to_string())),
         },
-        "propose_memory" => propose_memory_output(state.memory_service()?, &arguments)?,
         "precheck_path" => json!({
             "warnings": state.memory_service()?.precheck(PrecheckInput {
                 path: Some(required_str(&arguments, "path")?.to_owned()),
@@ -1524,7 +1524,7 @@ fn tools_call(
 
     let text = match name {
         "plan_capture" => capture_text_content(&structured)?,
-        "plan_maintenance_v1" => maintenance_text_content(&structured),
+        "plan_maintenance" => maintenance_text_content(&structured),
         _ => serde_json::to_string_pretty(&structured)?,
     };
     Ok(json!({
@@ -1722,76 +1722,16 @@ fn search_input(arguments: &Value) -> Result<SearchInput> {
 }
 
 fn context_input(arguments: &Value) -> Result<ContextPackInput> {
+    if arguments.get("include_local").is_some() || arguments.get("include_session").is_some() {
+        bail!(PRIVATE_CONTEXT_DENIED);
+    }
     Ok(ContextPackInput {
         task: required_str(arguments, "task")?.to_owned(),
         path_prefix: optional_string(arguments, "path_prefix")
             .or_else(|| optional_string(arguments, "path")),
         token_budget: optional_usize(arguments, "token_budget")?,
-        include_local: optional_bool(arguments, "include_local")?.unwrap_or(false),
-        include_session: optional_bool(arguments, "include_session")?.unwrap_or(false),
-    })
-}
-
-fn propose_memory_output(service: &MemoryService, arguments: &Value) -> Result<Value> {
-    if arguments.get("apply").is_some() || arguments.get("auto_apply").is_some() {
-        bail!("MCP propose_memory cannot apply canonical records; use the CLI apply workflow");
-    }
-
-    let result = service.propose_memory_with_options(
-        optional_str(arguments, "actor").unwrap_or(DEFAULT_ACTOR),
-        memory_draft(arguments)?,
-        ProposeOptions {
-            approval_override: optional_approval_override(arguments)?,
-            apply: false,
-        },
-    )?;
-    let proposal_id = result.proposal.id.clone();
-    let status = result.proposal.status;
-    let validation = result
-        .validation
-        .or_else(|| result.proposal.validation.clone());
-    let proposal = proposal_for_mcp_response(result.proposal);
-
-    Ok(json!({
-        "proposal": proposal,
-        "proposal_id": proposal_id,
-        "status": status,
-        "validation": validation,
-        "applied": false,
-    }))
-}
-
-fn proposal_for_mcp_response(mut proposal: Proposal) -> Proposal {
-    if proposal.payload.sensitivity == OkfProposalSensitivity::RepoSafe {
-        return proposal;
-    }
-
-    proposal.payload.title = "Redacted non-repo-safe proposal".to_owned();
-    proposal.payload.body =
-        "Original non-repo-safe proposal content was redacted from this response.".to_owned();
-    proposal.payload.scope_id = None;
-    proposal.payload.tags.clear();
-    proposal.payload.source_kind = None;
-    proposal.payload.source_ref = None;
-    proposal.actor = "redacted".to_owned();
-    proposal
-}
-
-fn memory_draft(arguments: &Value) -> Result<MemoryDraft> {
-    Ok(MemoryDraft {
-        memory_type: optional_memory_type(arguments)?.unwrap_or(MemoryType::Fact),
-        lane: MemoryLane::Semantic,
-        scope_kind: optional_scope_kind(arguments)?.unwrap_or(ScopeKind::Repo),
-        scope_id: optional_string(arguments, "scope_id"),
-        visibility: optional_visibility(arguments)?.unwrap_or(Visibility::Repo),
-        title: required_str(arguments, "title")?.to_owned(),
-        body: required_str(arguments, "body")?.to_owned(),
-        tags: optional_string_array(arguments, "tags")?,
-        source_kind: optional_string(arguments, "source_kind"),
-        source_ref: optional_string(arguments, "source_ref"),
-        sensitivity: optional_sensitivity(arguments)?.unwrap_or_default(),
-        content_class: optional_content_class(arguments)?.unwrap_or_default(),
-        confidence: optional_f64(arguments, "confidence")?.unwrap_or(1.0),
+        include_local: false,
+        include_session: false,
     })
 }
 
@@ -1826,36 +1766,6 @@ fn optional_memory_type(value: &Value) -> Result<Option<MemoryType>> {
         .map_err(|error: String| anyhow!(error))
 }
 
-fn optional_visibility(value: &Value) -> Result<Option<Visibility>> {
-    optional_str(value, "visibility")
-        .map(str::parse)
-        .transpose()
-        .map_err(|error: String| anyhow!(error))
-}
-
-fn optional_sensitivity(value: &Value) -> Result<Option<OkfProposalSensitivity>> {
-    optional_str(value, "sensitivity")
-        .map(str::parse)
-        .transpose()
-        .map_err(anyhow::Error::msg)
-}
-
-fn optional_content_class(value: &Value) -> Result<Option<memzoi_core::RepositoryContentClass>> {
-    optional_str(value, "content_class")
-        .map(str::parse)
-        .transpose()
-        .map_err(anyhow::Error::msg)
-}
-
-fn optional_approval_override(value: &Value) -> Result<Option<ProposalApprovalOverride>> {
-    match optional_str(value, "approval_mode") {
-        Some("auto") => Ok(Some(ProposalApprovalOverride::Auto)),
-        Some("manual") => Ok(Some(ProposalApprovalOverride::Manual)),
-        Some(_) => bail!("invalid approval_mode: expected \"auto\" or \"manual\""),
-        None => Ok(None),
-    }
-}
-
 fn optional_usize(value: &Value, key: &str) -> Result<Option<usize>> {
     match value.get(key) {
         Some(raw) => {
@@ -1870,43 +1780,6 @@ fn optional_usize(value: &Value, key: &str) -> Result<Option<usize>> {
         }
         None => Ok(None),
     }
-}
-
-fn optional_bool(value: &Value, key: &str) -> Result<Option<bool>> {
-    match value.get(key) {
-        Some(raw) => raw
-            .as_bool()
-            .map(Some)
-            .ok_or_else(|| anyhow!("argument {key} must be a boolean")),
-        None => Ok(None),
-    }
-}
-
-fn optional_f64(value: &Value, key: &str) -> Result<Option<f64>> {
-    match value.get(key) {
-        Some(raw) => raw
-            .as_f64()
-            .map(Some)
-            .ok_or_else(|| anyhow!("argument {key} must be a number")),
-        None => Ok(None),
-    }
-}
-
-fn optional_string_array(value: &Value, key: &str) -> Result<Vec<String>> {
-    let Some(raw) = value.get(key) else {
-        return Ok(Vec::new());
-    };
-    let array = raw
-        .as_array()
-        .ok_or_else(|| anyhow!("argument {key} must be an array of strings"))?;
-    array
-        .iter()
-        .map(|item| {
-            item.as_str()
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| anyhow!("argument {key} must be an array of strings"))
-        })
-        .collect()
 }
 
 fn jsonrpc_error(id: Value, code: i64, message: String) -> Value {
@@ -1930,7 +1803,8 @@ mod tests {
     };
 
     use memzoi_core::{
-        InitRequest, RepositoryContentClass, SessionEndCandidate, SessionEndDocument,
+        InitRequest, MemoryDraft, MemoryLane, OkfProposalSensitivity, RepositoryContentClass,
+        SessionEndCandidate, SessionEndDocument, Visibility,
     };
     use serde_json::{Value, json};
     use tempfile::TempDir;
@@ -2028,7 +1902,7 @@ mod tests {
                 "id": id,
                 "method": "tools/call",
                 "params": {
-                    "name": "plan_maintenance_v1",
+                    "name": "plan_maintenance",
                     "arguments": arguments
                 }
             }),
@@ -2273,7 +2147,7 @@ mod tests {
         let response = concurrent_busy_response(
             &active,
             "maintenance-while-capture",
-            "plan_maintenance_v1",
+            "plan_maintenance",
             maintenance_arguments(),
         );
 
@@ -2528,6 +2402,72 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_mcp_reads_open_immutable_current_state_and_write_nothing() {
+        let (_temp, state) = capture_test_state();
+        let before = managed_state_snapshot(&state);
+        for (name, arguments, result_array) in [
+            ("search_memory", json!({"query": "repository"}), "records"),
+            (
+                "build_context_pack",
+                json!({"task": "repository context"}),
+                "records",
+            ),
+            ("precheck_path", json!({"path": "src/lib.rs"}), "warnings"),
+            (
+                "precheck_action",
+                json!({"action": "edit repository code", "path": "src/lib.rs"}),
+                "warnings",
+            ),
+            (
+                "precheck_command",
+                json!({"command": "cargo test", "path": "src/lib.rs"}),
+                "warnings",
+            ),
+        ] {
+            let response = response(
+                &state,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": name,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments}
+                }),
+            );
+            assert_eq!(response["id"], name);
+            assert!(
+                response.get("error").is_none(),
+                "immutable MCP {name} failed instead of returning a read result: {response}"
+            );
+            assert_eq!(response["result"]["isError"], false, "{response}");
+            assert!(
+                response["result"]["structuredContent"][result_array].is_array(),
+                "immutable MCP {name} omitted structured {result_array}: {response}"
+            );
+        }
+        assert!(
+            state.service.get().is_none(),
+            "production MCP must not cache an immutable SQLite snapshot or lifecycle read lock"
+        );
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(
+            &before,
+            &after,
+            "ordinary MCP repository reads mutated managed state",
+        );
+
+        let writer = MemoryService::open_paths(state.paths.clone()).unwrap();
+        writer
+            .propose_memory(
+                "fixture:post-mcp-write",
+                draft(
+                    "Post-MCP exclusive lifecycle lock",
+                    "A completed immutable MCP read must not block later repository mutation.",
+                ),
+            )
+            .expect("completed MCP reads must release the shared lifecycle lock");
+    }
+
+    #[test]
     fn ping_returns_empty_result() {
         let (_temp, service) = test_service();
 
@@ -2568,14 +2508,15 @@ mod tests {
             "inspect_memory_expiry",
             "build_context_pack",
             "plan_capture",
-            "plan_maintenance_v1",
-            "propose_memory",
+            "plan_maintenance",
             "precheck_path",
             "precheck_action",
             "precheck_command",
         ]);
 
         assert_eq!(names, expected);
+        assert!(!names.contains("plan_maintenance_v1"));
+        assert!(!names.contains("propose_memory"));
         for forbidden in ["approve", "reject", "apply", "export"] {
             assert!(
                 !names.iter().any(|name| name.contains(forbidden)),
@@ -2586,9 +2527,16 @@ mod tests {
             .iter()
             .find(|tool| tool["name"].as_str() == Some("build_context_pack"))
             .unwrap_or_else(|| panic!("build_context_pack tool should be exposed: {tools:?}"));
+        assert_eq!(context_tool["inputSchema"]["additionalProperties"], false);
         let properties = &context_tool["inputSchema"]["properties"];
-        assert_eq!(properties["include_local"]["type"], "boolean");
-        assert_eq!(properties["include_session"]["type"], "boolean");
+        assert!(properties.get("include_local").is_none());
+        assert!(properties.get("include_session").is_none());
+
+        let expiry_tool = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("inspect_memory_expiry"))
+            .unwrap_or_else(|| panic!("inspect_memory_expiry should be exposed: {tools:?}"));
+        assert_eq!(expiry_tool["inputSchema"]["additionalProperties"], false);
 
         let capture_tool = tools
             .iter()
@@ -2635,8 +2583,8 @@ mod tests {
 
         let maintenance_tool = tools
             .iter()
-            .find(|tool| tool["name"].as_str() == Some("plan_maintenance_v1"))
-            .unwrap_or_else(|| panic!("plan_maintenance_v1 tool should be exposed: {tools:?}"));
+            .find(|tool| tool["name"].as_str() == Some("plan_maintenance"))
+            .unwrap_or_else(|| panic!("plan_maintenance tool should be exposed: {tools:?}"));
         let schema = &maintenance_tool["inputSchema"];
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["required"], json!(["schema"]));
@@ -2654,19 +2602,23 @@ mod tests {
             "memzoi/maintenance-plan"
         );
         assert_eq!(
+            maintenance_tool["outputSchema"]["properties"]["policy"]["properties"]["contract_version"]
+                ["const"],
+            "maintenance-plan/2"
+        );
+        assert_eq!(
             maintenance_tool["outputSchema"]["properties"]["action_groups"]["type"],
             "array"
         );
         assert_schema_recursively_closed(
             &maintenance_tool["outputSchema"],
-            "plan_maintenance_v1.outputSchema",
+            "plan_maintenance.outputSchema",
         );
         assert_eq!(
             maintenance_tool["outputSchema"]["properties"]["records"]["items"]["required"],
             json!([
                 "record_id",
-                "source_path",
-                "revision",
+                "version",
                 "content_hash",
                 "claim_digest",
                 "applicability_digest",
@@ -2677,6 +2629,16 @@ mod tests {
                 "retention_reason",
                 "target"
             ])
+        );
+        assert_eq!(
+            maintenance_tool["outputSchema"]["properties"]["records"]["items"]["properties"]["version"]
+                ["properties"]["kind"]["const"],
+            "canonical_repository"
+        );
+        assert_eq!(
+            maintenance_tool["outputSchema"]["properties"]["preconditions"]["properties"]["scope"]
+                ["properties"]["kind"]["const"],
+            "repository"
         );
         assert_eq!(
             maintenance_tool["outputSchema"]["properties"]["action_groups"]["items"]["properties"]
@@ -2786,6 +2748,11 @@ mod tests {
             result["structuredContent"]["schema"],
             "memzoi/maintenance-plan"
         );
+        assert_eq!(
+            result["structuredContent"]["policy"]["contract_version"],
+            "maintenance-plan/2"
+        );
+        assert_eq!(result["structuredContent"]["scope"]["kind"], "repository");
         assert_eq!(
             result["structuredContent"]["request"]["record_ids"],
             json!([])
@@ -2922,7 +2889,7 @@ mod tests {
                     "id": "maintenance-timeout",
                     "method": "tools/call",
                     "params": {
-                        "name": "plan_maintenance_v1",
+                        "name": "plan_maintenance",
                         "arguments": maintenance_arguments()
                     }
                 })
@@ -3174,259 +3141,44 @@ mod tests {
             "blocked plan leaked the original locator: {rendered}"
         );
     }
-
     #[test]
-    fn propose_memory_tool_defaults_to_approved_result() {
-        let (_temp, service) = test_service();
+    fn propose_memory_is_unavailable_content_free_and_zero_write() {
+        let (_temp, state) = test_service();
+        let title = "MCP-PRIVATE-TITLE-SENTINEL";
+        let body = "MCP-PRIVATE-BODY-SENTINEL";
+        let before = managed_state_snapshot(&state);
 
         let response = response(
-            &service,
+            &state,
             json!({
                 "jsonrpc": "2.0",
-                "id": 3,
+                "id": "removed-propose-memory",
                 "method": "tools/call",
                 "params": {
                     "name": "propose_memory",
                     "arguments": {
-                        "actor": "mcp-smoke",
-                        "type": "decision",
-                        "scope_kind": "repo",
-                        "scope_id": "  team-alpha  ",
-                        "visibility": "repo",
+                        "scope_kind": "personal",
+                        "visibility": "private",
                         "sensitivity": "repo-safe",
-                        "source_kind": "  issue  ",
-                        "source_ref": "  issue://42  ",
-                        "title": "  Keep MCP smoke tests focused  ",
-                        "body": "\n  MCP smoke tests cover the JSON-RPC tool contract.  \n"
-                    }
-                }
-            }),
-        );
-
-        let result = &response["result"];
-        let structured = &result["structuredContent"];
-        let proposal = &structured["proposal"];
-        let content = result["content"].as_array().unwrap();
-        let text_value: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
-
-        assert_eq!(result["isError"], false);
-        assert_eq!(content.len(), 1);
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(text_value, *structured);
-        assert!(
-            structured["proposal_id"]
-                .as_str()
-                .unwrap()
-                .starts_with("prop_")
-        );
-        assert_eq!(structured["proposal_id"], proposal["id"]);
-        assert_eq!(structured["status"], "approved");
-        assert_eq!(structured["applied"], false);
-        assert_eq!(structured["validation"]["is_valid"], true);
-        assert_eq!(proposal["operation"], "create");
-        assert_eq!(proposal["status"], "approved");
-        assert_eq!(proposal["actor"], "mcp-smoke");
-        assert_eq!(proposal["payload"]["memory_type"], "decision");
-        assert_eq!(proposal["payload"]["scope_kind"], "repo");
-        assert_eq!(proposal["payload"]["scope_id"], "team-alpha");
-        assert_eq!(proposal["payload"]["visibility"], "repo");
-        assert_eq!(proposal["payload"]["sensitivity"], "repo-safe");
-        assert_eq!(proposal["payload"]["source_kind"], "issue");
-        assert_eq!(proposal["payload"]["source_ref"], "issue://42");
-        assert_eq!(proposal["payload"]["title"], "Keep MCP smoke tests focused");
-        assert_eq!(
-            proposal["payload"]["body"],
-            "MCP smoke tests cover the JSON-RPC tool contract."
-        );
-    }
-
-    #[test]
-    fn propose_memory_tool_manual_override_returns_pending() {
-        let (_temp, service) = test_service();
-
-        let response = response(
-            &service,
-            json!({
-                "jsonrpc": "2.0",
-                "id": "manual-propose",
-                "method": "tools/call",
-                "params": {
-                    "name": "propose_memory",
-                    "arguments": {
-                        "title": "Manual MCP proposal",
-                        "body": "Manual approval keeps this MCP proposal pending.",
-                        "approval_mode": "manual"
-                    }
-                }
-            }),
-        );
-
-        let structured = &response["result"]["structuredContent"];
-        assert_eq!(structured["status"], "pending");
-        assert_eq!(structured["proposal"]["status"], "pending");
-        assert_eq!(structured["validation"], Value::Null);
-        assert_eq!(structured["applied"], false);
-    }
-
-    #[test]
-    fn propose_memory_tool_auto_override_returns_approved() {
-        let (_temp, service) = test_service();
-
-        let response = response(
-            &service,
-            json!({
-                "jsonrpc": "2.0",
-                "id": "auto-propose",
-                "method": "tools/call",
-                "params": {
-                    "name": "propose_memory",
-                    "arguments": {
-                        "title": "Auto MCP proposal",
-                        "body": "Auto approval approves this MCP proposal without applying it.",
-                        "sensitivity": "repo-safe",
-                        "approval_mode": "auto"
-                    }
-                }
-            }),
-        );
-
-        let structured = &response["result"]["structuredContent"];
-        assert_eq!(structured["status"], "approved");
-        assert_eq!(structured["proposal"]["status"], "approved");
-        assert_eq!(structured["validation"]["is_valid"], true);
-        assert_eq!(structured["applied"], false);
-    }
-
-    #[test]
-    fn propose_memory_tool_treats_omitted_sensitivity_as_unknown() {
-        let (_temp, service) = test_service();
-        let sentinels = [
-            "MCP-UNKNOWN-TITLE-SENTINEL",
-            "MCP-UNKNOWN-BODY-SENTINEL",
-            "MCP-UNKNOWN-SCOPE-SENTINEL",
-            "MCP-UNKNOWN-TAG-SENTINEL",
-            "MCP-UNKNOWN-SOURCE-KIND-SENTINEL",
-            "MCP-UNKNOWN-SOURCE-REF-SENTINEL",
-            "MCP-UNKNOWN-ACTOR-SENTINEL",
-        ];
-
-        let response = response(
-            &service,
-            json!({
-                "jsonrpc": "2.0",
-                "id": "unknown-sensitivity",
-                "method": "tools/call",
-                "params": {
-                    "name": "propose_memory",
-                    "arguments": {
-                        "actor": sentinels[6],
-                        "title": sentinels[0],
-                        "body": sentinels[1],
-                        "scope_id": sentinels[2],
-                        "tags": [sentinels[3]],
-                        "source_kind": sentinels[4],
-                        "source_ref": sentinels[5],
-                        "approval_mode": "auto"
-                    }
-                }
-            }),
-        );
-
-        let structured = &response["result"]["structuredContent"];
-        assert_eq!(structured["status"], "pending");
-        assert_eq!(structured["proposal"]["payload"]["sensitivity"], "unknown");
-        assert_eq!(
-            structured["proposal"]["payload"]["title"],
-            "Redacted non-repo-safe proposal"
-        );
-        assert_eq!(structured["proposal"]["payload"]["scope_id"], Value::Null);
-        assert_eq!(
-            structured["proposal"]["payload"]["source_kind"],
-            Value::Null
-        );
-        assert_eq!(structured["proposal"]["payload"]["source_ref"], Value::Null);
-        assert_eq!(structured["validation"]["is_valid"], false);
-        assert!(
-            structured["validation"]["issues"]
-                .as_array()
-                .is_some_and(|issues| issues
-                    .iter()
-                    .any(|issue| { issue["code"] == "repo_sensitivity_required" }))
-        );
-        assert_eq!(structured["applied"], false);
-        let rendered = serde_json::to_string(&response).expect("serialize MCP response");
-        for sentinel in sentinels {
-            assert!(
-                !rendered.contains(sentinel),
-                "non-repo-safe MCP response leaked {sentinel}: {rendered}"
-            );
-        }
-    }
-
-    #[test]
-    fn propose_memory_tool_rejects_invalid_approval_mode() {
-        let (_temp, service) = test_service();
-
-        let response = response(
-            &service,
-            json!({
-                "jsonrpc": "2.0",
-                "id": "bad-approval-mode",
-                "method": "tools/call",
-                "params": {
-                    "name": "propose_memory",
-                    "arguments": {
-                        "title": "Bad MCP proposal",
-                        "body": "Invalid approval mode should fail before proposal creation.",
-                        "approval_mode": "sometimes"
+                        "title": title,
+                        "body": body
                     }
                 }
             }),
         );
 
         assert_eq!(response["error"]["code"], -32602);
-        assert_eq!(
-            response["error"]["message"],
-            "invalid approval_mode: expected \"auto\" or \"manual\""
+        assert_eq!(response["error"]["message"], "unknown tool: propose_memory");
+        let rendered = serde_json::to_string(&response).expect("serialize MCP rejection");
+        assert!(!rendered.contains(title));
+        assert!(!rendered.contains(body));
+        let after = managed_state_snapshot(&state);
+        assert_managed_state_unchanged(
+            &before,
+            &after,
+            "removed MCP propose_memory mutated managed state",
         );
     }
-
-    #[test]
-    fn propose_memory_tool_rejects_apply_like_arguments() {
-        let (temp, service) = test_service();
-
-        for apply_argument in ["apply", "auto_apply"] {
-            let mut arguments = json!({
-                "title": "Unsafe MCP proposal",
-                "body": "MCP must reject apply-like arguments."
-            });
-            arguments[apply_argument] = json!(true);
-
-            let response = response(
-                &service,
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": apply_argument,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "propose_memory",
-                        "arguments": arguments
-                    }
-                }),
-            );
-
-            assert_eq!(response["error"]["code"], -32602);
-            assert_eq!(
-                response["error"]["message"],
-                "MCP propose_memory cannot apply canonical records; use the CLI apply workflow"
-            );
-        }
-
-        let records_dir = temp.path().join(".memzoi/records");
-        let record_files = fs::read_dir(records_dir).unwrap().count();
-        assert_eq!(record_files, 0);
-    }
-
     #[test]
     fn search_memory_tool_finds_applied_fixture() {
         let (_temp, service) = test_service();
@@ -3540,6 +3292,47 @@ The mcpexpirydiagnostic token should be hidden from normal search.
     }
 
     #[test]
+    fn inspect_memory_expiry_tool_refuses_private_runtime_records_without_leaking_them() {
+        use memzoi_core::LocalMemoryInput;
+
+        let (_temp, service) = test_service();
+        let private_sentinel = "PRIVATE-MCP-EXPIRY-SENTINEL";
+        let record = service
+            .create_local_memory(
+                "fixture",
+                LocalMemoryInput {
+                    memory_type: MemoryType::Preference,
+                    lane: MemoryLane::Semantic,
+                    title: "Private MCP expiry record".to_owned(),
+                    body: private_sentinel.to_owned(),
+                },
+            )
+            .unwrap();
+
+        let response = response(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "private-expiry-inspect",
+                "method": "tools/call",
+                "params": {
+                    "name": "inspect_memory_expiry",
+                    "arguments": { "record_id": &record.id }
+                }
+            }),
+        );
+
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(
+            response["error"]["message"],
+            "ordinary expiry inspection is repository-only; use `memzoi lifecycle inspect record <ID>` for private runtime history"
+        );
+        let rendered = serde_json::to_string(&response).unwrap();
+        assert!(!rendered.contains(private_sentinel));
+        assert!(!rendered.contains(&record.id));
+    }
+
+    #[test]
     fn build_context_pack_tool_returns_budget_and_provenance_metadata() {
         let (_temp, service) = test_service();
         let proposal = service
@@ -3587,7 +3380,7 @@ The mcpexpirydiagnostic token should be hidden from normal search.
     }
 
     #[test]
-    fn build_context_pack_tool_honors_layered_opt_in() {
+    fn build_context_pack_tool_is_repository_only_and_rejects_private_selectors() {
         use memzoi_core::{CheckpointInput, LocalMemoryInput};
 
         let (_temp, service) = test_service();
@@ -3652,36 +3445,40 @@ The mcpexpirydiagnostic token should be hidden from normal search.
             json!(["repo"])
         );
 
-        let layered_response = response(
-            &service,
-            json!({
-                "jsonrpc": "2.0",
-                "id": "context-layered",
-                "method": "tools/call",
-                "params": {
-                    "name": "build_context_pack",
-                    "arguments": {
-                        "task": "layered sigma context",
-                        "token_budget": 240,
-                        "include_local": true,
-                        "include_session": true
+        for (request_id, selector) in [
+            ("context-local", json!({ "include_local": true })),
+            ("context-session", json!({ "include_session": true })),
+            (
+                "context-layered",
+                json!({ "include_local": true, "include_session": true }),
+            ),
+        ] {
+            let mut arguments = json!({
+                "task": "layered sigma context",
+                "token_budget": 240
+            });
+            arguments
+                .as_object_mut()
+                .unwrap()
+                .extend(selector.as_object().unwrap().clone());
+            let denied = response(
+                &service,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "build_context_pack",
+                        "arguments": arguments
                     }
-                }
-            }),
-        );
-        let layered_structured = &layered_response["result"]["structuredContent"];
-        let layered_ids = context_record_ids(layered_structured);
-        assert!(layered_ids.contains(&repo_record.id.as_str()));
-        assert!(layered_ids.contains(&local_record.id.as_str()));
-        assert!(layered_ids.contains(&session_record.id.as_str()));
-        assert_eq!(
-            layered_structured["policy"]["requested_destinations"],
-            json!(["repo", "local", "session"])
-        );
-        assert!(
-            layered_structured["records"][0].get("ranking").is_some(),
-            "context tool should expose ranking metadata: {layered_structured}"
-        );
+                }),
+            );
+            assert_eq!(denied["error"]["code"], -32602);
+            assert_eq!(denied["error"]["message"], PRIVATE_CONTEXT_DENIED);
+            let rendered = serde_json::to_string(&denied).unwrap();
+            assert!(!rendered.contains(&local_record.id));
+            assert!(!rendered.contains(&session_record.id));
+        }
     }
 
     #[test]
@@ -3715,6 +3512,8 @@ The mcpexpirydiagnostic token should be hidden from normal search.
             "reject_proposal",
             "apply_proposal",
             "export_memory",
+            "propose_memory",
+            "plan_maintenance_v1",
             "unknown_tool",
         ] {
             let response = response(

@@ -109,28 +109,29 @@ candidates:
 
     assert_json_string_field(&candidates[1], &["destination"], "local");
     assert_json_string_field(&candidates[1]["write"], &["kind"], "runtime_record");
-    assert_json_string_field(
-        &candidates[1]["write"],
-        &["record_id"],
-        "local-session-end-local-zircon-preference",
-    );
+    let local_record_id = json_string(&candidates[1]["write"], "record_id").to_owned();
+    assert_opaque_private_record_id(&local_record_id, "local");
+    assert!(!local_record_id.contains("zircon"));
+    assert_json_string_field(&candidates[1]["write"], &["record_id"], &local_record_id);
     let local = run_json_command(repo, &["local", "list", "--json"]);
     assert_eq!(
         record_ids_from_json(&local),
-        vec!["local-session-end-local-zircon-preference"],
+        vec![local_record_id.as_str()],
         "local session-end candidate should create local runtime memory only: {local}"
     );
 
     assert_json_string_field(&candidates[2], &["destination"], "session");
+    let checkpoint_record_id = json_string(&candidates[2]["write"], "record_id").to_owned();
+    assert_opaque_private_record_id(&checkpoint_record_id, "session");
     assert_json_string_field(
         &candidates[2]["write"],
         &["record_id"],
-        "session-session-end-checkpoint-zircon-task",
+        &checkpoint_record_id,
     );
     let checkpoints = run_json_command(repo, &["checkpoint", "list", "--json"]);
     assert_eq!(
         record_ids_from_json(&checkpoints),
-        vec!["session-session-end-checkpoint-zircon-task"],
+        vec![checkpoint_record_id.as_str()],
         "session session-end candidate should create checkpoint runtime memory only: {checkpoints}"
     );
 
@@ -153,13 +154,7 @@ candidates:
         "global search should stay repo-only and not include runtime session-end writes: {global_search}"
     );
     let context = run_json_command(repo, &["context", "--task", "session-end zircon", "--json"]);
-    assert_json_does_not_reference_records(
-        &context,
-        &[
-            "local-session-end-local-zircon-preference".to_owned(),
-            "session-session-end-checkpoint-zircon-task".to_owned(),
-        ],
-    );
+    assert_json_does_not_reference_records(&context, &[local_record_id, checkpoint_record_id]);
     let export = run_json_command(repo, &["export", "okf", "--json"]);
     assert!(
         written_paths_from_json(&export).is_empty(),

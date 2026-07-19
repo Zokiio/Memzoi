@@ -57,6 +57,23 @@ pub(crate) fn search_memory_at(
     input: SearchInput,
     now: OffsetDateTime,
 ) -> Result<Vec<SearchResult>> {
+    search_memory_at_with_audit(conn, input, now, true)
+}
+
+pub(crate) fn search_memory_at_without_audit(
+    conn: &Connection,
+    input: SearchInput,
+    now: OffsetDateTime,
+) -> Result<Vec<SearchResult>> {
+    search_memory_at_with_audit(conn, input, now, false)
+}
+
+fn search_memory_at_with_audit(
+    conn: &Connection,
+    input: SearchInput,
+    now: OffsetDateTime,
+    append_read_audit: bool,
+) -> Result<Vec<SearchResult>> {
     let fts_query = fts_query(&input.query);
     if fts_query.is_empty() {
         return Ok(Vec::new());
@@ -213,26 +230,28 @@ pub(crate) fn search_memory_at(
         });
     }
 
-    append_event(
-        conn,
-        AppendEvent {
-            event_type: "memory.searched".to_owned(),
-            actor: "memzoi-core".to_owned(),
-            payload: json!({
-                "query": input.query,
-                "scope_kind": scope_kind,
-                "type": memory_type,
-                "lane": lane,
-                "destination": destination,
-                "path_prefix": input.path_prefix,
-                "limit": limit,
-                "evaluated_at": evaluated_at,
-                "result_ids": results.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
-            }),
-            record_id: None,
-            proposal_id: None,
-        },
-    )?;
+    if append_read_audit {
+        append_event(
+            conn,
+            AppendEvent {
+                event_type: "memory.searched".to_owned(),
+                actor: "memzoi-core".to_owned(),
+                payload: json!({
+                    "query": input.query,
+                    "scope_kind": scope_kind,
+                    "type": memory_type,
+                    "lane": lane,
+                    "destination": destination,
+                    "path_prefix": input.path_prefix,
+                    "limit": limit,
+                    "evaluated_at": evaluated_at,
+                    "result_ids": results.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
+                }),
+                record_id: None,
+                proposal_id: None,
+            },
+        )?;
+    }
 
     Ok(results)
 }

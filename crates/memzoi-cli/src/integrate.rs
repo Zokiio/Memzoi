@@ -268,7 +268,7 @@ fn memzoi_policy_block() -> String {
 - Runtime-plane local/session memory (`{runtime_plane}`) is local continuity under `{}` and is not canonical shared repo truth.\n\
 - Destination policy (destination → plane, write route, review boundary):\n\
 {destinations}\n\
-- `memzoi propose` and MCP proposals are reviewable operational state, not canonical records.\n\
+- `memzoi propose` creates reviewable operational state; MCP is read-only and its plans are evidence, not canonical records.\n\
 - Canonical repo writes require an explicit CLI apply route: DB proposals use `memzoi apply <proposal-id>` or `memzoi proposals apply --all-approved` after approval, or the one-shot `memzoi propose --apply` route; file-backed proposal packets require review followed by `memzoi proposal-files apply <proposal-id>`. DB proposal state and packet review alone are not canonical.\n\
 - Do not commit {exclusions} to canonical repo records.\n\
 - Future destinations not enabled by this integration: {future_destinations}.",
@@ -299,7 +299,7 @@ When durable repo knowledge is discovered:
 - Use types like fact, decision, procedure, preference, warning, risk, or failed_attempt.
 - Prefer reviewable proposals over silent durable mutation.
 
-The policy block defines the canonical route; DB-local and MCP proposal state are not canonical before an explicit CLI apply."#;
+The policy block defines the canonical route; DB-local proposal state is not canonical before an explicit CLI apply."#;
 
 const CLAUDE_PROMPT_PREFIX: &str = "You are Claude working in a repo that uses Memzoi.";
 
@@ -323,7 +323,7 @@ When durable repo knowledge is discovered:
 - Use types like fact, decision, procedure, preference, warning, risk, or failed_attempt.
 - Prefer reviewable proposals over silent durable mutation.
 
-The policy block defines the canonical route; DB-local and MCP proposal state are not canonical before an explicit CLI apply."#;
+The policy block defines the canonical route; DB-local proposal state is not canonical before an explicit CLI apply."#;
 
 const MCP_PROMPT_PREFIX: &str = r#"Memzoi MCP setup and usage guidance for this repo.
 
@@ -331,15 +331,16 @@ To configure an MCP client, generate a copy-pasteable server config with:
 - `memzoi mcp config --project-root .`"#;
 
 const MCP_PROMPT_SUFFIX: &str = r#"MCP clients should use Memzoi tools to:
-- Search Memzoi memory before broad repo scans.
-- Build context packs for the current task.
-- Request local/session continuity only with explicit local/session options.
+- Search repository memory before broad repo scans.
+- Build repository-only context packs for the current task.
 - Run precheck tools before risky path, action, or command work.
-- Create reviewable proposal requests for durable repo memories.
+- Build read-only capture and repository-maintenance plans.
 
 MCP clients must not:
+- Request or expose private local/session memory.
+- Create or change proposal state.
 - Apply proposals or write canonical repo records.
-- Treat DB-local or MCP proposal state as canonical records.
+- Treat read-only planning artifacts as execution authority or canonical records.
 - Commit excluded or runtime-only material into canonical repo records.
 - Claim that MCP can apply canonical records; canonical writes require an explicit CLI apply route described in the policy block."#;
 

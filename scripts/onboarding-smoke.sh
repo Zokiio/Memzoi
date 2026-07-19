@@ -62,13 +62,12 @@ tools = {tool['name'] for tool in responses[1]['result']['tools']}
 expected = {
     'search_memory',
     'build_context_pack',
-    'propose_memory',
     'precheck_path',
     'precheck_action',
     'precheck_command',
     'inspect_memory_expiry',
     'plan_capture',
-    'plan_maintenance_v1',
+    'plan_maintenance',
 }
 assert tools == expected, tools
 print('onboarding smoke OK')

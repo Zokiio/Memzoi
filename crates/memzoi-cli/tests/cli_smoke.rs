@@ -41,6 +41,14 @@ fn test_paths(repo: &Path) -> MemoryPaths {
     )
 }
 
+fn assert_opaque_private_record_id(record_id: &str, prefix: &str) {
+    let uuid = record_id
+        .strip_prefix(&format!("{prefix}-"))
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .unwrap_or_else(|| panic!("private record ID is not an opaque {prefix} UUID: {record_id}"));
+    assert_eq!(uuid.get_version_num(), 4, "private record ID is not random");
+}
+
 #[path = "cli_smoke/capture.rs"]
 mod capture;
 #[path = "cli_smoke/checkpoint_lifecycle.rs"]
