@@ -115,6 +115,12 @@ pub(crate) enum Commands {
         command: MaintenanceCommands,
     },
 
+    /// Plan and execute exact owner-authorized private lifecycle actions.
+    Lifecycle {
+        #[command(subcommand)]
+        command: LifecycleCommands,
+    },
+
     /// Plan, decide, and apply direct Git-native record materialization.
     Materialize {
         #[command(subcommand)]
@@ -713,6 +719,84 @@ pub(crate) enum MaintenanceCommands {
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
         /// Emit the complete repository-safe plan as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum LifecycleCommands {
+    /// Build read-only maintenance evidence over private runtime records.
+    Plan {
+        /// Restrict targets to these record IDs while retaining their comparison neighbourhood.
+        #[arg(long = "record-id", value_name = "ID")]
+        record_ids: Vec<String>,
+        /// Explicit RFC 3339 evaluation instant for deterministic evidence.
+        #[arg(long = "evaluated-at", value_name = "RFC3339")]
+        evaluated_at: Option<String>,
+        /// Unix-only in this release: atomic no-clobber destination outside the worktree and managed runtime state.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Emit the complete content-free private plan as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Persist one time-bounded, one-shot owner grant for an exact request.
+    Authorize {
+        /// Strict JSON/YAML request artifact; secure regular-file reads currently require Unix.
+        #[arg(long = "request-file", value_name = "PATH")]
+        request_file: PathBuf,
+        /// Optional strict JSON/YAML plan artifact; secure regular-file reads currently require Unix.
+        #[arg(long = "plan-file", value_name = "PATH")]
+        plan_file: Option<PathBuf>,
+        /// Optional upper bound that may only shorten the default authority window.
+        #[arg(long = "expires-at", value_name = "RFC3339")]
+        expires_at: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Revoke an active owner grant without changing private lifecycle state.
+    Revoke {
+        #[arg(long = "grant-id", value_name = "ID")]
+        grant_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Explicitly inspect private lifecycle history or owner authority.
+    Inspect {
+        #[command(subcommand)]
+        command: LifecycleInspectCommands,
+    },
+
+    /// Atomically consume one active grant and apply its exact action group.
+    Apply {
+        /// Strict JSON/YAML request artifact; secure regular-file reads currently require Unix.
+        #[arg(long = "request-file", value_name = "PATH")]
+        request_file: PathBuf,
+        #[arg(long = "grant-id", value_name = "ID")]
+        grant_id: String,
+        /// Optional strict JSON/YAML plan artifact; secure regular-file reads currently require Unix.
+        #[arg(long = "plan-file", value_name = "PATH")]
+        plan_file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum LifecycleInspectCommands {
+    /// Inspect one private record, including quarantined or superseded history.
+    Record {
+        record_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect the authoritative stored grant row.
+    Grant {
+        grant_id: String,
         #[arg(long)]
         json: bool,
     },

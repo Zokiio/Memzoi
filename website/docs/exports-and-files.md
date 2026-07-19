@@ -6,8 +6,8 @@ title: Exports and Files
 
 Memzoi keeps canonical authored memory under repo `.memzoi/records/` and keeps runtime state under
 `~/.memzoi/projects/<repository-key>/`. OKF-compatible proposal files are schema-defined under
-`.memzoi/proposals/pending/`, while the current CLI/MCP proposal inbox is still DB-local workflow
-state in repository-wide `shared.db`. Valid CLI proposals default to `approved`, but approved is not
+`.memzoi/proposals/pending/`, while the current CLI proposal inbox is still DB-local workflow state
+in repository-wide `shared.db`. Valid CLI proposals default to `approved`, but approved is not
 applied: canonical record files are written only by explicit CLI apply flows. Rebuild replaces only
 the current worktree's disposable `index.db`; it preserves local/session memory and proposals in
 `shared.db` and fails closed if that shared authority is unreadable. See the [OKF profile](./okf-profile.md)
@@ -54,7 +54,7 @@ Workflow policy config is separate from the runtime project config. Effective pr
 1. Built-in default: `auto`.
 2. User-global `${MEMZOI_HOME:-~/.memzoi}/config.toml`.
 3. Repo `.memzoi/config.toml`.
-4. CLI or MCP per-call override.
+4. CLI per-call override.
 
 ```toml
 [workflow]
@@ -75,7 +75,10 @@ memzoi reject <proposal-id> --reason "not durable repo knowledge"
 memzoi rebuild
 ```
 
-`memzoi propose --manual` keeps one proposal pending. `memzoi propose --apply` is a CLI-only shortcut that writes a canonical record after approval. MCP proposal calls can auto-approve or stay manual, but MCP never applies.
+`memzoi propose --manual` keeps one proposal pending. `memzoi propose --apply`
+is a CLI-only shortcut that writes a canonical record after approval. The MCP
+server exposes no proposal call and cannot create or change proposal inbox
+state.
 
 ## Export formats
 
@@ -120,9 +123,16 @@ memzoi events export --jsonl
 
 `memzoi events export --jsonl` streams runtime event-log rows from the SQLite `event_log`
 table as JSONL: one compact event object per physical line, with no wrapper and no pretty
-multi-line JSON. This operational stream is not canonical memory, is not consumed by
-`memzoi rebuild`, and does not replace `.memzoi/records/*.md` records or OKF proposal
-files under `.memzoi/proposals/pending/*.md`.
+multi-line JSON. Only rows explicitly classified as `data_class: repository` cross this
+boundary. Raw search, context, handoff, and precheck telemetry and private-record events
+stay local even when `record_id` is absent. Proposal titles and unrestricted rejection or
+tombstone reasons also stay local; only events produced after repository-write authorization
+may carry repository content across this boundary. Content-free private lifecycle application
+receipts remain exportable. This operational stream is not canonical memory, is not
+consumed by `memzoi rebuild`, and does not replace `.memzoi/records/*.md` records or OKF
+proposal files under `.memzoi/proposals/pending/*.md`. Repository events encode proposal-file
+locations as POSIX-style, forward-slash paths relative to the repository and never export an
+absolute local worktree path.
 
 
 ## Generated file policy

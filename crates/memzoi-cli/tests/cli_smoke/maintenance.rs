@@ -113,6 +113,15 @@ fn maintenance_plan_is_deterministic_content_free_and_zero_write() {
     );
     let plan: Value = serde_json::from_str(&first).expect("parse maintenance plan JSON");
     assert_json_string_field(&plan, &["schema"], "memzoi/maintenance-plan");
+    assert_json_string_field(&plan["policy"], &["contract_version"], "maintenance-plan/2");
+    assert_json_string_field(&plan["scope"], &["kind"], "repository");
+    assert_json_string_field(
+        &plan["records"][0]["version"],
+        &["kind"],
+        "canonical_repository",
+    );
+    assert!(plan["records"][0].get("source_path").is_none());
+    assert!(plan["records"][0].get("revision").is_none());
     assert!(
         plan["plan_id"]
             .as_str()

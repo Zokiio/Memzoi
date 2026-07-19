@@ -33,10 +33,9 @@ writer previously obtained Memzoi authorization.
 
 Memzoi never stages, commits, pushes, opens or merges pull requests, switches
 branches, changes Git configuration, or implicitly promotes personal or
-session memory into the repository. MCP initially receives no Git-native
-repository-materialization authority. Pre-1.0 MCP proposal behavior has no
-forward-compatibility guarantee and does not gain authority to write beneath
-the repository root.
+session memory into the repository. MCP receives no Git-native
+repository-materialization authority. Earlier pre-1.0 MCP proposal behavior
+has been removed; the current MCP surface is repository-only and read-only.
 
 Pre-1.0 proposal packets must be manually upgraded to a current supported
 format or removed. They are not required for normal repository writes and
@@ -309,10 +308,10 @@ Materialization is a separate explicit operation. Initial authority is:
 | Extractor or model adapter | No repository-write authority |
 | Provider-import adapter | No direct repository-write authority |
 
-Pre-1.0 MCP operations that create DB-local proposal state have no
-forward-compatibility guarantee and do not grant permission to write beneath
-the repository root. MCP recall, context, precheck, capture planning, and
-proposal requests retain only their documented current authority.
+Earlier pre-1.0 MCP operations that created DB-local proposal state have no
+forward-compatibility guarantee and are not part of the current surface. MCP
+recall, context, precheck, capture planning, and repository-maintenance
+planning retain only their documented read-only, repository-only authority.
 
 A future RFC or versioned extension may grant an MCP profile materialization
 authority. That authority must be opt-in, locally authenticated by the host

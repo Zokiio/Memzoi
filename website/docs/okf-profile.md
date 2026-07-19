@@ -39,8 +39,8 @@ Rules:
 - `.memzoi/records/*.md` is the canonical home for applied durable records.
 - `.memzoi/proposals/pending/*.md` is the review packet shape for proposed memory mutations before they become canonical records.
 - `.memzoi/config.toml` can set repo workflow policy, such as `[workflow] proposal_approval = "manual"`. It overrides the user-global `${MEMZOI_HOME:-~/.memzoi}/config.toml`.
-- Proposal files are schema-defined review packets. The current CLI/MCP proposal inbox is still DB-local workflow state until a later lifecycle slice wires file proposals into commands.
-- `~/.memzoi/projects/<repository-key>/shared.db` is the durable local authority for local/session memory and current CLI/MCP proposal state. Linked worktrees share it. Rebuild does not discard it and fails closed if it is unreadable.
+- Proposal files are schema-defined review packets. The current CLI proposal inbox is still DB-local workflow state until a later lifecycle slice wires file proposals into commands. MCP cannot create or change proposal state.
+- `~/.memzoi/projects/<repository-key>/shared.db` is the durable local authority for local/session memory and current CLI proposal state. Linked worktrees share it. Rebuild does not discard it and fails closed if it is unreadable.
 - `~/.memzoi/projects/<repository-key>/worktrees/<worktree-key>/index.db` is a disposable projection of that checkout's canonical records plus shared runtime mirrors. `memzoi rebuild` replaces this index while preserving `shared.db`, including open proposals.
 - `~/.memzoi/projects/<repository-key>/worktrees/<worktree-key>/exports/` contains generated projections such as OKF exports and agent instruction files. Do not author canonical records there.
 

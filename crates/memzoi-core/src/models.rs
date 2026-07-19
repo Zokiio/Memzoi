@@ -74,6 +74,15 @@ pub enum Visibility {
     Org,
 }
 
+/// Export boundary for an event payload. This is explicit because some read
+/// audit events carry private data without being attached to one record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEventDataClass {
+    Repository,
+    Private,
+}
+
 impl MemoryType {
     pub fn as_str(self) -> &'static str {
         enum_to_str(self)
@@ -107,6 +116,15 @@ impl ScopeKind {
 impl Visibility {
     pub fn as_str(self) -> &'static str {
         visibility_to_str(self)
+    }
+}
+
+impl MemoryEventDataClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Repository => "repository",
+            Self::Private => "private",
+        }
     }
 }
 
@@ -156,6 +174,7 @@ pub struct MemoryEvent {
     pub id: String,
     pub event_type: String,
     pub actor: String,
+    pub data_class: MemoryEventDataClass,
     pub payload: Value,
     pub record_id: Option<String>,
     pub proposal_id: Option<String>,
@@ -462,6 +481,18 @@ impl FromStr for Visibility {
     }
 }
 
+impl FromStr for MemoryEventDataClass {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "repository" => Ok(Self::Repository),
+            "private" => Ok(Self::Private),
+            other => Err(format!("unknown memory event data class {other:?}")),
+        }
+    }
+}
+
 pub fn enum_to_str(value: MemoryType) -> &'static str {
     match value {
         MemoryType::Fact => "fact",
@@ -537,8 +568,8 @@ mod tests {
     use serde::{Serialize, de::DeserializeOwned};
 
     use crate::models::{
-        MemoryDestination, MemoryDestinationClassification, MemoryLane, MemoryStatus, MemoryType,
-        ScopeKind, Visibility,
+        MemoryDestination, MemoryDestinationClassification, MemoryEventDataClass, MemoryLane,
+        MemoryStatus, MemoryType, ScopeKind, Visibility,
     };
 
     #[test]
@@ -587,6 +618,9 @@ mod tests {
         assert_json_string_round_trip(Visibility::Team, "team")?;
         assert_json_string_round_trip(Visibility::Org, "org")?;
 
+        assert_json_string_round_trip(MemoryEventDataClass::Repository, "repository")?;
+        assert_json_string_round_trip(MemoryEventDataClass::Private, "private")?;
+
         Ok(())
     }
 
@@ -598,6 +632,7 @@ mod tests {
         assert_invalid_json_string::<MemoryStatus>("archived");
         assert_invalid_json_string::<ScopeKind>("workspace");
         assert_invalid_json_string::<Visibility>("friends");
+        assert_invalid_json_string::<MemoryEventDataClass>("public");
     }
 
     #[test]

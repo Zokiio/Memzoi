@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 
 pub const UNSUPPORTED_SCHEMA_ERROR_PREFIX: &str = "unsupported SQLite schema";
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 pub fn is_unsupported_schema_error(error: &anyhow::Error) -> bool {
     error
@@ -27,6 +28,10 @@ pub(crate) fn validate_existing(conn: &Connection) -> Result<()> {
     validate_exact_current_schema(conn)
 }
 
+pub(crate) fn validate_current(conn: &Connection) -> Result<()> {
+    validate_exact_current_schema(conn)
+}
+
 fn database_has_no_application_objects(conn: &Connection) -> Result<bool> {
     conn.query_row(
         "SELECT NOT EXISTS(
@@ -39,6 +44,14 @@ fn database_has_no_application_objects(conn: &Connection) -> Result<bool> {
 }
 
 fn validate_exact_current_schema(conn: &Connection) -> Result<()> {
+    let actual_version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .context("failed to read SQLite user_version")?;
+    if actual_version != CURRENT_SCHEMA_VERSION {
+        bail!(
+            "unsupported SQLite schema: database does not match the current Memzoi format (user_version {actual_version}, current {CURRENT_SCHEMA_VERSION}); manually upgrade or remove it"
+        );
+    }
     let expected = Connection::open_in_memory()
         .context("failed to create current-schema validation database")?;
     expected
@@ -51,6 +64,47 @@ fn validate_exact_current_schema(conn: &Connection) -> Result<()> {
     if schema_snapshot(conn)? != schema_snapshot(&expected)? {
         bail!(
             "unsupported SQLite schema: database does not match the current Memzoi format; manually upgrade or remove it"
+        );
+    }
+    let lifecycle_singleton_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM private_lifecycle_generation
+               WHERE singleton = 1 AND generation >= 0
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to validate private lifecycle generation")?;
+    if !lifecycle_singleton_exists {
+        bail!(
+            "unsupported SQLite schema: private lifecycle generation is not initialized; manually upgrade or remove it"
+        );
+    }
+    let private_state_is_complete: bool = conn
+        .query_row(
+            "SELECT
+               NOT EXISTS(
+                 SELECT 1
+                 FROM memory_record AS record
+                 LEFT JOIN private_lifecycle_state AS lifecycle
+                   ON lifecycle.record_id = record.id
+                 WHERE record.destination IN ('local', 'session')
+                   AND lifecycle.record_id IS NULL
+               )
+               AND NOT EXISTS(
+                 SELECT 1
+                 FROM private_lifecycle_state AS lifecycle
+                 JOIN memory_record AS record ON record.id = lifecycle.record_id
+                 WHERE record.destination NOT IN ('local', 'session')
+               )",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to validate private lifecycle state coverage")?;
+    if !private_state_is_complete {
+        bail!(
+            "unsupported SQLite schema: private lifecycle state is incomplete; manually upgrade or remove it"
         );
     }
     Ok(())
@@ -87,10 +141,13 @@ fn schema_snapshot(conn: &Connection) -> Result<Vec<SchemaObject>> {
 
 const CURRENT_SCHEMA: &str = r#"
 
+PRAGMA user_version = 2;
+
 CREATE TABLE IF NOT EXISTS event_log (
   id TEXT PRIMARY KEY,
   event_type TEXT NOT NULL,
   actor TEXT NOT NULL,
+  data_class TEXT NOT NULL CHECK (data_class IN ('repository', 'private')),
   payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
   record_id TEXT,
   proposal_id TEXT,
@@ -204,6 +261,85 @@ CREATE TABLE IF NOT EXISTS runtime_mirror_state (
   )
 );
 
+CREATE TABLE IF NOT EXISTS private_lifecycle_generation (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  generation INTEGER NOT NULL CHECK (generation >= 0)
+);
+
+INSERT OR IGNORE INTO private_lifecycle_generation(singleton, generation) VALUES (1, 0);
+
+CREATE TABLE IF NOT EXISTS private_lifecycle_state (
+  record_id TEXT PRIMARY KEY REFERENCES memory_record(id) ON DELETE CASCADE,
+  automatic_recall_until TEXT,
+  validity_until TEXT,
+  retain_until TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+  quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
+  quarantine_reason_code TEXT CHECK (
+    quarantine_reason_code IS NULL OR (
+      length(trim(quarantine_reason_code)) > 0
+      AND length(CAST(quarantine_reason_code AS BLOB)) <= 128
+    )
+  ),
+  record_version TEXT NOT NULL CHECK (
+    length(record_version) = 32
+    AND record_version NOT GLOB '*[^0-9a-f]*'
+  ),
+  automatic_recall_event_id TEXT,
+  validity_event_id TEXT,
+  retention_event_id TEXT,
+  quarantine_event_id TEXT,
+  updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+  CHECK (
+    (quarantined = 1 AND quarantine_reason_code IS NOT NULL)
+    OR (quarantined = 0 AND quarantine_reason_code IS NULL)
+  )
+);
+
+CREATE TABLE IF NOT EXISTS owner_action_grant (
+  grant_id TEXT PRIMARY KEY CHECK (length(trim(grant_id)) > 0 AND length(grant_id) <= 128),
+  request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+  request_json TEXT NOT NULL CHECK (json_valid(request_json)),
+  state TEXT NOT NULL CHECK (state IN ('active', 'consumed', 'revoked')),
+  authorized_at TEXT NOT NULL CHECK (length(trim(authorized_at)) > 0),
+  expires_at TEXT NOT NULL CHECK (length(trim(expires_at)) > 0),
+  revoked_at TEXT,
+  consumed_at TEXT,
+  consumed_application_id TEXT,
+  CHECK (
+    (state = 'active' AND revoked_at IS NULL AND consumed_at IS NULL AND consumed_application_id IS NULL)
+    OR (state = 'revoked' AND revoked_at IS NOT NULL AND consumed_at IS NULL AND consumed_application_id IS NULL)
+    OR (state = 'consumed' AND revoked_at IS NULL AND consumed_at IS NOT NULL AND consumed_application_id IS NOT NULL)
+  )
+);
+
+CREATE TABLE IF NOT EXISTS private_lifecycle_application (
+  application_id TEXT PRIMARY KEY CHECK (length(trim(application_id)) > 0 AND length(application_id) <= 128),
+  operation_id TEXT NOT NULL UNIQUE CHECK (length(trim(operation_id)) > 0),
+  request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+  grant_id TEXT NOT NULL UNIQUE REFERENCES owner_action_grant(grant_id),
+  result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+  lifecycle_generation INTEGER NOT NULL CHECK (lifecycle_generation > 0),
+  applied_at TEXT NOT NULL CHECK (length(trim(applied_at)) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS private_lifecycle_relation (
+  id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0 AND length(id) <= 128),
+  relation_kind TEXT NOT NULL CHECK (relation_kind IN (
+    'renewed_by',
+    'corrected_by',
+    'superseded_by',
+    'consolidated_into',
+    'contradiction_resolved_by'
+  )),
+  subject_record_id TEXT NOT NULL REFERENCES memory_record(id) ON DELETE CASCADE,
+  related_record_id TEXT NOT NULL REFERENCES memory_record(id) ON DELETE CASCADE,
+  application_id TEXT NOT NULL CHECK (length(trim(application_id)) > 0),
+  created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+  CHECK (subject_record_id <> related_record_id),
+  UNIQUE (relation_kind, subject_record_id, related_record_id, application_id)
+);
+
 CREATE TABLE IF NOT EXISTS read_audit (
   id TEXT PRIMARY KEY,
   operation TEXT NOT NULL,
@@ -241,6 +377,10 @@ CREATE INDEX IF NOT EXISTS idx_memory_path_path ON memory_path(path);
 CREATE INDEX IF NOT EXISTS idx_proposal_id_status ON proposal(id, status);
 CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_memory_capture_record_id ON memory_capture(record_id);
+CREATE INDEX IF NOT EXISTS idx_private_lifecycle_relation_subject ON private_lifecycle_relation(subject_record_id, relation_kind);
+CREATE INDEX IF NOT EXISTS idx_private_lifecycle_relation_related ON private_lifecycle_relation(related_record_id, relation_kind);
+CREATE INDEX IF NOT EXISTS idx_owner_action_grant_request_state ON owner_action_grant(request_id, state, expires_at);
+CREATE INDEX IF NOT EXISTS idx_private_lifecycle_application_request ON private_lifecycle_application(request_id);
 "#;
 
 const RUNTIME_MIRROR_TRIGGERS: &str = r#"
@@ -248,6 +388,14 @@ CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_record_ai
 AFTER INSERT ON memory_record
 WHEN NEW.destination IN ('local', 'session')
 BEGIN
+  INSERT INTO private_lifecycle_state(
+    record_id, record_version, updated_at
+  ) VALUES (
+    NEW.id, lower(hex(randomblob(16))), NEW.updated_at
+  );
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -256,6 +404,20 @@ CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_record_au
 AFTER UPDATE ON memory_record
 WHEN OLD.destination IN ('local', 'session') OR NEW.destination IN ('local', 'session')
 BEGIN
+  INSERT INTO private_lifecycle_state(
+    record_id, record_version, updated_at
+  )
+  SELECT NEW.id, lower(hex(randomblob(16))), NEW.updated_at
+  WHERE NEW.destination IN ('local', 'session')
+  ON CONFLICT(record_id) DO UPDATE SET
+    record_version = lower(hex(randomblob(16))),
+    updated_at = excluded.updated_at;
+  DELETE FROM private_lifecycle_state
+  WHERE record_id = NEW.id
+    AND NEW.destination NOT IN ('local', 'session');
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -264,6 +426,100 @@ CREATE TRIGGER IF NOT EXISTS runtime_mirror_memory_record_ad
 AFTER DELETE ON memory_record
 WHEN OLD.destination IN ('local', 'session')
 BEGIN
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_lifecycle_state_au
+AFTER UPDATE OF
+  automatic_recall_until,
+  validity_until,
+  retain_until,
+  pinned,
+  quarantined,
+  quarantine_reason_code,
+  automatic_recall_event_id,
+  validity_event_id,
+  retention_event_id,
+  quarantine_event_id
+ON private_lifecycle_state
+BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id = NEW.record_id;
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_lifecycle_state_bi
+BEFORE INSERT ON private_lifecycle_state
+WHEN NOT EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id = NEW.record_id AND destination IN ('local', 'session')
+)
+BEGIN
+  SELECT RAISE(ABORT, 'private lifecycle state requires a local/session record');
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_lifecycle_state_ad
+AFTER DELETE ON private_lifecycle_state
+WHEN EXISTS (SELECT 1 FROM memory_record WHERE id = OLD.record_id)
+BEGIN
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_lifecycle_relation_ai
+AFTER INSERT ON private_lifecycle_relation
+BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16))),
+      updated_at = NEW.created_at
+  WHERE record_id IN (NEW.subject_record_id, NEW.related_record_id);
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_lifecycle_relation_bi
+BEFORE INSERT ON private_lifecycle_relation
+WHEN NOT EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id = NEW.subject_record_id AND destination IN ('local', 'session')
+) OR NOT EXISTS (
+  SELECT 1 FROM memory_record
+  WHERE id = NEW.related_record_id AND destination IN ('local', 'session')
+)
+BEGIN
+  SELECT RAISE(ABORT, 'private lifecycle relations require local/session records');
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_lifecycle_relation_bu
+BEFORE UPDATE ON private_lifecycle_relation
+BEGIN
+  SELECT RAISE(ABORT, 'private lifecycle relations are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_lifecycle_relation_ad
+AFTER DELETE ON private_lifecycle_relation
+BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id IN (OLD.subject_record_id, OLD.related_record_id);
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -275,6 +531,12 @@ WHEN EXISTS (
   WHERE id = NEW.record_id AND destination IN ('local', 'session')
 )
 BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id = NEW.record_id;
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -286,6 +548,12 @@ WHEN EXISTS (
   WHERE id IN (OLD.record_id, NEW.record_id) AND destination IN ('local', 'session')
 )
 BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id IN (OLD.record_id, NEW.record_id);
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -297,6 +565,12 @@ WHEN EXISTS (
   WHERE id = OLD.record_id AND destination IN ('local', 'session')
 )
 BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id = OLD.record_id;
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -308,6 +582,12 @@ WHEN EXISTS (
   WHERE id = NEW.record_id AND destination IN ('local', 'session')
 )
 BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id = NEW.record_id;
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -319,6 +599,12 @@ WHEN EXISTS (
   WHERE id IN (OLD.record_id, NEW.record_id) AND destination IN ('local', 'session')
 )
 BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id IN (OLD.record_id, NEW.record_id);
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -330,6 +616,12 @@ WHEN EXISTS (
   WHERE id = OLD.record_id AND destination IN ('local', 'session')
 )
 BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id = OLD.record_id;
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -341,6 +633,12 @@ WHEN EXISTS (
   WHERE id = NEW.record_id AND destination IN ('local', 'session')
 )
 BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id = NEW.record_id;
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -352,6 +650,12 @@ WHEN EXISTS (
   WHERE id IN (OLD.record_id, NEW.record_id) AND destination IN ('local', 'session')
 )
 BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id IN (OLD.record_id, NEW.record_id);
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;
@@ -363,6 +667,12 @@ WHEN EXISTS (
   WHERE id = OLD.record_id AND destination IN ('local', 'session')
 )
 BEGIN
+  UPDATE private_lifecycle_state
+  SET record_version = lower(hex(randomblob(16)))
+  WHERE record_id = OLD.record_id;
+  UPDATE private_lifecycle_generation
+  SET generation = generation + 1
+  WHERE singleton = 1;
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));
 END;

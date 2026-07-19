@@ -21,6 +21,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi session-end` | Promote explicit structured session-end candidates into proposal files or runtime memory. |
 | `memzoi capture` | Plan evidence-backed capture from one explicit Markdown, instruction, ADR, or Git-change source; record a complete review; and route reviewed candidates. |
 | `memzoi maintenance` | Generate an immutable, repository-only maintenance evidence plan without applying or authorizing any action. |
+| `memzoi lifecycle` | Plan, authorize, revoke, inspect, and atomically apply exact owner-authorized private lifecycle actions. This local CLI/core workflow is not exposed through MCP. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
 | `memzoi apply` | Apply an approved memory proposal into canonical `.memzoi/records/*.md`. |
@@ -73,6 +74,12 @@ Run `memzoi <command> --help` for exact options.
 | `capture review` | `--plan-file`, `--decisions-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--reviewed-by`, `--reviewed-at`, `--output`, `--json` |
 | `capture apply` | `--plan-file`, `--review-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--plan-id`, `--review-id`, `--actor`, `--json` |
 | `maintenance plan` | repeated `--record-id`, `--evaluated-at <RFC3339>`, `--output`, `--json` |
+| `lifecycle plan` | repeated `--record-id`, `--evaluated-at <RFC3339>`, `--output`, `--json` |
+| `lifecycle authorize` | `--request-file <path>`, optional `--plan-file <path>`, optional `--expires-at <RFC3339>`, `--json` |
+| `lifecycle revoke` | `--grant-id <id>`, `--json` |
+| `lifecycle inspect record` | `<record-id>`, `--json` |
+| `lifecycle inspect grant` | `<grant-id>`, `--json` |
+| `lifecycle apply` | `--request-file <path>`, `--grant-id <id>`, optional `--plan-file <path>`, `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
@@ -262,7 +269,7 @@ memzoi maintenance plan \
   --json
 
 memzoi maintenance plan \
-  --record-id mem_repository_policy \
+  --record-id maintenance-plans-separate-evidence-from-execution-authority \
   --output /path/outside/the/worktree/maintenance-plan.json
 ```
 
@@ -286,10 +293,168 @@ must be outside the Git worktree and all Memzoi-managed runtime roots.
 
 The artifact schema reserves separate repository materialization, private
 derived-state, and owner-authorized private action groups for downstream work.
-The current CLI is deliberately repository-only: it exposes no private flags,
-private output, private mutation path, revalidation/apply command, or retention
-extension. Private release boundaries belong to #116–#118; execution belongs
-to #121–#123.
+`memzoi maintenance plan` remains deliberately repository-only and exposes no
+private flags, output, or mutation path. Private planning and owner-authorized
+execution use the separate local `memzoi lifecycle` CLI/core workflow; MCP
+`plan_maintenance` never exposes private records or lifecycle mutation.
+
+The current maintenance contract is `maintenance-plan/2` while the stable
+artifact schemas remain `memzoi/maintenance-request` and
+`memzoi/maintenance-plan`. Memzoi is pre-1.0 and current-schema-only: v1
+artifacts are rejected and must be regenerated. There is no compatibility
+reader, schema fallback, deprecated field alias, or SQLite migration. An old
+runtime database must be manually removed and regenerated before these commands
+can open it.
+
+## Owner-authorized private lifecycle
+
+Private lifecycle work is local CLI/core only and follows
+`plan → exact owner request → one-shot grant → atomic apply → idempotent result`:
+
+Start by inspecting the target. This shell-safe template uses a quoted variable
+instead of angle-bracket syntax that a shell would interpret as redirection:
+
+```bash
+RECORD_ID='replace-with-private-record-id'
+
+memzoi lifecycle inspect record "$RECORD_ID" --json
+```
+
+For a plan-bound request, create fresh evidence before constructing the exact
+owner request:
+
+```bash
+memzoi lifecycle plan \
+  --record-id "$RECORD_ID" \
+  --output /private/review/lifecycle-plan.json \
+  --json
+```
+
+The direct request walkthrough below is separate and does not bind that
+optional plan. Optional `--evaluated-at` and `--expires-at` overrides are
+deliberately omitted so copied examples cannot become stale.
+
+The strict request schema is `memzoi/private-lifecycle-request`:
+
+The following JSON is an illustrative, non-executable shape template. Replace
+the record ID and version with values from inspection, select the exact owner
+action, and recompute `request_id`; placeholder text is never accepted as
+authority.
+
+```json
+{
+  "schema": "memzoi/private-lifecycle-request",
+  "request_id": "blake3:<computed-64-lowercase-hex-digest>",
+  "operation_id": "owner-operation-42",
+  "source": { "kind": "direct" },
+  "actions": [
+    {
+      "kind": "pin",
+      "record_id": "local-<opaque-uuid>",
+      "expected_version": "0123456789abcdef0123456789abcdef"
+    }
+  ]
+}
+```
+
+A planned request instead uses
+`{"kind":"maintenance_plan","plan_id":"...","selected_action_ids":["..."]}`.
+For that source, pass the exact selected plan artifact to both `authorize` and
+`apply`. The direct walkthrough below intentionally omits `--plan-file`.
+The `request_id` is recomputed from the schema, caller-controlled
+`operation_id`, source, and exact ordered action payloads; a mismatch is
+rejected. Core callers should use
+`PrivateLifecycleRequest::with_computed_id`; its identity is the BLAKE3 digest
+of the NUL-terminated `memzoi/private-lifecycle-request-id/v1` domain separator
+followed by canonical JSON containing only `schema`, `operation_id`, `source`,
+and `actions`. Do not hand-edit a previously computed ID after changing an
+action.
+
+Requests contain one to 64 actions, at most 256 distinct mutation targets, no
+duplicate or overlapping participation, and exact version tokens for every
+target and evidence reference. Reason codes are nonempty machine-readable
+values of at most 128 UTF-8 bytes. Inputs may be strict JSON or YAML, but must
+be regular non-symlink files no larger than 2 MiB; unknown or duplicate keys,
+trailing documents, special files, and truncation are rejected.
+
+After constructing and reviewing the exact request artifact, authorize and
+apply it. Copy the returned `grant_id` into the quoted shell variable before
+continuing:
+
+```bash
+memzoi lifecycle authorize \
+  --request-file /private/review/lifecycle-request.json \
+  --json
+
+GRANT_ID='replace-with-grant-id-from-authorize'
+
+memzoi lifecycle inspect grant "$GRANT_ID" --json
+
+memzoi lifecycle apply \
+  --request-file /private/review/lifecycle-request.json \
+  --grant-id "$GRANT_ID" \
+  --json
+```
+
+To cancel an active grant **instead of applying it**:
+
+```bash
+memzoi lifecycle revoke --grant-id "$GRANT_ID" --json
+```
+
+`plan` and both `inspect` forms are strictly read-only. `authorize` may create
+only one authoritative `owner_action_grant` row, and `revoke` may update only
+that grant store. `apply` is the only command that may change private record
+content/status, lifecycle state or relations, ordinary-read eligibility,
+application receipts, or lifecycle audit events.
+
+**Platform boundary:** In this release, the artifact-backed
+`lifecycle authorize` and `lifecycle apply` CLI commands are Unix-only because
+their required request artifact—and optional plan artifact—must be opened using
+fail-closed regular-file, no-symlink semantics. `lifecycle plan --output` is
+also Unix-only because private plans use an atomic no-clobber installer. On
+non-Unix systems these paths fail before any lifecycle write. `lifecycle plan`
+without `--output`, both `lifecycle inspect` commands, and `lifecycle revoke`
+remain available.
+
+Tagged actions are `extend_automatic_recall`, `extend_validity`,
+`retain_until`, `pin`, `unpin`, `renew_from_evidence`, `correct`, `supersede`,
+`consolidate`, `resolve_contradiction`, `quarantine`, and
+`release_quarantine`. Duplicate detection and contradiction detection supply
+member sets only: the owner request must name the keeper or winner. See
+[Exact owner-authorized private lifecycle](./memory-lifecycle.md#exact-owner-authorized-private-lifecycle)
+for the per-action lane, clock, evidence, compatibility, and retention rules.
+
+Authorization time always comes from the service clock. `--expires-at` may
+only shorten the effective expiry, which is the earliest of authorization plus
+24 hours, the requested expiry, and a selected maintenance plan's `not_after`.
+The stored grant row is authoritative; copied JSON cannot bypass expiry,
+revocation, consumption, exact request binding, or database revalidation.
+Authorizing an identical request reuses an identical active grant. Revoking an
+active grant returns `revoked`; an already revoked or consumed grant returns a
+typed no-op, while an unknown grant fails without writes.
+
+Apply checks operation replay/conflict first, then revalidates the grant,
+request, optional plan, policy, comparison neighbourhood, lane constraints,
+and every target/evidence version under the lifecycle lock and one shared
+SQLite transaction. The whole action group and exactly one grant consumption
+commit together or all lifecycle writes roll back. The same `operation_id`,
+`request_id`, and recorded `grant_id` returns the recorded result after mirror
+convergence. A different grant is a zero-write replay mismatch; the same
+operation with another request is a zero-write operation-ID conflict.
+
+Each successful lifecycle commit advances the authoritative `shared.db`
+lifecycle generation. A worktree mirror must converge to that generation
+before it can serve an ordinary read; refresh failure returns a safe
+mirror-refresh-required error. Grants and application receipts remain only in
+shared authority. Audit events contain no private content, evidence IDs/text,
+provenance payloads, request digests, content hashes, or content-derived
+versions.
+
+Private `--output` plans use atomic no-clobber installation under a real
+existing directory and must remain outside both the Git worktree and all
+Memzoi-managed runtime directories. MCP exposes no corresponding lifecycle
+tool and its `plan_maintenance` capability remains repository-only.
 
 ## Evidence-backed capture
 
@@ -791,14 +956,22 @@ Event objects include:
 - `id`
 - `event_type`
 - `actor`
+- `data_class` (`repository` for exported rows)
 - `payload`
 - `record_id`
 - `proposal_id`
 - `created_at`
 
-The JSONL stream is operational runtime state for bulk or append-only consumption. It is
-not canonical memory, not rebuild input, and does not replace `.memzoi/records/*.md` or
-`.memzoi/proposals/pending/*.md` files.
+The command exports only events explicitly written with the `repository` data class. Raw
+search, context, handoff, and precheck telemetry and events attached to private runtime
+records remain local even when they have no top-level `record_id`. Proposal titles and
+unrestricted rejection or tombstone reasons remain local until repository-write policy has
+authorized any resulting repository event. Content-free private lifecycle application events
+remain repository-exportable audit receipts. The JSONL
+stream is operational runtime state for bulk or append-only consumption. It is not
+canonical memory, not rebuild input, and does not replace `.memzoi/records/*.md` or
+`.memzoi/proposals/pending/*.md` files. Proposal-file locations in repository events are
+repository-relative; absolute local worktree paths never cross the export boundary.
 
 
 ## Update Command
@@ -830,11 +1003,18 @@ JSON status values:
 | --- | --- | --- |
 | `search_memory` | `query` | `scope_kind`, `scope`, `type`, `memory_type`, `path`, `path_prefix`, `limit` |
 | `inspect_memory_expiry` | `record_id` | none |
-| `build_context_pack` | `task` | `path`, `path_prefix`, `token_budget`, `include_local`, `include_session` |
-| `propose_memory` | `title`, `body` | `type`, `memory_type`, `scope_kind`, `scope`, `scope_id`, `visibility`, `sensitivity`, `tags`, `source_kind`, `source_ref`, `confidence`, `actor`, `approval_mode` |
+| `build_context_pack` | `task` | `path`, `path_prefix`, `token_budget` |
+| `plan_capture` | strict `schema`, `sources`, `extractor` | none |
+| `plan_maintenance` | `schema` | `evaluated_at`, `record_ids` |
 | `precheck_path` | `path` | `scope_kind`, `scope` |
 | `precheck_action` | `action` | `path`, `scope_kind`, `scope` |
 | `precheck_command` | `command` | `path`, `scope_kind`, `scope` |
+
+`search_memory`, `inspect_memory_expiry`, and `build_context_pack` are
+repository-only at the MCP boundary. `include_local` and `include_session` are
+not accepted MCP arguments. `plan_maintenance` emits maintenance v2 evidence
+from repository records only; MCP exposes no private lifecycle plan, grant,
+inspection, revoke, or apply capability.
 
 ## Memory types
 
@@ -895,7 +1075,9 @@ Valid proposal sensitivity values:
 - `temporary-state`
 - `unknown`
 
-The current CLI/MCP proposal inbox remains DB-local workflow state and uses the operational proposal statuses below.
+The current CLI proposal inbox remains DB-local workflow state and uses the
+operational proposal statuses below. MCP cannot create or change proposal
+state.
 
 Proposal file review commands:
 
@@ -1062,7 +1244,7 @@ Effective proposal approval mode is resolved in this order:
 1. Built-in default: `auto`.
 2. User-global config: `${MEMZOI_HOME:-~/.memzoi}/config.toml`.
 3. Repo config: `.memzoi/config.toml`.
-4. CLI or MCP per-call override.
+4. CLI per-call override.
 
 Config shape:
 
@@ -1078,10 +1260,10 @@ CLI overrides:
 - `memzoi propose --apply --sensitivity repo-safe` creates, approves, and applies through the CLI. It is incompatible with `--manual`.
 - Omitted sensitivity is serialized as `unknown`; validation and apply both refuse canonical promotion until it is explicitly `repo-safe`.
 
-MCP override:
+MCP boundary:
 
-- `propose_memory` accepts `approval_mode: "auto"` or `"manual"`.
-- MCP rejects `apply` and `auto_apply`; MCP never writes canonical records.
+- MCP exposes no proposal creation or approval-policy override, and never
+  creates proposal state or writes canonical records.
 
 ## Export formats
 
@@ -1097,5 +1279,6 @@ Valid `memzoi export <format>` values:
 - Search is text/FTS-first, not vector or semantic recall.
 - Memory is repo-local; global, personal, team, and org sync are future work.
 - `memzoi rebuild` restores canonical records from `.memzoi/records/` into the current worktree's disposable `index.db`. Repository-wide local/session memory and proposal state remain authoritative in `shared.db`, so open proposals do not block rebuild. An unreadable `shared.db` fails closed before the worktree index is replaced.
-- MCP is intentionally minimal and safe-by-default. It can create proposals under the effective approval policy, but it cannot apply canonical records.
+- MCP is intentionally minimal, repository-only, and read-only. It cannot
+  create proposal state or apply canonical records.
 - Homebrew and package-manager installers are not available yet.

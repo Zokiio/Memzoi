@@ -6,11 +6,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    CaptureCandidate, CaptureProvenance, MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus,
-    MemoryType, OriginDescriptor, OriginRoute, RecordLineage, RetentionFacts, ScopeKind,
-    Visibility,
+    CaptureCandidate, CaptureProvenance, MemoryDestination, MemoryEventDataClass, MemoryLane,
+    MemoryRecord, MemoryStatus, MemoryType, OriginDescriptor, OriginRoute, RecordLineage,
+    RetentionFacts, ScopeKind, Visibility,
     events::{AppendEvent, append_event},
-    proposals,
 };
 
 use super::{CheckpointInput, LocalMemoryInput};
@@ -61,8 +60,42 @@ pub(super) fn create_local_memory_with_metadata_avoiding(
     lineage: Option<RecordLineage>,
     reserved_ids: &BTreeSet<String>,
 ) -> Result<MemoryRecord> {
+    let id = next_private_record_id(conn, "local", reserved_ids)?;
+    create_local_memory_with_metadata_and_id(conn, actor, input, now, origin, lineage, id)
+}
+
+pub(super) fn create_local_memory_with_id_for_trusted_recall_eval(
+    conn: &Connection,
+    actor: &str,
+    id: &str,
+    input: &LocalMemoryInput,
+    now: &str,
+) -> Result<MemoryRecord> {
+    create_local_memory_with_metadata_and_id(
+        conn,
+        actor,
+        input,
+        now,
+        OriginDescriptor::new(
+            format!("trusted-recall-eval:{id}"),
+            OriginRoute::LocalMemory,
+        ),
+        None,
+        id.to_owned(),
+    )
+}
+
+fn create_local_memory_with_metadata_and_id(
+    conn: &Connection,
+    actor: &str,
+    input: &LocalMemoryInput,
+    now: &str,
+    origin: OriginDescriptor,
+    lineage: Option<RecordLineage>,
+    id: String,
+) -> Result<MemoryRecord> {
     validate_local_memory_input(input)?;
-    let id = next_prefixed_record_id(conn, "local", &input.title, reserved_ids)?;
+    validate_private_record_id(&id, "local")?;
     let body = input.body.trim().to_owned();
     let record = MemoryRecord {
         id,
@@ -96,10 +129,10 @@ pub(super) fn create_local_memory_with_metadata_avoiding(
         AppendEvent {
             event_type: "memory.local_created".to_owned(),
             actor: actor.to_owned(),
+            data_class: MemoryEventDataClass::Private,
             payload: json!({
                 "record_id": &record.id,
                 "destination": record.destination.as_str(),
-                "title": &record.title,
             }),
             record_id: Some(record.id.clone()),
             proposal_id: None,
@@ -135,8 +168,42 @@ pub(super) fn create_checkpoint_with_metadata_avoiding(
     lineage: Option<RecordLineage>,
     reserved_ids: &BTreeSet<String>,
 ) -> Result<MemoryRecord> {
+    let id = next_private_record_id(conn, "session", reserved_ids)?;
+    create_checkpoint_with_metadata_and_id(conn, actor, input, now, origin, lineage, id)
+}
+
+pub(super) fn create_checkpoint_with_id_for_trusted_recall_eval(
+    conn: &Connection,
+    actor: &str,
+    id: &str,
+    input: &CheckpointInput,
+    now: &str,
+) -> Result<MemoryRecord> {
+    create_checkpoint_with_metadata_and_id(
+        conn,
+        actor,
+        input,
+        now,
+        OriginDescriptor::new(
+            format!("trusted-recall-eval:{id}"),
+            OriginRoute::CheckpointCreate,
+        ),
+        None,
+        id.to_owned(),
+    )
+}
+
+fn create_checkpoint_with_metadata_and_id(
+    conn: &Connection,
+    actor: &str,
+    input: &CheckpointInput,
+    now: &str,
+    origin: OriginDescriptor,
+    lineage: Option<RecordLineage>,
+    id: String,
+) -> Result<MemoryRecord> {
     validate_checkpoint_input(input)?;
-    let id = next_prefixed_record_id(conn, "session", &input.task, reserved_ids)?;
+    validate_private_record_id(&id, "session")?;
     let body = input.note.trim().to_owned();
     let record = MemoryRecord {
         id,
@@ -165,18 +232,16 @@ pub(super) fn create_checkpoint_with_metadata_avoiding(
         lineage,
     };
     insert_memory_record_row(conn, &record, InsertMode::Create)?;
-    let record_version = super::lifecycle::checkpoint_record_version(&record)?;
+    let record_version = super::lifecycle::checkpoint_record_version(conn, &record.id)?;
     append_event(
         conn,
         AppendEvent {
             event_type: "memory.checkpoint_created".to_owned(),
             actor: actor.to_owned(),
+            data_class: MemoryEventDataClass::Private,
             payload: json!({
                 "record_id": &record.id,
                 "destination": record.destination.as_str(),
-                "title": &record.title,
-                "origin": &record.origin,
-                "lineage": &record.lineage,
                 "record_version": record_version,
             }),
             record_id: Some(record.id.clone()),
@@ -206,25 +271,28 @@ fn validate_checkpoint_input(input: &CheckpointInput) -> Result<()> {
     Ok(())
 }
 
-fn next_prefixed_record_id(
+fn validate_private_record_id(id: &str, prefix: &str) -> Result<()> {
+    if id.len() > 256 || !id.starts_with(&format!("{prefix}-")) || id.contains('/') {
+        bail!("private record id must be a bounded {prefix}-* identifier");
+    }
+    crate::validate_canonical_record_id(id)?;
+    Ok(())
+}
+
+fn next_private_record_id(
     conn: &Connection,
     prefix: &str,
-    title: &str,
     reserved_ids: &BTreeSet<String>,
 ) -> Result<String> {
-    let slug = proposals::title_to_concept_slug(title)
-        .unwrap_or_else(|| format!("memory-{}", Uuid::now_v7()));
-    let base = format!("{prefix}-{slug}");
-    if !reserved_ids.contains(&base) && !record_id_exists(conn, &base)? {
-        return Ok(base);
-    }
-    for suffix in 2.. {
-        let candidate = format!("{base}-{suffix}");
+    loop {
+        // Private record identifiers cross lifecycle-plan and audit boundaries.
+        // Keep them opaque: neither title/task text nor content participates in
+        // the identifier. UUID v4 also avoids exposing creation timestamps.
+        let candidate = format!("{prefix}-{}", Uuid::new_v4());
         if !reserved_ids.contains(&candidate) && !record_id_exists(conn, &candidate)? {
             return Ok(candidate);
         }
     }
-    unreachable!("unbounded suffix search returns")
 }
 
 fn record_id_exists(conn: &Connection, id: &str) -> Result<bool> {
@@ -312,7 +380,7 @@ pub(super) fn create_capture(
         OriginRoute::Capture,
     );
     let record = MemoryRecord {
-        id: next_prefixed_record_id(conn, prefix, &candidate.memory.title, reserved_ids)?,
+        id: next_private_record_id(conn, prefix, reserved_ids)?,
         memory_type: candidate.memory.memory_type,
         lane: candidate.memory.lane,
         destination,
@@ -361,6 +429,15 @@ pub(super) fn create_capture(
         AppendEvent {
             event_type: "memory.capture_routed".to_owned(),
             actor: actor.to_owned(),
+            data_class: match destination {
+                MemoryDestination::Repo => MemoryEventDataClass::Repository,
+                MemoryDestination::Local | MemoryDestination::Session => {
+                    MemoryEventDataClass::Private
+                }
+                MemoryDestination::Discard | MemoryDestination::NeedsReview => {
+                    MemoryEventDataClass::Private
+                }
+            },
             payload: json!({
                 "record_id": &record.id,
                 "destination": destination.as_str(),

@@ -40,6 +40,31 @@ use self::inventory::{
     require_clean_file_proposal_inventory, reserved_proposal_identities,
 };
 
+fn repository_relative_event_path(paths: &MemoryPaths, absolute_path: &Path) -> Result<String> {
+    let relative = absolute_path
+        .strip_prefix(&paths.project_root)
+        .context("resolved proposal event path escaped the repository")?;
+    let mut segments = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(segment) = component else {
+            bail!("resolved proposal event path contains an unsafe component");
+        };
+        let segment = segment
+            .to_str()
+            .context("resolved proposal event path is not valid UTF-8")?;
+        ensure!(
+            !segment.is_empty() && !segment.contains('\\'),
+            "resolved proposal event path contains an unsafe component"
+        );
+        segments.push(segment);
+    }
+    ensure!(
+        !segments.is_empty(),
+        "resolved proposal event path cannot be empty"
+    );
+    Ok(segments.join("/"))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileProposalResolutionResult {
     pub proposal: OkfProposalFile,

@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs, process::Command};
+use std::{cell::Cell, collections::BTreeSet, fs, process::Command, rc::Rc};
 
 use super::*;
 use crate::repository_io;
@@ -11,6 +11,14 @@ use crate::{
     repository_materialization_candidate_plan, repository_materialization_policy,
 };
 use tempfile::TempDir;
+
+fn assert_opaque_private_record_id(id: &str, prefix: &str) {
+    let uuid = id
+        .strip_prefix(&format!("{prefix}-"))
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .unwrap_or_else(|| panic!("private record ID is not an opaque {prefix} UUID: {id}"));
+    assert_eq!(uuid.get_version_num(), 4, "private record ID is not random");
+}
 
 #[test]
 fn unresolved_git_identity_blocks_service_lifecycles_before_writes() -> anyhow::Result<()> {
@@ -515,8 +523,8 @@ fn refresh_refuses_shared_id_owned_by_inactive_repo_record() -> anyhow::Result<(
 }
 
 #[test]
-fn shared_runtime_id_allocation_skips_repo_owned_local_and_session_candidates() -> anyhow::Result<()>
-{
+fn shared_runtime_ids_are_opaque_and_do_not_reuse_title_derived_repository_ids()
+-> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let repo_local = apply_test_record(
         &service,
@@ -541,19 +549,21 @@ fn shared_runtime_id_allocation_skips_repo_owned_local_and_session_candidates() 
             memory_type: MemoryType::Preference,
             lane: MemoryLane::Semantic,
             title: "Runtime collision".to_owned(),
-            body: "The local write must select the next repository-safe identifier.".to_owned(),
+            body: "The local write must allocate an opaque private identifier.".to_owned(),
         },
     )?;
     let checkpoint = service.create_checkpoint(
         "agent:collision-test",
         CheckpointInput {
             task: "Runtime collision".to_owned(),
-            note: "The session write must select the next repository-safe identifier.".to_owned(),
+            note: "The session write must allocate an opaque private identifier.".to_owned(),
         },
     )?;
 
-    assert_eq!(local.id, "local-runtime-collision-2");
-    assert_eq!(checkpoint.id, "session-runtime-collision-2");
+    assert_opaque_private_record_id(&local.id, "local");
+    assert_opaque_private_record_id(&checkpoint.id, "session");
+    assert_ne!(local.id, repo_local.id);
+    assert_ne!(checkpoint.id, repo_session.id);
     for (repo, runtime) in [(&repo_local, &local), (&repo_session, &checkpoint)] {
         assert_eq!(
             RuntimeRecords::new(&service.conn)
@@ -574,7 +584,7 @@ fn shared_runtime_id_allocation_skips_repo_owned_local_and_session_candidates() 
 }
 
 #[test]
-fn direct_runtime_id_allocation_skips_unindexed_canonical_file_ids() -> anyhow::Result<()> {
+fn direct_runtime_ids_are_opaque_and_do_not_reuse_unindexed_canonical_ids() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let canonical_local = apply_test_record(
         &service,
@@ -623,19 +633,21 @@ fn direct_runtime_id_allocation_skips_unindexed_canonical_file_ids() -> anyhow::
             memory_type: MemoryType::Preference,
             lane: MemoryLane::Semantic,
             title: "Unindexed canonical collision".to_owned(),
-            body: "The local write must reserve identifiers from canonical Markdown.".to_owned(),
+            body: "The local write must not derive its identifier from this title.".to_owned(),
         },
     )?;
     let checkpoint = service.create_checkpoint(
         "agent:unindexed-collision-test",
         CheckpointInput {
             task: "Unindexed canonical collision".to_owned(),
-            note: "The session write must reserve identifiers from canonical Markdown.".to_owned(),
+            note: "The session write must not derive its identifier from this task.".to_owned(),
         },
     )?;
 
-    assert_eq!(local.id, "local-unindexed-canonical-collision-2");
-    assert_eq!(checkpoint.id, "session-unindexed-canonical-collision-2");
+    assert_opaque_private_record_id(&local.id, "local");
+    assert_opaque_private_record_id(&checkpoint.id, "session");
+    assert_ne!(local.id, canonical_local.id);
+    assert_ne!(checkpoint.id, canonical_session.id);
     let canonical_ids = okf::read_okf_record_files(service.paths.records_dir())?
         .into_iter()
         .map(|record| record.concept_id)
@@ -993,9 +1005,9 @@ fn shared_proposals_are_authoritative_during_reads_and_open() -> anyhow::Result<
 }
 
 #[test]
-fn open_rebuilds_an_incompatible_disposable_index() -> anyhow::Result<()> {
+fn open_rejects_an_incompatible_disposable_index_without_rebuilding_it() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
-    let record = apply_test_record(
+    let _record = apply_test_record(
         &service,
         sample_memory_draft(
             "Disposable index rebuild",
@@ -1009,8 +1021,16 @@ fn open_rebuilds_an_incompatible_disposable_index() -> anyhow::Result<()> {
     incompatible.execute("CREATE TABLE obsolete_index_layout(id INTEGER)", [])?;
     drop(incompatible);
 
-    let reopened = MemoryService::open_paths(paths)?;
-    let obsolete_exists: bool = reopened.conn.query_row(
+    let before = std::fs::read(&paths.index_db_path)?;
+    let error = match MemoryService::open_paths(paths.clone()) {
+        Ok(_) => anyhow::bail!("an existing old-schema index must fail current-only open"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("unsupported SQLite schema"));
+    assert_eq!(std::fs::read(&paths.index_db_path)?, before);
+
+    let unchanged = Connection::open(&paths.index_db_path)?;
+    let obsolete_exists: bool = unchanged.query_row(
         "SELECT EXISTS(
            SELECT 1 FROM sqlite_schema
            WHERE type = 'table' AND name = 'obsolete_index_layout'
@@ -1018,16 +1038,9 @@ fn open_rebuilds_an_incompatible_disposable_index() -> anyhow::Result<()> {
         [],
         |row| row.get(0),
     )?;
-    assert!(!obsolete_exists, "incompatible index was not replaced");
     assert!(
-        reopened
-            .search_memory(SearchInput {
-                query: "Disposable index rebuild".to_owned(),
-                ..SearchInput::default()
-            })?
-            .iter()
-            .any(|result| result.record.id == record.id),
-        "rebuilt index omitted the canonical record"
+        obsolete_exists,
+        "incompatible index was unexpectedly replaced"
     );
     Ok(())
 }
@@ -1039,10 +1052,215 @@ fn unchanged_search_does_not_open_the_repository_lifecycle_lock() -> anyhow::Res
 
     let results = service.search_memory(SearchInput {
         query: "absent mirror freshness sentinel".to_owned(),
+        destination: Some(MemoryDestination::Repo),
         ..SearchInput::default()
     })?;
 
     assert!(results.is_empty());
+    Ok(())
+}
+
+#[test]
+fn unscoped_search_retries_when_private_mirror_generation_changes() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let hook_calls = Rc::new(Cell::new(0_usize));
+    let observed_calls = Rc::clone(&hook_calls);
+    inject_after_private_mirror_read_hook(move |shared| {
+        let call = observed_calls.get();
+        observed_calls.set(call + 1);
+        if call == 0 {
+            shared.execute(
+                "UPDATE private_lifecycle_generation
+                 SET generation = generation + 1
+                 WHERE singleton = 1",
+                [],
+            )?;
+        }
+        Ok(())
+    });
+
+    let result = service.search_memory(SearchInput {
+        query: "absent unscoped mirror freshness sentinel".to_owned(),
+        ..SearchInput::default()
+    });
+    clear_after_private_mirror_read_hook();
+
+    assert!(result?.is_empty());
+    assert_eq!(hook_calls.get(), 2, "unscoped search did not retry");
+    assert!(shared_runtime::lifecycle_generations_match(
+        &service.shared_conn,
+        &service.conn
+    )?);
+    Ok(())
+}
+
+#[test]
+fn benchmark_read_helpers_are_repository_only() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+
+    let search_error = service
+        .search_memory_for_benchmark(SearchInput {
+            query: "private benchmark sentinel".to_owned(),
+            destination: Some(MemoryDestination::Local),
+            ..SearchInput::default()
+        })
+        .expect_err("benchmark search must reject private destinations");
+    assert_eq!(
+        search_error.to_string(),
+        "benchmark search is repository-only"
+    );
+
+    let context_error = service
+        .build_context_pack_for_benchmark(ContextPackInput {
+            task: "private benchmark sentinel".to_owned(),
+            include_session: true,
+            ..ContextPackInput::default()
+        })
+        .expect_err("benchmark context building must reject private destinations");
+    assert_eq!(
+        context_error.to_string(),
+        "benchmark context building is repository-only"
+    );
+    Ok(())
+}
+
+#[test]
+fn local_search_audits_only_audited_services() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let local = service.create_local_memory(
+        "agent:immutable-local-search",
+        LocalMemoryInput {
+            memory_type: MemoryType::Preference,
+            lane: MemoryLane::Semantic,
+            title: "Immutable local search sentinel".to_owned(),
+            body: "A no-audit immutable service must return this local record without writing."
+                .to_owned(),
+        },
+    )?;
+    let event_count = |conn: &Connection| -> anyhow::Result<i64> {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM event_log WHERE event_type = 'memory.searched'",
+            [],
+            |row| row.get(0),
+        )?)
+    };
+    let shared_before = event_count(&service.shared_conn)?;
+    let mirror_before = event_count(&service.conn)?;
+
+    let audited = service.search_local_memory("immutable local search sentinel".to_owned(), 10)?;
+    assert_eq!(audited.len(), 1);
+    assert_eq!(audited[0].record.id, local.id);
+    assert_eq!(event_count(&service.shared_conn)?, shared_before + 1);
+    assert_eq!(event_count(&service.conn)?, mirror_before);
+    let data_class: String = service.shared_conn.query_row(
+        "SELECT data_class FROM event_log
+         WHERE event_type = 'memory.searched'
+         ORDER BY rowid DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(data_class, "private");
+
+    let paths = service.paths.clone();
+    drop(service);
+    let shared_bytes_before = fs::read(&paths.shared_db_path)?;
+    let mirror_bytes_before = fs::read(&paths.index_db_path)?;
+    let immutable = MemoryService::open_paths_for_immutable_read(paths.clone())?;
+    let immutable_shared_events = event_count(&immutable.shared_conn)?;
+    let immutable_mirror_events = event_count(&immutable.conn)?;
+
+    let results =
+        immutable.search_local_memory("immutable local search sentinel".to_owned(), 10)?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].record.id, local.id);
+    assert_eq!(
+        event_count(&immutable.shared_conn)?,
+        immutable_shared_events
+    );
+    assert_eq!(event_count(&immutable.conn)?, immutable_mirror_events);
+    drop(immutable);
+
+    assert_eq!(fs::read(&paths.shared_db_path)?, shared_bytes_before);
+    assert_eq!(fs::read(&paths.index_db_path)?, mirror_bytes_before);
+    Ok(())
+}
+
+#[test]
+fn private_mirror_read_retries_after_a_generation_change() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let local = service.create_local_memory(
+        "agent:red-tests",
+        LocalMemoryInput {
+            memory_type: MemoryType::Preference,
+            lane: MemoryLane::Semantic,
+            title: "Mirror retry sentinel".to_owned(),
+            body: "Private mirror retry result".to_owned(),
+        },
+    )?;
+    let mut injected = false;
+    inject_after_private_mirror_read_hook(move |shared| {
+        if !injected {
+            shared.execute(
+                "UPDATE private_lifecycle_generation
+                 SET generation = generation + 1
+                 WHERE singleton = 1",
+                [],
+            )?;
+            injected = true;
+        }
+        Ok(())
+    });
+
+    let result = service.build_context_pack(ContextPackInput {
+        task: "Mirror retry sentinel".to_owned(),
+        include_local: true,
+        ..ContextPackInput::default()
+    });
+    clear_after_private_mirror_read_hook();
+    let pack = result?;
+    assert!(
+        pack.records
+            .iter()
+            .any(|result| result.record.id == local.id),
+        "fresh retry omitted the private record"
+    );
+    assert!(shared_runtime::lifecycle_generations_match(
+        &service.shared_conn,
+        &service.conn
+    )?);
+    Ok(())
+}
+
+#[test]
+fn private_mirror_read_fails_safely_after_two_unstable_generations() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    service.create_local_memory(
+        "agent:red-tests",
+        LocalMemoryInput {
+            memory_type: MemoryType::Preference,
+            lane: MemoryLane::Semantic,
+            title: "Persistent mirror race".to_owned(),
+            body: "This result must not be returned from an unstable mirror.".to_owned(),
+        },
+    )?;
+    inject_after_private_mirror_read_hook(|shared| {
+        shared.execute(
+            "UPDATE private_lifecycle_generation
+             SET generation = generation + 1
+             WHERE singleton = 1",
+            [],
+        )?;
+        Ok(())
+    });
+
+    let result = service.build_context_pack(ContextPackInput {
+        task: "Persistent mirror race".to_owned(),
+        include_local: true,
+        ..ContextPackInput::default()
+    });
+    clear_after_private_mirror_read_hook();
+    let error = result.expect_err("an unstable private mirror must not return a context pack");
+    assert_eq!(error.to_string(), "mirror refresh required");
     Ok(())
 }
 
@@ -1093,10 +1311,174 @@ fn canonical_lifecycle_rejects_runtime_targets_without_canonical_leaks() -> anyh
             "runtime target {} leaked into canonical records",
             record.id
         );
-        let stored = service.inspect_expiry(&record.id)?.record;
+        let error = service
+            .inspect_expiry(&record.id)
+            .expect_err("ordinary expiry inspection must not expose private runtime history");
+        assert!(error.to_string().contains("repository-only"));
+        let stored = RuntimeRecords::new(&service.shared_conn)
+            .get(&record.id)?
+            .context("private runtime target disappeared after rejected canonical lifecycle")?;
         assert_eq!(stored.status, MemoryStatus::Active);
         assert_eq!(stored.destination, record.destination);
     }
+    Ok(())
+}
+
+#[test]
+fn quarantined_checkpoint_history_is_available_only_through_lifecycle_inspection()
+-> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let checkpoint = service.create_checkpoint(
+        "agent:red-tests",
+        CheckpointInput {
+            task: "Quarantined checkpoint".to_owned(),
+            note: "Private checkpoint history sentinel".to_owned(),
+        },
+    )?;
+    service.shared_conn.execute(
+        "UPDATE private_lifecycle_state
+         SET quarantined = 1,
+             quarantine_reason_code = 'owner_quarantine',
+             quarantine_event_id = 'event-owner-quarantine'
+         WHERE record_id = ?1",
+        [&checkpoint.id],
+    )?;
+
+    assert!(
+        service.inspect_checkpoint(&checkpoint.id).is_err(),
+        "ordinary checkpoint inspection exposed quarantined history"
+    );
+    assert!(
+        service.show_checkpoint(&checkpoint.id).is_err(),
+        "ordinary checkpoint show exposed quarantined history"
+    );
+    assert!(
+        service
+            .checkpoint_for_owner_operation(&checkpoint.id)
+            .is_err(),
+        "owner command accessor exposed quarantined history"
+    );
+    assert!(
+        service
+            .list_checkpoints()?
+            .iter()
+            .all(|record| record.id != checkpoint.id),
+        "ordinary checkpoint list exposed quarantined history"
+    );
+
+    let inspected = service.inspect_private_lifecycle_record(&checkpoint.id)?;
+    assert_eq!(inspected.record.body, "Private checkpoint history sentinel");
+    assert!(inspected.state.quarantined);
+    Ok(())
+}
+
+#[test]
+fn owner_checkpoint_commands_can_render_closed_history_but_not_superseded_history()
+-> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let closed = service.create_checkpoint(
+        "agent:red-tests",
+        CheckpointInput {
+            task: "Closed owner command".to_owned(),
+            note: "Closed history remains available to its exact owner command.".to_owned(),
+        },
+    )?;
+    let closed_version = service.checkpoint_record_version(&closed.id)?;
+    service.close_checkpoint(
+        "agent:red-tests",
+        CloseCheckpointCommand {
+            operation_id: "close-owner-command-history".to_owned(),
+            checkpoint_id: closed.id.clone(),
+            expected_version: closed_version,
+        },
+    )?;
+    assert!(service.inspect_checkpoint(&closed.id).is_err());
+    assert_eq!(
+        service.checkpoint_for_owner_operation(&closed.id)?.id,
+        closed.id
+    );
+
+    let superseded = service.create_checkpoint(
+        "agent:red-tests",
+        CheckpointInput {
+            task: "Superseded owner command".to_owned(),
+            note: "Superseded history remains lifecycle-inspection-only.".to_owned(),
+        },
+    )?;
+    service.shared_conn.execute(
+        "UPDATE memory_record SET status = 'superseded' WHERE id = ?1",
+        [&superseded.id],
+    )?;
+    assert!(
+        service
+            .checkpoint_for_owner_operation(&superseded.id)
+            .is_err(),
+        "owner command accessor exposed superseded history"
+    );
+    Ok(())
+}
+
+#[test]
+fn caller_selected_private_ids_are_confined_to_trusted_recall_evaluation() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let paths = service.paths.clone();
+    let fixture_id = "local-trusted-recall-eval-fixture";
+    let input = LocalMemoryInput {
+        memory_type: MemoryType::Preference,
+        lane: MemoryLane::Semantic,
+        title: "Trusted recall fixture".to_owned(),
+        body: "Deterministic fixture identity is isolated from production writers.".to_owned(),
+    };
+
+    let error = service
+        .create_local_memory_with_id_for_trusted_recall_eval(
+            "memzoi-eval",
+            fixture_id,
+            input.clone(),
+        )
+        .expect_err("ordinary services must reject caller-selected private ids");
+    assert!(error.to_string().contains("trusted recall evaluation"));
+    assert!(
+        RuntimeRecords::new(&service.shared_conn)
+            .get(fixture_id)?
+            .is_none()
+    );
+    drop(service);
+
+    let trusted = MemoryService::open_paths_with_clock_for_trusted_recall_eval(
+        paths,
+        crate::FixedClock::from_rfc3339("2026-07-19T12:00:00Z")?,
+    )?;
+    let error = trusted
+        .create_local_memory_with_id_for_trusted_recall_eval(
+            "memzoi-eval",
+            "wrong-prefix",
+            input.clone(),
+        )
+        .expect_err("all private record ids must use their destination prefix");
+    assert!(
+        error
+            .to_string()
+            .contains("private record id must be a bounded local-* identifier"),
+        "unexpected private-id validation error: {error:#}"
+    );
+    let created = trusted.create_local_memory_with_id_for_trusted_recall_eval(
+        "memzoi-eval",
+        fixture_id,
+        input.clone(),
+    )?;
+    assert_eq!(created.id, fixture_id);
+    let error = trusted
+        .create_local_memory_with_id_for_trusted_recall_eval("memzoi-eval", fixture_id, input)
+        .expect_err("trusted fixture ids must remain collision-free");
+    assert!(format!("{error:#}").contains("collides"));
+    assert_eq!(
+        RuntimeRecords::new(&trusted.shared_conn)
+            .get(fixture_id)?
+            .context("trusted fixture disappeared")?
+            .id,
+        fixture_id
+    );
     Ok(())
 }
 

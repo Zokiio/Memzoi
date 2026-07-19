@@ -26,6 +26,14 @@ use crate::{
 
 const CAPTURE_EVALUATED_AT: &str = "2026-07-18T12:00:00Z";
 
+fn assert_opaque_private_record_id(id: &str, prefix: &str) {
+    let uuid = id
+        .strip_prefix(&format!("{prefix}-"))
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .unwrap_or_else(|| panic!("private record ID is not an opaque {prefix} UUID: {id}"));
+    assert_eq!(uuid.get_version_num(), 4, "private record ID is not random");
+}
+
 fn capture_evaluated_at() -> time::OffsetDateTime {
     time::OffsetDateTime::parse(
         CAPTURE_EVALUATED_AT,
@@ -234,7 +242,7 @@ fn committed_capture_fallback_completes_shared_sync_before_success() -> anyhow::
 }
 
 #[test]
-fn capture_runtime_id_allocation_skips_an_unindexed_canonical_file_id() -> anyhow::Result<()> {
+fn capture_runtime_ids_are_opaque_and_do_not_reuse_unindexed_canonical_ids() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let paths = service.paths.clone();
     let proposal = service.propose_memory(
@@ -328,7 +336,8 @@ fn capture_runtime_id_allocation_skips_an_unindexed_canonical_file_id() -> anyho
     assert_eq!(result.writes.len(), 1);
     match &result.writes[0] {
         crate::CaptureWrite::RuntimeRecord { record_id, .. } => {
-            assert_eq!(record_id, "local-unindexed-capture-collision-2")
+            assert_opaque_private_record_id(record_id, "local");
+            assert_ne!(record_id, &canonical.id);
         }
         write => panic!("expected a capture runtime write, got {write:?}"),
     }

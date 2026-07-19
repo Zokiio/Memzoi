@@ -105,6 +105,31 @@ fn expiry_command_shows_records_excluded_from_normal_search_and_explains_why() {
 }
 
 #[test]
+fn expiry_command_refuses_private_runtime_history() {
+    let repo = initialized_temp_repo();
+    let private_body = "PRIVATE-EXPIRY-HISTORY-SENTINEL";
+    let added = run_json_command(
+        repo.path(),
+        &[
+            "local",
+            "add",
+            "--type",
+            "preference",
+            "--title",
+            "Private expiry history",
+            "--body",
+            private_body,
+            "--json",
+        ],
+    );
+    let record_id = json_string(&added, "record_id").to_owned();
+
+    let stderr = run_command_failure_stderr(repo.path(), &["expiry", record_id.as_str(), "--json"]);
+    assert!(stderr.contains("ordinary expiry inspection is repository-only"));
+    assert!(!stderr.contains(private_body));
+}
+
+#[test]
 fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
     let repo = initialized_temp_repo();
     let repo = repo.path();
@@ -124,7 +149,8 @@ fn local_commands_create_list_search_and_stay_out_of_repo_outputs() {
         ],
     );
     let record_id = json_string(&added, "record_id").to_owned();
-    assert_eq!(record_id, "local-local-zircon-preference");
+    assert_opaque_private_record_id(&record_id, "local");
+    assert!(!record_id.contains("zircon"));
     assert_json_string_field(&added, &["destination"], "local");
     assert_json_string_field(&added, &["visibility"], "private");
     assert_json_string_field(&added, &["status"], "active");
@@ -296,7 +322,8 @@ fn checkpoint_commands_create_list_and_stay_out_of_repo_outputs() {
         ],
     );
     let first_id = json_string(&first, "record_id").to_owned();
-    assert_eq!(first_id, "session-implement-checkpoint-workflow");
+    assert_opaque_private_record_id(&first_id, "session");
+    assert!(!first_id.contains("checkpoint"));
     assert_json_string_field(&first, &["type"], "episode");
     assert_json_string_field(&first, &["lane"], "session");
     assert_json_string_field(&first, &["destination"], "session");
@@ -342,7 +369,7 @@ fn checkpoint_commands_create_list_and_stay_out_of_repo_outputs() {
         ],
     );
     let from_file_id = json_string(&from_file, "record_id").to_owned();
-    assert_eq!(from_file_id, "session-file-checkpoint-workflow");
+    assert_opaque_private_record_id(&from_file_id, "session");
     assert_json_string_field(
         &from_file,
         &["body"],
@@ -374,7 +401,8 @@ fn checkpoint_commands_create_list_and_stay_out_of_repo_outputs() {
         ],
     );
     let duplicate_id = json_string(&duplicate, "record_id").to_owned();
-    assert_eq!(duplicate_id, "session-implement-checkpoint-workflow-2");
+    assert_opaque_private_record_id(&duplicate_id, "session");
+    assert_ne!(duplicate_id, first_id);
 
     let local = run_json_command(
         repo,

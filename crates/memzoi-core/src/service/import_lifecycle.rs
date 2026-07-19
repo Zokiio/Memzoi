@@ -632,21 +632,10 @@ impl<'a> ImportLifecycle<'a> {
                 hash: import::content_hash(&entry.proposal.body),
             });
         }
-        let runtime_records = RuntimeRecords::new(self.shared_conn).records_for_preservation()?;
         let mut runtime = Vec::new();
-        for record in runtime_records {
-            if crate::evaluate_current_assertion(
-                &record.id,
-                record.status,
-                record.lane,
-                &record.retention,
-                now,
-                Vec::new(),
-            )?
-            .is_current
-            {
-                runtime.push(record);
-            }
+        let records = RuntimeRecords::new(self.shared_conn);
+        for destination in [MemoryDestination::Local, MemoryDestination::Session] {
+            runtime.extend(records.active_for_destination(destination, now)?);
         }
         runtime.sort_by(|a, b| a.id.cmp(&b.id));
         for record in runtime {

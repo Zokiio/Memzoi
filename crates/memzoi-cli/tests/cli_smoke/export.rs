@@ -127,7 +127,7 @@ fn events_export_jsonl_emits_compact_standalone_event_objects() {
         "JSONL export should emit at least one row"
     );
 
-    let mut saw_memory_proposed = false;
+    let mut saw_memory_applied = false;
     for (index, line) in lines.iter().copied().enumerate() {
         assert_eq!(
             line,
@@ -160,14 +160,20 @@ fn events_export_jsonl_emits_compact_standalone_event_objects() {
             "JSONL row {} should include a payload field: {line}",
             index + 1
         );
+        assert_eq!(
+            object.get("data_class").and_then(Value::as_str),
+            Some("repository"),
+            "JSONL row {} crossed the export boundary without repository classification: {line}",
+            index + 1
+        );
 
-        saw_memory_proposed |=
-            object.get("event_type").and_then(Value::as_str) == Some("memory.proposed");
+        saw_memory_applied |=
+            object.get("event_type").and_then(Value::as_str) == Some("memory.applied");
     }
 
     assert!(
-        saw_memory_proposed,
-        "JSONL export should include the memory.proposed event: {stdout}"
+        saw_memory_applied,
+        "JSONL export should include the repository-authorized memory.applied event: {stdout}"
     );
 }
 

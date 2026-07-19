@@ -42,6 +42,10 @@ pub(super) fn inspect(paths: &MemoryPaths, conn: &Connection) -> Result<RepoInde
     drift::inspect(paths, conn)
 }
 
+pub(super) fn inspect_read_only(paths: &MemoryPaths, conn: &Connection) -> Result<RepoIndexDrift> {
+    drift::inspect_read_only(paths, conn)
+}
+
 pub(super) fn inspect_for_trusted_recall_eval(
     paths: &MemoryPaths,
     conn: &Connection,

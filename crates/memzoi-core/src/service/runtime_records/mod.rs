@@ -14,11 +14,17 @@ use super::safe_files::ensure_safe_directory;
 
 mod lifecycle;
 mod preservation;
+mod private_lifecycle_storage;
 mod query;
 mod write;
 
 pub(super) use self::lifecycle::CheckpointLifecycleMutation;
 pub(super) use self::preservation::RuntimeRecordSnapshot;
+pub(in crate::service) use self::private_lifecycle_storage::{
+    OwnerActionGrantRow, OwnerActionGrantState, PrivateLifecycleApplicationRow,
+    PrivateLifecycleRelation, PrivateLifecycleRelationKind, PrivateLifecycleState,
+    PrivateLifecycleStorage, RevokeGrantOutcome, lifecycle_generation, set_lifecycle_generation,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalMemoryInput {
@@ -126,6 +132,16 @@ impl<'a> RuntimeRecords<'a> {
         )
     }
 
+    pub(super) fn create_local_with_id_for_trusted_recall_eval(
+        &self,
+        actor: &str,
+        id: &str,
+        input: &LocalMemoryInput,
+        now: &str,
+    ) -> Result<MemoryRecord> {
+        write::create_local_memory_with_id_for_trusted_recall_eval(self.conn, actor, id, input, now)
+    }
+
     pub(super) fn create_checkpoint_avoiding(
         &self,
         actor: &str,
@@ -154,6 +170,16 @@ impl<'a> RuntimeRecords<'a> {
             lineage,
             reserved_ids,
         )
+    }
+
+    pub(super) fn create_checkpoint_with_id_for_trusted_recall_eval(
+        &self,
+        actor: &str,
+        id: &str,
+        input: &CheckpointInput,
+        now: &str,
+    ) -> Result<MemoryRecord> {
+        write::create_checkpoint_with_id_for_trusted_recall_eval(self.conn, actor, id, input, now)
     }
 
     pub(super) fn create_capture(
@@ -215,16 +241,42 @@ impl<'a> RuntimeRecords<'a> {
         lifecycle::checkpoint_for_lifecycle(self.conn, record_id)
     }
 
-    pub(super) fn checkpoint_record_version(record: &MemoryRecord) -> Result<String> {
-        lifecycle::checkpoint_record_version(record)
+    pub(super) fn private_record_version(&self, record_id: &str) -> Result<String> {
+        private_lifecycle_storage::private_record_version(self.conn, record_id)
+    }
+
+    pub(super) fn ensure_private_record_version(
+        &self,
+        record_id: &str,
+        expected_version: &str,
+    ) -> Result<()> {
+        private_lifecycle_storage::ensure_private_record_version(
+            self.conn,
+            record_id,
+            expected_version,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn rotate_private_record_version(
+        &self,
+        record_id: &str,
+        updated_at: &str,
+    ) -> Result<String> {
+        private_lifecycle_storage::rotate_private_record_version(self.conn, record_id, updated_at)
+    }
+
+    pub(super) fn checkpoint_record_version(&self, record_id: &str) -> Result<String> {
+        lifecycle::checkpoint_record_version(self.conn, record_id)
     }
 
     pub(super) fn ensure_successor_predecessor(
+        &self,
         record: &MemoryRecord,
         expected_version: &str,
         now: OffsetDateTime,
     ) -> Result<()> {
-        lifecycle::ensure_successor_predecessor(record, expected_version, now)
+        lifecycle::ensure_successor_predecessor(self.conn, record, expected_version, now)
     }
 
     pub(super) fn continue_checkpoint(

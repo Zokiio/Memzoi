@@ -1410,6 +1410,9 @@ fn plan_capture_inner(
     let inventory = match inventory_result {
         Ok(inventory) => inventory,
         Err(error) => {
+            if crate::schema::is_unsupported_schema_error(&error) {
+                return Err(error);
+            }
             let _ = error;
             return blocked_after_planning_failure(
                 &request,
@@ -2865,11 +2868,22 @@ fn load_inventory(
     control: Option<&CapturePlanningControl>,
 ) -> Result<CaptureInventorySnapshot> {
     let mut inventory = load_file_inventory(paths, evaluated_at, control)?;
-    let mut runtime_entries = Vec::new();
-    inventory.runtime_available = paths.shared_db_path.try_exists().unwrap_or(false)
-        && load_runtime_inventory(paths, &mut runtime_entries, evaluated_at, control).is_ok();
-    if inventory.runtime_available {
-        inventory.entries.extend(runtime_entries);
+    if paths
+        .shared_db_path
+        .try_exists()
+        .context("failed to inspect capture runtime inventory")?
+    {
+        let mut runtime_entries = Vec::new();
+        match load_runtime_inventory(paths, &mut runtime_entries, evaluated_at, control) {
+            Ok(()) => {
+                inventory.runtime_available = true;
+                inventory.entries.extend(runtime_entries);
+            }
+            Err(error) if crate::schema::is_unsupported_schema_error(&error) => {
+                return Err(error);
+            }
+            Err(_) => {}
+        }
     }
     finish_inventory_snapshot(&mut inventory);
     Ok(inventory)
@@ -3162,6 +3176,8 @@ fn load_runtime_inventory(
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .context("failed to open capture runtime inventory read-only")?;
+    crate::schema::validate_existing(&conn)
+        .context("capture runtime inventory schema is incompatible")?;
     crate::retention::register_sqlite_functions(&conn)?;
     load_runtime_inventory_from_connection(&conn, entries, evaluated_at, control)?;
     check_planning_control(control)?;

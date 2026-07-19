@@ -661,22 +661,26 @@ fn seed_runtime_fixtures(
         .iter()
         .map(|fixture| {
             let record = match fixture.destination {
-                MemoryDestination::Local => service.create_local_memory(
-                    "memzoi-recall-v3-eval",
-                    LocalMemoryInput {
-                        memory_type: fixture.memory_type,
-                        lane: fixture.lane,
-                        title: fixture.title.clone(),
-                        body: fixture.body.clone(),
-                    },
-                )?,
-                MemoryDestination::Session => service.create_checkpoint(
-                    "memzoi-recall-v3-eval",
-                    CheckpointInput {
-                        task: fixture.title.clone(),
-                        note: fixture.body.clone(),
-                    },
-                )?,
+                MemoryDestination::Local => service
+                    .create_local_memory_with_id_for_trusted_recall_eval(
+                        "memzoi-recall-v3-eval",
+                        &fixture.id,
+                        LocalMemoryInput {
+                            memory_type: fixture.memory_type,
+                            lane: fixture.lane,
+                            title: fixture.title.clone(),
+                            body: fixture.body.clone(),
+                        },
+                    )?,
+                MemoryDestination::Session => service
+                    .create_checkpoint_with_id_for_trusted_recall_eval(
+                        "memzoi-recall-v3-eval",
+                        &fixture.id,
+                        CheckpointInput {
+                            task: fixture.title.clone(),
+                            note: fixture.body.clone(),
+                        },
+                    )?,
                 _ => unreachable!("runtime fixture destination was validated"),
             };
             if record.id != fixture.id {

@@ -1,6 +1,6 @@
 use crate::{
     error::{CoreError, Result as CoreResult},
-    models::MemoryEvent,
+    models::{MemoryEvent, MemoryEventDataClass},
 };
 use rusqlite::{Connection, Row};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub struct AppendEvent {
     pub event_type: String,
     pub actor: String,
+    pub data_class: MemoryEventDataClass,
     pub payload: Value,
     pub record_id: Option<String>,
     pub proposal_id: Option<String>,
@@ -23,6 +24,7 @@ pub fn append_event(conn: &Connection, input: AppendEvent) -> CoreResult<MemoryE
         id: format!("evt_{}", Uuid::now_v7()),
         event_type: input.event_type,
         actor: input.actor,
+        data_class: input.data_class,
         payload: input.payload,
         record_id: input.record_id,
         proposal_id: input.proposal_id,
@@ -30,12 +32,14 @@ pub fn append_event(conn: &Connection, input: AppendEvent) -> CoreResult<MemoryE
     };
 
     conn.execute(
-        "INSERT INTO event_log (id, event_type, actor, payload_json, record_id, proposal_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO event_log (
+           id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             event.id,
             event.event_type,
             event.actor,
+            event.data_class.as_str(),
             serde_json::to_string(&event.payload)?,
             event.record_id,
             event.proposal_id,
@@ -56,7 +60,7 @@ pub(crate) fn for_each_event(
     mut visit: impl FnMut(MemoryEvent) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
+        "SELECT id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
          FROM event_log
          ORDER BY created_at ASC, id ASC",
     )?;
@@ -75,7 +79,7 @@ pub(crate) fn for_each_merged_event(
     mut visit: impl FnMut(MemoryEvent) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     const ORDERED_EVENTS: &str =
-        "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
+        "SELECT id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
          FROM event_log
          ORDER BY created_at ASC, id ASC";
 
@@ -142,6 +146,7 @@ struct EncodedMemoryEvent {
     id: String,
     event_type: String,
     actor: String,
+    data_class: MemoryEventDataClass,
     payload_json: String,
     record_id: Option<String>,
     proposal_id: Option<String>,
@@ -154,17 +159,18 @@ impl EncodedMemoryEvent {
             id: row.get(0)?,
             event_type: row.get(1)?,
             actor: row.get(2)?,
-            payload_json: row.get(3)?,
-            record_id: row.get(4)?,
-            proposal_id: row.get(5)?,
-            created_at: row.get(6)?,
+            data_class: event_data_class_from_row(row, 3)?,
+            payload_json: row.get(4)?,
+            record_id: row.get(5)?,
+            proposal_id: row.get(6)?,
+            created_at: row.get(7)?,
         })
     }
 
     fn into_event(self) -> rusqlite::Result<MemoryEvent> {
         let payload = serde_json::from_str(&self.payload_json).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                3,
+                4,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
@@ -173,12 +179,27 @@ impl EncodedMemoryEvent {
             id: self.id,
             event_type: self.event_type,
             actor: self.actor,
+            data_class: self.data_class,
             payload,
             record_id: self.record_id,
             proposal_id: self.proposal_id,
             created_at: self.created_at,
         })
     }
+}
+
+fn event_data_class_from_row(
+    row: &Row<'_>,
+    index: usize,
+) -> rusqlite::Result<MemoryEventDataClass> {
+    let encoded = row.get::<_, String>(index)?;
+    encoded.parse().map_err(|error: String| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error).into(),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -206,6 +227,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
+        MemoryEventDataClass,
         events::{AppendEvent, append_event, for_each_event, for_each_merged_event, list_events},
         init_database, open_database,
     };
@@ -228,6 +250,7 @@ mod tests {
             AppendEvent {
                 event_type: "memory.proposed".to_owned(),
                 actor: "agent:red-tests".to_owned(),
+                data_class: MemoryEventDataClass::Repository,
                 payload: json!({
                     "proposal_id": "prop-first",
                     "title": "Prefer deterministic tests",
@@ -242,6 +265,7 @@ mod tests {
             AppendEvent {
                 event_type: "memory.applied".to_owned(),
                 actor: "agent:red-tests".to_owned(),
+                data_class: MemoryEventDataClass::Repository,
                 payload: json!({
                     "proposal_id": "prop-second",
                     "record_id": "mem-second",
@@ -296,6 +320,7 @@ mod tests {
             AppendEvent {
                 event_type: "memory.proposed".to_owned(),
                 actor: "agent:streaming-test".to_owned(),
+                data_class: MemoryEventDataClass::Repository,
                 payload: json!({ "sequence": 1 }),
                 record_id: None,
                 proposal_id: None,
@@ -306,6 +331,7 @@ mod tests {
             AppendEvent {
                 event_type: "memory.applied".to_owned(),
                 actor: "agent:streaming-test".to_owned(),
+                data_class: MemoryEventDataClass::Repository,
                 payload: json!({ "sequence": 2 }),
                 record_id: None,
                 proposal_id: None,
@@ -338,9 +364,9 @@ mod tests {
         second.pragma_update(None, "ignore_check_constraints", "ON")?;
         second.execute(
             "INSERT INTO event_log (
-               id, event_type, actor, payload_json, record_id, proposal_id, created_at
+               id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
              ) VALUES (
-               'evt-malformed', 'test.event', 'malformed', '{', NULL, NULL,
+               'evt-malformed', 'test.event', 'malformed', 'repository', '{', NULL, NULL,
                '2026-07-14T00:03:00Z'
              )",
             [],
@@ -382,9 +408,9 @@ mod tests {
         second.pragma_update(None, "ignore_check_constraints", "ON")?;
         second.execute(
             "INSERT INTO event_log (
-               id, event_type, actor, payload_json, record_id, proposal_id, created_at
+               id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
              ) VALUES (
-               'evt-malformed', 'test.event', 'malformed', '{', NULL, NULL,
+               'evt-malformed', 'test.event', 'malformed', 'repository', '{', NULL, NULL,
                '2026-07-14T00:01:00Z'
              )",
             [],
@@ -412,6 +438,7 @@ mod tests {
             AppendEvent {
                 event_type: "memory.proposed".to_owned(),
                 actor: "agent:first".to_owned(),
+                data_class: MemoryEventDataClass::Repository,
                 payload: json!({ "version": 1, "proposal_id": "prop-same" }),
                 record_id: None,
                 proposal_id: Some("prop-same".to_owned()),
@@ -422,6 +449,7 @@ mod tests {
             AppendEvent {
                 event_type: "memory.proposed".to_owned(),
                 actor: "agent:second".to_owned(),
+                data_class: MemoryEventDataClass::Repository,
                 payload: json!({ "version": 2, "proposal_id": "prop-same" }),
                 record_id: None,
                 proposal_id: Some("prop-same".to_owned()),
@@ -467,8 +495,8 @@ mod tests {
     ) -> anyhow::Result<()> {
         conn.execute(
             "INSERT INTO event_log (
-               id, event_type, actor, payload_json, record_id, proposal_id, created_at
-             ) VALUES (?1, 'test.event', ?2, '{}', NULL, NULL, ?3)",
+               id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
+             ) VALUES (?1, 'test.event', ?2, 'repository', '{}', NULL, NULL, ?3)",
             rusqlite::params![id, actor, created_at],
         )?;
         Ok(())

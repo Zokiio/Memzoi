@@ -119,7 +119,6 @@ impl MemoryService {
                 runtime_index_updated: false,
             });
         }
-
         let (canonical_records, primary_index) =
             self.validate_resolved_apply_canonical_truth(&entry.proposal, &resolution)?;
         let relational_drift = canonical_records
@@ -131,6 +130,12 @@ impl MemoryService {
         let fts_out_of_sync = !derived_index::fts_is_current(&self.conn)?;
         let runtime_index_updated = relational_drift || fts_out_of_sync;
         if runtime_index_updated {
+            ensure!(
+                crate::repository_write_safety::repository_event_actor_is_safe(actor),
+                "proposal-file replay actor is invalid"
+            );
+            let event_resolved_path =
+                repository_relative_event_path(&self.paths, &entry.actual_path)?;
             let tx = self.conn.unchecked_transaction()?;
             if relational_drift {
                 okf::import_okf_records(&tx, &canonical_records)?;
@@ -141,6 +146,7 @@ impl MemoryService {
                 AppendEvent {
                     event_type: "proposal_file.index_repaired".to_owned(),
                     actor: actor.trim().to_owned(),
+                    data_class: crate::MemoryEventDataClass::Repository,
                     payload: json!({
                         "proposal_id": entry.proposal.id,
                         "file_id": entry.proposal.file_id,
@@ -148,7 +154,7 @@ impl MemoryService {
                             .iter()
                             .map(|record| record.concept_id.as_str())
                             .collect::<Vec<_>>(),
-                        "resolved_path": entry.display_path,
+                        "resolved_path": event_resolved_path,
                         "relational_drift": relational_drift,
                         "fts_out_of_sync": fts_out_of_sync,
                     }),

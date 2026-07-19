@@ -15,14 +15,15 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 use crate::{
-    CanonicalRevision, CaptureReviewOutcome, MemoryLane, MemoryPaths, MemoryStatus, MemoryType,
-    OkfRecordFile, RecordLineageKind, RepositoryContentClass, RetentionReason, RetentionState,
-    ScopeKind, Visibility, canonical_revision_for_okf_record, evaluate_current_assertion,
+    CanonicalRevision, CaptureReviewOutcome, MemoryDestination, MemoryLane, MemoryPaths,
+    MemoryRecord, MemoryStatus, MemoryType, OkfRecordFile, RecordLineageKind,
+    RepositoryContentClass, RetentionReason, RetentionState, ScopeKind, Visibility,
+    canonical_revision_for_okf_record, evaluate_current_assertion,
 };
 
 pub const MAINTENANCE_REQUEST_SCHEMA: &str = "memzoi/maintenance-request";
 pub const MAINTENANCE_PLAN_SCHEMA: &str = "memzoi/maintenance-plan";
-pub const MAINTENANCE_CONTRACT_VERSION: &str = "maintenance-plan/1";
+pub const MAINTENANCE_CONTRACT_VERSION: &str = "maintenance-plan/2";
 pub const MAINTENANCE_POLICY_VERSION: &str = "maintenance-policy/1";
 /// Upper bound while repository admission still performs synchronous Git review checks per file.
 pub const MAINTENANCE_MAX_RECORDS: usize = 256;
@@ -91,18 +92,44 @@ pub struct MaintenancePlanRequest {
     pub record_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaintenanceScope {
-    pub kind: MaintenanceScopeKind,
-    pub repository_fingerprint: String,
-    pub target_record_ids: Vec<String>,
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrivateMaintenanceRecordInput {
+    pub record: MemoryRecord,
+    pub version_token: String,
+    pub current_assertion: bool,
+    pub retention_state: RetentionState,
+    pub retention_reason: RetentionReason,
+    pub retention_boundary: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenanceScopeKind {
-    Repository,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MaintenanceScope {
+    Repository {
+        repository_fingerprint: String,
+        target_record_ids: Vec<String>,
+    },
+    PrivateRuntime {
+        runtime_fingerprint: String,
+        target_record_ids: Vec<String>,
+    },
+}
+
+impl MaintenanceScope {
+    pub fn target_record_ids(&self) -> &[String] {
+        match self {
+            Self::Repository {
+                target_record_ids, ..
+            }
+            | Self::PrivateRuntime {
+                target_record_ids, ..
+            } => target_record_ids,
+        }
+    }
+
+    pub fn is_repository(&self) -> bool {
+        matches!(self, Self::Repository { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,12 +164,39 @@ pub enum MaintenanceAuthorityMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MaintenanceRecordVersion {
+    CanonicalRepository {
+        source_path: String,
+        #[serde(with = "strict_canonical_revision")]
+        revision: CanonicalRevision,
+    },
+    PrivateRuntime {
+        version_token: String,
+    },
+}
+
+impl MaintenanceRecordVersion {
+    pub fn repository_revision(&self) -> Option<&CanonicalRevision> {
+        match self {
+            Self::CanonicalRepository { revision, .. } => Some(revision),
+            Self::PrivateRuntime { .. } => None,
+        }
+    }
+
+    pub fn private_version_token(&self) -> Option<&str> {
+        match self {
+            Self::CanonicalRepository { .. } => None,
+            Self::PrivateRuntime { version_token } => Some(version_token),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceRecordSnapshot {
     pub record_id: String,
-    pub source_path: String,
-    #[serde(with = "strict_canonical_revision")]
-    pub revision: CanonicalRevision,
+    pub version: MaintenanceRecordVersion,
     pub content_hash: String,
     pub claim_digest: String,
     pub applicability_digest: String,
@@ -211,13 +265,14 @@ pub enum MaintenanceActionClass {
     SuppressUnresolvedConflict,
     OwnerConsolidateExactDuplicates,
     OwnerCreateRenewalSuccessor,
+    OwnerResolveContradiction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceActionPreconditions {
     pub comparison_set_digest: String,
-    pub record_versions: BTreeMap<String, String>,
+    pub record_versions: BTreeMap<String, MaintenanceRecordVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,13 +301,20 @@ pub struct MaintenanceActionGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenancePreconditions {
-    pub repository_fingerprint: String,
-    pub target_versions: BTreeMap<String, String>,
+    pub scope: MaintenanceScopeBinding,
+    pub target_versions: BTreeMap<String, MaintenanceRecordVersion>,
     pub comparison_set_digest: String,
     pub detector_digest: String,
     pub policy_digest: String,
     pub grant_fingerprint: String,
     pub not_after: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MaintenanceScopeBinding {
+    Repository { repository_fingerprint: String },
+    PrivateRuntime { runtime_fingerprint: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +390,16 @@ pub enum MaintenanceRevalidation {
 struct LoadedRecord {
     snapshot: MaintenanceRecordSnapshot,
     record: OkfRecordFile,
+    duplicate_claim_digest: String,
+    renewal_claim_digest: String,
+    freshness: OffsetDateTime,
+    eligible_at_evaluation: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PrivateLoadedRecord {
+    snapshot: MaintenanceRecordSnapshot,
+    record: MemoryRecord,
     duplicate_claim_digest: String,
     renewal_claim_digest: String,
     freshness: OffsetDateTime,
@@ -529,8 +601,10 @@ fn plan_maintenance_inner(
             .replace('\\', "/");
         let snapshot = MaintenanceRecordSnapshot {
             record_id: record.concept_id.clone(),
-            source_path,
-            revision,
+            version: MaintenanceRecordVersion::CanonicalRepository {
+                source_path,
+                revision,
+            },
             content_hash: identity("memzoi/maintenance/content", &record.draft.body)?,
             claim_digest: duplicate_claim_digest.clone(),
             applicability_digest,
@@ -642,12 +716,7 @@ fn plan_maintenance_inner(
     let target_versions = records
         .iter()
         .filter(|record| record.target)
-        .map(|record| {
-            (
-                record.record_id.clone(),
-                record.revision.revision_hash.clone(),
-            )
-        })
+        .map(|record| (record.record_id.clone(), record.version.clone()))
         .collect::<BTreeMap<_, _>>();
     let not_after_text = format_timestamp(not_after)?;
     let summary = summarize(&records, &findings, &action_groups);
@@ -672,8 +741,7 @@ fn plan_maintenance_inner(
         request,
         evaluated_at: evaluated_at_text,
         not_after: not_after_text.clone(),
-        scope: MaintenanceScope {
-            kind: MaintenanceScopeKind::Repository,
+        scope: MaintenanceScope::Repository {
             repository_fingerprint: repository_fingerprint.clone(),
             target_record_ids,
         },
@@ -685,7 +753,9 @@ fn plan_maintenance_inner(
         findings,
         action_groups,
         preconditions: MaintenancePreconditions {
-            repository_fingerprint,
+            scope: MaintenanceScopeBinding::Repository {
+                repository_fingerprint,
+            },
             target_versions,
             comparison_set_digest,
             detector_digest,
@@ -700,6 +770,303 @@ fn plan_maintenance_inner(
     plan.validate()?;
     ensure_plan_size(&plan)?;
     Ok(plan)
+}
+
+/// Build a read-only private-runtime maintenance plan from an already stable,
+/// authoritative snapshot. The caller is responsible for taking that snapshot
+/// without mutating runtime state. Private content is inspected only to derive
+/// evidence digests and is never copied into the returned artifact.
+pub fn plan_private_maintenance_at(
+    runtime_fingerprint: String,
+    mut request: MaintenancePlanRequest,
+    mut inputs: Vec<PrivateMaintenanceRecordInput>,
+    fallback_now: OffsetDateTime,
+) -> Result<MaintenancePlan> {
+    validate_request(&request)?;
+    crate::validate_materialization_identity(
+        &runtime_fingerprint,
+        "maintenance private-runtime fingerprint",
+    )?;
+    ensure!(
+        inputs.len() <= MAINTENANCE_MAX_RECORDS,
+        "maintenance private-runtime snapshot exceeds the admitted-record limit"
+    );
+    let evaluated_at = match request.evaluated_at.as_deref() {
+        Some(value) => parse_timestamp(value, "maintenance evaluated_at")?,
+        None => fallback_now,
+    };
+    let evaluated_at_text = format_timestamp(evaluated_at)?;
+    request.evaluated_at = Some(evaluated_at_text.clone());
+    request.record_ids = normalize_record_ids(request.record_ids)?;
+
+    inputs.sort_by(|left, right| left.record.id.cmp(&right.record.id));
+    ensure_sorted_unique(
+        inputs.iter().map(|input| input.record.id.as_str()),
+        "maintenance private-runtime records",
+    )?;
+    let available_ids = inputs
+        .iter()
+        .map(|input| input.record.id.as_str())
+        .collect::<BTreeSet<_>>();
+    for requested in &request.record_ids {
+        if !available_ids.contains(requested.as_str()) {
+            return Err(MissingMaintenanceTarget {
+                record_id: requested.clone(),
+            }
+            .into());
+        }
+    }
+    let selected = if request.record_ids.is_empty() {
+        available_ids
+            .iter()
+            .map(|record_id| (*record_id).to_owned())
+            .collect::<BTreeSet<_>>()
+    } else {
+        request.record_ids.iter().cloned().collect()
+    };
+
+    let maximum_not_after = evaluated_at
+        .checked_add(Duration::hours(MAX_VALIDITY_HOURS))
+        .context("maintenance evaluation time cannot represent the validity window")?;
+    let mut not_after = maximum_not_after;
+    let mut future_record_count = 0_usize;
+    let mut loaded = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let PrivateMaintenanceRecordInput {
+            record,
+            version_token,
+            current_assertion,
+            retention_state,
+            retention_reason,
+            retention_boundary,
+        } = input;
+        crate::validate_canonical_record_id(&record.id)?;
+        validate_private_record_version_token(&version_token)?;
+        ensure!(
+            matches!(
+                record.destination,
+                MemoryDestination::Local | MemoryDestination::Session
+            ),
+            "private maintenance accepts only local or session runtime records"
+        );
+        let freshness = parse_timestamp(&record.updated_at, "maintenance record updated_at")?;
+        let eligible_at_evaluation = freshness <= evaluated_at;
+        if !eligible_at_evaluation {
+            future_record_count = future_record_count
+                .checked_add(1)
+                .context("maintenance future-record diagnostic count overflowed")?;
+        }
+        if let Some(boundary) = retention_boundary.as_deref() {
+            let boundary = parse_timestamp(boundary, "maintenance retention boundary")?;
+            if eligible_at_evaluation && boundary > evaluated_at && boundary < not_after {
+                not_after = boundary;
+            }
+        }
+        if eligible_at_evaluation
+            && current_assertion
+            && record.status == MemoryStatus::Active
+            && matches!(record.lane, MemoryLane::Semantic | MemoryLane::Procedural)
+        {
+            let stale_at = freshness
+                .checked_add(Duration::days(STALE_AFTER_DAYS))
+                .context("maintenance freshness cannot represent the staleness boundary")?;
+            if stale_at > evaluated_at && stale_at < not_after {
+                not_after = stale_at;
+            }
+        }
+        // Content-derived projections remain process-local detector inputs.
+        // The private artifact exposes only identities derived from the opaque
+        // record ID and random version token, preventing dictionary tests
+        // against private titles, bodies, or evidence.
+        let duplicate_claim_digest = private_duplicate_claim_digest(&record)?;
+        let renewal_claim_digest = private_renewal_claim_digest(&record)?;
+        let opaque_content_identity = identity(
+            "memzoi/maintenance/private-content",
+            &(&record.id, &version_token),
+        )?;
+        let opaque_claim_identity = identity(
+            "memzoi/maintenance/private-claim",
+            &(&record.id, &version_token),
+        )?;
+        let applicability_digest = identity(
+            "memzoi/maintenance/applicability",
+            &serde_json::json!({
+                "destination": record.destination,
+                "scope_kind": record.scope_kind,
+                "scope_id": record.scope_id,
+                "visibility": record.visibility,
+            }),
+        )?;
+        let temporal_digest = identity(
+            "memzoi/maintenance/temporal",
+            &serde_json::json!({
+                "status": record.status,
+                "retention": record.retention,
+                "retention_state": retention_state,
+                "retention_reason": retention_reason,
+                "retention_boundary": retention_boundary,
+                "supersedes_id": record.supersedes_id,
+                "lineage": record.lineage,
+            }),
+        )?;
+        let snapshot = MaintenanceRecordSnapshot {
+            record_id: record.id.clone(),
+            version: MaintenanceRecordVersion::PrivateRuntime { version_token },
+            content_hash: opaque_content_identity,
+            claim_digest: opaque_claim_identity,
+            applicability_digest,
+            temporal_digest,
+            status: record.status,
+            current_assertion: current_assertion && eligible_at_evaluation,
+            retention_state,
+            retention_reason,
+            retention_boundary,
+            target: selected.contains(&record.id),
+        };
+        loaded.push(PrivateLoadedRecord {
+            snapshot,
+            record,
+            duplicate_claim_digest,
+            renewal_claim_digest,
+            freshness,
+            eligible_at_evaluation,
+        });
+    }
+
+    let records = loaded
+        .iter()
+        .map(|record| record.snapshot.clone())
+        .collect::<Vec<_>>();
+    let comparison_set_digest = comparison_digest(&records)?;
+    let policy = maintenance_policy()?;
+    let detectors = maintenance_detectors()?;
+    let authority = MaintenanceAuthoritySnapshot {
+        mode: MaintenanceAuthorityMode::ReportOnly,
+        grant_fingerprint: identity("memzoi/maintenance/grant", &"report-only")?,
+    };
+    let mut findings = Vec::new();
+    let mut owner_actions = Vec::new();
+    detect_private_exact_duplicates(
+        &loaded,
+        &selected,
+        &comparison_set_digest,
+        &mut findings,
+        &mut owner_actions,
+    )?;
+    detect_private_contradictions(
+        &loaded,
+        &selected,
+        &comparison_set_digest,
+        &mut findings,
+        &mut owner_actions,
+    )?;
+    detect_private_staleness(&loaded, &selected, evaluated_at, &mut findings)?;
+    detect_private_expiry(&loaded, &selected, &mut findings)?;
+    detect_private_renewals(
+        &loaded,
+        &selected,
+        evaluated_at,
+        &comparison_set_digest,
+        &mut findings,
+        &mut owner_actions,
+    )?;
+    findings.sort_by(|left, right| left.finding_id.cmp(&right.finding_id));
+    owner_actions.sort_by(|left, right| left.action_id.cmp(&right.action_id));
+    for finding in &mut findings {
+        finding.proposed_action_ids = owner_actions
+            .iter()
+            .filter(|action| action.finding_id == finding.finding_id)
+            .map(|action| action.action_id.clone())
+            .collect();
+    }
+    let action_groups = vec![
+        MaintenanceActionGroup {
+            kind: MaintenanceActionGroupKind::RepositoryMaterialization,
+            actions: Vec::new(),
+        },
+        MaintenanceActionGroup {
+            kind: MaintenanceActionGroupKind::PrivateDerivedState,
+            actions: Vec::new(),
+        },
+        MaintenanceActionGroup {
+            kind: MaintenanceActionGroupKind::OwnerAuthorizedPrivateMutation,
+            actions: owner_actions,
+        },
+    ];
+    let detector_digest = identity("memzoi/maintenance/detectors", &detectors)?;
+    let target_record_ids = records
+        .iter()
+        .filter(|record| record.target)
+        .map(|record| record.record_id.clone())
+        .collect::<Vec<_>>();
+    let target_versions = records
+        .iter()
+        .filter(|record| record.target)
+        .map(|record| (record.record_id.clone(), record.version.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let not_after_text = format_timestamp(not_after)?;
+    let summary = summarize(&records, &findings, &action_groups);
+    let mut diagnostics = vec![MaintenanceDiagnostic {
+        code: "private_runtime_snapshot_evaluated".to_owned(),
+        count: records.len(),
+        digest: comparison_set_digest.clone(),
+    }];
+    if future_record_count > 0 {
+        diagnostics.push(MaintenanceDiagnostic {
+            code: "records_after_evaluation_excluded".to_owned(),
+            count: future_record_count,
+            digest: identity(
+                "memzoi/maintenance/future-record-count",
+                &future_record_count,
+            )?,
+        });
+    }
+    let mut plan = MaintenancePlan {
+        schema: MAINTENANCE_PLAN_SCHEMA.to_owned(),
+        plan_id: String::new(),
+        request,
+        evaluated_at: evaluated_at_text,
+        not_after: not_after_text.clone(),
+        scope: MaintenanceScope::PrivateRuntime {
+            runtime_fingerprint: runtime_fingerprint.clone(),
+            target_record_ids,
+        },
+        policy: policy.clone(),
+        detectors,
+        authority: authority.clone(),
+        records,
+        comparison_set_digest: comparison_set_digest.clone(),
+        findings,
+        action_groups,
+        preconditions: MaintenancePreconditions {
+            scope: MaintenanceScopeBinding::PrivateRuntime {
+                runtime_fingerprint,
+            },
+            target_versions,
+            comparison_set_digest,
+            detector_digest,
+            policy_digest: policy.policy_digest.clone(),
+            grant_fingerprint: authority.grant_fingerprint.clone(),
+            not_after: not_after_text,
+        },
+        summary,
+        diagnostics,
+    };
+    plan.plan_id = maintenance_plan_id(&plan)?;
+    plan.validate()?;
+    ensure_plan_size(&plan)?;
+    Ok(plan)
+}
+
+/// Derive the opaque scope binding used by private-runtime maintenance plans.
+/// Callers should supply the stable repository/runtime key, never private
+/// record content or another user-provided secret.
+pub fn private_maintenance_runtime_fingerprint(runtime_scope_key: &str) -> Result<String> {
+    ensure!(
+        !runtime_scope_key.trim().is_empty() && runtime_scope_key == runtime_scope_key.trim(),
+        "maintenance private-runtime scope key must be canonical and non-empty"
+    );
+    identity("memzoi/maintenance/private-runtime", &runtime_scope_key)
 }
 
 fn detect_exact_duplicates(
@@ -1058,6 +1425,474 @@ fn detect_renewals(
     Ok(())
 }
 
+fn detect_private_exact_duplicates(
+    loaded: &[PrivateLoadedRecord],
+    selected: &BTreeSet<String>,
+    comparison_set_digest: &str,
+    findings: &mut Vec<MaintenanceFinding>,
+    actions: &mut Vec<MaintenanceAction>,
+) -> Result<()> {
+    let mut groups = BTreeMap::<&str, Vec<&PrivateLoadedRecord>>::new();
+    for record in loaded
+        .iter()
+        .filter(|record| record.snapshot.current_assertion)
+    {
+        groups
+            .entry(record.duplicate_claim_digest.as_str())
+            .or_default()
+            .push(record);
+    }
+    for (_claim_digest, group) in groups.into_iter().filter(|(_, group)| group.len() > 1) {
+        let record_ids = group
+            .iter()
+            .map(|record| record.snapshot.record_id.clone())
+            .collect::<Vec<_>>();
+        if !record_ids
+            .iter()
+            .any(|record_id| selected.contains(record_id))
+        {
+            continue;
+        }
+        let mut finding = new_finding(
+            MaintenanceFindingKind::ExactDuplicate,
+            record_ids.clone(),
+            private_finding_comparison_digest(&group)?,
+            vec![MaintenanceEvidence {
+                code: "exact_claim_projection".to_owned(),
+                digest: private_artifact_digest("exact_claim_projection", &group)?,
+                boundary: None,
+            }],
+            MaintenanceConfidence::Exact,
+        )?;
+        let action = new_private_action(
+            MaintenanceActionClass::OwnerConsolidateExactDuplicates,
+            &finding.finding_id,
+            record_ids,
+            None,
+            None,
+            comparison_set_digest,
+            &group,
+        )?;
+        finding.proposed_action_ids.push(action.action_id.clone());
+        push_finding(findings, finding)?;
+        push_action(actions, action)?;
+    }
+    Ok(())
+}
+
+fn detect_private_contradictions(
+    loaded: &[PrivateLoadedRecord],
+    selected: &BTreeSet<String>,
+    comparison_set_digest: &str,
+    findings: &mut Vec<MaintenanceFinding>,
+    actions: &mut Vec<MaintenanceAction>,
+) -> Result<()> {
+    let candidates = loaded
+        .iter()
+        .filter_map(|record| {
+            (record.snapshot.current_assertion
+                && matches!(
+                    record.record.lane,
+                    MemoryLane::Semantic | MemoryLane::Procedural
+                )
+                && claim_bearing_type(record.record.memory_type)
+                && !contains_conditional_or_temporal_language(&record.record.body))
+            .then(|| polarity_signature(&record.record.body).map(|value| (record, value)))
+            .flatten()
+        })
+        .collect::<Vec<_>>();
+    let mut adjacency = vec![BTreeSet::<usize>::new(); candidates.len()];
+    let mut pair_comparisons = 0_usize;
+    for left_index in 0..candidates.len() {
+        for right_index in (left_index + 1)..candidates.len() {
+            consume_pair_work(&mut pair_comparisons, None)?;
+            let (left, (left_signature, left_negative)) = &candidates[left_index];
+            let (right, (right_signature, right_negative)) = &candidates[right_index];
+            if left_signature != right_signature
+                || left_negative == right_negative
+                || !same_private_claim_context(&left.record, &right.record)
+                || private_records_are_temporally_related(&left.record, &right.record)
+            {
+                continue;
+            }
+            adjacency[left_index].insert(right_index);
+            adjacency[right_index].insert(left_index);
+        }
+    }
+    let mut visited = vec![false; candidates.len()];
+    for start in 0..candidates.len() {
+        if visited[start] || adjacency[start].is_empty() {
+            continue;
+        }
+        let mut pending = vec![start];
+        let mut component = Vec::new();
+        while let Some(index) = pending.pop() {
+            if visited[index] {
+                continue;
+            }
+            visited[index] = true;
+            component.push(index);
+            pending.extend(
+                adjacency[index]
+                    .iter()
+                    .rev()
+                    .filter(|neighbor| !visited[**neighbor]),
+            );
+        }
+        component.sort_unstable();
+        let group = component
+            .iter()
+            .map(|index| candidates[*index].0)
+            .collect::<Vec<_>>();
+        let record_ids = group
+            .iter()
+            .map(|record| record.snapshot.record_id.clone())
+            .collect::<Vec<_>>();
+        if !record_ids
+            .iter()
+            .any(|record_id| selected.contains(record_id))
+        {
+            continue;
+        }
+        let mut finding = new_finding(
+            MaintenanceFindingKind::HighConfidenceContradiction,
+            record_ids.clone(),
+            private_finding_comparison_digest(&group)?,
+            vec![MaintenanceEvidence {
+                code: "allowlisted_symmetric_polarity".to_owned(),
+                digest: private_artifact_digest("allowlisted_symmetric_polarity", &group)?,
+                boundary: None,
+            }],
+            MaintenanceConfidence::High,
+        )?;
+        let action = new_private_action(
+            MaintenanceActionClass::OwnerResolveContradiction,
+            &finding.finding_id,
+            record_ids,
+            None,
+            None,
+            comparison_set_digest,
+            &group,
+        )?;
+        finding.proposed_action_ids.push(action.action_id.clone());
+        push_finding(findings, finding)?;
+        push_action(actions, action)?;
+    }
+    Ok(())
+}
+
+fn detect_private_staleness(
+    loaded: &[PrivateLoadedRecord],
+    selected: &BTreeSet<String>,
+    evaluated_at: OffsetDateTime,
+    findings: &mut Vec<MaintenanceFinding>,
+) -> Result<()> {
+    for record in loaded.iter().filter(|record| {
+        record.snapshot.current_assertion
+            && record.record.status == MemoryStatus::Active
+            && matches!(
+                record.record.lane,
+                MemoryLane::Semantic | MemoryLane::Procedural
+            )
+            && selected.contains(&record.snapshot.record_id)
+    }) {
+        let stale_at = record
+            .freshness
+            .checked_add(Duration::days(STALE_AFTER_DAYS))
+            .context("maintenance freshness cannot represent the staleness boundary")?;
+        if evaluated_at < stale_at {
+            continue;
+        }
+        push_finding(
+            findings,
+            new_finding(
+                MaintenanceFindingKind::Stale,
+                vec![record.snapshot.record_id.clone()],
+                private_finding_comparison_digest(&[record])?,
+                vec![MaintenanceEvidence {
+                    code: "freshness_age_threshold".to_owned(),
+                    digest: identity(
+                        "memzoi/maintenance/freshness",
+                        &format_timestamp(record.freshness)?,
+                    )?,
+                    boundary: Some(format_timestamp(stale_at)?),
+                }],
+                MaintenanceConfidence::ReportOnly,
+            )?,
+        )?;
+    }
+    Ok(())
+}
+
+fn detect_private_expiry(
+    loaded: &[PrivateLoadedRecord],
+    selected: &BTreeSet<String>,
+    findings: &mut Vec<MaintenanceFinding>,
+) -> Result<()> {
+    for record in loaded.iter().filter(|record| {
+        record.eligible_at_evaluation
+            && (record.record.status == MemoryStatus::Expired
+                || (record.record.status == MemoryStatus::Active
+                    && record.snapshot.retention_state == RetentionState::QueryOnly))
+            && selected.contains(&record.snapshot.record_id)
+    }) {
+        let mut evidence = Vec::new();
+        if record.record.status == MemoryStatus::Expired {
+            evidence.push(MaintenanceEvidence {
+                code: "lifecycle_expired".to_owned(),
+                digest: record.snapshot.temporal_digest.clone(),
+                boundary: None,
+            });
+        }
+        if record.snapshot.retention_state == RetentionState::QueryOnly {
+            evidence.push(MaintenanceEvidence {
+                code: format!("retention_{:?}", record.snapshot.retention_reason).to_lowercase(),
+                digest: record.snapshot.temporal_digest.clone(),
+                boundary: record.snapshot.retention_boundary.clone(),
+            });
+        }
+        push_finding(
+            findings,
+            new_finding(
+                MaintenanceFindingKind::Expired,
+                vec![record.snapshot.record_id.clone()],
+                private_finding_comparison_digest(&[record])?,
+                evidence,
+                MaintenanceConfidence::Exact,
+            )?,
+        )?;
+    }
+    Ok(())
+}
+
+fn detect_private_renewals(
+    loaded: &[PrivateLoadedRecord],
+    selected: &BTreeSet<String>,
+    evaluated_at: OffsetDateTime,
+    comparison_set_digest: &str,
+    findings: &mut Vec<MaintenanceFinding>,
+    actions: &mut Vec<MaintenanceAction>,
+) -> Result<()> {
+    let mut pair_comparisons = 0_usize;
+    for predecessor in loaded.iter().filter(|record| {
+        private_renewal_eligible(record)
+            && matches!(
+                record.record.status,
+                MemoryStatus::Active | MemoryStatus::Expired
+            )
+            && record.snapshot.retention_state == RetentionState::QueryOnly
+            && record.snapshot.retention_boundary.is_some()
+    }) {
+        let boundary = parse_timestamp(
+            predecessor
+                .snapshot
+                .retention_boundary
+                .as_deref()
+                .expect("renewal predecessor boundary checked"),
+            "renewal predecessor boundary",
+        )?;
+        for evidence_record in loaded.iter().filter(|record| {
+            private_renewal_eligible(record)
+                && record.snapshot.current_assertion
+                && record.renewal_claim_digest == predecessor.renewal_claim_digest
+                && record.snapshot.record_id != predecessor.snapshot.record_id
+        }) {
+            consume_pair_work(&mut pair_comparisons, None)?;
+            if !selected.contains(&predecessor.snapshot.record_id)
+                && !selected.contains(&evidence_record.snapshot.record_id)
+            {
+                continue;
+            }
+            if evidence_record.record.origin == predecessor.record.origin
+                || evidence_record
+                    .record
+                    .lineage
+                    .as_ref()
+                    .is_some_and(|lineage| {
+                        lineage.kind == RecordLineageKind::Renewal
+                            && lineage.predecessor_id == predecessor.snapshot.record_id
+                    })
+            {
+                continue;
+            }
+            let Some(capture) = evidence_record.record.capture.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                capture.review_outcome,
+                CaptureReviewOutcome::Accept | CaptureReviewOutcome::Edit
+            ) {
+                continue;
+            }
+            let reviewed_at = parse_timestamp(&capture.reviewed_at, "renewal reviewed_at")?;
+            if reviewed_at <= boundary || reviewed_at > evaluated_at {
+                continue;
+            }
+            let private_evidence_digest =
+                identity("memzoi/maintenance/capture-evidence", &capture.evidence)?;
+            if predecessor.record.capture.as_ref().is_some_and(|prior| {
+                identity("memzoi/maintenance/capture-evidence", &prior.evidence)
+                    .is_ok_and(|digest| digest == private_evidence_digest)
+            }) {
+                continue;
+            }
+            let mut record_ids = vec![
+                predecessor.snapshot.record_id.clone(),
+                evidence_record.snapshot.record_id.clone(),
+            ];
+            record_ids.sort();
+            let group = vec![predecessor, evidence_record];
+            let mut finding = new_finding(
+                MaintenanceFindingKind::RenewalCandidate,
+                record_ids.clone(),
+                private_finding_comparison_digest(&group)?,
+                vec![MaintenanceEvidence {
+                    code: "fresh_accepted_capture_evidence".to_owned(),
+                    digest: private_artifact_digest("fresh_accepted_capture_evidence", &group)?,
+                    boundary: Some(format_timestamp(boundary)?),
+                }],
+                MaintenanceConfidence::High,
+            )?;
+            let action = new_private_action(
+                MaintenanceActionClass::OwnerCreateRenewalSuccessor,
+                &finding.finding_id,
+                record_ids,
+                Some(predecessor.snapshot.record_id.clone()),
+                Some(evidence_record.snapshot.record_id.clone()),
+                comparison_set_digest,
+                &group,
+            )?;
+            finding.proposed_action_ids.push(action.action_id.clone());
+            push_finding(findings, finding)?;
+            push_action(actions, action)?;
+        }
+    }
+    Ok(())
+}
+
+fn new_private_action(
+    class: MaintenanceActionClass,
+    finding_id: &str,
+    mut record_ids: Vec<String>,
+    predecessor_record_id: Option<String>,
+    evidence_record_id: Option<String>,
+    comparison_set_digest: &str,
+    records: &[&PrivateLoadedRecord],
+) -> Result<MaintenanceAction> {
+    record_ids.sort();
+    record_ids.dedup();
+    let preconditions = MaintenanceActionPreconditions {
+        comparison_set_digest: comparison_set_digest.to_owned(),
+        record_versions: records
+            .iter()
+            .map(|record| {
+                (
+                    record.snapshot.record_id.clone(),
+                    record.snapshot.version.clone(),
+                )
+            })
+            .collect(),
+    };
+    let mut action = MaintenanceAction {
+        action_id: String::new(),
+        class,
+        finding_id: finding_id.to_owned(),
+        record_ids,
+        keeper_record_id: None,
+        predecessor_record_id,
+        evidence_record_id,
+        preconditions,
+    };
+    action.action_id = maintenance_action_id(&action)?;
+    Ok(action)
+}
+
+fn private_finding_comparison_digest(records: &[&PrivateLoadedRecord]) -> Result<String> {
+    let mut values = records
+        .iter()
+        .map(|record| (record.snapshot.record_id.as_str(), &record.snapshot.version))
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| left.0.cmp(right.0));
+    identity("memzoi/maintenance/finding-comparison-set", &values)
+}
+
+fn private_artifact_digest(label: &str, records: &[&PrivateLoadedRecord]) -> Result<String> {
+    let mut values = records
+        .iter()
+        .map(|record| (record.snapshot.record_id.as_str(), &record.snapshot.version))
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| left.0.cmp(right.0));
+    identity(
+        "memzoi/maintenance/private-artifact-evidence",
+        &(label, values),
+    )
+}
+
+fn private_renewal_eligible(record: &PrivateLoadedRecord) -> bool {
+    record.eligible_at_evaluation
+        && matches!(
+            record.record.lane,
+            MemoryLane::Semantic | MemoryLane::Procedural
+        )
+        && claim_bearing_type(record.record.memory_type)
+}
+
+fn same_private_claim_context(left: &MemoryRecord, right: &MemoryRecord) -> bool {
+    left.memory_type == right.memory_type
+        && left.lane == right.lane
+        && left.destination == right.destination
+        && normalize_text(&left.title) == normalize_text(&right.title)
+        && left.scope_kind == right.scope_kind
+        && left.scope_id == right.scope_id
+}
+
+fn private_records_are_temporally_related(left: &MemoryRecord, right: &MemoryRecord) -> bool {
+    left.supersedes_id.as_deref() == Some(right.id.as_str())
+        || right.supersedes_id.as_deref() == Some(left.id.as_str())
+        || left
+            .lineage
+            .as_ref()
+            .is_some_and(|lineage| lineage.predecessor_id == right.id)
+        || right
+            .lineage
+            .as_ref()
+            .is_some_and(|lineage| lineage.predecessor_id == left.id)
+}
+
+fn private_duplicate_claim_digest(record: &MemoryRecord) -> Result<String> {
+    identity(
+        "memzoi/maintenance/duplicate-claim",
+        &serde_json::json!({
+            "memory_type": record.memory_type,
+            "lane": record.lane,
+            "destination": record.destination,
+            "scope_kind": record.scope_kind,
+            "scope_id": record.scope_id,
+            "visibility": record.visibility,
+            "title": normalize_text(&record.title),
+            "body": record.body.trim(),
+            "confidence": record.confidence,
+            "retention": record.retention,
+        }),
+    )
+}
+
+fn private_renewal_claim_digest(record: &MemoryRecord) -> Result<String> {
+    identity(
+        "memzoi/maintenance/renewal-claim",
+        &serde_json::json!({
+            "memory_type": record.memory_type,
+            "lane": record.lane,
+            "destination": record.destination,
+            "scope_kind": record.scope_kind,
+            "scope_id": record.scope_id,
+            "visibility": record.visibility,
+            "title": normalize_text(&record.title),
+            "body": record.body.trim(),
+        }),
+    )
+}
+
 fn new_finding(
     kind: MaintenanceFindingKind,
     mut record_ids: Vec<String>,
@@ -1106,7 +1941,7 @@ fn new_action(
         .map(|record| {
             (
                 record.snapshot.record_id.clone(),
-                record.snapshot.revision.revision_hash.clone(),
+                record.snapshot.version.clone(),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -1629,7 +2464,7 @@ fn comparison_digest(records: &[MaintenanceRecordSnapshot]) -> Result<String> {
             .map(|record| {
                 (
                     &record.record_id,
-                    &record.revision.revision_hash,
+                    &record.version,
                     &record.claim_digest,
                     &record.applicability_digest,
                     &record.temporal_digest,
@@ -1642,14 +2477,9 @@ fn comparison_digest(records: &[MaintenanceRecordSnapshot]) -> Result<String> {
 fn finding_comparison_digest(records: &[&LoadedRecord]) -> Result<String> {
     let mut values = records
         .iter()
-        .map(|record| {
-            (
-                record.snapshot.record_id.as_str(),
-                record.snapshot.revision.revision_hash.as_str(),
-            )
-        })
+        .map(|record| (record.snapshot.record_id.as_str(), &record.snapshot.version))
         .collect::<Vec<_>>();
-    values.sort();
+    values.sort_by(|left, right| left.0.cmp(right.0));
     identity("memzoi/maintenance/finding-comparison-set", &values)
 }
 
@@ -1667,10 +2497,7 @@ fn finding_snapshot_comparison_digest(
                 .with_context(|| {
                     format!("maintenance finding references unknown record {record_id}")
                 })?;
-            Ok((
-                record.record_id.as_str(),
-                record.revision.revision_hash.as_str(),
-            ))
+            Ok((record.record_id.as_str(), &record.version))
         })
         .collect::<Result<Vec<_>>>()?;
     identity("memzoi/maintenance/finding-comparison-set", &values)
@@ -1764,6 +2591,18 @@ fn parse_canonical_timestamp(value: &str, label: &str) -> Result<OffsetDateTime>
     Ok(parsed)
 }
 
+fn validate_private_record_version_token(token: &str) -> Result<()> {
+    ensure!(
+        (32..=64).contains(&token.len())
+            && token.bytes().all(|byte| {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) || byte == b'-'
+            })
+            && token.bytes().any(|byte| byte != b'-'),
+        "maintenance private-runtime version token is invalid"
+    );
+    Ok(())
+}
+
 fn format_timestamp(value: OffsetDateTime) -> Result<String> {
     value
         .to_offset(UtcOffset::UTC)
@@ -1805,6 +2644,23 @@ pub fn revalidate_maintenance_plan_at(
     now: OffsetDateTime,
 ) -> Result<MaintenanceRevalidation> {
     plan.validate()?;
+    let repository_fingerprint = match &plan.scope {
+        MaintenanceScope::Repository {
+            repository_fingerprint,
+            ..
+        } => repository_fingerprint,
+        MaintenanceScope::PrivateRuntime { .. } => {
+            bail!("repository maintenance revalidation requires a repository-scoped plan")
+        }
+    };
+    let precondition_repository_fingerprint = match &plan.preconditions.scope {
+        MaintenanceScopeBinding::Repository {
+            repository_fingerprint,
+        } => repository_fingerprint,
+        MaintenanceScopeBinding::PrivateRuntime { .. } => {
+            bail!("repository maintenance revalidation requires repository preconditions")
+        }
+    };
     let evaluated_at = parse_timestamp(&plan.evaluated_at, "maintenance evaluated_at")?;
     let not_after = parse_timestamp(&plan.not_after, "maintenance not_after")?;
     let mut reasons = BTreeSet::new();
@@ -1836,8 +2692,8 @@ pub fn revalidate_maintenance_plan_at(
         reasons.insert(MaintenanceStaleReason::GrantChanged);
     }
     let current_repository = identity("memzoi/maintenance/repository", &paths.repository_key())?;
-    if plan.scope.repository_fingerprint != current_repository
-        || plan.preconditions.repository_fingerprint != current_repository
+    if repository_fingerprint != &current_repository
+        || precondition_repository_fingerprint != &current_repository
     {
         reasons.insert(MaintenanceStaleReason::RepositoryChanged);
     }
@@ -1849,26 +2705,16 @@ pub fn revalidate_maintenance_plan_at(
             let prior_versions = plan
                 .records
                 .iter()
-                .map(|record| {
-                    (
-                        record.record_id.as_str(),
-                        record.revision.revision_hash.as_str(),
-                    )
-                })
+                .map(|record| (record.record_id.as_str(), &record.version))
                 .collect::<BTreeMap<_, _>>();
             let current_versions = current
                 .records
                 .iter()
-                .map(|record| {
-                    (
-                        record.record_id.as_str(),
-                        record.revision.revision_hash.as_str(),
-                    )
-                })
+                .map(|record| (record.record_id.as_str(), &record.version))
                 .collect::<BTreeMap<_, _>>();
             let target_ids = plan
                 .scope
-                .target_record_ids
+                .target_record_ids()
                 .iter()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>();
@@ -1940,6 +2786,11 @@ impl MaintenancePlan {
             self.schema == MAINTENANCE_PLAN_SCHEMA,
             "maintenance plan schema must be {MAINTENANCE_PLAN_SCHEMA}"
         );
+        ensure!(
+            self.policy.contract_version == MAINTENANCE_CONTRACT_VERSION
+                && self.policy.policy_version == MAINTENANCE_POLICY_VERSION,
+            "maintenance policy snapshot does not use the current contract"
+        );
         validate_request(&self.request)?;
         ensure!(
             self.request.evaluated_at.as_deref() == Some(self.evaluated_at.as_str()),
@@ -1959,14 +2810,41 @@ impl MaintenancePlan {
             not_after <= maximum_not_after,
             "maintenance validity exceeds the maximum policy window"
         );
-        ensure!(
-            self.scope.kind == MaintenanceScopeKind::Repository,
-            "maintenance plan scope must be repository"
-        );
-        crate::validate_materialization_identity(
-            &self.scope.repository_fingerprint,
-            "maintenance repository fingerprint",
-        )?;
+        let (scope_target_record_ids, expected_scope_binding, snapshot_diagnostic_code) =
+            match &self.scope {
+                MaintenanceScope::Repository {
+                    repository_fingerprint,
+                    target_record_ids,
+                } => {
+                    crate::validate_materialization_identity(
+                        repository_fingerprint,
+                        "maintenance repository fingerprint",
+                    )?;
+                    (
+                        target_record_ids,
+                        MaintenanceScopeBinding::Repository {
+                            repository_fingerprint: repository_fingerprint.clone(),
+                        },
+                        "repository_snapshot_evaluated",
+                    )
+                }
+                MaintenanceScope::PrivateRuntime {
+                    runtime_fingerprint,
+                    target_record_ids,
+                } => {
+                    crate::validate_materialization_identity(
+                        runtime_fingerprint,
+                        "maintenance private-runtime fingerprint",
+                    )?;
+                    (
+                        target_record_ids,
+                        MaintenanceScopeBinding::PrivateRuntime {
+                            runtime_fingerprint: runtime_fingerprint.clone(),
+                        },
+                        "private_runtime_snapshot_evaluated",
+                    )
+                }
+            };
         crate::validate_materialization_identity(
             &self.authority.grant_fingerprint,
             "maintenance grant fingerprint",
@@ -1977,11 +2855,26 @@ impl MaintenancePlan {
         )?;
         for record in &self.records {
             crate::validate_canonical_record_id(&record.record_id)?;
-            record.revision.validate()?;
-            ensure!(
-                record.source_path == format!(".memzoi/records/{}.md", record.record_id),
-                "maintenance record source path does not match its canonical identity"
-            );
+            match (&self.scope, &record.version) {
+                (
+                    MaintenanceScope::Repository { .. },
+                    MaintenanceRecordVersion::CanonicalRepository {
+                        source_path,
+                        revision,
+                    },
+                ) => {
+                    revision.validate()?;
+                    ensure!(
+                        source_path == &format!(".memzoi/records/{}.md", record.record_id),
+                        "maintenance record source path does not match its canonical identity"
+                    );
+                }
+                (
+                    MaintenanceScope::PrivateRuntime { .. },
+                    MaintenanceRecordVersion::PrivateRuntime { version_token },
+                ) => validate_private_record_version_token(version_token)?,
+                _ => bail!("maintenance record version kind does not match the plan scope"),
+            }
             for (digest, label) in [
                 (&record.content_hash, "maintenance content hash"),
                 (&record.claim_digest, "maintenance claim digest"),
@@ -2012,7 +2905,7 @@ impl MaintenancePlan {
             "maintenance request record IDs",
         )?;
         ensure_sorted_unique(
-            self.scope.target_record_ids.iter().map(String::as_str),
+            scope_target_record_ids.iter().map(String::as_str),
             "maintenance target record IDs",
         )?;
         let record_targets = self
@@ -2022,7 +2915,7 @@ impl MaintenancePlan {
             .map(|record| record.record_id.clone())
             .collect::<Vec<_>>();
         ensure!(
-            record_targets == self.scope.target_record_ids,
+            record_targets == *scope_target_record_ids,
             "maintenance scope targets do not match record target markers"
         );
         let expected_request_targets = if self.request.record_ids.is_empty() {
@@ -2034,7 +2927,7 @@ impl MaintenancePlan {
             self.request.record_ids.clone()
         };
         ensure!(
-            expected_request_targets == self.scope.target_record_ids,
+            expected_request_targets == *scope_target_record_ids,
             "maintenance request selectors do not match plan scope targets"
         );
         ensure_sorted_unique(
@@ -2067,6 +2960,7 @@ impl MaintenancePlan {
                         action.class,
                         MaintenanceActionClass::OwnerConsolidateExactDuplicates
                             | MaintenanceActionClass::OwnerCreateRenewalSuccessor
+                            | MaintenanceActionClass::OwnerResolveContradiction
                     ),
                 };
                 ensure!(
@@ -2165,6 +3059,9 @@ impl MaintenancePlan {
                     MaintenanceActionClass::SuppressUnresolvedConflict => {
                         finding.kind == MaintenanceFindingKind::HighConfidenceContradiction
                     }
+                    MaintenanceActionClass::OwnerResolveContradiction => {
+                        finding.kind == MaintenanceFindingKind::HighConfidenceContradiction
+                    }
                 };
                 ensure!(
                     class_matches_finding,
@@ -2177,13 +3074,8 @@ impl MaintenancePlan {
                             .records
                             .iter()
                             .find(|record| record.record_id == *record_id)
-                            .map(|record| record.revision.revision_hash.as_str());
-                        action
-                            .preconditions
-                            .record_versions
-                            .get(record_id)
-                            .map(String::as_str)
-                            == expected
+                            .map(|record| &record.version);
+                        action.preconditions.record_versions.get(record_id) == expected
                     }) && action.preconditions.record_versions.len() == action.record_ids.len()
                         && action.preconditions.comparison_set_digest == self.comparison_set_digest,
                     "maintenance action record versions do not match its targets"
@@ -2237,14 +3129,14 @@ impl MaintenancePlan {
         }
         ensure!(
             self.diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "repository_snapshot_evaluated"
+                diagnostic.code == snapshot_diagnostic_code
                     && diagnostic.count == self.records.len()
                     && diagnostic.digest == self.comparison_set_digest
             }),
             "maintenance repository-snapshot diagnostic does not match the plan"
         );
         ensure!(
-            self.preconditions.repository_fingerprint == self.scope.repository_fingerprint
+            self.preconditions.scope == expected_scope_binding
                 && self.preconditions.comparison_set_digest == self.comparison_set_digest
                 && self.preconditions.policy_digest == self.policy.policy_digest
                 && self.preconditions.grant_fingerprint == self.authority.grant_fingerprint
@@ -2256,11 +3148,11 @@ impl MaintenancePlan {
             "maintenance policy digest does not match the policy snapshot"
         );
         ensure!(
-            !self.policy.contract_version.trim().is_empty()
-                && !self.policy.policy_version.trim().is_empty()
+            self.policy.contract_version == MAINTENANCE_CONTRACT_VERSION
+                && self.policy.policy_version == MAINTENANCE_POLICY_VERSION
                 && self.policy.maximum_validity_seconds > 0
                 && self.policy.stale_after_seconds > 0,
-            "maintenance policy snapshot is incomplete"
+            "maintenance policy snapshot does not use the current contract"
         );
         ensure!(
             self.detectors
@@ -2289,12 +3181,7 @@ impl MaintenancePlan {
             .records
             .iter()
             .filter(|record| record.target)
-            .map(|record| {
-                (
-                    record.record_id.clone(),
-                    record.revision.revision_hash.clone(),
-                )
-            })
+            .map(|record| (record.record_id.clone(), record.version.clone()))
             .collect::<BTreeMap<_, _>>();
         ensure!(
             self.preconditions.target_versions == expected_target_versions,
@@ -2343,14 +3230,23 @@ fn maintenance_action_id(action: &MaintenanceAction) -> Result<String> {
 
 fn validate_action_shape(action: &MaintenanceAction) -> Result<()> {
     match action.class {
-        MaintenanceActionClass::ConsolidateExactDuplicates
-        | MaintenanceActionClass::OwnerConsolidateExactDuplicates => {
+        MaintenanceActionClass::ConsolidateExactDuplicates => {
             ensure!(
                 action.record_ids.len() >= 2
                     && action.keeper_record_id.as_ref() == action.record_ids.first()
                     && action.predecessor_record_id.is_none()
                     && action.evidence_record_id.is_none(),
                 "maintenance duplicate-consolidation action has an invalid shape"
+            );
+        }
+        MaintenanceActionClass::OwnerConsolidateExactDuplicates
+        | MaintenanceActionClass::OwnerResolveContradiction => {
+            ensure!(
+                action.record_ids.len() >= 2
+                    && action.keeper_record_id.is_none()
+                    && action.predecessor_record_id.is_none()
+                    && action.evidence_record_id.is_none(),
+                "maintenance owner-selection action must not choose a winner"
             );
         }
         MaintenanceActionClass::CreateRenewalSuccessor
@@ -2521,6 +3417,47 @@ mod tests {
         }
     }
 
+    fn private_record(id: &str, title: &str, body: &str) -> MemoryRecord {
+        MemoryRecord {
+            id: id.to_owned(),
+            memory_type: MemoryType::Fact,
+            lane: MemoryLane::Semantic,
+            destination: MemoryDestination::Local,
+            scope_kind: ScopeKind::Repo,
+            scope_id: None,
+            visibility: Visibility::Private,
+            title: title.to_owned(),
+            body: body.to_owned(),
+            status: MemoryStatus::Active,
+            confidence: 1.0,
+            source_kind: Some("test".to_owned()),
+            source_ref: None,
+            proposal_id: None,
+            capture: None,
+            content_hash: "RAW_PRIVATE_HASH_SENTINEL".to_owned(),
+            created_at: "2026-07-01T00:00:00Z".to_owned(),
+            updated_at: "2026-07-01T00:00:00Z".to_owned(),
+            supersedes_id: None,
+            retention: retention(None),
+            origin: OriginDescriptor::new(
+                format!("private-maintenance-test:{id}"),
+                OriginRoute::LocalMemory,
+            ),
+            lineage: None,
+        }
+    }
+
+    fn private_input(record: MemoryRecord, token_fill: char) -> PrivateMaintenanceRecordInput {
+        PrivateMaintenanceRecordInput {
+            record,
+            version_token: token_fill.to_string().repeat(32),
+            current_assertion: true,
+            retention_state: RetentionState::Current,
+            retention_reason: RetentionReason::NoAgeLimit,
+            retention_boundary: None,
+        }
+    }
+
     fn identity_fixture(fill: char) -> String {
         format!("blake3:{}", fill.to_string().repeat(64))
     }
@@ -2584,6 +3521,102 @@ mod tests {
     }
 
     #[test]
+    fn private_planning_is_deterministic_content_free_and_requires_owner_keeper_selection()
+    -> Result<()> {
+        let private_body = "PRIVATE_DUPLICATE_BODY_SENTINEL must remain private.";
+        let probe = private_record("private-duplicate-a", "Private duplicate", private_body);
+        let raw_content_digest = identity("memzoi/maintenance/content", &probe.body)?;
+        let raw_claim_digest = private_duplicate_claim_digest(&probe)?;
+        let left = private_input(probe, 'a');
+        let right = private_input(
+            private_record("private-duplicate-b", "Private duplicate", private_body),
+            'b',
+        );
+        let request = MaintenancePlanRequest {
+            schema: MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+            evaluated_at: Some("2026-07-18T12:00:00Z".to_owned()),
+            record_ids: Vec::new(),
+        };
+        let first = plan_private_maintenance_at(
+            identity_fixture('1'),
+            request.clone(),
+            vec![right.clone(), left.clone()],
+            parse_timestamp("2026-07-18T12:00:00Z", "test")?,
+        )?;
+        let repeated = plan_private_maintenance_at(
+            identity_fixture('1'),
+            request,
+            vec![left, right],
+            parse_timestamp("2026-07-18T12:00:00Z", "test")?,
+        )?;
+        assert_eq!(
+            serde_json::to_vec_pretty(&first)?,
+            serde_json::to_vec_pretty(&repeated)?
+        );
+        assert!(matches!(
+            &first.scope,
+            MaintenanceScope::PrivateRuntime { .. }
+        ));
+        assert_eq!(first.summary.exact_duplicates, 1);
+        assert!(first.action_groups[0].actions.is_empty());
+        assert!(first.action_groups[1].actions.is_empty());
+        let action = &first.action_groups[2].actions[0];
+        assert_eq!(
+            action.class,
+            MaintenanceActionClass::OwnerConsolidateExactDuplicates
+        );
+        assert!(action.keeper_record_id.is_none());
+        let rendered = serde_json::to_string(&first)?;
+        assert!(!rendered.contains(private_body));
+        assert!(!rendered.contains("Private duplicate"));
+        assert!(!rendered.contains("RAW_PRIVATE_HASH_SENTINEL"));
+        assert!(!rendered.contains(&raw_content_digest));
+        assert!(!rendered.contains(&raw_claim_digest));
+        assert!(rendered.contains("version_token"));
+        Ok(())
+    }
+
+    #[test]
+    fn private_contradiction_candidates_never_choose_a_winner() -> Result<()> {
+        let positive = private_input(
+            private_record(
+                "private-conflict-a",
+                "Private conflict",
+                "Authentication is required.",
+            ),
+            'c',
+        );
+        let negative = private_input(
+            private_record(
+                "private-conflict-b",
+                "Private conflict",
+                "Authentication is not required.",
+            ),
+            'd',
+        );
+        let plan = plan_private_maintenance_at(
+            identity_fixture('2'),
+            MaintenancePlanRequest {
+                schema: MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+                evaluated_at: Some("2026-07-18T12:00:00Z".to_owned()),
+                record_ids: Vec::new(),
+            },
+            vec![positive, negative],
+            parse_timestamp("2026-07-18T12:00:00Z", "test")?,
+        )?;
+        assert_eq!(plan.summary.contradictions, 1);
+        let action = &plan.action_groups[2].actions[0];
+        assert_eq!(
+            action.class,
+            MaintenanceActionClass::OwnerResolveContradiction
+        );
+        assert!(action.keeper_record_id.is_none());
+        assert!(action.predecessor_record_id.is_none());
+        assert!(action.evidence_record_id.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn replay_is_byte_identical_and_duplicate_is_not_a_contradiction() -> Result<()> {
         let fixture = Fixture::new()?;
         fixture.write(&record(
@@ -2623,10 +3656,56 @@ mod tests {
         assert_eq!(first.action_groups[0].actions.len(), 1);
         assert!(first.action_groups[1].actions.is_empty());
         assert!(first.action_groups[2].actions.is_empty());
+        assert_eq!(first.schema, MAINTENANCE_PLAN_SCHEMA);
+        assert_eq!(first.request.schema, MAINTENANCE_REQUEST_SCHEMA);
+        assert_eq!(first.policy.contract_version, "maintenance-plan/2");
+        assert_eq!(first.policy.policy_version, "maintenance-policy/1");
+        assert!(matches!(&first.scope, MaintenanceScope::Repository { .. }));
+        assert!(first.records.iter().all(|record| matches!(
+            &record.version,
+            MaintenanceRecordVersion::CanonicalRepository { .. }
+        )));
         let rendered = serde_json::to_string(&first)?;
         assert!(!rendered.contains("Authentication is required"));
         assert_eq!(snapshot_tree(&fixture.paths.memory_dir)?, before);
         assert!(!fixture.paths.repository_runtime_dir.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_v2_is_current_only_and_rejects_v1_artifacts() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.write(&record(
+            "maintenance-current-contract",
+            "Current contract",
+            "The current maintenance contract is required.",
+        ))?;
+        let plan = fixture.plan("2026-07-18T12:00:00Z", Vec::new())?;
+        let current = serde_json::to_value(&plan)?;
+        assert_eq!(current["schema"], MAINTENANCE_PLAN_SCHEMA);
+        assert_eq!(
+            current["records"][0]["version"]["kind"],
+            "canonical_repository"
+        );
+
+        let mut v1 = current.clone();
+        v1["policy"]["contract_version"] = serde_json::json!("maintenance-plan/1");
+        let error = parse_maintenance_plan(&serde_json::to_string(&v1)?)
+            .expect_err("v1 maintenance artifacts must be rejected");
+        assert!(error.to_string().contains("current contract"), "{error:#}");
+
+        let mut legacy_record_shape = current;
+        let version = legacy_record_shape["records"][0]["version"].clone();
+        legacy_record_shape["records"][0]["source_path"] = version["source_path"].clone();
+        legacy_record_shape["records"][0]["revision"] = version["revision"].clone();
+        legacy_record_shape["records"][0]
+            .as_object_mut()
+            .expect("record object")
+            .remove("version");
+        assert!(
+            parse_maintenance_plan(&serde_json::to_string(&legacy_record_shape)?).is_err(),
+            "legacy source_path/revision fields must not be accepted"
+        );
         Ok(())
     }
 
@@ -3019,7 +4098,8 @@ mod tests {
         assert!(parse_maintenance_plan(&serde_json::to_string(&value)?).is_err());
 
         let mut nested_unknown = serde_json::to_value(&plan)?;
-        nested_unknown["records"][0]["revision"]["unknown"] = serde_json::Value::Bool(true);
+        nested_unknown["records"][0]["version"]["revision"]["unknown"] =
+            serde_json::Value::Bool(true);
         assert!(
             parse_maintenance_plan(&serde_json::to_string(&nested_unknown)?).is_err(),
             "nested revision fields must remain strict"
@@ -3030,10 +4110,16 @@ mod tests {
         assert!(tampered.validate().is_err());
 
         let mut stale_precondition = plan.clone();
+        let mut stale_version = plan.records[0].version.clone();
+        let MaintenanceRecordVersion::CanonicalRepository { revision, .. } = &mut stale_version
+        else {
+            panic!("repository fixture must use a canonical version")
+        };
+        revision.revision_hash = identity_fixture('9');
         stale_precondition
             .preconditions
             .target_versions
-            .insert("tamper".to_owned(), identity_fixture('9'));
+            .insert("tamper".to_owned(), stale_version);
         stale_precondition.plan_id = maintenance_plan_id(&stale_precondition)?;
         assert!(stale_precondition.validate().is_err());
 
@@ -3099,7 +4185,7 @@ mod tests {
             vec!["selector-target".to_owned(); MAINTENANCE_MAX_ADMITTED_RECORDS + 17];
         let plan = fixture.plan("2026-07-18T12:00:00Z", duplicate_selectors)?;
         assert_eq!(plan.request.record_ids, ["selector-target"]);
-        assert_eq!(plan.scope.target_record_ids, ["selector-target"]);
+        assert_eq!(plan.scope.target_record_ids(), ["selector-target"]);
 
         let unique_selectors = (0..=MAINTENANCE_MAX_ADMITTED_RECORDS)
             .map(|index| format!("selector-{index:03}"))

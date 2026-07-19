@@ -2758,7 +2758,7 @@ fn capture_managed_state_snapshot(
     let mut checkpoints = service.list_checkpoints()?;
     checkpoints.sort_by(|left, right| left.id.cmp(&right.id));
     let mut events = Vec::new();
-    service.for_each_event(|event| {
+    service.for_each_event_including_private(|event| {
         events.push(event);
         Ok(())
     })?;

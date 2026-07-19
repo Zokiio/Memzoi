@@ -8,8 +8,8 @@ use crate::{
     events::{AppendEvent, append_event},
     expiry,
     models::{
-        MemoryCitation, MemoryDestination, MemoryLane, MemoryPath, MemoryRecord, MemoryType,
-        ScopeKind, SearchResult,
+        MemoryCitation, MemoryDestination, MemoryEventDataClass, MemoryLane, MemoryPath,
+        MemoryRecord, MemoryType, ScopeKind, SearchResult,
     },
     retention,
 };
@@ -56,6 +56,25 @@ pub(crate) fn search_memory_at(
     conn: &Connection,
     input: SearchInput,
     now: OffsetDateTime,
+) -> Result<Vec<SearchResult>> {
+    // Search queries, path prefixes, and result identifiers are local read
+    // telemetry even when the searched records are repository-visible.
+    search_memory_at_with_audit(conn, input, now, Some(MemoryEventDataClass::Private))
+}
+
+pub(crate) fn search_memory_at_without_audit(
+    conn: &Connection,
+    input: SearchInput,
+    now: OffsetDateTime,
+) -> Result<Vec<SearchResult>> {
+    search_memory_at_with_audit(conn, input, now, None)
+}
+
+fn search_memory_at_with_audit(
+    conn: &Connection,
+    input: SearchInput,
+    now: OffsetDateTime,
+    audit_data_class: Option<MemoryEventDataClass>,
 ) -> Result<Vec<SearchResult>> {
     let fts_query = fts_query(&input.query);
     if fts_query.is_empty() {
@@ -213,26 +232,29 @@ pub(crate) fn search_memory_at(
         });
     }
 
-    append_event(
-        conn,
-        AppendEvent {
-            event_type: "memory.searched".to_owned(),
-            actor: "memzoi-core".to_owned(),
-            payload: json!({
-                "query": input.query,
-                "scope_kind": scope_kind,
-                "type": memory_type,
-                "lane": lane,
-                "destination": destination,
-                "path_prefix": input.path_prefix,
-                "limit": limit,
-                "evaluated_at": evaluated_at,
-                "result_ids": results.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
-            }),
-            record_id: None,
-            proposal_id: None,
-        },
-    )?;
+    if let Some(data_class) = audit_data_class {
+        append_event(
+            conn,
+            AppendEvent {
+                event_type: "memory.searched".to_owned(),
+                actor: "memzoi-core".to_owned(),
+                data_class,
+                payload: json!({
+                    "query": input.query,
+                    "scope_kind": scope_kind,
+                    "type": memory_type,
+                    "lane": lane,
+                    "destination": destination,
+                    "path_prefix": input.path_prefix,
+                    "limit": limit,
+                    "evaluated_at": evaluated_at,
+                    "result_ids": results.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
+                }),
+                record_id: None,
+                proposal_id: None,
+            },
+        )?;
+    }
 
     Ok(results)
 }

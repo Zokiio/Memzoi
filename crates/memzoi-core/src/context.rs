@@ -15,13 +15,14 @@ use crate::{
     expiry,
     models::{
         ContextPack, ContextPackBudget, ContextPackIncludedItem, ContextPackOmittedItem,
-        ContextPackPolicy, ContextPackWarning, MemoryCitation, MemoryDestination, MemoryLane,
-        MemoryPath, MemoryRecord, MemoryType, SearchRanking, SearchRankingSignals, SearchResult,
+        ContextPackPolicy, ContextPackWarning, MemoryCitation, MemoryDestination,
+        MemoryEventDataClass, MemoryLane, MemoryPath, MemoryRecord, MemoryType, SearchRanking,
+        SearchRankingSignals, SearchResult,
     },
     retention,
     search::{
         SearchInput, citation_for, load_paths, path_matches_request, record_from_row,
-        search_memory_at,
+        search_memory_at, search_memory_at_without_audit,
     },
 };
 
@@ -46,6 +47,25 @@ pub(crate) fn build_context_pack_at(
     input: ContextPackInput,
     now: OffsetDateTime,
 ) -> Result<ContextPack> {
+    // Tasks, paths, and selected identifiers are local read telemetry even
+    // when a context request selects repository records only.
+    build_context_pack_at_with_audit(conn, input, now, Some(MemoryEventDataClass::Private))
+}
+
+pub(crate) fn build_context_pack_at_without_audit(
+    conn: &Connection,
+    input: ContextPackInput,
+    now: OffsetDateTime,
+) -> Result<ContextPack> {
+    build_context_pack_at_with_audit(conn, input, now, None)
+}
+
+fn build_context_pack_at_with_audit(
+    conn: &Connection,
+    input: ContextPackInput,
+    now: OffsetDateTime,
+    audit_data_class: Option<MemoryEventDataClass>,
+) -> Result<ContextPack> {
     let path_prefix = input
         .path_prefix
         .as_deref()
@@ -56,17 +76,19 @@ pub(crate) fn build_context_pack_at(
     let mut candidates = HashMap::<String, ContextCandidate>::new();
 
     for destination in &requested_destinations {
-        for result in search_memory_at(
-            conn,
-            SearchInput {
-                query: input.task.clone(),
-                destination: Some(*destination),
-                limit: 50,
-                include_inactive: false,
-                ..SearchInput::default()
-            },
-            now,
-        )? {
+        let search = SearchInput {
+            query: input.task.clone(),
+            destination: Some(*destination),
+            limit: 50,
+            include_inactive: false,
+            ..SearchInput::default()
+        };
+        let results = if audit_data_class.is_some() {
+            search_memory_at(conn, search, now)?
+        } else {
+            search_memory_at_without_audit(conn, search, now)?
+        };
+        for result in results {
             insert_candidate(&mut candidates, ContextCandidate::fts(result));
         }
     }
@@ -144,28 +166,31 @@ pub(crate) fn build_context_pack_at(
     let mut pack = pack;
     pack.budget.selected_records = pack.records.len();
 
-    append_event(
-        conn,
-        AppendEvent {
-            event_type: "memory.context_pack_built".to_owned(),
-            actor: "memzoi-core".to_owned(),
-            payload: json!({
-                "context_pack_id": pack.id,
-                "task": input.task,
-                "path_prefix": input.path_prefix,
-                "token_budget": input.token_budget,
-                "include_local": input.include_local,
-                "include_session": input.include_session,
-                "requested_destinations": pack.policy.requested_destinations.iter().map(|destination| destination.as_str()).collect::<Vec<_>>(),
-                "included_destinations": pack.policy.included_destinations.iter().map(|destination| destination.as_str()).collect::<Vec<_>>(),
-                "candidate_records": pack.budget.candidate_records,
-                "selected_records": pack.budget.selected_records,
-                "record_ids": pack.records.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
-            }),
-            record_id: None,
-            proposal_id: None,
-        },
-    )?;
+    if let Some(data_class) = audit_data_class {
+        append_event(
+            conn,
+            AppendEvent {
+                event_type: "memory.context_pack_built".to_owned(),
+                actor: "memzoi-core".to_owned(),
+                data_class,
+                payload: json!({
+                    "context_pack_id": pack.id,
+                    "task": input.task,
+                    "path_prefix": input.path_prefix,
+                    "token_budget": input.token_budget,
+                    "include_local": input.include_local,
+                    "include_session": input.include_session,
+                    "requested_destinations": pack.policy.requested_destinations.iter().map(|destination| destination.as_str()).collect::<Vec<_>>(),
+                    "included_destinations": pack.policy.included_destinations.iter().map(|destination| destination.as_str()).collect::<Vec<_>>(),
+                    "candidate_records": pack.budget.candidate_records,
+                    "selected_records": pack.budget.selected_records,
+                    "record_ids": pack.records.iter().map(|result| result.record.id.as_str()).collect::<Vec<_>>(),
+                }),
+                record_id: None,
+                proposal_id: None,
+            },
+        )?;
+    }
 
     Ok(pack)
 }
