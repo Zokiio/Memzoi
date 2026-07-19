@@ -1449,6 +1449,19 @@ fn caller_selected_private_ids_are_confined_to_trusted_recall_evaluation() -> an
         paths,
         crate::FixedClock::from_rfc3339("2026-07-19T12:00:00Z")?,
     )?;
+    let error = trusted
+        .create_local_memory_with_id_for_trusted_recall_eval(
+            "memzoi-eval",
+            "wrong-prefix",
+            input.clone(),
+        )
+        .expect_err("all private record ids must use their destination prefix");
+    assert!(
+        error
+            .to_string()
+            .contains("private record id must be a bounded local-* identifier"),
+        "unexpected private-id validation error: {error:#}"
+    );
     let created = trusted.create_local_memory_with_id_for_trusted_recall_eval(
         "memzoi-eval",
         fixture_id,

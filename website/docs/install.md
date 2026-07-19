@@ -33,12 +33,17 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zok
 
 By default, the install script downloads the latest GitHub release binary, verifies its SHA-256 checksum, and installs into `~/.local/bin` on Mac/Linux. On Windows, it installs under `%LOCALAPPDATA%\Programs\Memzoi\bin` and updates the user `Path`.
 
-The v0.5.0 Windows binaries support MCP and most CLI surfaces. CLI/MCP capture
-file operations and private lifecycle artifact I/O fail closed on Windows
-because they require Unix handle-relative, no-symlink, or atomic no-clobber
-primitives. For private lifecycle, `authorize`, `apply`, and `plan --output`
-are unavailable; `plan` without `--output`, `inspect`, and `revoke` remain
-available.
+The tagged v0.5.0 release predates `maintenance`, `lifecycle`, and MCP
+`plan_maintenance`. To exercise those still-unreleased surfaces while reading
+the documentation on `main`, use [Developer Mode](#developer-mode) from a
+current source checkout; release binaries may lag the source documentation.
+
+In current source builds, Windows supports MCP and most CLI surfaces. CLI/MCP
+capture file operations and private lifecycle artifact I/O fail closed on
+Windows because they require Unix handle-relative, no-symlink, or atomic
+no-clobber primitives. For private lifecycle, `authorize`, `apply`, and
+`plan --output` are unavailable; `plan` without `--output`, `inspect`, and
+`revoke` remain available.
 
 Install a pinned release by tag. Replace `vX.Y.Z` with a tag from the
 [latest GitHub release](https://github.com/Zokiio/Memzoi/releases/latest):
@@ -47,7 +52,9 @@ Install a pinned release by tag. Replace `vX.Y.Z` with a tag from the
 curl -fsSL https://raw.githubusercontent.com/Zokiio/Memzoi/main/scripts/install.sh | MEMZOI_REF=vX.Y.Z sh
 ```
 
-Set `MEMZOI_REF=main` to install from the current main branch instead; that source install path requires Cargo.
+To run current `main` before it is released, use
+[Developer Mode](#developer-mode) from a source checkout instead of the release
+installer.
 
 ## Staying Up To Date
 

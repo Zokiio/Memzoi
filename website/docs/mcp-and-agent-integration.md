@@ -127,7 +127,7 @@ workflow only after treating it as untrusted review input, then use `memzoi capt
 {
   "schema": "memzoi/maintenance-request",
   "evaluated_at": "2026-07-18T12:00:00Z",
-  "record_ids": ["mem-repository-policy"]
+  "record_ids": ["maintenance-plans-separate-evidence-from-execution-authority"]
 }
 ```
 

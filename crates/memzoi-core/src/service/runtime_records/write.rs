@@ -95,7 +95,7 @@ fn create_local_memory_with_metadata_and_id(
     id: String,
 ) -> Result<MemoryRecord> {
     validate_local_memory_input(input)?;
-    validate_trusted_recall_eval_id(&id, "local")?;
+    validate_private_record_id(&id, "local")?;
     let body = input.body.trim().to_owned();
     let record = MemoryRecord {
         id,
@@ -203,7 +203,7 @@ fn create_checkpoint_with_metadata_and_id(
     id: String,
 ) -> Result<MemoryRecord> {
     validate_checkpoint_input(input)?;
-    validate_trusted_recall_eval_id(&id, "session")?;
+    validate_private_record_id(&id, "session")?;
     let body = input.note.trim().to_owned();
     let record = MemoryRecord {
         id,
@@ -271,9 +271,9 @@ fn validate_checkpoint_input(input: &CheckpointInput) -> Result<()> {
     Ok(())
 }
 
-fn validate_trusted_recall_eval_id(id: &str, prefix: &str) -> Result<()> {
+fn validate_private_record_id(id: &str, prefix: &str) -> Result<()> {
     if id.len() > 256 || !id.starts_with(&format!("{prefix}-")) || id.contains('/') {
-        bail!("trusted recall fixture id must be a bounded {prefix}-* identifier");
+        bail!("private record id must be a bounded {prefix}-* identifier");
     }
     crate::validate_canonical_record_id(id)?;
     Ok(())

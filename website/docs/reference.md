@@ -269,7 +269,7 @@ memzoi maintenance plan \
   --json
 
 memzoi maintenance plan \
-  --record-id mem-repository-policy \
+  --record-id maintenance-plans-separate-evidence-from-execution-authority \
   --output /path/outside/the/worktree/maintenance-plan.json
 ```
 
@@ -311,49 +311,47 @@ can open it.
 Private lifecycle work is local CLI/core only and follows
 `plan → exact owner request → one-shot grant → atomic apply → idempotent result`:
 
+Start by inspecting the target. This shell-safe template uses a quoted variable
+instead of angle-bracket syntax that a shell would interpret as redirection:
+
+```bash
+RECORD_ID='replace-with-private-record-id'
+
+memzoi lifecycle inspect record "$RECORD_ID" --json
+```
+
+For a plan-bound request, create fresh evidence before constructing the exact
+owner request:
+
 ```bash
 memzoi lifecycle plan \
-  --record-id <ID> \
-  --evaluated-at 2026-07-18T12:00:00Z \
+  --record-id "$RECORD_ID" \
   --output /private/review/lifecycle-plan.json \
-  --json
-
-memzoi lifecycle authorize \
-  --request-file /private/review/lifecycle-request.json \
-  --plan-file /private/review/lifecycle-plan.json \
-  --expires-at 2026-07-18T18:00:00Z \
-  --json
-
-memzoi lifecycle inspect grant <GRANT-ID> --json
-memzoi lifecycle inspect record <RECORD-ID> --json
-memzoi lifecycle revoke --grant-id <GRANT-ID> --json
-
-memzoi lifecycle apply \
-  --request-file /private/review/lifecycle-request.json \
-  --grant-id <GRANT-ID> \
-  --plan-file /private/review/lifecycle-plan.json \
   --json
 ```
 
-`plan` and both `inspect` forms are strictly read-only. `authorize` may create
-only one authoritative `owner_action_grant` row, and `revoke` may update only
-that grant store. `apply` is the only command that may change private record
-content/status, lifecycle state or relations, ordinary-read eligibility,
-application receipts, or lifecycle audit events.
+The direct request walkthrough below is separate and does not bind that
+optional plan. Optional `--evaluated-at` and `--expires-at` overrides are
+deliberately omitted so copied examples cannot become stale.
 
 The strict request schema is `memzoi/private-lifecycle-request`:
+
+The following JSON is an illustrative, non-executable shape template. Replace
+the record ID and version with values from inspection, select the exact owner
+action, and recompute `request_id`; placeholder text is never accepted as
+authority.
 
 ```json
 {
   "schema": "memzoi/private-lifecycle-request",
-  "request_id": "blake3:<canonical-request-identity>",
+  "request_id": "blake3:<computed-64-lowercase-hex-digest>",
   "operation_id": "owner-operation-42",
   "source": { "kind": "direct" },
   "actions": [
     {
       "kind": "pin",
-      "record_id": "<OPAQUE-PRIVATE-RECORD-ID>",
-      "expected_version": "<OPAQUE-RANDOM-VERSION>"
+      "record_id": "local-<opaque-uuid>",
+      "expected_version": "0123456789abcdef0123456789abcdef"
     }
   ]
 }
@@ -361,14 +359,54 @@ The strict request schema is `memzoi/private-lifecycle-request`:
 
 A planned request instead uses
 `{"kind":"maintenance_plan","plan_id":"...","selected_action_ids":["..."]}`.
+For that source, pass the exact selected plan artifact to both `authorize` and
+`apply`. The direct walkthrough below intentionally omits `--plan-file`.
 The `request_id` is recomputed from the schema, caller-controlled
 `operation_id`, source, and exact ordered action payloads; a mismatch is
-rejected. Requests contain one to 64 actions, at most 256 distinct mutation
-targets, no duplicate or overlapping participation, and exact version tokens
-for every target and evidence reference. Reason codes are nonempty
-machine-readable values of at most 128 UTF-8 bytes. Inputs may be strict JSON
-or YAML, but must be regular non-symlink files no larger than 2 MiB; unknown or
-duplicate keys, trailing documents, special files, and truncation are rejected.
+rejected. Core callers should use
+`PrivateLifecycleRequest::with_computed_id`; its identity is the BLAKE3 digest
+of the NUL-terminated `memzoi/private-lifecycle-request-id/v1` domain separator
+followed by canonical JSON containing only `schema`, `operation_id`, `source`,
+and `actions`. Do not hand-edit a previously computed ID after changing an
+action.
+
+Requests contain one to 64 actions, at most 256 distinct mutation targets, no
+duplicate or overlapping participation, and exact version tokens for every
+target and evidence reference. Reason codes are nonempty machine-readable
+values of at most 128 UTF-8 bytes. Inputs may be strict JSON or YAML, but must
+be regular non-symlink files no larger than 2 MiB; unknown or duplicate keys,
+trailing documents, special files, and truncation are rejected.
+
+After constructing and reviewing the exact request artifact, authorize and
+apply it. Copy the returned `grant_id` into the quoted shell variable before
+continuing:
+
+```bash
+memzoi lifecycle authorize \
+  --request-file /private/review/lifecycle-request.json \
+  --json
+
+GRANT_ID='replace-with-grant-id-from-authorize'
+
+memzoi lifecycle inspect grant "$GRANT_ID" --json
+
+memzoi lifecycle apply \
+  --request-file /private/review/lifecycle-request.json \
+  --grant-id "$GRANT_ID" \
+  --json
+```
+
+To cancel an active grant **instead of applying it**:
+
+```bash
+memzoi lifecycle revoke --grant-id "$GRANT_ID" --json
+```
+
+`plan` and both `inspect` forms are strictly read-only. `authorize` may create
+only one authoritative `owner_action_grant` row, and `revoke` may update only
+that grant store. `apply` is the only command that may change private record
+content/status, lifecycle state or relations, ordinary-read eligibility,
+application receipts, or lifecycle audit events.
 
 **Platform boundary:** In this release, the artifact-backed
 `lifecycle authorize` and `lifecycle apply` CLI commands are Unix-only because
