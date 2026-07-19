@@ -33,9 +33,12 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Zok
 
 By default, the install script downloads the latest GitHub release binary, verifies its SHA-256 checksum, and installs into `~/.local/bin` on Mac/Linux. On Windows, it installs under `%LOCALAPPDATA%\Programs\Memzoi\bin` and updates the user `Path`.
 
-The v0.5.0 Windows binaries support the non-capture CLI and MCP surfaces. CLI
-and MCP capture file operations fail closed on Windows because they require
-Unix handle-relative, no-symlink file access.
+The v0.5.0 Windows binaries support MCP and most CLI surfaces. CLI/MCP capture
+file operations and private lifecycle artifact I/O fail closed on Windows
+because they require Unix handle-relative, no-symlink, or atomic no-clobber
+primitives. For private lifecycle, `authorize`, `apply`, and `plan --output`
+are unavailable; `plan` without `--output`, `inspect`, and `revoke` remain
+available.
 
 Install a pinned release by tag. Replace `vX.Y.Z` with a tag from the
 [latest GitHub release](https://github.com/Zokiio/Memzoi/releases/latest):

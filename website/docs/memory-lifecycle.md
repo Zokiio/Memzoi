@@ -250,8 +250,17 @@ transaction applies the whole action group, writes one content-free event and
 one replayable receipt, consumes the grant, and advances the shared lifecycle
 generation. Any stale, unauthorized, expired, revoked, overlapping, or
 partially invalid request performs zero lifecycle writes and leaves the grant
-unconsumed. Reusing an `operation_id` with the same `request_id` returns the
-recorded result; reusing it with another request is a zero-write conflict.
+unconsumed. Reusing an `operation_id` with the same `request_id` and recorded
+`grant_id` returns the recorded result. Supplying another grant is a zero-write
+replay mismatch; reusing the operation with another request is a zero-write
+operation-ID conflict.
+
+Private lifecycle artifact I/O is deliberately fail-closed on unsupported
+platforms in this release. `lifecycle authorize`, `lifecycle apply`, and
+`lifecycle plan --output` currently require Unix regular-file, no-symlink, and
+atomic no-clobber primitives. On non-Unix systems, `lifecycle plan` without
+`--output`, both `lifecycle inspect` commands, and `lifecycle revoke` remain
+available.
 
 The action rules preserve independent clocks and owner choice:
 

@@ -734,7 +734,7 @@ pub(crate) enum LifecycleCommands {
         /// Explicit RFC 3339 evaluation instant for deterministic evidence.
         #[arg(long = "evaluated-at", value_name = "RFC3339")]
         evaluated_at: Option<String>,
-        /// Existing-parent destination outside the worktree and managed runtime state.
+        /// Unix-only in this release: atomic no-clobber destination outside the worktree and managed runtime state.
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
         /// Emit the complete content-free private plan as JSON.
@@ -744,8 +744,10 @@ pub(crate) enum LifecycleCommands {
 
     /// Persist one time-bounded, one-shot owner grant for an exact request.
     Authorize {
+        /// Strict JSON/YAML request artifact; secure regular-file reads currently require Unix.
         #[arg(long = "request-file", value_name = "PATH")]
         request_file: PathBuf,
+        /// Optional strict JSON/YAML plan artifact; secure regular-file reads currently require Unix.
         #[arg(long = "plan-file", value_name = "PATH")]
         plan_file: Option<PathBuf>,
         /// Optional upper bound that may only shorten the default authority window.
@@ -771,10 +773,12 @@ pub(crate) enum LifecycleCommands {
 
     /// Atomically consume one active grant and apply its exact action group.
     Apply {
+        /// Strict JSON/YAML request artifact; secure regular-file reads currently require Unix.
         #[arg(long = "request-file", value_name = "PATH")]
         request_file: PathBuf,
         #[arg(long = "grant-id", value_name = "ID")]
         grant_id: String,
+        /// Optional strict JSON/YAML plan artifact; secure regular-file reads currently require Unix.
         #[arg(long = "plan-file", value_name = "PATH")]
         plan_file: Option<PathBuf>,
         #[arg(long)]

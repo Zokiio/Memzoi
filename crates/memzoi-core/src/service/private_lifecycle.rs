@@ -378,6 +378,10 @@ impl MemoryService {
                     request.operation_id
                 );
             }
+            ensure!(
+                application.grant_id == grant_id,
+                "private_lifecycle_replay_grant_mismatch"
+            );
             let mut result: PrivateLifecycleApplyResult =
                 serde_json::from_str(&application.result_json)
                     .context("stored private lifecycle result is invalid")?;
@@ -3080,6 +3084,60 @@ mod tests {
             &service.shared_conn,
             &service.conn,
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_replay_requires_the_recorded_grant_and_request() -> Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let first = local(
+            &service,
+            "Replay-bound first",
+            "The recorded application belongs to one exact grant.",
+        )?;
+        let second = local(
+            &service,
+            "Replay-bound second",
+            "Unrelated authority must not replay the first application.",
+        )?;
+        let request = pin_request(&service, "operation-replay-grant-binding", &first.id)?;
+        let grant = service.authorize_private_lifecycle(&request, None, None)?;
+        let applied = service.apply_private_lifecycle(&request, &grant.grant_id, None)?;
+
+        let other_request = pin_request(&service, "operation-other-grant", &second.id)?;
+        let other_grant = service.authorize_private_lifecycle(&other_request, None, None)?;
+        let before_replays = atomic_lifecycle_snapshot(&service)?;
+
+        let replay = service.apply_private_lifecycle(&request, &grant.grant_id, None)?;
+        assert!(replay.replayed);
+        assert_eq!(replay.application_id, applied.application_id);
+        assert_eq!(atomic_lifecycle_snapshot(&service)?, before_replays);
+
+        let error = service
+            .apply_private_lifecycle(&request, &other_grant.grant_id, None)
+            .expect_err("the same operation and request must still require the recorded grant");
+        assert!(format!("{error:#}").contains("private_lifecycle_replay_grant_mismatch"));
+        assert_eq!(atomic_lifecycle_snapshot(&service)?, before_replays);
+
+        let conflicting_request =
+            pin_request(&service, "operation-replay-grant-binding", &second.id)?;
+        let error = service
+            .apply_private_lifecycle(&conflicting_request, &other_grant.grant_id, None)
+            .expect_err("the same operation with a different request must conflict");
+        assert!(format!("{error:#}").contains("operation_id_conflict"));
+        assert_eq!(atomic_lifecycle_snapshot(&service)?, before_replays);
+        assert_eq!(
+            service
+                .inspect_private_lifecycle_grant(&other_grant.grant_id)?
+                .state,
+            crate::OwnerActionGrantState::Active
+        );
+        assert!(
+            !service
+                .inspect_private_lifecycle_record(&second.id)?
+                .state
+                .pinned
+        );
         Ok(())
     }
 

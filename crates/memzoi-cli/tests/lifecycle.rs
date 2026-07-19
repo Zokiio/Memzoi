@@ -154,6 +154,17 @@ fn lifecycle_help_exposes_the_exact_owner_authority_flow() {
         );
     }
 
+    let mut plan = fixture.command();
+    let plan = plan
+        .args(["lifecycle", "plan", "--help"])
+        .assert()
+        .success();
+    let plan = String::from_utf8_lossy(&plan.get_output().stdout);
+    assert!(
+        plan.contains("Unix-only"),
+        "plan help must disclose the private-plan output platform boundary: {plan}"
+    );
+
     let mut authorize = fixture.command();
     let authorize = authorize
         .args(["lifecycle", "authorize", "--help"])
@@ -170,6 +181,10 @@ fn lifecycle_help_exposes_the_exact_owner_authority_flow() {
         !authorize.contains("--authorized-at"),
         "the public CLI must not accept a caller-controlled authorization time: {authorize}"
     );
+    assert!(
+        authorize.contains("secure regular-file reads currently require Unix"),
+        "authorize help must disclose its artifact platform boundary: {authorize}"
+    );
 
     let mut apply = fixture.command();
     let apply = apply
@@ -183,6 +198,10 @@ fn lifecycle_help_exposes_the_exact_owner_authority_flow() {
             "apply help should expose {option}: {apply}"
         );
     }
+    assert!(
+        apply.contains("secure regular-file reads currently require Unix"),
+        "apply help must disclose its artifact platform boundary: {apply}"
+    );
 }
 
 #[test]

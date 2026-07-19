@@ -370,6 +370,15 @@ machine-readable values of at most 128 UTF-8 bytes. Inputs may be strict JSON
 or YAML, but must be regular non-symlink files no larger than 2 MiB; unknown or
 duplicate keys, trailing documents, special files, and truncation are rejected.
 
+**Platform boundary:** In this release, the artifact-backed
+`lifecycle authorize` and `lifecycle apply` CLI commands are Unix-only because
+their required request artifact—and optional plan artifact—must be opened using
+fail-closed regular-file, no-symlink semantics. `lifecycle plan --output` is
+also Unix-only because private plans use an atomic no-clobber installer. On
+non-Unix systems these paths fail before any lifecycle write. `lifecycle plan`
+without `--output`, both `lifecycle inspect` commands, and `lifecycle revoke`
+remain available.
+
 Tagged actions are `extend_automatic_recall`, `extend_validity`,
 `retain_until`, `pin`, `unpin`, `renew_from_evidence`, `correct`, `supersede`,
 `consolidate`, `resolve_contradiction`, `quarantine`, and
@@ -391,9 +400,10 @@ Apply checks operation replay/conflict first, then revalidates the grant,
 request, optional plan, policy, comparison neighbourhood, lane constraints,
 and every target/evidence version under the lifecycle lock and one shared
 SQLite transaction. The whole action group and exactly one grant consumption
-commit together or all lifecycle writes roll back. The same `operation_id` and
-`request_id` returns the recorded result after mirror convergence; the same
-operation with another request is a zero-write conflict.
+commit together or all lifecycle writes roll back. The same `operation_id`,
+`request_id`, and recorded `grant_id` returns the recorded result after mirror
+convergence. A different grant is a zero-write replay mismatch; the same
+operation with another request is a zero-write operation-ID conflict.
 
 Each successful lifecycle commit advances the authoritative `shared.db`
 lifecycle generation. A worktree mirror must converge to that generation
