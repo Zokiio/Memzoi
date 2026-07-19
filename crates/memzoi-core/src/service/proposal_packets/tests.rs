@@ -45,30 +45,43 @@ fn repo_packet_writers_share_the_lifecycle_lock() -> anyhow::Result<()> {
 
 #[test]
 fn proposal_file_events_export_only_repository_relative_paths() -> anyhow::Result<()> {
-    fn event_payload(
+    fn exported_event(
         service: &MemoryService,
         event_type: &str,
     ) -> anyhow::Result<serde_json::Value> {
-        let payload: String = service.conn.query_row(
-            "SELECT payload_json FROM event_log
-             WHERE event_type = ?1
-             ORDER BY created_at DESC, id DESC
-             LIMIT 1",
-            [event_type],
-            |row| row.get(0),
-        )?;
-        Ok(serde_json::from_str(&payload)?)
+        let mut exported = None;
+        service.for_each_event(|event| {
+            if event.event_type == event_type {
+                exported = Some(serde_json::to_string(&event)?);
+            }
+            Ok(())
+        })?;
+        let exported = exported.context("proposal event was not exported")?;
+        Ok(serde_json::from_str(&exported)?)
     }
 
     fn assert_repository_relative(
         service: &MemoryService,
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
-        let path = payload["resolved_path"]
+        let path = payload["payload"]["resolved_path"]
             .as_str()
             .context("proposal event resolved_path")?;
         assert!(!Path::new(path).is_absolute(), "{payload}");
-        assert!(path.starts_with(".memzoi/proposals/resolved/"), "{payload}");
+        assert_eq!(
+            path,
+            format!(
+                ".memzoi/proposals/resolved/applied/{}.md",
+                payload["payload"]["file_id"]
+                    .as_str()
+                    .context("proposal event file_id")?
+            ),
+            "{payload}"
+        );
+        assert!(
+            !path.contains('\\'),
+            "repository event paths must use forward slashes on every platform: {payload}"
+        );
         assert!(
             !payload
                 .to_string()
@@ -85,7 +98,10 @@ fn proposal_file_events_export_only_repository_relative_paths() -> anyhow::Resul
         OkfProposalSensitivity::RepoSafe,
     )?;
     let applied = service.apply_file_proposal(&pending, "agent:applier")?;
-    assert_repository_relative(&service, &event_payload(&service, "proposal_file.applied")?)?;
+    assert_repository_relative(
+        &service,
+        &exported_event(&service, "proposal_file.applied")?,
+    )?;
 
     let record_id = applied
         .record
@@ -104,8 +120,103 @@ fn proposal_file_events_export_only_repository_relative_paths() -> anyhow::Resul
     assert!(replay.runtime_index_updated);
     assert_repository_relative(
         &service,
-        &event_payload(&service, "proposal_file.index_repaired")?,
+        &exported_event(&service, "proposal_file.index_repaired")?,
     )?;
+    Ok(())
+}
+
+#[test]
+fn repository_event_paths_use_posix_components() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let path = service
+        .paths
+        .project_root
+        .join(".memzoi")
+        .join("proposals")
+        .join("resolved")
+        .join("applied")
+        .join("proposal.md");
+    assert_eq!(
+        repository_relative_event_path(&service.paths, &path)?,
+        ".memzoi/proposals/resolved/applied/proposal.md"
+    );
+
+    let error = repository_relative_event_path(&service.paths, &service.paths.project_root)
+        .expect_err("the repository root is not an event file path");
+    assert_eq!(
+        error.to_string(),
+        "resolved proposal event path cannot be empty"
+    );
+
+    #[cfg(unix)]
+    {
+        let path = service.paths.project_root.join("unsafe\\component.md");
+        let error = repository_relative_event_path(&service.paths, &path)
+            .expect_err("literal backslashes are not repository path separators on Unix");
+        assert_eq!(
+            error.to_string(),
+            "resolved proposal event path contains an unsafe component"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn replay_rejects_private_actor_text_before_repairing_the_index() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let pending = write_test_pending_proposal(
+        &service,
+        "Replay actor validation",
+        OkfProposalSensitivity::RepoSafe,
+    )?;
+    let accepted_free_form_actor = "Alice Example";
+    let applied = service.apply_file_proposal(&pending, accepted_free_form_actor)?;
+    let clean_replay = service.replay_file_proposal(
+        &applied.proposal.id,
+        OkfProposalOutcome::Applied,
+        accepted_free_form_actor,
+    )?;
+    assert!(clean_replay.already_resolved);
+    assert!(!clean_replay.runtime_index_updated);
+    let record_id = applied
+        .record
+        .as_ref()
+        .map(|record| record.id.as_str())
+        .context("applied proposal record")?;
+    service.conn.execute(
+        "UPDATE memory_record SET title = 'Injected relational drift' WHERE id = ?1",
+        [record_id],
+    )?;
+    let event_count_before: i64 =
+        service
+            .conn
+            .query_row("SELECT COUNT(*) FROM event_log", [], |row| row.get(0))?;
+    for private_actor in [
+        "/Users/alice/private-project",
+        "agent:n3Xq8R_l2A7pV9zK4mT1bC6dF0hJ5sW8uY2eG7iL9oP4rQ6",
+        "ghp_012345678901234567890123456789012345",
+    ] {
+        let error = service
+            .replay_file_proposal(
+                &applied.proposal.id,
+                OkfProposalOutcome::Applied,
+                private_actor,
+            )
+            .expect_err("private actor text must not enter a repository-exportable event");
+        assert_eq!(error.to_string(), "proposal-file replay actor is invalid");
+        assert!(!error.to_string().contains(private_actor));
+    }
+    let event_count_after: i64 =
+        service
+            .conn
+            .query_row("SELECT COUNT(*) FROM event_log", [], |row| row.get(0))?;
+    assert_eq!(event_count_after, event_count_before);
+    let drifted_title: String = service.conn.query_row(
+        "SELECT title FROM memory_record WHERE id = ?1",
+        [record_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(drifted_title, "Injected relational drift");
     Ok(())
 }
 

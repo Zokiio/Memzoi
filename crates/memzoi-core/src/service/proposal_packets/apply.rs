@@ -81,10 +81,7 @@ impl MemoryService {
             .join("resolved")
             .join("applied")
             .join(format!("{}.md", proposal.file_id));
-        let event_resolved_path = resolved_path
-            .strip_prefix(&self.paths.project_root)
-            .context("resolved proposal event path escaped the repository")?
-            .to_path_buf();
+        let event_resolved_path = repository_relative_event_path(&self.paths, &resolved_path)?;
         let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
         let mut projections = canonical_write_projections(&self.paths, &plan.writes)?;
         projections.push(OwnedRepositoryProjection::from_absolute(

@@ -20,6 +20,35 @@ use serde::{Deserialize, Serialize};
 pub const REPOSITORY_WRITE_SAFETY_SCHEMA: &str = "memzoi/repository-write-safety";
 pub const REPOSITORY_WRITE_MAX_BLOB_BYTES: usize = detectors::MAX_FIELD_BYTES;
 
+pub(crate) fn repository_event_actor_is_safe(actor: &str) -> bool {
+    let actor = actor.trim();
+    if actor.is_empty() || actor.len() > 256 || !actor.is_ascii() {
+        return false;
+    }
+    let mut bytes = actor.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !actor
+            .bytes()
+            .last()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !actor.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'@')
+        })
+    {
+        return false;
+    }
+    let mut findings = Vec::new();
+    detectors::scan_value(
+        "event.actor",
+        SafetyFieldKind::Identifier,
+        actor.as_bytes(),
+        &mut findings,
+    );
+    findings.is_empty()
+}
+
 /// Capability minted only after the shared repository-write policy authorizes an exact batch.
 ///
 /// External callers cannot construct or mutate the capability:

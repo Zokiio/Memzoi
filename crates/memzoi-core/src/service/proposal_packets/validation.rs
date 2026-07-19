@@ -119,7 +119,6 @@ impl MemoryService {
                 runtime_index_updated: false,
             });
         }
-
         let (canonical_records, primary_index) =
             self.validate_resolved_apply_canonical_truth(&entry.proposal, &resolution)?;
         let relational_drift = canonical_records
@@ -131,11 +130,12 @@ impl MemoryService {
         let fts_out_of_sync = !derived_index::fts_is_current(&self.conn)?;
         let runtime_index_updated = relational_drift || fts_out_of_sync;
         if runtime_index_updated {
-            let event_resolved_path = entry
-                .actual_path
-                .strip_prefix(&self.paths.project_root)
-                .context("resolved proposal event path escaped the repository")?
-                .to_path_buf();
+            ensure!(
+                crate::repository_write_safety::repository_event_actor_is_safe(actor),
+                "proposal-file replay actor is invalid"
+            );
+            let event_resolved_path =
+                repository_relative_event_path(&self.paths, &entry.actual_path)?;
             let tx = self.conn.unchecked_transaction()?;
             if relational_drift {
                 okf::import_okf_records(&tx, &canonical_records)?;

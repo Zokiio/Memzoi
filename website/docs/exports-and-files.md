@@ -131,7 +131,8 @@ may carry repository content across this boundary. Content-free private lifecycl
 receipts remain exportable. This operational stream is not canonical memory, is not
 consumed by `memzoi rebuild`, and does not replace `.memzoi/records/*.md` records or OKF
 proposal files under `.memzoi/proposals/pending/*.md`. Repository events encode proposal-file
-locations relative to the repository and never export an absolute local worktree path.
+locations as POSIX-style, forward-slash paths relative to the repository and never export an
+absolute local worktree path.
 
 
 ## Generated file policy
