@@ -15,8 +15,9 @@ use crate::{
     expiry,
     models::{
         ContextPack, ContextPackBudget, ContextPackIncludedItem, ContextPackOmittedItem,
-        ContextPackPolicy, ContextPackWarning, MemoryCitation, MemoryDestination, MemoryLane,
-        MemoryPath, MemoryRecord, MemoryType, SearchRanking, SearchRankingSignals, SearchResult,
+        ContextPackPolicy, ContextPackWarning, MemoryCitation, MemoryDestination,
+        MemoryEventDataClass, MemoryLane, MemoryPath, MemoryRecord, MemoryType, SearchRanking,
+        SearchRankingSignals, SearchResult,
     },
     retention,
     search::{
@@ -46,7 +47,9 @@ pub(crate) fn build_context_pack_at(
     input: ContextPackInput,
     now: OffsetDateTime,
 ) -> Result<ContextPack> {
-    build_context_pack_at_with_audit(conn, input, now, true)
+    // Tasks, paths, and selected identifiers are local read telemetry even
+    // when a context request selects repository records only.
+    build_context_pack_at_with_audit(conn, input, now, Some(MemoryEventDataClass::Private))
 }
 
 pub(crate) fn build_context_pack_at_without_audit(
@@ -54,14 +57,14 @@ pub(crate) fn build_context_pack_at_without_audit(
     input: ContextPackInput,
     now: OffsetDateTime,
 ) -> Result<ContextPack> {
-    build_context_pack_at_with_audit(conn, input, now, false)
+    build_context_pack_at_with_audit(conn, input, now, None)
 }
 
 fn build_context_pack_at_with_audit(
     conn: &Connection,
     input: ContextPackInput,
     now: OffsetDateTime,
-    append_read_audit: bool,
+    audit_data_class: Option<MemoryEventDataClass>,
 ) -> Result<ContextPack> {
     let path_prefix = input
         .path_prefix
@@ -80,7 +83,7 @@ fn build_context_pack_at_with_audit(
             include_inactive: false,
             ..SearchInput::default()
         };
-        let results = if append_read_audit {
+        let results = if audit_data_class.is_some() {
             search_memory_at(conn, search, now)?
         } else {
             search_memory_at_without_audit(conn, search, now)?
@@ -163,12 +166,13 @@ fn build_context_pack_at_with_audit(
     let mut pack = pack;
     pack.budget.selected_records = pack.records.len();
 
-    if append_read_audit {
+    if let Some(data_class) = audit_data_class {
         append_event(
             conn,
             AppendEvent {
                 event_type: "memory.context_pack_built".to_owned(),
                 actor: "memzoi-core".to_owned(),
+                data_class,
                 payload: json!({
                     "context_pack_id": pack.id,
                     "task": input.task,

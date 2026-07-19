@@ -60,15 +60,21 @@ impl RepoLifecycleReadLock {
     /// initialization creates it as part of the first explicit rebuild.
     pub(super) fn acquire(paths: &MemoryPaths) -> Result<Self> {
         let lock_path = paths.repository_runtime_dir.join("repo-lifecycle.lock");
-        let file = OpenOptions::new()
-            .read(true)
-            .open(&lock_path)
-            .with_context(|| {
-                format!(
-                    "failed to open lifecycle lock {} read-only",
-                    lock_path.display()
-                )
-            })?;
+        let file = match OpenOptions::new().read(true).open(&lock_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => bail!(
+                "repository lifecycle lock is missing at {}; run `memzoi rebuild` to initialize the read boundary",
+                lock_path.display()
+            ),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to open lifecycle lock {} read-only",
+                        lock_path.display()
+                    )
+                });
+            }
+        };
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match file.try_lock_shared() {
@@ -330,6 +336,25 @@ mod tests {
                 .to_string()
                 .contains("another repo lifecycle operation is in progress"),
             "unexpected lock contention error: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_lifecycle_read_lock_reports_the_recovery_command() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let paths = MemoryPaths::with_runtime_home(
+            temp.path().to_path_buf(),
+            temp.path().join("runtime-home"),
+        );
+
+        let error = RepoLifecycleReadLock::acquire(&paths)
+            .err()
+            .context("a missing lifecycle read lock should fail")?;
+
+        assert!(
+            error.to_string().contains("run `memzoi rebuild`"),
+            "unexpected missing-lock guidance: {error:#}"
         );
         Ok(())
     }

@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS event_log (
   id TEXT PRIMARY KEY,
   event_type TEXT NOT NULL,
   actor TEXT NOT NULL,
+  data_class TEXT NOT NULL CHECK (data_class IN ('repository', 'private')),
   payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
   record_id TEXT,
   proposal_id TEXT,

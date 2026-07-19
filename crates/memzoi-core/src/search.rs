@@ -8,8 +8,8 @@ use crate::{
     events::{AppendEvent, append_event},
     expiry,
     models::{
-        MemoryCitation, MemoryDestination, MemoryLane, MemoryPath, MemoryRecord, MemoryType,
-        ScopeKind, SearchResult,
+        MemoryCitation, MemoryDestination, MemoryEventDataClass, MemoryLane, MemoryPath,
+        MemoryRecord, MemoryType, ScopeKind, SearchResult,
     },
     retention,
 };
@@ -57,7 +57,9 @@ pub(crate) fn search_memory_at(
     input: SearchInput,
     now: OffsetDateTime,
 ) -> Result<Vec<SearchResult>> {
-    search_memory_at_with_audit(conn, input, now, true)
+    // Search queries, path prefixes, and result identifiers are local read
+    // telemetry even when the searched records are repository-visible.
+    search_memory_at_with_audit(conn, input, now, Some(MemoryEventDataClass::Private))
 }
 
 pub(crate) fn search_memory_at_without_audit(
@@ -65,14 +67,14 @@ pub(crate) fn search_memory_at_without_audit(
     input: SearchInput,
     now: OffsetDateTime,
 ) -> Result<Vec<SearchResult>> {
-    search_memory_at_with_audit(conn, input, now, false)
+    search_memory_at_with_audit(conn, input, now, None)
 }
 
 fn search_memory_at_with_audit(
     conn: &Connection,
     input: SearchInput,
     now: OffsetDateTime,
-    append_read_audit: bool,
+    audit_data_class: Option<MemoryEventDataClass>,
 ) -> Result<Vec<SearchResult>> {
     let fts_query = fts_query(&input.query);
     if fts_query.is_empty() {
@@ -230,12 +232,13 @@ fn search_memory_at_with_audit(
         });
     }
 
-    if append_read_audit {
+    if let Some(data_class) = audit_data_class {
         append_event(
             conn,
             AppendEvent {
                 event_type: "memory.searched".to_owned(),
                 actor: "memzoi-core".to_owned(),
+                data_class,
                 payload: json!({
                     "query": input.query,
                     "scope_kind": scope_kind,

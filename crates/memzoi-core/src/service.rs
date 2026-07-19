@@ -18,11 +18,11 @@ use crate::{
     AuthorizationProof, CaptureApplyResult, CapturePlan, CaptureRequest, CaptureReview,
     CaptureReviewInput, CaptureSourceInputs, ContextPack, ContextPackInput, HandoffInput,
     HandoffPack, ImportApplyResult, ImportDocument, ImportPlan, MemoryDestination, MemoryDraft,
-    MemoryEvent, MemoryPaths, MemoryRecord, MemoryStatus, OkfProposalAction, OkfProposalFile,
-    OkfProposalOutcome, OkfProposalResolution, OkfProposalSensitivity, PrecheckInput,
-    PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter, RepositoryContentClass,
-    RepositoryWriteRoute, SafetyFieldKind, ScopeKind, SearchInput, SearchResult, SupersedeResult,
-    ValidationResult, Visibility,
+    MemoryEvent, MemoryEventDataClass, MemoryPaths, MemoryRecord, MemoryStatus, OkfProposalAction,
+    OkfProposalFile, OkfProposalOutcome, OkfProposalResolution, OkfProposalSensitivity,
+    PrecheckInput, PrecheckWarning, Proposal, ProposalStatus, ProposalStatusFilter,
+    RepositoryContentClass, RepositoryWriteRoute, SafetyFieldKind, ScopeKind, SearchInput,
+    SearchResult, SupersedeResult, ValidationResult, Visibility,
 };
 use crate::{
     config::{
@@ -214,10 +214,112 @@ pub struct MemoryService {
     _lifecycle_read_lock: Option<RepoLifecycleReadLock>,
 }
 
+/// Shared-authority-only private lifecycle access. This type deliberately has
+/// no worktree index connection: planning, authorization, revocation, and
+/// inspection must remain available when a disposable mirror is absent.
+pub struct PrivateLifecycleService {
+    paths: MemoryPaths,
+    shared_conn: Connection,
+    clock: Arc<dyn Clock>,
+    mode: PrivateLifecycleServiceMode,
+    _lifecycle_read_lock: Option<RepoLifecycleReadLock>,
+}
+
+/// Apply-only private lifecycle authority. The handle intentionally exposes no
+/// ordinary memory operations and owns no worktree mirror connection. Each
+/// apply opens the live disposable mirror while holding the lifecycle lock.
+pub struct PrivateLifecycleApplyService {
+    paths: MemoryPaths,
+    shared_conn: Connection,
+    clock: Arc<dyn Clock>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServiceReadMode {
     Audited,
     ImmutableNoAuditRetainedLock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivateLifecycleServiceMode {
+    ReadOnly,
+    Authority,
+}
+
+impl PrivateLifecycleService {
+    pub fn open_paths_for_read(paths: MemoryPaths) -> Result<Self> {
+        Self::open_paths(paths, PrivateLifecycleServiceMode::ReadOnly)
+    }
+
+    pub fn open_paths_for_authority(paths: MemoryPaths) -> Result<Self> {
+        Self::open_paths(paths, PrivateLifecycleServiceMode::Authority)
+    }
+
+    fn open_paths(paths: MemoryPaths, mode: PrivateLifecycleServiceMode) -> Result<Self> {
+        paths.validate_runtime_identity()?;
+        if !paths.config_path.is_file() {
+            bail!(
+                "Memzoi bundle is not initialized at {}; run `memzoi init` first",
+                paths.project_root.display()
+            );
+        }
+        let read_only = mode == PrivateLifecycleServiceMode::ReadOnly;
+        let lifecycle_read_lock = read_only
+            .then(|| RepoLifecycleReadLock::acquire(&paths))
+            .transpose()?;
+        let shared_conn = db::open_existing_database(&paths.shared_db_path, read_only)
+            .with_context(|| {
+                format!(
+                    "failed to open current shared lifecycle authority {}",
+                    paths.shared_db_path.display()
+                )
+            })?;
+        Ok(Self {
+            paths,
+            shared_conn,
+            clock: Arc::new(SystemClock),
+            mode,
+            _lifecycle_read_lock: lifecycle_read_lock,
+        })
+    }
+
+    fn authority_enabled(&self) -> bool {
+        self.mode == PrivateLifecycleServiceMode::Authority
+    }
+}
+
+impl PrivateLifecycleApplyService {
+    pub fn open_paths(paths: MemoryPaths) -> Result<Self> {
+        paths.validate_runtime_identity()?;
+        if !paths.config_path.is_file() {
+            bail!(
+                "Memzoi bundle is not initialized at {}; run `memzoi init` first",
+                paths.project_root.display()
+            );
+        }
+        let shared_conn =
+            db::open_existing_database(&paths.shared_db_path, false).with_context(|| {
+                format!(
+                    "failed to open current shared lifecycle authority {}",
+                    paths.shared_db_path.display()
+                )
+            })?;
+        // Validate the current mirror without retaining a reusable connection.
+        // Apply will reopen the path under the lifecycle lock.
+        let mirror =
+            db::open_existing_database(&paths.index_db_path, false).with_context(|| {
+                format!(
+                    "failed to validate current lifecycle mirror {}",
+                    paths.index_db_path.display()
+                )
+            })?;
+        drop(mirror);
+        Ok(Self {
+            paths,
+            shared_conn,
+            clock: Arc::new(SystemClock),
+        })
+    }
 }
 
 impl MemoryService {
@@ -238,30 +340,12 @@ impl MemoryService {
         Self::open_paths_with_clock_and_admission(paths, clock, false)
     }
 
-    /// Open the current lifecycle authority and mirror without recovery,
-    /// rebuilding, refresh, schema initialization, or persistent SQLite
-    /// configuration changes. The returned connections are read-only.
-    ///
-    /// This is the hard boundary used by `lifecycle plan` and `lifecycle
-    /// inspect`: opening the service cannot mutate private or authority state.
-    pub fn open_paths_for_private_lifecycle_read(paths: MemoryPaths) -> Result<Self> {
-        Self::open_paths_for_private_lifecycle(paths, ServiceReadMode::ImmutableNoAuditRetainedLock)
-    }
-
     /// Open a current, immutable repository/runtime snapshot for callers that
     /// must never append ordinary read-audit events. Search, context, and
     /// precheck still enforce canonical-index and mirror freshness before
     /// returning structured results.
     pub fn open_paths_for_immutable_read(paths: MemoryPaths) -> Result<Self> {
         Self::open_paths_for_private_lifecycle(paths, ServiceReadMode::ImmutableNoAuditRetainedLock)
-    }
-
-    /// Open the current lifecycle authority and mirror without recovery,
-    /// rebuilding, refresh, schema initialization, or persistent SQLite
-    /// configuration changes. The connections may write only through the
-    /// lifecycle methods' narrower transactional contracts.
-    pub fn open_paths_for_private_lifecycle_authority(paths: MemoryPaths) -> Result<Self> {
-        Self::open_paths_for_private_lifecycle(paths, ServiceReadMode::Audited)
     }
 
     fn open_paths_for_private_lifecycle(
@@ -847,7 +931,12 @@ impl MemoryService {
     }
 
     pub fn repo_index_drift(&self) -> Result<RepoIndexDrift> {
-        derived_index::inspect(&self.paths, &self.conn)
+        match self.read_mode {
+            ServiceReadMode::Audited => derived_index::inspect(&self.paths, &self.conn),
+            ServiceReadMode::ImmutableNoAuditRetainedLock => {
+                derived_index::inspect_read_only(&self.paths, &self.conn)
+            }
+        }
     }
 
     fn ensure_repository_index_current(&self) -> Result<()> {
@@ -867,10 +956,18 @@ impl MemoryService {
     }
 
     fn search_memory_at(&self, input: SearchInput) -> Result<Vec<SearchResult>> {
+        self.search_memory_with_conn(&self.conn, input)
+    }
+
+    fn search_memory_with_conn(
+        &self,
+        conn: &Connection,
+        input: SearchInput,
+    ) -> Result<Vec<SearchResult>> {
         match self.read_mode {
-            ServiceReadMode::Audited => search::search_memory_at(&self.conn, input, self.now()),
+            ServiceReadMode::Audited => search::search_memory_at(conn, input, self.now()),
             ServiceReadMode::ImmutableNoAuditRetainedLock => {
-                search::search_memory_at_without_audit(&self.conn, input, self.now())
+                search::search_memory_at_without_audit(conn, input, self.now())
             }
         }
     }
@@ -972,7 +1069,7 @@ impl MemoryService {
     }
 
     pub fn search_local_memory(&self, query: String, limit: usize) -> Result<Vec<SearchResult>> {
-        search::search_memory_at(
+        self.search_memory_with_conn(
             &self.shared_conn,
             SearchInput {
                 query,
@@ -981,7 +1078,6 @@ impl MemoryService {
                 include_inactive: false,
                 ..SearchInput::default()
             },
-            self.now(),
         )
     }
 
@@ -1117,6 +1213,7 @@ impl MemoryService {
             AppendEvent {
                 event_type: "memory.checkpoint_succeeded".to_owned(),
                 actor: actor.to_owned(),
+                data_class: MemoryEventDataClass::Private,
                 payload: json!({
                     "operation_id": &command.operation_id,
                     "predecessor_id": &predecessor.id,
@@ -1591,13 +1688,22 @@ impl MemoryService {
 
     pub fn build_handoff_pack(&self, input: HandoffInput) -> Result<HandoffPack> {
         if input.include_local || input.include_session {
-            return self.read_private_mirror(|service| {
-                handoff::build_handoff_pack_at(&service.conn, input.clone(), service.now())
-            });
+            return self
+                .read_private_mirror(|service| service.build_handoff_pack_at(input.clone()));
         }
-        shared_runtime::refresh_index_mirrors(&self.paths, &self.shared_conn, &self.conn)?;
-        self.ensure_repository_index_current()?;
-        handoff::build_handoff_pack_at(&self.conn, input, self.now())
+        self.prepare_repository_read()?;
+        self.build_handoff_pack_at(input)
+    }
+
+    fn build_handoff_pack_at(&self, input: HandoffInput) -> Result<HandoffPack> {
+        match self.read_mode {
+            ServiceReadMode::Audited => {
+                handoff::build_handoff_pack_at(&self.conn, input, self.now())
+            }
+            ServiceReadMode::ImmutableNoAuditRetainedLock => {
+                handoff::build_handoff_pack_at_without_audit(&self.conn, input, self.now())
+            }
+        }
     }
 
     pub fn precheck(&self, input: PrecheckInput) -> Result<Vec<PrecheckWarning>> {
@@ -1692,6 +1798,9 @@ fn event_references_private_record(
     index: &Connection,
     event: &MemoryEvent,
 ) -> Result<bool> {
+    if event.data_class == MemoryEventDataClass::Private {
+        return Ok(true);
+    }
     let Some(record_id) = event.record_id.as_deref() else {
         return Ok(false);
     };

@@ -6,9 +6,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    CaptureCandidate, CaptureProvenance, MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus,
-    MemoryType, OriginDescriptor, OriginRoute, RecordLineage, RetentionFacts, ScopeKind,
-    Visibility,
+    CaptureCandidate, CaptureProvenance, MemoryDestination, MemoryEventDataClass, MemoryLane,
+    MemoryRecord, MemoryStatus, MemoryType, OriginDescriptor, OriginRoute, RecordLineage,
+    RetentionFacts, ScopeKind, Visibility,
     events::{AppendEvent, append_event},
 };
 
@@ -129,6 +129,7 @@ fn create_local_memory_with_metadata_and_id(
         AppendEvent {
             event_type: "memory.local_created".to_owned(),
             actor: actor.to_owned(),
+            data_class: MemoryEventDataClass::Private,
             payload: json!({
                 "record_id": &record.id,
                 "destination": record.destination.as_str(),
@@ -237,6 +238,7 @@ fn create_checkpoint_with_metadata_and_id(
         AppendEvent {
             event_type: "memory.checkpoint_created".to_owned(),
             actor: actor.to_owned(),
+            data_class: MemoryEventDataClass::Private,
             payload: json!({
                 "record_id": &record.id,
                 "destination": record.destination.as_str(),
@@ -427,6 +429,15 @@ pub(super) fn create_capture(
         AppendEvent {
             event_type: "memory.capture_routed".to_owned(),
             actor: actor.to_owned(),
+            data_class: match destination {
+                MemoryDestination::Repo => MemoryEventDataClass::Repository,
+                MemoryDestination::Local | MemoryDestination::Session => {
+                    MemoryEventDataClass::Private
+                }
+                MemoryDestination::Discard | MemoryDestination::NeedsReview => {
+                    MemoryEventDataClass::Private
+                }
+            },
             payload: json!({
                 "record_id": &record.id,
                 "destination": destination.as_str(),

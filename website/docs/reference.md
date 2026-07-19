@@ -918,14 +918,22 @@ Event objects include:
 - `id`
 - `event_type`
 - `actor`
+- `data_class` (`repository` for exported rows)
 - `payload`
 - `record_id`
 - `proposal_id`
 - `created_at`
 
-The JSONL stream is operational runtime state for bulk or append-only consumption. It is
-not canonical memory, not rebuild input, and does not replace `.memzoi/records/*.md` or
-`.memzoi/proposals/pending/*.md` files.
+The command exports only events explicitly written with the `repository` data class. Raw
+search, context, handoff, and precheck telemetry and events attached to private runtime
+records remain local even when they have no top-level `record_id`. Proposal titles and
+unrestricted rejection or tombstone reasons remain local until repository-write policy has
+authorized any resulting repository event. Content-free private lifecycle application events
+remain repository-exportable audit receipts. The JSONL
+stream is operational runtime state for bulk or append-only consumption. It is not
+canonical memory, not rebuild input, and does not replace `.memzoi/records/*.md` or
+`.memzoi/proposals/pending/*.md` files. Proposal-file locations in repository events are
+repository-relative; absolute local worktree paths never cross the export boundary.
 
 
 ## Update Command

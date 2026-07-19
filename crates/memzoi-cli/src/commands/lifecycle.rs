@@ -6,9 +6,9 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use memzoi_core::{
-    MaintenancePlan, MemoryPaths, MemoryService, PRIVATE_LIFECYCLE_MAX_ARTIFACT_BYTES,
-    discover_paths, parse_maintenance_plan, parse_private_lifecycle_request,
-    parse_strict_lifecycle_artifact, runtime_home,
+    MaintenancePlan, MemoryPaths, PRIVATE_LIFECYCLE_MAX_ARTIFACT_BYTES,
+    PrivateLifecycleApplyService, PrivateLifecycleService, discover_paths, parse_maintenance_plan,
+    parse_private_lifecycle_request, parse_strict_lifecycle_artifact, runtime_home,
 };
 use serde_json::Value;
 
@@ -22,7 +22,7 @@ pub(super) fn plan_command(
     as_json: bool,
 ) -> Result<()> {
     let paths = lifecycle_paths()?;
-    let service = MemoryService::open_paths_for_private_lifecycle_read(paths.clone())?;
+    let service = PrivateLifecycleService::open_paths_for_read(paths.clone())?;
     let plan = service.plan_private_lifecycle(record_ids, evaluated_at)?;
     let value =
         serde_json::to_value(&plan).context("failed to serialize private lifecycle plan")?;
@@ -53,7 +53,7 @@ pub(super) fn authorize_command(
         .as_deref()
         .map(|path| read_plan(path, "plan"))
         .transpose()?;
-    let service = MemoryService::open_paths_for_private_lifecycle_authority(lifecycle_paths()?)?;
+    let service = PrivateLifecycleService::open_paths_for_authority(lifecycle_paths()?)?;
     let grant =
         service.authorize_private_lifecycle(&request, plan.as_ref(), expires_at.as_deref())?;
     if as_json {
@@ -70,7 +70,7 @@ pub(super) fn authorize_command(
 }
 
 pub(super) fn revoke_command(grant_id: &str, as_json: bool) -> Result<()> {
-    let service = MemoryService::open_paths_for_private_lifecycle_authority(lifecycle_paths()?)?;
+    let service = PrivateLifecycleService::open_paths_for_authority(lifecycle_paths()?)?;
     let result = service.revoke_private_lifecycle(grant_id)?;
     if as_json {
         print_json(&serde_json::to_value(&result)?)
@@ -88,7 +88,7 @@ pub(super) fn revoke_command(grant_id: &str, as_json: bool) -> Result<()> {
 }
 
 pub(super) fn inspect_record_command(record_id: &str, as_json: bool) -> Result<()> {
-    let service = MemoryService::open_paths_for_private_lifecycle_read(lifecycle_paths()?)?;
+    let service = PrivateLifecycleService::open_paths_for_read(lifecycle_paths()?)?;
     let inspection = service.inspect_private_lifecycle_record(record_id)?;
     if as_json {
         print_json(&serde_json::to_value(&inspection)?)
@@ -106,7 +106,7 @@ pub(super) fn inspect_record_command(record_id: &str, as_json: bool) -> Result<(
 }
 
 pub(super) fn inspect_grant_command(grant_id: &str, as_json: bool) -> Result<()> {
-    let service = MemoryService::open_paths_for_private_lifecycle_read(lifecycle_paths()?)?;
+    let service = PrivateLifecycleService::open_paths_for_read(lifecycle_paths()?)?;
     let grant = service.inspect_private_lifecycle_grant(grant_id)?;
     if as_json {
         print_json(&serde_json::to_value(&grant)?)
@@ -132,7 +132,7 @@ pub(super) fn apply_command(
         .as_deref()
         .map(|path| read_plan(path, "plan"))
         .transpose()?;
-    let service = MemoryService::open_paths_for_private_lifecycle_authority(lifecycle_paths()?)?;
+    let service = PrivateLifecycleApplyService::open_paths(lifecycle_paths()?)?;
     let result = service.apply_private_lifecycle(&request, grant_id, plan.as_ref())?;
     if as_json {
         print_json(&serde_json::to_value(&result)?)

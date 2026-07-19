@@ -8,7 +8,7 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{
-    MaintenanceAction, MaintenanceActionClass, MaintenanceActionGroupKind, MaintenancePlan,
+    Clock, MaintenanceAction, MaintenanceActionClass, MaintenanceActionGroupKind, MaintenancePlan,
     MaintenancePlanRequest, MaintenanceScope, MemoryDestination, MemoryLane, MemoryRecord,
     MemoryStatus, MemoryType, OriginDescriptor, OriginRoute, PRIVATE_LIFECYCLE_GRANT_SCHEMA,
     PRIVATE_LIFECYCLE_POLICY_VERSION, PRIVATE_LIFECYCLE_RECORD_INSPECTION_SCHEMA,
@@ -21,14 +21,14 @@ use crate::{
 };
 
 use super::{
-    MemoryService,
+    MemoryService, PrivateLifecycleApplyService, PrivateLifecycleService,
     runtime_records::{
         OwnerActionGrantRow, OwnerActionGrantState as StoredGrantState,
         PrivateLifecycleApplicationRow, PrivateLifecycleRelation, PrivateLifecycleRelationKind,
         PrivateLifecycleState, PrivateLifecycleStorage, RevokeGrantOutcome, RuntimeRecords,
         lifecycle_generation,
     },
-    safe_files::RepoLifecycleLock,
+    safe_files::{RepoLifecycleLock, RepoLifecycleReadLock},
     shared_runtime,
 };
 
@@ -155,200 +155,86 @@ struct PreparedApply {
 impl MemoryService {
     /// Build private maintenance evidence exclusively from the authoritative
     /// shared runtime. This method performs no database or filesystem writes.
+    #[cfg(test)]
     pub fn plan_private_lifecycle(
         &self,
         record_ids: Vec<String>,
         evaluated_at: Option<String>,
     ) -> Result<MaintenancePlan> {
-        let transaction =
-            Transaction::new_unchecked(&self.shared_conn, TransactionBehavior::Deferred)?;
-        let plan = self.plan_private_lifecycle_with_conn(
-            &transaction,
-            MaintenancePlanRequest {
-                schema: crate::MAINTENANCE_REQUEST_SCHEMA.to_owned(),
-                evaluated_at,
-                record_ids,
-            },
-            self.now(),
-        )?;
-        transaction.rollback()?;
-        Ok(plan)
+        plan_private_lifecycle_for(
+            &self.paths,
+            &self.shared_conn,
+            self.clock.as_ref(),
+            record_ids,
+            evaluated_at,
+        )
     }
 
     /// Authorize the exact immutable request. Apart from returning an existing
     /// identical active grant, the only allowed write is one grant-row insert.
+    #[cfg(test)]
     pub fn authorize_private_lifecycle(
         &self,
         request: &PrivateLifecycleRequest,
         plan: Option<&MaintenancePlan>,
         requested_expires_at: Option<&str>,
     ) -> Result<PrivateLifecycleGrant> {
-        request.validate()?;
-        ensure!(
+        authorize_private_lifecycle_for(
+            &self.paths,
+            &self.shared_conn,
+            self.clock.as_ref(),
             self._lifecycle_read_lock.is_none(),
-            "lifecycle authorization requires an authority service"
-        );
-        let _lock = RepoLifecycleLock::acquire(&self.paths)?;
-        let now = self.now();
-        let authorized_at = crate::expiry::format_timestamp(now)?;
-        let transaction =
-            Transaction::new_unchecked(&self.shared_conn, TransactionBehavior::Immediate)?;
-        let storage = PrivateLifecycleStorage::new(&transaction);
-
-        // An operation ID is permanently one-request-only once application is
-        // recorded. Re-authorization of the exact request returns its
-        // historical consumed authority; it must never mint a fresh grant
-        // whose expected versions can no longer be current after application.
-        if let Some(application) = storage.application_by_operation_id(&request.operation_id)? {
-            if application.request_id != request.request_id {
-                transaction.rollback()?;
-                bail!(
-                    "operation_id_conflict: {} is already bound to a different request",
-                    request.operation_id
-                );
-            }
-            let historical = storage
-                .grant(&application.grant_id)?
-                .context("recorded lifecycle application has no historical grant")?;
-            let historical_binding: GrantBinding =
-                serde_json::from_str(&historical.request_json)
-                    .context("stored owner grant binding is invalid")?;
-            let result = grant_from_row(&historical, &historical_binding)?;
-            ensure!(
-                result.state == crate::OwnerActionGrantState::Consumed,
-                "recorded lifecycle application grant is not consumed"
-            );
-            transaction.rollback()?;
-            return Ok(result);
-        }
-
-        let binding = self.build_grant_binding(&transaction, request, plan, now, true)?;
-        // Authorization validates the complete action group but performs none
-        // of its mutations. Apply repeats this validation under its lock and
-        // transaction before consuming authority.
-        validate_action_group(&transaction, request, now)?;
-        let binding_json = canonical_json(&binding)?;
-        let effective_expiry = effective_grant_expiry(now, requested_expires_at, plan)?;
-        let expires_at = crate::expiry::format_timestamp(effective_expiry)?;
-        let mut identical_live_grant = None;
-        for candidate in storage.identical_active_grants(&request.request_id, &binding_json)? {
-            let existing_expiry = crate::private_lifecycle::parse_timestamp(
-                &candidate.expires_at,
-                "stored owner grant expires_at",
-            )?;
-            if existing_expiry > now {
-                identical_live_grant = Some((candidate, existing_expiry));
-                break;
-            }
-        }
-        if let Some((existing, existing_expiry)) = identical_live_grant {
-            if existing_expiry > effective_expiry {
-                transaction.rollback()?;
-                bail!(
-                    "owner_action_grant_expiry_conflict: identical active grant {} expires at {}, later than the requested authority {}; revoke it before explicitly authorizing shorter authority",
-                    existing.grant_id,
-                    existing.expires_at,
-                    expires_at
-                );
-            }
-            let result = grant_from_row(&existing, &binding)?;
-            transaction.rollback()?;
-            return Ok(result);
-        }
-        let row = OwnerActionGrantRow {
-            grant_id: format!("grant_{}", Uuid::now_v7()),
-            request_id: request.request_id.clone(),
-            request_json: binding_json,
-            state: StoredGrantState::Active,
-            authorized_at,
-            expires_at,
-            revoked_at: None,
-            consumed_at: None,
-            consumed_application_id: None,
-        };
-        storage.insert_grant(&row)?;
-        let result = grant_from_row(&row, &binding)?;
-        transaction.commit()?;
-        Ok(result)
+            request,
+            plan,
+            requested_expires_at,
+        )
     }
 
     /// Revoke authority only; private records, events, relations, receipts,
     /// versions, and mirror generations are deliberately untouched.
+    #[cfg(test)]
     pub fn revoke_private_lifecycle(&self, grant_id: &str) -> Result<PrivateLifecycleRevokeResult> {
-        ensure_identifier(grant_id, "grant_id")?;
-        ensure!(
+        revoke_private_lifecycle_for(
+            &self.paths,
+            &self.shared_conn,
+            self.clock.as_ref(),
             self._lifecycle_read_lock.is_none(),
-            "lifecycle revocation requires an authority service"
-        );
-        let _lock = RepoLifecycleLock::acquire(&self.paths)?;
-        let revoked_at = self.now_timestamp()?;
-        let transaction =
-            Transaction::new_unchecked(&self.shared_conn, TransactionBehavior::Immediate)?;
-        let outcome =
-            PrivateLifecycleStorage::new(&transaction).revoke_grant(grant_id, &revoked_at)?;
-        let outcome = match outcome {
-            RevokeGrantOutcome::Revoked => {
-                transaction.commit()?;
-                PrivateLifecycleRevokeOutcome::Revoked
-            }
-            RevokeGrantOutcome::AlreadyRevoked => {
-                transaction.rollback()?;
-                PrivateLifecycleRevokeOutcome::AlreadyRevoked
-            }
-            RevokeGrantOutcome::AlreadyConsumed => {
-                transaction.rollback()?;
-                PrivateLifecycleRevokeOutcome::AlreadyConsumed
-            }
-            RevokeGrantOutcome::Missing => {
-                transaction.rollback()?;
-                bail!("owner_action_grant_not_found: {grant_id}")
-            }
-        };
-        Ok(PrivateLifecycleRevokeResult {
-            grant_id: grant_id.to_owned(),
-            outcome,
-        })
+            grant_id,
+        )
     }
 
+    #[cfg(test)]
     pub fn inspect_private_lifecycle_record(
         &self,
         record_id: &str,
     ) -> Result<PrivateLifecycleRecordInspection> {
-        ensure_identifier(record_id, "record_id")?;
-        let transaction =
-            Transaction::new_unchecked(&self.shared_conn, TransactionBehavior::Deferred)?;
-        let record = require_private_record(&transaction, record_id)?;
-        #[cfg(test)]
-        run_after_private_lifecycle_record_snapshot_hook()?;
-        let storage = PrivateLifecycleStorage::new(&transaction);
-        let state = storage.require_state(record_id)?;
-        let relations = storage
-            .relations_for_record(record_id)?
-            .into_iter()
-            .map(relation_snapshot)
-            .collect();
-        let inspection = PrivateLifecycleRecordInspection {
-            schema: PRIVATE_LIFECYCLE_RECORD_INSPECTION_SCHEMA.to_owned(),
-            record,
-            version: state.record_version.clone(),
-            state: state_snapshot(&state),
-            relations,
-        };
-        transaction.rollback()?;
-        Ok(inspection)
+        inspect_private_lifecycle_record_for(&self.paths, &self.shared_conn, record_id)
     }
 
+    #[cfg(test)]
     pub fn inspect_private_lifecycle_grant(&self, grant_id: &str) -> Result<PrivateLifecycleGrant> {
-        ensure_identifier(grant_id, "grant_id")?;
-        let row = PrivateLifecycleStorage::new(&self.shared_conn)
-            .grant(grant_id)?
-            .with_context(|| format!("owner_action_grant_not_found: {grant_id}"))?;
-        let binding: GrantBinding = serde_json::from_str(&row.request_json)
-            .context("stored owner grant binding is invalid")?;
-        validate_stored_binding(&binding, &row)?;
-        grant_from_row(&row, &binding)
+        inspect_private_lifecycle_grant_for(&self.shared_conn, grant_id)
     }
 
+    #[cfg(test)]
+    pub fn apply_private_lifecycle(
+        &self,
+        request: &PrivateLifecycleRequest,
+        grant_id: &str,
+        plan: Option<&MaintenancePlan>,
+    ) -> Result<PrivateLifecycleApplyResult> {
+        apply_private_lifecycle_for(
+            &self.paths,
+            &self.shared_conn,
+            self.clock.as_ref(),
+            request,
+            grant_id,
+            plan,
+        )
+    }
+}
+
+impl PrivateLifecycleApplyService {
     /// Atomically apply one complete owner action group and consume exactly one
     /// active grant. Mirror convergence occurs only after the shared commit.
     pub fn apply_private_lifecycle(
@@ -357,250 +243,534 @@ impl MemoryService {
         grant_id: &str,
         plan: Option<&MaintenancePlan>,
     ) -> Result<PrivateLifecycleApplyResult> {
-        request.validate()?;
-        ensure_identifier(grant_id, "grant_id")?;
-        ensure!(
-            self._lifecycle_read_lock.is_none(),
-            "lifecycle apply requires an authority service"
-        );
-        let _lock = RepoLifecycleLock::acquire(&self.paths)?;
-        let now = self.now();
-        let applied_at = crate::expiry::format_timestamp(now)?;
-        let transaction =
-            Transaction::new_unchecked(&self.shared_conn, TransactionBehavior::Immediate)?;
-        let storage = PrivateLifecycleStorage::new(&transaction);
-
-        if let Some(application) = storage.application_by_operation_id(&request.operation_id)? {
-            if application.request_id != request.request_id {
-                transaction.rollback()?;
-                bail!(
-                    "operation_id_conflict: {} is already bound to a different request",
-                    request.operation_id
-                );
-            }
-            ensure!(
-                application.grant_id == grant_id,
-                "private_lifecycle_replay_grant_mismatch"
-            );
-            let mut result: PrivateLifecycleApplyResult =
-                serde_json::from_str(&application.result_json)
-                    .context("stored private lifecycle result is invalid")?;
-            transaction.rollback()?;
-            shared_runtime::refresh_index_mirrors_locked(
-                &self.paths,
-                &self.shared_conn,
-                &self.conn,
-            )
-            .context("mirror refresh required after lifecycle application replay")?;
-            result.replayed = true;
-            return Ok(result);
-        }
-
-        let grant = storage
-            .grant(grant_id)?
-            .with_context(|| format!("owner_action_grant_not_found: {grant_id}"))?;
-        ensure!(
-            grant.state == StoredGrantState::Active,
-            "owner_action_grant_not_active: {grant_id} is {}",
-            grant.state.as_str()
-        );
-        let grant_expiry =
-            crate::private_lifecycle::parse_timestamp(&grant.expires_at, "grant expires_at")?;
-        ensure!(now < grant_expiry, "owner_action_grant_expired: {grant_id}");
-        ensure!(
-            grant.request_id == request.request_id,
-            "owner_action_grant_request_mismatch"
-        );
-        let stored_binding: GrantBinding = serde_json::from_str(&grant.request_json)
-            .context("stored owner grant binding is invalid")?;
-        validate_stored_binding(&stored_binding, &grant)?;
-        let current_binding = self.build_grant_binding(&transaction, request, plan, now, true)?;
-        ensure!(
-            stored_binding == current_binding,
-            "owner_action_grant_binding_stale_or_unauthorized"
-        );
-        let prepared = validate_action_group(&transaction, request, now)?;
-        #[cfg(test)]
-        fail_lifecycle_apply_at(LifecycleApplyFault::AfterValidation)?;
-        let generation_before = lifecycle_generation(&transaction)?;
-
-        let application_id = format!("application_{}", Uuid::now_v7());
-        let event_id = format!("evt_{}", Uuid::now_v7());
-        let action_results = apply_action_group(
-            &transaction,
+        apply_private_lifecycle_for(
+            &self.paths,
+            &self.shared_conn,
+            self.clock.as_ref(),
             request,
-            &prepared,
-            &application_id,
-            &event_id,
-            &applied_at,
-        )?;
-        append_content_free_lifecycle_event(
-            &transaction,
-            &event_id,
-            &application_id,
             grant_id,
-            request,
-            &action_results,
-            &applied_at,
-        )?;
-        #[cfg(test)]
-        fail_lifecycle_apply_at(LifecycleApplyFault::AfterAuditInsert)?;
-        let generation = lifecycle_generation(&transaction)?;
-        ensure!(
-            generation > generation_before,
-            "private lifecycle generation did not advance"
-        );
-        let result = PrivateLifecycleApplyResult {
-            schema: PRIVATE_LIFECYCLE_RESULT_SCHEMA.to_owned(),
-            application_id: application_id.clone(),
-            operation_id: request.operation_id.clone(),
-            request_id: request.request_id.clone(),
-            grant_id: grant_id.to_owned(),
-            applied_at: applied_at.clone(),
-            lifecycle_generation: u64::try_from(generation)
-                .context("private lifecycle generation is negative")?,
-            replayed: false,
-            actions: action_results,
-        };
-        storage.insert_application(&PrivateLifecycleApplicationRow {
-            application_id: application_id.clone(),
-            operation_id: request.operation_id.clone(),
-            request_id: request.request_id.clone(),
-            grant_id: grant_id.to_owned(),
-            result_json: canonical_json(&result)?,
-            lifecycle_generation: generation,
-            applied_at: applied_at.clone(),
+            plan,
+        )
+    }
+}
+
+fn apply_private_lifecycle_for(
+    paths: &crate::MemoryPaths,
+    shared_conn: &Connection,
+    clock: &dyn Clock,
+    request: &PrivateLifecycleRequest,
+    grant_id: &str,
+    plan: Option<&MaintenancePlan>,
+) -> Result<PrivateLifecycleApplyResult> {
+    request.validate()?;
+    ensure_identifier(grant_id, "grant_id")?;
+    let _lock = RepoLifecycleLock::acquire(paths)?;
+    // Reopen the disposable mirror while holding the lifecycle lock so every
+    // invocation targets the live path, never a connection to an unlinked
+    // database left behind by rebuild.
+    let live_index_conn = crate::db::open_existing_database(&paths.index_db_path, false)
+        .with_context(|| {
+            format!(
+                "failed to open current lifecycle mirror {} under the lifecycle lock",
+                paths.index_db_path.display()
+            )
         })?;
-        #[cfg(test)]
-        fail_lifecycle_apply_at(LifecycleApplyFault::AfterReceiptInsert)?;
-        ensure!(
-            storage.consume_active_grant(grant_id, &application_id, &applied_at)?,
-            "owner action grant changed before atomic consumption"
-        );
-        #[cfg(test)]
-        fail_lifecycle_apply_at(LifecycleApplyFault::AfterGrantConsume)?;
-        transaction.commit()?;
+    shared_runtime::ensure_read_only_lifecycle_snapshot_ready(paths)?;
+    let now = clock.now_utc();
+    let applied_at = crate::expiry::format_timestamp(now)?;
+    let transaction = Transaction::new_unchecked(shared_conn, TransactionBehavior::Immediate)?;
+    let storage = PrivateLifecycleStorage::new(&transaction);
 
-        #[cfg(test)]
-        fail_lifecycle_apply_at(LifecycleApplyFault::AfterSharedCommitBeforeMirror)?;
-
-        shared_runtime::refresh_index_mirrors_locked(&self.paths, &self.shared_conn, &self.conn)
-            .context("mirror refresh required after committed private lifecycle application")?;
-        Ok(result)
-    }
-
-    fn plan_private_lifecycle_with_conn(
-        &self,
-        conn: &Connection,
-        request: MaintenancePlanRequest,
-        fallback_now: OffsetDateTime,
-    ) -> Result<MaintenancePlan> {
-        let runtime_fingerprint =
-            private_maintenance_runtime_fingerprint(self.paths.repository_key())?;
-        let records = RuntimeRecords::new(conn).records_for_preservation()?;
-        #[cfg(test)]
-        run_after_private_lifecycle_record_snapshot_hook()?;
-        ensure!(
-            records.len() <= crate::MAINTENANCE_MAX_RECORDS,
-            "private maintenance snapshot exceeds the admitted-record limit"
-        );
-        let evaluated_at = request
-            .evaluated_at
-            .as_deref()
-            .map(|value| crate::private_lifecycle::parse_timestamp(value, "evaluated_at"))
-            .transpose()?
-            .unwrap_or(fallback_now);
-        let storage = PrivateLifecycleStorage::new(conn);
-        let mut inputs = Vec::with_capacity(records.len());
-        for record in records {
-            ensure_private_shape(&record)?;
-            let state = storage.require_state(&record.id)?;
-            let decision = effective_current_assertion(conn, &record, &state, evaluated_at)?;
-            inputs.push(PrivateMaintenanceRecordInput {
-                record,
-                version_token: state.record_version,
-                current_assertion: decision.is_current,
-                retention_state: decision.retention.state,
-                retention_reason: decision.retention.reason,
-                retention_boundary: decision.retention.effective_boundary,
-            });
+    if let Some(application) = storage.application_by_operation_id(&request.operation_id)? {
+        if application.request_id != request.request_id {
+            transaction.rollback()?;
+            bail!(
+                "operation_id_conflict: {} is already bound to a different request",
+                request.operation_id
+            );
         }
-        plan_private_maintenance_at(runtime_fingerprint, request, inputs, fallback_now)
+        ensure!(
+            application.grant_id == grant_id,
+            "private_lifecycle_replay_grant_mismatch"
+        );
+        let mut result: PrivateLifecycleApplyResult =
+            serde_json::from_str(&application.result_json)
+                .context("stored private lifecycle result is invalid")?;
+        transaction.rollback()?;
+        shared_runtime::refresh_index_mirrors_locked(paths, shared_conn, &live_index_conn)
+            .context("mirror refresh required after lifecycle application replay")?;
+        result.replayed = true;
+        return Ok(result);
     }
 
-    fn build_grant_binding(
+    let grant = storage
+        .grant(grant_id)?
+        .with_context(|| format!("owner_action_grant_not_found: {grant_id}"))?;
+    ensure!(
+        grant.state == StoredGrantState::Active,
+        "owner_action_grant_not_active: {grant_id} is {}",
+        grant.state.as_str()
+    );
+    let grant_expiry =
+        crate::private_lifecycle::parse_timestamp(&grant.expires_at, "grant expires_at")?;
+    ensure!(now < grant_expiry, "owner_action_grant_expired: {grant_id}");
+    ensure!(
+        grant.request_id == request.request_id,
+        "owner_action_grant_request_mismatch"
+    );
+    let stored_binding: GrantBinding = serde_json::from_str(&grant.request_json)
+        .context("stored owner grant binding is invalid")?;
+    validate_stored_binding(&stored_binding, &grant)?;
+    let current_binding = build_grant_binding_for(paths, &transaction, request, plan, now, true)?;
+    ensure!(
+        stored_binding == current_binding,
+        "owner_action_grant_binding_stale_or_unauthorized"
+    );
+    let prepared = validate_action_group(&transaction, request, now)?;
+    #[cfg(test)]
+    fail_lifecycle_apply_at(LifecycleApplyFault::AfterValidation)?;
+    let generation_before = lifecycle_generation(&transaction)?;
+
+    let application_id = format!("application_{}", Uuid::now_v7());
+    let event_id = format!("evt_{}", Uuid::now_v7());
+    let action_results = apply_action_group(
+        &transaction,
+        request,
+        &prepared,
+        &application_id,
+        &event_id,
+        &applied_at,
+    )?;
+    append_content_free_lifecycle_event(
+        &transaction,
+        &event_id,
+        &application_id,
+        grant_id,
+        request,
+        &action_results,
+        &applied_at,
+    )?;
+    #[cfg(test)]
+    fail_lifecycle_apply_at(LifecycleApplyFault::AfterAuditInsert)?;
+    let generation = lifecycle_generation(&transaction)?;
+    ensure!(
+        generation > generation_before,
+        "private lifecycle generation did not advance"
+    );
+    let result = PrivateLifecycleApplyResult {
+        schema: PRIVATE_LIFECYCLE_RESULT_SCHEMA.to_owned(),
+        application_id: application_id.clone(),
+        operation_id: request.operation_id.clone(),
+        request_id: request.request_id.clone(),
+        grant_id: grant_id.to_owned(),
+        applied_at: applied_at.clone(),
+        lifecycle_generation: u64::try_from(generation)
+            .context("private lifecycle generation is negative")?,
+        replayed: false,
+        actions: action_results,
+    };
+    storage.insert_application(&PrivateLifecycleApplicationRow {
+        application_id: application_id.clone(),
+        operation_id: request.operation_id.clone(),
+        request_id: request.request_id.clone(),
+        grant_id: grant_id.to_owned(),
+        result_json: canonical_json(&result)?,
+        lifecycle_generation: generation,
+        applied_at: applied_at.clone(),
+    })?;
+    #[cfg(test)]
+    fail_lifecycle_apply_at(LifecycleApplyFault::AfterReceiptInsert)?;
+    ensure!(
+        storage.consume_active_grant(grant_id, &application_id, &applied_at)?,
+        "owner action grant changed before atomic consumption"
+    );
+    #[cfg(test)]
+    fail_lifecycle_apply_at(LifecycleApplyFault::AfterGrantConsume)?;
+    transaction.commit()?;
+
+    #[cfg(test)]
+    fail_lifecycle_apply_at(LifecycleApplyFault::AfterSharedCommitBeforeMirror)?;
+
+    shared_runtime::refresh_index_mirrors_locked(paths, shared_conn, &live_index_conn)
+        .context("mirror refresh required after committed private lifecycle application")?;
+    Ok(result)
+}
+
+impl PrivateLifecycleService {
+    fn acquire_transient_read_lock(&self) -> Result<Option<RepoLifecycleReadLock>> {
+        if self._lifecycle_read_lock.is_some() {
+            Ok(None)
+        } else {
+            RepoLifecycleReadLock::acquire(&self.paths).map(Some)
+        }
+    }
+
+    pub fn plan_private_lifecycle(
         &self,
-        conn: &Connection,
+        record_ids: Vec<String>,
+        evaluated_at: Option<String>,
+    ) -> Result<MaintenancePlan> {
+        // Authority services cannot retain a shared lock because authorize
+        // and revoke require the exclusive lock. Take a method-scoped lock so
+        // their optional read APIs still cannot race a sync journal or rebuild.
+        let _read_lock = self.acquire_transient_read_lock()?;
+        plan_private_lifecycle_for(
+            &self.paths,
+            &self.shared_conn,
+            self.clock.as_ref(),
+            record_ids,
+            evaluated_at,
+        )
+    }
+
+    pub fn authorize_private_lifecycle(
+        &self,
         request: &PrivateLifecycleRequest,
         plan: Option<&MaintenancePlan>,
-        now: OffsetDateTime,
-        revalidate_plan: bool,
-    ) -> Result<GrantBinding> {
-        validate_request_plan_binding(self, conn, request, plan, now, revalidate_plan)?;
-        let mut expected = BTreeMap::<String, String>::new();
-        for action in &request.actions {
-            for (record_id, version) in action.expected_versions() {
-                if let Some(prior) = expected.insert(record_id.to_owned(), version.to_owned()) {
-                    ensure!(
-                        prior == version,
-                        "private record {record_id} has conflicting expected versions"
-                    );
-                }
-            }
-        }
-        let mut records = Vec::with_capacity(expected.len());
-        for (record_id, expected_version) in expected {
-            let record = require_private_record(conn, &record_id)?;
-            let state = PrivateLifecycleStorage::new(conn).require_state(&record_id)?;
-            verify_lifecycle_authority(conn, &record_id, &state)?;
-            RuntimeRecords::new(conn)
-                .ensure_private_record_version(&record_id, &expected_version)?;
-            records.push(GrantRecordBinding {
-                record_id,
-                expected_version,
-                memory_type: record.memory_type,
-                lane: record.lane,
-                destination: record.destination,
-                scope_kind: record.scope_kind,
-                scope_id: record.scope_id,
-                visibility: record.visibility,
-            });
-        }
-        let plan = match (&request.source, plan) {
-            (PrivateLifecycleSource::Direct, None) => None,
-            (
-                PrivateLifecycleSource::MaintenancePlan {
-                    plan_id,
-                    selected_action_ids,
-                },
-                Some(plan),
-            ) => {
-                let runtime_fingerprint = match &plan.scope {
-                    MaintenanceScope::PrivateRuntime {
-                        runtime_fingerprint,
-                        ..
-                    } => runtime_fingerprint.clone(),
-                    MaintenanceScope::Repository { .. } => unreachable!("validated above"),
-                };
-                Some(GrantPlanBinding {
-                    plan_id: plan_id.clone(),
-                    selected_action_ids: selected_action_ids.clone(),
-                    runtime_fingerprint,
-                    policy_digest: plan.policy.policy_digest.clone(),
-                    detector_digest: plan.preconditions.detector_digest.clone(),
-                    not_after: plan.not_after.clone(),
-                })
-            }
-            _ => unreachable!("request/plan pairing validated above"),
-        };
-        Ok(GrantBinding {
-            schema: GRANT_BINDING_SCHEMA.to_owned(),
-            request: request.clone(),
-            policy_version: PRIVATE_LIFECYCLE_POLICY_VERSION.to_owned(),
-            records,
+        requested_expires_at: Option<&str>,
+    ) -> Result<PrivateLifecycleGrant> {
+        authorize_private_lifecycle_for(
+            &self.paths,
+            &self.shared_conn,
+            self.clock.as_ref(),
+            self.authority_enabled(),
+            request,
             plan,
-        })
+            requested_expires_at,
+        )
     }
+
+    pub fn revoke_private_lifecycle(&self, grant_id: &str) -> Result<PrivateLifecycleRevokeResult> {
+        revoke_private_lifecycle_for(
+            &self.paths,
+            &self.shared_conn,
+            self.clock.as_ref(),
+            self.authority_enabled(),
+            grant_id,
+        )
+    }
+
+    pub fn inspect_private_lifecycle_record(
+        &self,
+        record_id: &str,
+    ) -> Result<PrivateLifecycleRecordInspection> {
+        let _read_lock = self.acquire_transient_read_lock()?;
+        inspect_private_lifecycle_record_for(&self.paths, &self.shared_conn, record_id)
+    }
+
+    pub fn inspect_private_lifecycle_grant(&self, grant_id: &str) -> Result<PrivateLifecycleGrant> {
+        inspect_private_lifecycle_grant_for(&self.shared_conn, grant_id)
+    }
+}
+
+fn plan_private_lifecycle_for(
+    paths: &crate::MemoryPaths,
+    conn: &Connection,
+    clock: &dyn Clock,
+    record_ids: Vec<String>,
+    evaluated_at: Option<String>,
+) -> Result<MaintenancePlan> {
+    shared_runtime::ensure_read_only_lifecycle_snapshot_ready(paths)?;
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+    let plan = plan_private_lifecycle_with_conn(
+        paths,
+        &transaction,
+        MaintenancePlanRequest {
+            schema: crate::MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+            evaluated_at,
+            record_ids,
+        },
+        clock.now_utc(),
+    )?;
+    transaction.rollback()?;
+    Ok(plan)
+}
+
+fn authorize_private_lifecycle_for(
+    paths: &crate::MemoryPaths,
+    conn: &Connection,
+    clock: &dyn Clock,
+    authority_enabled: bool,
+    request: &PrivateLifecycleRequest,
+    plan: Option<&MaintenancePlan>,
+    requested_expires_at: Option<&str>,
+) -> Result<PrivateLifecycleGrant> {
+    request.validate()?;
+    ensure!(
+        authority_enabled,
+        "lifecycle authorization requires an authority service"
+    );
+    let _lock = RepoLifecycleLock::acquire(paths)?;
+    shared_runtime::ensure_read_only_lifecycle_snapshot_ready(paths)?;
+    let now = clock.now_utc();
+    let authorized_at = crate::expiry::format_timestamp(now)?;
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let storage = PrivateLifecycleStorage::new(&transaction);
+
+    // An operation ID is permanently one-request-only once application is
+    // recorded. Re-authorization of the exact request returns its historical
+    // consumed authority instead of minting authority over stale versions.
+    if let Some(application) = storage.application_by_operation_id(&request.operation_id)? {
+        if application.request_id != request.request_id {
+            transaction.rollback()?;
+            bail!(
+                "operation_id_conflict: {} is already bound to a different request",
+                request.operation_id
+            );
+        }
+        let historical = storage
+            .grant(&application.grant_id)?
+            .context("recorded lifecycle application has no historical grant")?;
+        let historical_binding: GrantBinding = serde_json::from_str(&historical.request_json)
+            .context("stored owner grant binding is invalid")?;
+        let result = grant_from_row(&historical, &historical_binding)?;
+        ensure!(
+            result.state == crate::OwnerActionGrantState::Consumed,
+            "recorded lifecycle application grant is not consumed"
+        );
+        transaction.rollback()?;
+        return Ok(result);
+    }
+
+    let binding = build_grant_binding_for(paths, &transaction, request, plan, now, true)?;
+    validate_action_group(&transaction, request, now)?;
+    let binding_json = canonical_json(&binding)?;
+    let effective_expiry = effective_grant_expiry(now, requested_expires_at, plan)?;
+    let expires_at = crate::expiry::format_timestamp(effective_expiry)?;
+    let mut identical_live_grant = None;
+    for candidate in storage.identical_active_grants(&request.request_id, &binding_json)? {
+        let existing_expiry = crate::private_lifecycle::parse_timestamp(
+            &candidate.expires_at,
+            "stored owner grant expires_at",
+        )?;
+        if existing_expiry > now {
+            identical_live_grant = Some((candidate, existing_expiry));
+            break;
+        }
+    }
+    if let Some((existing, existing_expiry)) = identical_live_grant {
+        if existing_expiry > effective_expiry {
+            transaction.rollback()?;
+            bail!(
+                "owner_action_grant_expiry_conflict: identical active grant {} expires at {}, later than the requested authority {}; revoke it before explicitly authorizing shorter authority",
+                existing.grant_id,
+                existing.expires_at,
+                expires_at
+            );
+        }
+        let result = grant_from_row(&existing, &binding)?;
+        transaction.rollback()?;
+        return Ok(result);
+    }
+    let row = OwnerActionGrantRow {
+        grant_id: format!("grant_{}", Uuid::now_v7()),
+        request_id: request.request_id.clone(),
+        request_json: binding_json,
+        state: StoredGrantState::Active,
+        authorized_at,
+        expires_at,
+        revoked_at: None,
+        consumed_at: None,
+        consumed_application_id: None,
+    };
+    storage.insert_grant(&row)?;
+    let result = grant_from_row(&row, &binding)?;
+    transaction.commit()?;
+    Ok(result)
+}
+
+fn revoke_private_lifecycle_for(
+    paths: &crate::MemoryPaths,
+    conn: &Connection,
+    clock: &dyn Clock,
+    authority_enabled: bool,
+    grant_id: &str,
+) -> Result<PrivateLifecycleRevokeResult> {
+    ensure_identifier(grant_id, "grant_id")?;
+    ensure!(
+        authority_enabled,
+        "lifecycle revocation requires an authority service"
+    );
+    let _lock = RepoLifecycleLock::acquire(paths)?;
+    let revoked_at = crate::expiry::format_timestamp(clock.now_utc())?;
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let outcome = PrivateLifecycleStorage::new(&transaction).revoke_grant(grant_id, &revoked_at)?;
+    let outcome = match outcome {
+        RevokeGrantOutcome::Revoked => {
+            transaction.commit()?;
+            PrivateLifecycleRevokeOutcome::Revoked
+        }
+        RevokeGrantOutcome::AlreadyRevoked => {
+            transaction.rollback()?;
+            PrivateLifecycleRevokeOutcome::AlreadyRevoked
+        }
+        RevokeGrantOutcome::AlreadyConsumed => {
+            transaction.rollback()?;
+            PrivateLifecycleRevokeOutcome::AlreadyConsumed
+        }
+        RevokeGrantOutcome::Missing => {
+            transaction.rollback()?;
+            bail!("owner_action_grant_not_found: {grant_id}")
+        }
+    };
+    Ok(PrivateLifecycleRevokeResult {
+        grant_id: grant_id.to_owned(),
+        outcome,
+    })
+}
+
+fn inspect_private_lifecycle_record_for(
+    paths: &crate::MemoryPaths,
+    conn: &Connection,
+    record_id: &str,
+) -> Result<PrivateLifecycleRecordInspection> {
+    ensure_identifier(record_id, "record_id")?;
+    shared_runtime::ensure_read_only_lifecycle_snapshot_ready(paths)?;
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+    let record = require_private_record(&transaction, record_id)?;
+    #[cfg(test)]
+    run_after_private_lifecycle_record_snapshot_hook()?;
+    let storage = PrivateLifecycleStorage::new(&transaction);
+    let state = storage.require_state(record_id)?;
+    let relations = storage
+        .relations_for_record(record_id)?
+        .into_iter()
+        .map(relation_snapshot)
+        .collect();
+    let inspection = PrivateLifecycleRecordInspection {
+        schema: PRIVATE_LIFECYCLE_RECORD_INSPECTION_SCHEMA.to_owned(),
+        record,
+        version: state.record_version.clone(),
+        state: state_snapshot(&state),
+        relations,
+    };
+    transaction.rollback()?;
+    Ok(inspection)
+}
+
+fn inspect_private_lifecycle_grant_for(
+    conn: &Connection,
+    grant_id: &str,
+) -> Result<PrivateLifecycleGrant> {
+    ensure_identifier(grant_id, "grant_id")?;
+    let row = PrivateLifecycleStorage::new(conn)
+        .grant(grant_id)?
+        .with_context(|| format!("owner_action_grant_not_found: {grant_id}"))?;
+    let binding: GrantBinding =
+        serde_json::from_str(&row.request_json).context("stored owner grant binding is invalid")?;
+    validate_stored_binding(&binding, &row)?;
+    grant_from_row(&row, &binding)
+}
+
+fn plan_private_lifecycle_with_conn(
+    paths: &crate::MemoryPaths,
+    conn: &Connection,
+    request: MaintenancePlanRequest,
+    fallback_now: OffsetDateTime,
+) -> Result<MaintenancePlan> {
+    let runtime_fingerprint = private_maintenance_runtime_fingerprint(paths.repository_key())?;
+    let records = RuntimeRecords::new(conn).records_for_preservation()?;
+    #[cfg(test)]
+    run_after_private_lifecycle_record_snapshot_hook()?;
+    ensure!(
+        records.len() <= crate::MAINTENANCE_MAX_RECORDS,
+        "private maintenance snapshot exceeds the admitted-record limit"
+    );
+    let evaluated_at = request
+        .evaluated_at
+        .as_deref()
+        .map(|value| crate::private_lifecycle::parse_timestamp(value, "evaluated_at"))
+        .transpose()?
+        .unwrap_or(fallback_now);
+    let storage = PrivateLifecycleStorage::new(conn);
+    let mut inputs = Vec::with_capacity(records.len());
+    for record in records {
+        ensure_private_shape(&record)?;
+        let state = storage.require_state(&record.id)?;
+        let decision = effective_current_assertion(conn, &record, &state, evaluated_at)?;
+        inputs.push(PrivateMaintenanceRecordInput {
+            record,
+            version_token: state.record_version,
+            current_assertion: decision.is_current,
+            retention_state: decision.retention.state,
+            retention_reason: decision.retention.reason,
+            retention_boundary: decision.retention.effective_boundary,
+        });
+    }
+    plan_private_maintenance_at(runtime_fingerprint, request, inputs, fallback_now)
+}
+
+fn build_grant_binding_for(
+    paths: &crate::MemoryPaths,
+    conn: &Connection,
+    request: &PrivateLifecycleRequest,
+    plan: Option<&MaintenancePlan>,
+    now: OffsetDateTime,
+    revalidate_plan: bool,
+) -> Result<GrantBinding> {
+    validate_request_plan_binding(paths, conn, request, plan, now, revalidate_plan)?;
+    let mut expected = BTreeMap::<String, String>::new();
+    for action in &request.actions {
+        for (record_id, version) in action.expected_versions() {
+            if let Some(prior) = expected.insert(record_id.to_owned(), version.to_owned()) {
+                ensure!(
+                    prior == version,
+                    "private record {record_id} has conflicting expected versions"
+                );
+            }
+        }
+    }
+    let mut records = Vec::with_capacity(expected.len());
+    for (record_id, expected_version) in expected {
+        let record = require_private_record(conn, &record_id)?;
+        let state = PrivateLifecycleStorage::new(conn).require_state(&record_id)?;
+        verify_lifecycle_authority(conn, &record_id, &state)?;
+        RuntimeRecords::new(conn).ensure_private_record_version(&record_id, &expected_version)?;
+        records.push(GrantRecordBinding {
+            record_id,
+            expected_version,
+            memory_type: record.memory_type,
+            lane: record.lane,
+            destination: record.destination,
+            scope_kind: record.scope_kind,
+            scope_id: record.scope_id,
+            visibility: record.visibility,
+        });
+    }
+    let plan = match (&request.source, plan) {
+        (PrivateLifecycleSource::Direct, None) => None,
+        (
+            PrivateLifecycleSource::MaintenancePlan {
+                plan_id,
+                selected_action_ids,
+            },
+            Some(plan),
+        ) => {
+            let runtime_fingerprint = match &plan.scope {
+                MaintenanceScope::PrivateRuntime {
+                    runtime_fingerprint,
+                    ..
+                } => runtime_fingerprint.clone(),
+                MaintenanceScope::Repository { .. } => unreachable!("validated above"),
+            };
+            Some(GrantPlanBinding {
+                plan_id: plan_id.clone(),
+                selected_action_ids: selected_action_ids.clone(),
+                runtime_fingerprint,
+                policy_digest: plan.policy.policy_digest.clone(),
+                detector_digest: plan.preconditions.detector_digest.clone(),
+                not_after: plan.not_after.clone(),
+            })
+        }
+        _ => unreachable!("request/plan pairing validated above"),
+    };
+    Ok(GrantBinding {
+        schema: GRANT_BINDING_SCHEMA.to_owned(),
+        request: request.clone(),
+        policy_version: PRIVATE_LIFECYCLE_POLICY_VERSION.to_owned(),
+        records,
+        plan,
+    })
 }
 
 fn canonical_json(value: &impl Serialize) -> Result<String> {
@@ -879,7 +1049,7 @@ fn require_authorizing_event(
 }
 
 fn validate_request_plan_binding(
-    service: &MemoryService,
+    paths: &crate::MemoryPaths,
     conn: &Connection,
     request: &PrivateLifecycleRequest,
     plan: Option<&MaintenancePlan>,
@@ -906,7 +1076,7 @@ fn validate_request_plan_binding(
         PrivateLifecycleSource::Direct => unreachable!(),
     };
     ensure!(plan_id == &plan.plan_id, "maintenance plan_id mismatch");
-    let expected_runtime = private_maintenance_runtime_fingerprint(service.paths.repository_key())?;
+    let expected_runtime = private_maintenance_runtime_fingerprint(paths.repository_key())?;
     match &plan.scope {
         MaintenanceScope::PrivateRuntime {
             runtime_fingerprint,
@@ -962,7 +1132,7 @@ fn validate_request_plan_binding(
 
     if revalidate {
         let current =
-            service.plan_private_lifecycle_with_conn(conn, plan.request.clone(), evaluated_at)?;
+            plan_private_lifecycle_with_conn(paths, conn, plan.request.clone(), evaluated_at)?;
         ensure!(
             current.plan_id == plan.plan_id,
             "maintenance plan is stale: private snapshot, neighbourhood, detector, or policy changed"
@@ -2010,8 +2180,11 @@ fn append_content_free_lifecycle_event(
     };
     let inserted = conn.execute(
         "INSERT INTO event_log(
-           id, event_type, actor, payload_json, record_id, proposal_id, created_at
-         ) VALUES (?1, 'memory.private_lifecycle_applied', 'owner:local-cli', ?2, NULL, NULL, ?3)",
+           id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
+         ) VALUES (
+           ?1, 'memory.private_lifecycle_applied', 'owner:local-cli', 'repository',
+           ?2, NULL, NULL, ?3
+         )",
         rusqlite::params![event_id, serde_json::to_string(&payload)?, timestamp],
     )?;
     ensure!(
@@ -3087,6 +3260,55 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn apply_only_service_reopens_the_live_mirror_after_each_rebuild() -> Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let record = local(
+            &service,
+            "Replaced mirror authority",
+            "Apply must converge the live worktree mirror after a rebuild.",
+        )?;
+        let request = pin_request(&service, "operation-replaced-mirror", &record.id)?;
+        let grant = service.authorize_private_lifecycle(&request, None, None)?;
+        let paths = service.paths.clone();
+
+        // Open the apply service first, then replace index.db exactly as a
+        // concurrent rebuild that wins the lifecycle lock would do.
+        let apply_service = PrivateLifecycleApplyService::open_paths(paths.clone())?;
+        MemoryService::rebuild_paths(paths.clone())?;
+
+        let result = apply_service.apply_private_lifecycle(&request, &grant.grant_id, None)?;
+        assert!(!result.replayed);
+
+        let live_index = crate::db::open_existing_database(&paths.index_db_path, false)?;
+        assert!(shared_runtime::lifecycle_generations_match(
+            &apply_service.shared_conn,
+            &live_index,
+        )?);
+        assert!(
+            PrivateLifecycleStorage::new(&live_index)
+                .require_state(&record.id)?
+                .pinned
+        );
+
+        drop(live_index);
+        MemoryService::rebuild_paths(paths.clone())?;
+        let replay = apply_service.apply_private_lifecycle(&request, &grant.grant_id, None)?;
+        assert!(replay.replayed);
+        let replayed_live_index = crate::db::open_existing_database(&paths.index_db_path, false)?;
+        assert!(shared_runtime::lifecycle_generations_match(
+            &apply_service.shared_conn,
+            &replayed_live_index,
+        )?);
+        assert!(
+            PrivateLifecycleStorage::new(&replayed_live_index)
+                .require_state(&record.id)?
+                .pinned
+        );
+        Ok(())
+    }
+
     #[test]
     fn exact_replay_requires_the_recorded_grant_and_request() -> Result<()> {
         let (_temp, service) = initialized_service()?;
@@ -4073,6 +4295,45 @@ mod tests {
             "Inspection snapshot after concurrent change"
         );
         assert_ne!(current.version, historical.version);
+        Ok(())
+    }
+
+    #[test]
+    fn authority_service_reads_hold_a_transient_lifecycle_read_lock() -> Result<()> {
+        fn assert_exclusive_lock_is_blocked(
+            paths: crate::MemoryPaths,
+        ) -> impl FnOnce() -> Result<()> {
+            move || {
+                let lock_path = paths.repository_runtime_dir.join("repo-lifecycle.lock");
+                let file = std::fs::File::open(&lock_path)?;
+                ensure!(
+                    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                    "authority-mode lifecycle read did not retain a shared lock"
+                );
+                Ok(())
+            }
+        }
+
+        let (_temp, service) = initialized_service()?;
+        let record = local(
+            &service,
+            "Authority read-lock sentinel",
+            "Planning and record inspection must exclude lifecycle writers.",
+        )?;
+        let authority = PrivateLifecycleService::open_paths_for_authority(service.paths.clone())?;
+
+        inject_after_private_lifecycle_record_snapshot_hook(assert_exclusive_lock_is_blocked(
+            service.paths.clone(),
+        ));
+        authority.plan_private_lifecycle(
+            vec![record.id.clone()],
+            Some("2026-07-19T12:00:00Z".to_owned()),
+        )?;
+
+        inject_after_private_lifecycle_record_snapshot_hook(assert_exclusive_lock_is_blocked(
+            service.paths.clone(),
+        ));
+        authority.inspect_private_lifecycle_record(&record.id)?;
         Ok(())
     }
 

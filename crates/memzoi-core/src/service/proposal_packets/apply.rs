@@ -81,6 +81,10 @@ impl MemoryService {
             .join("resolved")
             .join("applied")
             .join(format!("{}.md", proposal.file_id));
+        let event_resolved_path = resolved_path
+            .strip_prefix(&self.paths.project_root)
+            .context("resolved proposal event path escaped the repository")?
+            .to_path_buf();
         let resolved_markdown = okf::render_resolved_okf_proposal_markdown(&proposal, &resolution)?;
         let mut projections = canonical_write_projections(&self.paths, &plan.writes)?;
         projections.push(OwnedRepositoryProjection::from_absolute(
@@ -176,13 +180,14 @@ impl MemoryService {
                 AppendEvent {
                     event_type: "proposal_file.applied".to_owned(),
                     actor: actor.trim().to_owned(),
+                    data_class: crate::MemoryEventDataClass::Repository,
                     payload: json!({
                         "proposal_id": proposal.id,
                         "file_id": proposal.file_id,
                         "action": proposal.proposal.action.as_str(),
                         "record_id": plan.record.id,
                         "target_id": plan.target_id,
-                        "resolved_path": resolved_path,
+                        "resolved_path": event_resolved_path,
                     }),
                     record_id: Some(plan.record.id.clone()),
                     proposal_id: Some(proposal.id.clone()),

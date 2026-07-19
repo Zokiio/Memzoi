@@ -1125,6 +1125,67 @@ fn benchmark_read_helpers_are_repository_only() -> anyhow::Result<()> {
 }
 
 #[test]
+fn local_search_audits_only_audited_services() -> anyhow::Result<()> {
+    let (_temp, service) = initialized_service()?;
+    let local = service.create_local_memory(
+        "agent:immutable-local-search",
+        LocalMemoryInput {
+            memory_type: MemoryType::Preference,
+            lane: MemoryLane::Semantic,
+            title: "Immutable local search sentinel".to_owned(),
+            body: "A no-audit immutable service must return this local record without writing."
+                .to_owned(),
+        },
+    )?;
+    let event_count = |conn: &Connection| -> anyhow::Result<i64> {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM event_log WHERE event_type = 'memory.searched'",
+            [],
+            |row| row.get(0),
+        )?)
+    };
+    let shared_before = event_count(&service.shared_conn)?;
+    let mirror_before = event_count(&service.conn)?;
+
+    let audited = service.search_local_memory("immutable local search sentinel".to_owned(), 10)?;
+    assert_eq!(audited.len(), 1);
+    assert_eq!(audited[0].record.id, local.id);
+    assert_eq!(event_count(&service.shared_conn)?, shared_before + 1);
+    assert_eq!(event_count(&service.conn)?, mirror_before);
+    let data_class: String = service.shared_conn.query_row(
+        "SELECT data_class FROM event_log
+         WHERE event_type = 'memory.searched'
+         ORDER BY rowid DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(data_class, "private");
+
+    let paths = service.paths.clone();
+    drop(service);
+    let shared_bytes_before = fs::read(&paths.shared_db_path)?;
+    let mirror_bytes_before = fs::read(&paths.index_db_path)?;
+    let immutable = MemoryService::open_paths_for_immutable_read(paths.clone())?;
+    let immutable_shared_events = event_count(&immutable.shared_conn)?;
+    let immutable_mirror_events = event_count(&immutable.conn)?;
+
+    let results =
+        immutable.search_local_memory("immutable local search sentinel".to_owned(), 10)?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].record.id, local.id);
+    assert_eq!(
+        event_count(&immutable.shared_conn)?,
+        immutable_shared_events
+    );
+    assert_eq!(event_count(&immutable.conn)?, immutable_mirror_events);
+    drop(immutable);
+
+    assert_eq!(fs::read(&paths.shared_db_path)?, shared_bytes_before);
+    assert_eq!(fs::read(&paths.index_db_path)?, mirror_bytes_before);
+    Ok(())
+}
+
+#[test]
 fn private_mirror_read_retries_after_a_generation_change() -> anyhow::Result<()> {
     let (_temp, service) = initialized_service()?;
     let local = service.create_local_memory(

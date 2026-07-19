@@ -474,7 +474,7 @@ fn event_export_never_exposes_quarantined_or_superseded_private_content() {
         "event-export-quarantine",
         "cli-event-export-quarantine",
         PrivateLifecycleAction::Quarantine {
-            record_id: quarantined_id,
+            record_id: quarantined_id.clone(),
             expected_version: quarantined_version,
             reason_code: "event_export_boundary".to_owned(),
         },
@@ -507,6 +507,125 @@ fn event_export_never_exposes_quarantined_or_superseded_private_content() {
     let supersede_grant = fixture.authorize(&supersede_path);
     fixture.apply(&supersede_path, json_string(&supersede_grant, "grant_id"));
 
+    let search_query = "PRIVATE-EVENT-SEARCH-QUERY-SENTINEL";
+    let context_task = "PRIVATE-EVENT-CONTEXT-TASK-SENTINEL";
+    let handoff_task = "PRIVATE-EVENT-HANDOFF-TASK-SENTINEL";
+    let precheck_command = "PRIVATE-EVENT-PRECHECK-COMMAND-SENTINEL";
+    let read_only_private_id = fixture.add_private_record(
+        search_query,
+        "This private record ID must not escape through raw read telemetry.",
+    );
+    fixture.run_json(&["local", "search", search_query, "--json"]);
+    fixture.run_json(&[
+        "context",
+        "--task",
+        context_task,
+        "--include-local",
+        "--json",
+    ]);
+    fixture.run_json(&[
+        "handoff",
+        "--task",
+        handoff_task,
+        "--include-local",
+        "--json",
+    ]);
+    fixture.run_json(&["precheck", "--command", precheck_command, "--json"]);
+
+    let private_proposal_title = "PRIVATE-EVENT-PROPOSAL-TITLE-SENTINEL";
+    let private_rejection_reason = "PRIVATE-EVENT-REJECTION-REASON-SENTINEL";
+    let private_tombstone_reason = "PRIVATE-EVENT-TOMBSTONE-REASON-SENTINEL";
+    let private_proposal = fixture.run_json(&[
+        "propose",
+        "--manual",
+        "--type",
+        "fact",
+        "--title",
+        private_proposal_title,
+        "--body",
+        "Unclassified proposal telemetry must remain local.",
+        "--json",
+    ]);
+    fixture.run_json(&[
+        "reject",
+        json_string(&private_proposal, "proposal_id"),
+        "--reason",
+        private_rejection_reason,
+        "--json",
+    ]);
+    let repository_record = fixture.run_json(&[
+        "propose",
+        "--apply",
+        "--type",
+        "fact",
+        "--sensitivity",
+        "repo-safe",
+        "--content-class",
+        "general_repo_knowledge",
+        "--title",
+        "Repository event-export control",
+        "--body",
+        "This repository-safe record exercises tombstone telemetry classification.",
+        "--json",
+    ]);
+    fixture.run_json(&[
+        "tombstone",
+        json_string(&repository_record, "record_id"),
+        "--reason",
+        private_tombstone_reason,
+        "--json",
+    ]);
+
+    let paths = fixture.paths();
+    let private_read_event_count = [&paths.shared_db_path, &paths.index_db_path]
+        .into_iter()
+        .map(|path| {
+            let conn = Connection::open(path).expect("open lifecycle event database");
+            conn.query_row(
+                "SELECT COUNT(*) FROM event_log
+                 WHERE data_class = 'private'
+                   AND event_type IN (
+                     'memory.searched',
+                     'memory.context_pack_built',
+                     'memory.precheck_ran'
+                   )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count private read events")
+        })
+        .sum::<i64>();
+    assert!(
+        private_read_event_count >= 4,
+        "raw read telemetry should be retained locally with an explicit private data class"
+    );
+    let private_caller_text_event_count = [&paths.shared_db_path, &paths.index_db_path]
+        .into_iter()
+        .map(|path| {
+            let conn = Connection::open(path).expect("open proposal event database");
+            conn.query_row(
+                "SELECT COUNT(*) FROM event_log
+                 WHERE data_class = 'private'
+                   AND (
+                     payload_json LIKE '%' || ?1 || '%'
+                     OR payload_json LIKE '%' || ?2 || '%'
+                     OR payload_json LIKE '%' || ?3 || '%'
+                   )",
+                [
+                    private_proposal_title,
+                    private_rejection_reason,
+                    private_tombstone_reason,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count private caller-text events")
+        })
+        .sum::<i64>();
+    assert!(
+        private_caller_text_event_count >= 3,
+        "unclassified proposal, rejection, and tombstone text must be explicitly private"
+    );
+
     let exported = fixture.success_stdout(&["events", "export", "--jsonl"]);
     for forbidden in [
         quarantined_title,
@@ -515,6 +634,14 @@ fn event_export_never_exposes_quarantined_or_superseded_private_content() {
         superseded_body,
         successor_title,
         successor_body,
+        search_query,
+        context_task,
+        handoff_task,
+        precheck_command,
+        private_proposal_title,
+        private_rejection_reason,
+        private_tombstone_reason,
+        &read_only_private_id,
     ] {
         assert!(
             !exported.contains(forbidden),
@@ -525,10 +652,75 @@ fn event_export_never_exposes_quarantined_or_superseded_private_content() {
         !exported.contains("memory.local_created"),
         "private creation events must not cross the repository event-export boundary: {exported}"
     );
+    for private_read_event in [
+        "memory.searched",
+        "memory.context_pack_built",
+        "memory.precheck_ran",
+    ] {
+        assert!(
+            !exported.contains(private_read_event),
+            "raw read event {private_read_event} crossed the repository export boundary: {exported}"
+        );
+    }
     assert!(
         exported.contains("memory.private_lifecycle_applied"),
         "content-free lifecycle audit events should remain exportable: {exported}"
     );
+}
+
+#[test]
+fn shared_lifecycle_authority_remains_available_without_the_disposable_index() {
+    let fixture = LifecycleFixture::new();
+    let record_id = fixture.add_private_record(
+        "Missing mirror grant sentinel",
+        "Grant authority must not depend on a disposable worktree index.",
+    );
+    let version = json_string(&fixture.inspect_record(&record_id), "version").to_owned();
+    let (_, request_path) = fixture.write_request(
+        "missing-mirror-revoke",
+        "cli-missing-mirror-revoke",
+        PrivateLifecycleAction::Pin {
+            record_id: record_id.clone(),
+            expected_version: version,
+        },
+    );
+    let grant = fixture.authorize(&request_path);
+    let grant_id = json_string(&grant, "grant_id").to_owned();
+    let paths = fixture.paths();
+    fs::remove_file(&paths.index_db_path).expect("remove disposable worktree index");
+
+    let plan = fixture.run_json(&["lifecycle", "plan", "--record-id", &record_id, "--json"]);
+    assert_eq!(plan["scope"]["kind"], "private_runtime");
+    assert_eq!(
+        fixture.inspect_record(&record_id)["record"]["id"],
+        record_id
+    );
+    assert_eq!(fixture.inspect_grant(&grant_id)["state"], "active");
+
+    let identical = fixture.authorize(&request_path);
+    assert_eq!(identical["grant_id"], grant_id);
+    let revoked = fixture.run_json(&["lifecycle", "revoke", "--grant-id", &grant_id, "--json"]);
+    assert_eq!(revoked["outcome"], "revoked");
+    assert_eq!(fixture.inspect_grant(&grant_id)["state"], "revoked");
+    assert!(
+        !paths.index_db_path.exists(),
+        "shared-only lifecycle commands must not recreate the disposable index"
+    );
+
+    let apply_error = fixture.failure_stderr(&[
+        "lifecycle",
+        "apply",
+        "--request-file",
+        path_text(&request_path),
+        "--grant-id",
+        &grant_id,
+        "--json",
+    ]);
+    assert!(
+        apply_error.contains("current SQLite database does not exist"),
+        "apply should retain its fail-closed mirror dependency: {apply_error}"
+    );
+    assert_eq!(fixture.inspect_grant(&grant_id)["state"], "revoked");
 }
 
 #[test]
@@ -617,6 +809,29 @@ fn authorize_changes_only_one_shared_grant_row() {
         .expect("write authorize recovery sentinel");
     let before = authority_storage_snapshot(&paths);
 
+    let recovery_error = fixture.failure_stderr(&[
+        "lifecycle",
+        "authorize",
+        "--request-file",
+        path_text(&request_path),
+        "--json",
+    ]);
+    assert!(
+        recovery_error.contains("requires shared runtime recovery"),
+        "authorize must fail closed on a pending authoritative snapshot: {recovery_error}"
+    );
+    assert_eq!(
+        authority_storage_snapshot(&paths),
+        before,
+        "authorize may neither recover a pending journal nor create authority from a stale snapshot"
+    );
+    assert_eq!(
+        fs::read(&recovery_sentinel).expect("read authorize recovery sentinel"),
+        b"DO-NOT-RECOVER-DURING-AUTHORIZE\n",
+        "authorize may not run unrelated shared-sync recovery"
+    );
+    fs::remove_file(&recovery_sentinel).expect("clear authorize recovery sentinel");
+
     let grant = fixture.authorize(&request_path);
     assert_eq!(grant["state"], "active");
     let after_first = authority_storage_snapshot(&paths);
@@ -634,12 +849,6 @@ fn authorize_changes_only_one_shared_grant_row() {
         before.shared_grants.len() + 1,
         "authorization must create exactly one grant row"
     );
-    assert_eq!(
-        fs::read(&recovery_sentinel).expect("read authorize recovery sentinel"),
-        b"DO-NOT-RECOVER-DURING-AUTHORIZE\n",
-        "authorize may not run unrelated shared-sync recovery"
-    );
-
     let identical = fixture.authorize(&request_path);
     assert_eq!(identical["grant_id"], grant["grant_id"]);
     assert_eq!(

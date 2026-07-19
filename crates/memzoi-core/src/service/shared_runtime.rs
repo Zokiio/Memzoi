@@ -44,6 +44,7 @@ struct EventRow {
     id: String,
     event_type: String,
     actor: String,
+    data_class: String,
     payload_json: String,
     record_id: Option<String>,
     proposal_id: Option<String>,
@@ -531,8 +532,8 @@ fn prepare_shared_sync_journal(
 fn insert_shared_sync_marker(index: &Connection, journal: &SharedSyncJournal) -> Result<()> {
     index.execute(
         "INSERT INTO event_log (
-           id, event_type, actor, payload_json, record_id, proposal_id, created_at
-         ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
+           id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
+         ) VALUES (?1, ?2, ?3, 'repository', ?4, NULL, NULL, ?5)
          ON CONFLICT(id) DO NOTHING",
         rusqlite::params![
             journal.marker_id,
@@ -957,7 +958,7 @@ fn shared_sync_marker_is_committed(
 ) -> Result<bool> {
     let row = index
         .query_row(
-            "SELECT event_type, actor, payload_json, record_id, proposal_id
+            "SELECT event_type, actor, data_class, payload_json, record_id, proposal_id
              FROM event_log
              WHERE id = ?1",
             [&journal.marker_id],
@@ -966,17 +967,19 @@ fn shared_sync_marker_is_committed(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((event_type, actor, payload_json, record_id, proposal_id)) = row else {
+    let Some((event_type, actor, data_class, payload_json, record_id, proposal_id)) = row else {
         return Ok(false);
     };
     if event_type != SHARED_SYNC_MARKER_EVENT
         || actor != SHARED_SYNC_MARKER_ACTOR
+        || data_class != "repository"
         || payload_json != marker_payload_json(journal)?
         || record_id.is_some()
         || proposal_id.is_some()
@@ -1031,7 +1034,7 @@ fn read_events_for_record_ids(
 ) -> Result<Vec<EventRow>> {
     let mut events = Vec::new();
     let mut statement = conn.prepare(
-        "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
+        "SELECT id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
          FROM event_log
          WHERE record_id = ?1
          ORDER BY created_at, id",
@@ -1049,7 +1052,7 @@ fn read_events_for_record_ids(
 
 fn read_private_lifecycle_authority_events(conn: &Connection) -> Result<Vec<EventRow>> {
     let mut statement = conn.prepare(
-        "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
+        "SELECT id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
          FROM event_log
          WHERE event_type = 'memory.private_lifecycle_applied'
            AND id IN (
@@ -1073,7 +1076,7 @@ fn read_private_lifecycle_authority_events(conn: &Connection) -> Result<Vec<Even
 
 fn read_proposal_apply_events(conn: &Connection, proposal_id: &str) -> Result<Vec<EventRow>> {
     let mut statement = conn.prepare(
-        "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
+        "SELECT id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
          FROM event_log
          WHERE proposal_id = ?1 AND event_type = 'memory.applied'
          ORDER BY created_at, id",
@@ -1084,7 +1087,7 @@ fn read_proposal_apply_events(conn: &Connection, proposal_id: &str) -> Result<Ve
 
 fn read_event(conn: &Connection, event_id: &str) -> Result<Option<EventRow>> {
     conn.query_row(
-        "SELECT id, event_type, actor, payload_json, record_id, proposal_id, created_at
+        "SELECT id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
          FROM event_log
          WHERE id = ?1",
         [event_id],
@@ -1099,10 +1102,11 @@ fn event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
         id: row.get(0)?,
         event_type: row.get(1)?,
         actor: row.get(2)?,
-        payload_json: row.get(3)?,
-        record_id: row.get(4)?,
-        proposal_id: row.get(5)?,
-        created_at: row.get(6)?,
+        data_class: row.get(3)?,
+        payload_json: row.get(4)?,
+        record_id: row.get(5)?,
+        proposal_id: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }
 
@@ -1110,12 +1114,13 @@ fn insert_events_exact(conn: &Connection, events: &[EventRow]) -> Result<()> {
     for event in events {
         conn.execute(
             "INSERT OR IGNORE INTO event_log (
-               id, event_type, actor, payload_json, record_id, proposal_id, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+               id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 event.id,
                 event.event_type,
                 event.actor,
+                event.data_class,
                 event.payload_json,
                 event.record_id,
                 event.proposal_id,
@@ -1301,8 +1306,8 @@ mod tests {
 
     use crate::{
         ContextPackInput, InitRequest, LocalMemoryInput, MemoryDraft, MemoryLane, MemoryService,
-        MemoryType, OkfProposalSensitivity, ProposalStatus, RepositoryContentClass, ScopeKind,
-        Visibility, proposals,
+        MemoryType, OkfProposalSensitivity, PrivateLifecycleApplyService, ProposalStatus,
+        RepositoryContentClass, ScopeKind, Visibility, proposals,
     };
 
     use super::*;
@@ -1816,11 +1821,10 @@ mod tests {
 
             let shared_before = fs::read(&paths.shared_db_path)?;
             let index_before = fs::read(&paths.index_db_path)?;
-            let error =
-                match MemoryService::open_paths_for_private_lifecycle_authority(paths.clone()) {
-                    Ok(_) => bail!("a lifecycle open accepted an old schema"),
-                    Err(error) => error,
-                };
+            let error = match PrivateLifecycleApplyService::open_paths(paths.clone()) {
+                Ok(_) => bail!("a lifecycle open accepted an old schema"),
+                Err(error) => error,
+            };
             assert!(
                 format!("{error:#}").contains("user_version 1"),
                 "unexpected schema rejection: {error:#}"
@@ -1960,8 +1964,11 @@ mod tests {
         let tx = source.shared_conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO event_log(
-               id, event_type, actor, payload_json, record_id, proposal_id, created_at
-             ) VALUES (?1, 'memory.private_lifecycle_applied', 'owner:local-cli', ?2, NULL, NULL, ?3)",
+               id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
+             ) VALUES (
+               ?1, 'memory.private_lifecycle_applied', 'owner:local-cli', 'repository',
+               ?2, NULL, NULL, ?3
+             )",
             rusqlite::params![
                 event_id,
                 serde_json::to_string(&payload)?,

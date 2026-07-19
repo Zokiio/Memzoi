@@ -10,8 +10,8 @@ use crate::{
     events::{AppendEvent, append_event},
     expiry,
     models::{
-        MemoryCitation, MemoryDestination, MemoryPath, MemoryType, PrecheckWarning, ScopeKind,
-        SearchResult,
+        MemoryCitation, MemoryDestination, MemoryEventDataClass, MemoryPath, MemoryType,
+        PrecheckWarning, ScopeKind, SearchResult,
     },
     retention,
     search::{
@@ -396,6 +396,9 @@ fn append_precheck_event(
         AppendEvent {
             event_type: "memory.precheck_ran".to_owned(),
             actor: "memzoi-core".to_owned(),
+            // Paths, commands, and warning identifiers are local read
+            // telemetry, not repository-exportable history.
+            data_class: MemoryEventDataClass::Private,
             payload: json!({
                 "path": input.path,
                 "action": input.action,

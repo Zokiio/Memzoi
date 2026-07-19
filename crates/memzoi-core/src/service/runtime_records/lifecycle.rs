@@ -4,8 +4,8 @@ use serde_json::json;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    MemoryDestination, MemoryEvent, MemoryLane, MemoryRecord, MemoryStatus, RetentionState,
-    evaluate_retention,
+    MemoryDestination, MemoryEvent, MemoryEventDataClass, MemoryLane, MemoryRecord, MemoryStatus,
+    RetentionState, evaluate_retention,
     events::{AppendEvent, append_event},
 };
 
@@ -80,6 +80,7 @@ pub(super) fn continue_checkpoint(
         AppendEvent {
             event_type: "memory.checkpoint_continued".to_owned(),
             actor: actor.to_owned(),
+            data_class: MemoryEventDataClass::Private,
             payload: json!({
                 "record_id": &record.id,
                 "operation_id": &command.operation_id,
@@ -144,6 +145,7 @@ pub(super) fn close_checkpoint(
         AppendEvent {
             event_type: "memory.checkpoint_closed".to_owned(),
             actor: actor.to_owned(),
+            data_class: MemoryEventDataClass::Private,
             payload: json!({
                 "record_id": &record.id,
                 "operation_id": &command.operation_id,

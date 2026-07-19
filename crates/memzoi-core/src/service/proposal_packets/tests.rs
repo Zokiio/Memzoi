@@ -43,6 +43,72 @@ fn repo_packet_writers_share_the_lifecycle_lock() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn proposal_file_events_export_only_repository_relative_paths() -> anyhow::Result<()> {
+    fn event_payload(
+        service: &MemoryService,
+        event_type: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let payload: String = service.conn.query_row(
+            "SELECT payload_json FROM event_log
+             WHERE event_type = ?1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+            [event_type],
+            |row| row.get(0),
+        )?;
+        Ok(serde_json::from_str(&payload)?)
+    }
+
+    fn assert_repository_relative(
+        service: &MemoryService,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let path = payload["resolved_path"]
+            .as_str()
+            .context("proposal event resolved_path")?;
+        assert!(!Path::new(path).is_absolute(), "{payload}");
+        assert!(path.starts_with(".memzoi/proposals/resolved/"), "{payload}");
+        assert!(
+            !payload
+                .to_string()
+                .contains(&service.paths.project_root.display().to_string()),
+            "{payload}"
+        );
+        Ok(())
+    }
+
+    let (_temp, service) = initialized_service()?;
+    let pending = write_test_pending_proposal(
+        &service,
+        "Repository-relative proposal event",
+        OkfProposalSensitivity::RepoSafe,
+    )?;
+    let applied = service.apply_file_proposal(&pending, "agent:applier")?;
+    assert_repository_relative(&service, &event_payload(&service, "proposal_file.applied")?)?;
+
+    let record_id = applied
+        .record
+        .as_ref()
+        .map(|record| record.id.as_str())
+        .context("applied proposal record")?;
+    service.conn.execute(
+        "UPDATE memory_record SET title = 'Injected relational drift' WHERE id = ?1",
+        [record_id],
+    )?;
+    let replay = service.replay_file_proposal(
+        &applied.proposal.id,
+        OkfProposalOutcome::Applied,
+        "agent:repair",
+    )?;
+    assert!(replay.runtime_index_updated);
+    assert_repository_relative(
+        &service,
+        &event_payload(&service, "proposal_file.index_repaired")?,
+    )?;
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn repo_packet_writers_refuse_symlinked_pending_root() -> anyhow::Result<()> {

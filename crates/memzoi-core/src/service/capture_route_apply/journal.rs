@@ -772,8 +772,8 @@ pub(super) fn append_capture_apply_commit_marker(
         .context("failed to serialize capture apply commit marker")?;
     conn.execute(
         "INSERT INTO event_log (
-           id, event_type, actor, payload_json, record_id, proposal_id, created_at
-         ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+           id, event_type, actor, data_class, payload_json, record_id, proposal_id, created_at
+         ) VALUES (?1, ?2, ?3, 'private', ?4, NULL, NULL, ?5)",
         rusqlite::params![
             capture_apply_commit_event_id(journal),
             CAPTURE_APPLY_COMMIT_EVENT,
@@ -802,17 +802,26 @@ fn capture_apply_commit_marker_exists_for_digest(
 ) -> Result<bool> {
     let row = conn
         .query_row(
-            "SELECT event_type, payload_json FROM event_log WHERE id = ?1",
+            "SELECT event_type, data_class, payload_json FROM event_log WHERE id = ?1",
             [capture_apply_commit_event_id(journal)],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()
         .context("failed to inspect capture apply commit marker")?;
-    let Some((event_type, payload_json)) = row else {
+    let Some((event_type, data_class, payload_json)) = row else {
         return Ok(false);
     };
     if event_type != CAPTURE_APPLY_COMMIT_EVENT {
         bail!("capture apply commit marker has an unexpected event type");
+    }
+    if data_class != "private" {
+        bail!("capture apply commit marker has an unexpected event data class");
     }
     let marker: CaptureApplyCommitMarker = serde_json::from_str(&payload_json)
         .context("failed to parse capture apply commit marker")?;

@@ -104,9 +104,9 @@ pub use memory_policy::{
 pub use models::{
     ContextPack, ContextPackBudget, ContextPackIncludedItem, ContextPackOmittedItem,
     ContextPackPolicy, ContextPackWarning, HandoffPack, MemoryCitation, MemoryDestination,
-    MemoryDestinationClassification, MemoryEvent, MemoryLane, MemoryPath, MemoryProposal,
-    MemoryRecord, MemoryStatus, MemoryType, PrecheckWarning, ProposalInboxSummary, ScopeKind,
-    SearchRanking, SearchRankingSignals, SearchResult, Visibility,
+    MemoryDestinationClassification, MemoryEvent, MemoryEventDataClass, MemoryLane, MemoryPath,
+    MemoryProposal, MemoryRecord, MemoryStatus, MemoryType, PrecheckWarning, ProposalInboxSummary,
+    ScopeKind, SearchRanking, SearchRankingSignals, SearchResult, Visibility,
 };
 pub use okf::{
     OkfProposalAction, OkfProposalFile, OkfProposalMetadata, OkfProposalOutcome,
@@ -169,9 +169,10 @@ pub use service::{
     CreateCheckpointCommand, CreateCheckpointSuccessorCommand, ExportFormat, ExportInput,
     ExportResult, FileProposalInventory, FileProposalInventoryEntry, FileProposalInventoryError,
     FileProposalResolutionResult, InitBundleResult, InitRequest, InitResult, LocalMemoryInput,
-    MemoryService, ProposalApprovalOverride, ProposeOptions, ProposeResult, RebuildResult,
-    RepoIndexDrift, SessionEndFromCheckpointCommand, SessionEndFromCheckpointResult, init_bundle,
-    lifecycle_transaction_artifact_count, scan_file_proposal_inventory,
+    MemoryService, PrivateLifecycleApplyService, PrivateLifecycleService, ProposalApprovalOverride,
+    ProposeOptions, ProposeResult, RebuildResult, RepoIndexDrift, SessionEndFromCheckpointCommand,
+    SessionEndFromCheckpointResult, init_bundle, lifecycle_transaction_artifact_count,
+    scan_file_proposal_inventory,
 };
 pub use session_end::{
     SessionEndCandidate, SessionEndCandidateResult, SessionEndCandidateStatus, SessionEndDocument,

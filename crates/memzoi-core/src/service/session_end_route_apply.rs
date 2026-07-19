@@ -5,9 +5,10 @@ use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
 
 use crate::{
-    AuthorizationProof, MemoryDestination, MemoryPaths, OkfProposalSensitivity, OriginIdentity,
-    OriginLookup, OriginOutcome, OriginOutcomeKind, OriginPreparation, OriginRoute,
-    RepositoryContentClass, RepositoryWriteRoute, SafetyFieldKind, ScopeKind, Visibility,
+    AuthorizationProof, MemoryDestination, MemoryEventDataClass, MemoryPaths,
+    OkfProposalSensitivity, OriginIdentity, OriginLookup, OriginOutcome, OriginOutcomeKind,
+    OriginPreparation, OriginRoute, RepositoryContentClass, RepositoryWriteRoute, SafetyFieldKind,
+    ScopeKind, Visibility,
     events::{AppendEvent, append_event},
     expiry::{self, Clock},
     okf, proposals,
@@ -652,6 +653,7 @@ impl<'a> SessionEndRouteApply<'a> {
                     AppendEvent {
                         event_type: "memory.checkpoint_session_ended".to_owned(),
                         actor: actor.to_owned(),
+                        data_class: MemoryEventDataClass::Private,
                         payload: json!({
                             "operation_id": &checkpoint.operation_id,
                             "checkpoint_id": &checkpoint.checkpoint_id,

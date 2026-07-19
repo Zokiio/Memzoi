@@ -29,19 +29,37 @@ pub(crate) fn build_handoff_pack_at(
     input: HandoffInput,
     now: OffsetDateTime,
 ) -> Result<HandoffPack> {
+    build_handoff_pack_at_with_audit(conn, input, now, true)
+}
+
+pub(crate) fn build_handoff_pack_at_without_audit(
+    conn: &Connection,
+    input: HandoffInput,
+    now: OffsetDateTime,
+) -> Result<HandoffPack> {
+    build_handoff_pack_at_with_audit(conn, input, now, false)
+}
+
+fn build_handoff_pack_at_with_audit(
+    conn: &Connection,
+    input: HandoffInput,
+    now: OffsetDateTime,
+    append_read_audit: bool,
+) -> Result<HandoffPack> {
     let path_prefix = normalize_optional(input.path_prefix);
     let task = effective_task(input.task, path_prefix.as_deref())?;
-    let context = context::build_context_pack_at(
-        conn,
-        ContextPackInput {
-            task: task.clone(),
-            path_prefix: path_prefix.clone(),
-            token_budget: input.token_budget,
-            include_local: input.include_local,
-            include_session: input.include_session,
-        },
-        now,
-    )?;
+    let context_input = ContextPackInput {
+        task: task.clone(),
+        path_prefix: path_prefix.clone(),
+        token_budget: input.token_budget,
+        include_local: input.include_local,
+        include_session: input.include_session,
+    };
+    let context = if append_read_audit {
+        context::build_context_pack_at(conn, context_input, now)?
+    } else {
+        context::build_context_pack_at_without_audit(conn, context_input, now)?
+    };
     let proposal_inbox = proposal_inbox_summary(proposals::open_proposal_counts(conn)?);
 
     Ok(HandoffPack {

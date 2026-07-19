@@ -7,7 +7,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::events::{AppendEvent, append_event, now_utc};
-use crate::models::{MemoryLane, MemoryRecord, MemoryType, ScopeKind, Visibility};
+use crate::models::{
+    MemoryEventDataClass, MemoryLane, MemoryRecord, MemoryType, ScopeKind, Visibility,
+};
 use crate::okf::OkfProposalSensitivity;
 use crate::{
     OriginDescriptor, OriginRoute, RepositoryContentClass, retention, retention_facts_for_creation,
@@ -141,6 +143,10 @@ pub fn propose_memory(conn: &Connection, actor: &str, mut draft: MemoryDraft) ->
         AppendEvent {
             event_type: "memory.proposed".to_owned(),
             actor: actor.to_owned(),
+            // A proposal title crosses the audit boundary before the complete
+            // repository-write policy has authorized its content. A caller's
+            // sensitivity label alone is not sufficient export authority.
+            data_class: MemoryEventDataClass::Private,
             payload: json!({"proposal_id": id, "title": draft.title}),
             record_id: None,
             proposal_id: Some(id.clone()),
@@ -277,6 +283,7 @@ pub fn approve_proposal(conn: &Connection, proposal_id: &str, actor: &str) -> Re
         AppendEvent {
             event_type: "proposal.approved".to_owned(),
             actor: actor.to_owned(),
+            data_class: MemoryEventDataClass::Repository,
             payload: json!({"proposal_id": proposal_id}),
             record_id: None,
             proposal_id: Some(proposal_id.to_owned()),
@@ -303,6 +310,9 @@ pub fn reject_proposal(
         AppendEvent {
             event_type: "proposal.rejected".to_owned(),
             actor: actor.to_owned(),
+            // Rejection reasons are unrestricted caller text, so they never
+            // cross the repository event-export boundary.
+            data_class: MemoryEventDataClass::Private,
             payload: json!({"proposal_id": proposal_id, "reason": reason}),
             record_id: None,
             proposal_id: Some(proposal_id.to_owned()),
@@ -329,6 +339,7 @@ pub fn apply_proposal(conn: &Connection, proposal_id: &str, actor: &str) -> Resu
         AppendEvent {
             event_type: "memory.applied".to_owned(),
             actor: actor.to_owned(),
+            data_class: MemoryEventDataClass::Repository,
             payload: json!({"proposal_id": proposal_id, "record_id": record.id}),
             record_id: Some(record.id.clone()),
             proposal_id: Some(proposal_id.to_owned()),
@@ -356,6 +367,7 @@ pub fn supersede_record(
         AppendEvent {
             event_type: "memory.superseded".to_owned(),
             actor: actor.to_owned(),
+            data_class: MemoryEventDataClass::Repository,
             payload: json!({"previous_record_id": record_id, "replacement_record_id": replacement.id}),
             record_id: Some(replacement.id.clone()),
             proposal_id: None,
@@ -383,6 +395,9 @@ pub fn tombstone_record(
         AppendEvent {
             event_type: "memory.tombstoned".to_owned(),
             actor: actor.to_owned(),
+            // Tombstone reasons are unrestricted caller text even though the
+            // affected record itself is repository-scoped.
+            data_class: MemoryEventDataClass::Private,
             payload: json!({"record_id": record_id, "reason": reason}),
             record_id: Some(record_id.to_owned()),
             proposal_id: None,
@@ -677,6 +692,7 @@ mod tests {
         assert_eq!(events[0].record_id, None);
         assert_eq!(events[0].payload["proposal_id"], proposal.id);
         assert_eq!(events[0].payload["title"], draft.title);
+        assert_eq!(events[0].data_class, crate::MemoryEventDataClass::Private);
 
         Ok(())
     }
@@ -710,7 +726,19 @@ mod tests {
         assert_eq!(record.source_ref.as_deref(), Some("proposal-red-tests"));
         assert_eq!(record.proposal_id.as_deref(), Some(proposal.id.as_str()));
 
-        let event_types = list_events(&conn)?
+        let events = list_events(&conn)?;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.data_class)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::MemoryEventDataClass::Private,
+                crate::MemoryEventDataClass::Repository,
+                crate::MemoryEventDataClass::Repository,
+            ]
+        );
+        let event_types = events
             .into_iter()
             .map(|event| event.event_type)
             .collect::<Vec<_>>();
@@ -816,7 +844,12 @@ mod tests {
             "apply error should explain the rejected proposal, got {error:?}"
         );
 
-        let event_types = list_events(&conn)?
+        let events = list_events(&conn)?;
+        assert_eq!(
+            events.last().map(|event| event.data_class),
+            Some(crate::MemoryEventDataClass::Private)
+        );
+        let event_types = events
             .into_iter()
             .map(|event| event.event_type)
             .collect::<Vec<_>>();
@@ -1197,7 +1230,12 @@ mod tests {
         assert_eq!(tombstoned.status, MemoryStatus::Tombstoned);
         assert_eq!(tombstoned.id, superseded.replacement.id);
 
-        let event_types = list_events(&conn)?
+        let events = list_events(&conn)?;
+        assert_eq!(
+            events.last().map(|event| event.data_class),
+            Some(crate::MemoryEventDataClass::Private)
+        );
+        let event_types = events
             .into_iter()
             .map(|event| event.event_type)
             .collect::<Vec<_>>();

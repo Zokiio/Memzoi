@@ -123,9 +123,15 @@ memzoi events export --jsonl
 
 `memzoi events export --jsonl` streams runtime event-log rows from the SQLite `event_log`
 table as JSONL: one compact event object per physical line, with no wrapper and no pretty
-multi-line JSON. This operational stream is not canonical memory, is not consumed by
-`memzoi rebuild`, and does not replace `.memzoi/records/*.md` records or OKF proposal
-files under `.memzoi/proposals/pending/*.md`.
+multi-line JSON. Only rows explicitly classified as `data_class: repository` cross this
+boundary. Raw search, context, handoff, and precheck telemetry and private-record events
+stay local even when `record_id` is absent. Proposal titles and unrestricted rejection or
+tombstone reasons also stay local; only events produced after repository-write authorization
+may carry repository content across this boundary. Content-free private lifecycle application
+receipts remain exportable. This operational stream is not canonical memory, is not
+consumed by `memzoi rebuild`, and does not replace `.memzoi/records/*.md` records or OKF
+proposal files under `.memzoi/proposals/pending/*.md`. Repository events encode proposal-file
+locations relative to the repository and never export an absolute local worktree path.
 
 
 ## Generated file policy
