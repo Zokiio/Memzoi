@@ -17,7 +17,7 @@ use crate::{
     PrivateLifecycleRelationSnapshot, PrivateLifecycleRequest, PrivateLifecycleRevokeOutcome,
     PrivateLifecycleRevokeResult, PrivateLifecycleSource, PrivateLifecycleStateSnapshot,
     PrivateMaintenanceRecordInput, ScopeKind, Visibility, plan_private_maintenance_at,
-    private_maintenance_runtime_fingerprint,
+    plan_private_maintenance_with_authority_at, private_maintenance_runtime_fingerprint,
 };
 
 use super::{
@@ -208,7 +208,12 @@ impl MemoryService {
         &self,
         record_id: &str,
     ) -> Result<PrivateLifecycleRecordInspection> {
-        inspect_private_lifecycle_record_for(&self.paths, &self.shared_conn, record_id)
+        inspect_private_lifecycle_record_for(
+            &self.paths,
+            &self.shared_conn,
+            record_id,
+            self.clock.now_utc(),
+        )
     }
 
     #[cfg(test)]
@@ -397,7 +402,7 @@ fn apply_private_lifecycle_for(
 }
 
 impl PrivateLifecycleService {
-    fn acquire_transient_read_lock(&self) -> Result<Option<RepoLifecycleReadLock>> {
+    pub(super) fn acquire_transient_read_lock(&self) -> Result<Option<RepoLifecycleReadLock>> {
         if self._lifecycle_read_lock.is_some() {
             Ok(None)
         } else {
@@ -455,7 +460,12 @@ impl PrivateLifecycleService {
         record_id: &str,
     ) -> Result<PrivateLifecycleRecordInspection> {
         let _read_lock = self.acquire_transient_read_lock()?;
-        inspect_private_lifecycle_record_for(&self.paths, &self.shared_conn, record_id)
+        inspect_private_lifecycle_record_for(
+            &self.paths,
+            &self.shared_conn,
+            record_id,
+            self.clock.now_utc(),
+        )
     }
 
     pub fn inspect_private_lifecycle_grant(&self, grant_id: &str) -> Result<PrivateLifecycleGrant> {
@@ -623,6 +633,7 @@ fn inspect_private_lifecycle_record_for(
     paths: &crate::MemoryPaths,
     conn: &Connection,
     record_id: &str,
+    evaluated_at: OffsetDateTime,
 ) -> Result<PrivateLifecycleRecordInspection> {
     ensure_identifier(record_id, "record_id")?;
     shared_runtime::ensure_read_only_lifecycle_snapshot_ready(paths)?;
@@ -632,6 +643,75 @@ fn inspect_private_lifecycle_record_for(
     run_after_private_lifecycle_record_snapshot_hook()?;
     let storage = PrivateLifecycleStorage::new(&transaction);
     let state = storage.require_state(record_id)?;
+    let base_eligibility = match base_current_assertion(&transaction, &record, &state, evaluated_at)
+    {
+        Ok(decision) => decision,
+        Err(_) => crate::evaluate_current_assertion(
+            &record.id,
+            record.status,
+            record.lane,
+            &record.retention,
+            evaluated_at,
+            vec![crate::CurrentAssertionExclusion::Safety {
+                reason: "private_lifecycle_authority_unverifiable".to_owned(),
+            }],
+        )?,
+    };
+    let evaluated_at_text = crate::expiry::format_timestamp(evaluated_at)?;
+    let conflicts = super::private_maintenance::conflict_participation(
+        &transaction,
+        record_id,
+        &evaluated_at_text,
+    )?;
+    let eligibility_sql = crate::retention::current_assertion_sql("inspected_record", "?2");
+    let effective_is_current = transaction.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM memory_record AS inspected_record
+             WHERE inspected_record.id = ?1 AND ({eligibility_sql}))"
+        ),
+        rusqlite::params![record_id, evaluated_at_text],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let mut effective_eligibility = base_eligibility.clone();
+    if base_eligibility.is_current && !effective_is_current {
+        let exclusion = if !conflicts.is_empty() {
+            crate::CurrentAssertionExclusion::UnresolvedConflict
+        } else {
+            let (state, generation_matches, policy_matches, before_not_after) = transaction
+                .query_row(
+                    "SELECT projection.state,
+                            projection.authoritative_generation = generation.generation,
+                            projection.policy_version = ?2,
+                            memzoi_timestamp_before(?1, projection.not_after) = 1
+                     FROM private_maintenance_projection AS projection
+                     CROSS JOIN private_lifecycle_generation AS generation
+                     WHERE projection.singleton = 1 AND generation.singleton = 1",
+                    rusqlite::params![&evaluated_at_text, crate::MAINTENANCE_POLICY_VERSION],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, bool>(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get::<_, bool>(3)?,
+                        ))
+                    },
+                )?;
+            let reason = if state != "current" {
+                format!("private_maintenance_projection_{state}")
+            } else if !generation_matches {
+                "private_maintenance_projection_generation_mismatch".to_owned()
+            } else if !policy_matches {
+                "private_maintenance_projection_policy_mismatch".to_owned()
+            } else if !before_not_after {
+                "private_maintenance_projection_stale".to_owned()
+            } else {
+                "private_maintenance_projection_unavailable".to_owned()
+            };
+            crate::CurrentAssertionExclusion::Safety { reason }
+        };
+        effective_eligibility.exclusions.push(exclusion);
+        effective_eligibility.is_current = false;
+    }
     let relations = storage
         .relations_for_record(record_id)?
         .into_iter()
@@ -642,6 +722,9 @@ fn inspect_private_lifecycle_record_for(
         record,
         version: state.record_version.clone(),
         state: state_snapshot(&state),
+        base_eligibility,
+        effective_automatic_recall_eligibility: effective_eligibility,
+        conflicts,
         relations,
     };
     transaction.rollback()?;
@@ -662,7 +745,7 @@ fn inspect_private_lifecycle_grant_for(
     grant_from_row(&row, &binding)
 }
 
-fn plan_private_lifecycle_with_conn(
+pub(super) fn plan_private_lifecycle_with_conn(
     paths: &crate::MemoryPaths,
     conn: &Connection,
     request: MaintenancePlanRequest,
@@ -687,9 +770,17 @@ fn plan_private_lifecycle_with_conn(
     for record in records {
         ensure_private_shape(&record)?;
         let state = storage.require_state(&record.id)?;
-        let decision = effective_current_assertion(conn, &record, &state, evaluated_at)?;
+        let decision = base_current_assertion(conn, &record, &state, evaluated_at)?;
+        let applicability_paths = {
+            let mut statement = conn
+                .prepare("SELECT path FROM memory_path WHERE record_id = ?1 ORDER BY path, id")?;
+            statement
+                .query_map([&record.id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         inputs.push(PrivateMaintenanceRecordInput {
             record,
+            applicability_paths,
             version_token: state.record_version,
             current_assertion: decision.is_current,
             retention_state: decision.retention.state,
@@ -697,7 +788,25 @@ fn plan_private_lifecycle_with_conn(
             retention_boundary: decision.retention.effective_boundary,
         });
     }
-    plan_private_maintenance_at(runtime_fingerprint, request, inputs, fallback_now)
+    let grant_fingerprint = conn
+        .query_row(
+            "SELECT grant_fingerprint
+             FROM private_maintenance_grant
+             WHERE state = 'active'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match grant_fingerprint {
+        Some(grant_fingerprint) => plan_private_maintenance_with_authority_at(
+            runtime_fingerprint,
+            request,
+            inputs,
+            fallback_now,
+            grant_fingerprint,
+        ),
+        None => plan_private_maintenance_at(runtime_fingerprint, request, inputs, fallback_now),
+    }
 }
 
 fn build_grant_binding_for(
@@ -921,7 +1030,7 @@ fn effective_grant_expiry(
     Ok(expiry)
 }
 
-fn effective_current_assertion(
+fn base_current_assertion(
     conn: &Connection,
     record: &MemoryRecord,
     state: &PrivateLifecycleState,
@@ -1373,7 +1482,7 @@ fn validate_action_semantics(
             for evidence_id in evidence_versions.keys() {
                 let evidence = require_private_record(conn, evidence_id)?;
                 let state = storage.require_state(evidence_id)?;
-                let decision = effective_current_assertion(conn, &evidence, &state, now)?;
+                let decision = base_current_assertion(conn, &evidence, &state, now)?;
                 ensure!(
                     evidence.status == MemoryStatus::Active && decision.is_current,
                     "correction evidence {evidence_id} is not a current accepted private record"
@@ -1473,8 +1582,7 @@ fn validate_renewal(
     );
     let storage = PrivateLifecycleStorage::new(conn);
     let predecessor_state = storage.require_state(predecessor_id)?;
-    let predecessor_decision =
-        effective_current_assertion(conn, &predecessor, &predecessor_state, now)?;
+    let predecessor_decision = base_current_assertion(conn, &predecessor, &predecessor_state, now)?;
     ensure!(
         predecessor_decision.retention.state == crate::RetentionState::QueryOnly,
         "renewal predecessor is not expired"
@@ -1487,7 +1595,7 @@ fn validate_renewal(
     let boundary = crate::private_lifecycle::parse_timestamp(boundary, "renewal boundary")?;
     let evidence_state = storage.require_state(evidence_record_id)?;
     ensure!(
-        effective_current_assertion(conn, &evidence, &evidence_state, now)?.is_current,
+        base_current_assertion(conn, &evidence, &evidence_state, now)?.is_current,
         "renewal evidence is not current"
     );
     let capture = evidence
@@ -1546,16 +1654,18 @@ fn validate_consolidation(
             .first()
             .context("consolidation requires at least two records")?,
     )?;
-    let projection = exact_duplicate_projection(&first)?;
+    let first_paths = private_applicability_paths(conn, &first.id)?;
+    let projection = exact_duplicate_projection(&first, &first_paths)?;
     let mut complete = BTreeSet::new();
     for record in RuntimeRecords::new(conn).records_for_preservation()? {
+        let applicability_paths = private_applicability_paths(conn, &record.id)?;
         if record.status != MemoryStatus::Active
-            || exact_duplicate_projection(&record)? != projection
+            || exact_duplicate_projection(&record, &applicability_paths)? != projection
         {
             continue;
         }
         let state = storage.require_state(&record.id)?;
-        if effective_current_assertion(conn, &record, &state, now)?.is_current {
+        if base_current_assertion(conn, &record, &state, now)?.is_current {
             complete.insert(record.id);
         }
     }
@@ -1567,7 +1677,10 @@ fn validate_consolidation(
     Ok(())
 }
 
-fn exact_duplicate_projection(record: &MemoryRecord) -> Result<Vec<u8>> {
+fn exact_duplicate_projection(
+    record: &MemoryRecord,
+    applicability_paths: &[String],
+) -> Result<Vec<u8>> {
     serde_json_canonicalizer::to_vec(&json!({
         "memory_type": record.memory_type,
         "lane": record.lane,
@@ -1579,8 +1692,19 @@ fn exact_duplicate_projection(record: &MemoryRecord) -> Result<Vec<u8>> {
         "body": record.body.trim(),
         "confidence": record.confidence,
         "retention": record.retention,
+        "applicability_paths": applicability_paths,
     }))
     .context("failed to compare exact duplicate records")
+}
+
+fn private_applicability_paths(conn: &Connection, record_id: &str) -> Result<Vec<String>> {
+    let mut statement =
+        conn.prepare("SELECT path FROM memory_path WHERE record_id = ?1 ORDER BY path, id")?;
+    let mut paths = statement
+        .query_map([record_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    paths.dedup();
+    Ok(paths)
 }
 
 fn validate_contradiction_resolution(
@@ -1593,46 +1717,50 @@ fn validate_contradiction_resolution(
         record_ids.iter().any(|id| id == winner_record_id),
         "owner-selected contradiction winner is not in the incompatible set"
     );
-    let all_records = RuntimeRecords::new(conn).records_for_preservation()?;
     let storage = PrivateLifecycleStorage::new(conn);
-    let selected_records = record_ids
-        .iter()
-        .map(|id| require_private_record(conn, id))
-        .collect::<Result<Vec<_>>>()?;
-    let first = selected_records
-        .first()
-        .context("contradiction resolution has no records")?;
-    let (signature, _) = polarity_signature(&first.body)
-        .context("contradiction record does not have allowlisted symmetric polarity")?;
-    let mut complete = BTreeSet::new();
-    let mut polarities = BTreeSet::new();
-    for record in all_records {
+    let mut candidates = Vec::new();
+    for record in RuntimeRecords::new(conn).records_for_preservation()? {
         if record.status != MemoryStatus::Active
-            || !matches!(record.lane, MemoryLane::Semantic | MemoryLane::Procedural)
-            || !claim_bearing_type(record.memory_type)
-            || contains_conditional_or_temporal_language(&record.body)
-            || !same_claim_context(first, &record)
-            || records_are_temporally_related(first, &record)
+            || !crate::maintenance::private_contradiction_candidate(&record)
         {
             continue;
         }
         let state = storage.require_state(&record.id)?;
-        if !effective_current_assertion(conn, &record, &state, now)?.is_current {
+        if !base_current_assertion(conn, &record, &state, now)?.is_current {
             continue;
         }
-        let Some((candidate_signature, negative)) = polarity_signature(&record.body) else {
-            continue;
-        };
-        if candidate_signature == signature {
-            complete.insert(record.id);
-            polarities.insert(negative);
-        }
+        let applicability_paths = private_applicability_paths(conn, &record.id)?;
+        candidates.push((record, applicability_paths));
     }
+    let graph_inputs = candidates
+        .iter()
+        .map(|(record, paths)| (record, paths.as_slice()))
+        .collect::<Vec<_>>();
+    let adjacency = crate::maintenance::private_contradiction_adjacency(&graph_inputs)?;
+    let selected = record_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let anchor_id = selected
+        .first()
+        .context("contradiction resolution has no records")?;
+    let anchor_index = candidates
+        .iter()
+        .position(|(record, _)| &record.id == anchor_id)
+        .context("contradiction record is not an eligible contradiction candidate")?;
     ensure!(
-        polarities.len() == 2,
+        !adjacency[anchor_index].is_empty(),
         "record set is not an incompatible polarity set"
     );
-    let selected = record_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut pending = vec![anchor_index];
+    let mut visited = BTreeSet::new();
+    while let Some(index) = pending.pop() {
+        if !visited.insert(index) {
+            continue;
+        }
+        pending.extend(adjacency[index].iter().copied());
+    }
+    let complete = visited
+        .into_iter()
+        .map(|index| candidates[index].0.id.clone())
+        .collect::<BTreeSet<_>>();
     ensure!(
         selected == complete,
         "contradiction resolution must name the complete incompatible set"
@@ -1646,28 +1774,6 @@ fn normalize_text(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
-}
-
-fn same_claim_context(left: &MemoryRecord, right: &MemoryRecord) -> bool {
-    left.memory_type == right.memory_type
-        && left.lane == right.lane
-        && left.destination == right.destination
-        && normalize_text(&left.title) == normalize_text(&right.title)
-        && left.scope_kind == right.scope_kind
-        && left.scope_id == right.scope_id
-}
-
-fn records_are_temporally_related(left: &MemoryRecord, right: &MemoryRecord) -> bool {
-    left.supersedes_id.as_deref() == Some(right.id.as_str())
-        || right.supersedes_id.as_deref() == Some(left.id.as_str())
-        || left
-            .lineage
-            .as_ref()
-            .is_some_and(|lineage| lineage.predecessor_id == right.id)
-        || right
-            .lineage
-            .as_ref()
-            .is_some_and(|lineage| lineage.predecessor_id == left.id)
 }
 
 fn claim_bearing_type(memory_type: MemoryType) -> bool {
@@ -2204,110 +2310,6 @@ fn audit_target_ids(action: &PrivateLifecycleAction) -> Vec<&str> {
         PrivateLifecycleAction::Correct { record_id, .. } => vec![record_id],
         _ => action.mutation_targets(),
     }
-}
-
-fn polarity_signature(body: &str) -> Option<(String, bool)> {
-    let mut tokens = normalized_tokens(body);
-    if tokens.is_empty()
-        || tokens
-            .iter()
-            .any(|token| token == "not" && tokens.len() == 1)
-    {
-        return None;
-    }
-    let boolean_positions = tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, token)| token.as_str() == "true" || token.as_str() == "false")
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    if boolean_positions.len() == 1 {
-        let index = boolean_positions[0];
-        let terminal_predicate = index + 1 == tokens.len()
-            && index > 0
-            && (matches!(tokens[index - 1].as_str(), "is" | "are")
-                || (tokens[index - 1] == "be"
-                    && index > 1
-                    && matches!(tokens[index - 2].as_str(), "must" | "should")));
-        if !terminal_predicate {
-            return None;
-        }
-        let negative = tokens[index] == "false";
-        tokens[index] = "<boolean>".to_owned();
-        return Some((tokens.join(" "), negative));
-    }
-    if !boolean_positions.is_empty() {
-        return None;
-    }
-    let not_positions = tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, token)| token.as_str() == "not")
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    if not_positions.len() > 1 {
-        return None;
-    }
-    if let Some(index) = not_positions.first().copied() {
-        if index == 0 || !matches!(tokens[index - 1].as_str(), "is" | "are" | "must" | "should") {
-            return None;
-        }
-        tokens.remove(index);
-        return Some((tokens.join(" "), true));
-    }
-    tokens
-        .iter()
-        .any(|token| matches!(token.as_str(), "is" | "are" | "must" | "should"))
-        .then(|| (tokens.join(" "), false))
-}
-
-fn contains_conditional_or_temporal_language(body: &str) -> bool {
-    let tokens = normalized_tokens(body);
-    const BLOCKED: &[&str] = &[
-        "if",
-        "when",
-        "whenever",
-        "unless",
-        "provided",
-        "providing",
-        "assuming",
-        "depending",
-        "where",
-        "wherever",
-        "while",
-        "except",
-        "otherwise",
-        "until",
-        "before",
-        "after",
-        "since",
-        "once",
-        "now",
-        "today",
-        "tomorrow",
-        "yesterday",
-        "formerly",
-        "current",
-        "currently",
-        "previously",
-        "temporarily",
-        "during",
-    ];
-    tokens.iter().any(|token| {
-        BLOCKED.contains(&token.as_str())
-            || (token.len() == 4 && token.bytes().all(|byte| byte.is_ascii_digit()))
-    }) || tokens
-        .windows(2)
-        .any(|window| window[0] == "as" && window[1] == "of")
-}
-
-fn normalized_tokens(value: &str) -> Vec<String> {
-    value
-        .to_lowercase()
-        .split(|character: char| !character.is_alphanumeric() && character != '_')
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 #[cfg(test)]
@@ -3335,7 +3337,9 @@ mod tests {
 
         // Open the apply service first, then replace index.db exactly as a
         // concurrent rebuild that wins the lifecycle lock would do.
-        let apply_service = PrivateLifecycleApplyService::open_paths(paths.clone())?;
+        let mut apply_service = PrivateLifecycleApplyService::open_paths(paths.clone())?;
+        apply_service.clock =
+            std::sync::Arc::new(FixedClock::from_rfc3339("2026-07-19T12:00:00Z")?);
         MemoryService::rebuild_paths(paths.clone())?;
 
         let result = apply_service.apply_private_lifecycle(&request, &grant.grant_id, None)?;
@@ -4268,6 +4272,62 @@ mod tests {
     }
 
     #[test]
+    fn path_distinct_private_records_are_not_exact_duplicates() -> Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let frontend = local(
+            &service,
+            "Path-distinct duplicate",
+            "The authentication provider is configured.",
+        )?;
+        let backend = local(
+            &service,
+            "Path-distinct duplicate",
+            "The authentication provider is configured.",
+        )?;
+        service.shared_conn.execute(
+            "INSERT INTO memory_path(id, record_id, path) VALUES ('duplicate-frontend', ?1, 'frontend/**')",
+            [&frontend.id],
+        )?;
+        service.shared_conn.execute(
+            "INSERT INTO memory_path(id, record_id, path) VALUES ('duplicate-backend', ?1, 'backend/**')",
+            [&backend.id],
+        )?;
+
+        let plan =
+            service.plan_private_lifecycle(Vec::new(), Some("2026-07-19T12:00:00Z".to_owned()))?;
+        assert_eq!(plan.summary.exact_duplicates, 0);
+        let ids = vec![frontend.id.clone(), backend.id.clone()];
+        let request = PrivateLifecycleRequest::with_computed_id(
+            "operation-path-distinct-consolidation",
+            PrivateLifecycleSource::Direct,
+            vec![PrivateLifecycleAction::Consolidate {
+                record_ids: ids.clone(),
+                expected_versions: record_versions(&service, &ids)?,
+                keeper_record_id: frontend.id.clone(),
+            }],
+        )?;
+        let error = service
+            .authorize_private_lifecycle(&request, None, None)
+            .expect_err("path-distinct records must not consolidate as exact duplicates");
+        assert!(format!("{error:#}").contains("complete exact duplicate set"));
+        assert_eq!(
+            service
+                .inspect_private_lifecycle_record(&frontend.id)?
+                .record
+                .status,
+            MemoryStatus::Active
+        );
+        assert_eq!(
+            service
+                .inspect_private_lifecycle_record(&backend.id)?
+                .record
+                .status,
+            MemoryStatus::Active
+        );
+        Ok(())
+    }
+
+    #[test]
     fn contradiction_resolution_requires_full_set_and_keeps_exact_owner_winner() -> Result<()> {
         let (_temp, service) = initialized_service()?;
         let records = [
@@ -4315,6 +4375,130 @@ mod tests {
                         && relation.related_record_id == winner
                 }));
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn planned_contradiction_resolution_uses_path_aware_connected_component() -> Result<()> {
+        let (_temp, service) = initialized_service()?;
+        let frontend = local(
+            &service,
+            "Path-aware contradiction",
+            "Authentication is required.",
+        )?;
+        let nested = local(
+            &service,
+            "Path-aware contradiction",
+            "Authentication is not required.",
+        )?;
+        let backend = local(
+            &service,
+            "Path-aware contradiction",
+            "Authentication is required.",
+        )?;
+        let global = local(
+            &service,
+            "Path-aware contradiction",
+            "Authentication is required.",
+        )?;
+        for (path_id, record_id, path) in [
+            ("contradiction-frontend", &frontend.id, "frontend/**"),
+            ("contradiction-nested", &nested.id, "frontend/auth/**"),
+            ("contradiction-backend", &backend.id, "backend/**"),
+        ] {
+            service.shared_conn.execute(
+                "INSERT INTO memory_path(id, record_id, path) VALUES (?1, ?2, ?3)",
+                rusqlite::params![path_id, record_id, path],
+            )?;
+        }
+
+        let plan =
+            service.plan_private_lifecycle(Vec::new(), Some("2026-07-19T12:00:00Z".to_owned()))?;
+        let planned_action = plan
+            .action_groups
+            .iter()
+            .flat_map(|group| &group.actions)
+            .find(|action| action.class == MaintenanceActionClass::OwnerResolveContradiction)
+            .context("path-aware contradiction action")?
+            .clone();
+        let expected_component =
+            BTreeSet::from([frontend.id.clone(), nested.id.clone(), global.id.clone()]);
+        assert_eq!(
+            planned_action
+                .record_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected_component
+        );
+        assert!(!planned_action.record_ids.contains(&backend.id));
+        let overbroad_ids = vec![
+            frontend.id.clone(),
+            nested.id.clone(),
+            backend.id.clone(),
+            global.id.clone(),
+        ];
+        let overbroad = PrivateLifecycleRequest::with_computed_id(
+            "operation-overbroad-path-contradiction",
+            PrivateLifecycleSource::Direct,
+            vec![PrivateLifecycleAction::ResolveContradiction {
+                record_ids: overbroad_ids.clone(),
+                expected_versions: record_versions(&service, &overbroad_ids)?,
+                winner_record_id: nested.id.clone(),
+            }],
+        )?;
+        service
+            .authorize_private_lifecycle(&overbroad, None, None)
+            .expect_err("a disjoint record must not join the contradiction component");
+        let expected_versions = planned_action
+            .preconditions
+            .record_versions
+            .iter()
+            .map(|(record_id, version)| {
+                version
+                    .private_version_token()
+                    .map(|token| (record_id.clone(), token.to_owned()))
+                    .context("private contradiction action used a canonical version")
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let request = PrivateLifecycleRequest::with_computed_id(
+            "operation-path-aware-contradiction",
+            PrivateLifecycleSource::MaintenancePlan {
+                plan_id: plan.plan_id.clone(),
+                selected_action_ids: vec![planned_action.action_id.clone()],
+            },
+            vec![PrivateLifecycleAction::ResolveContradiction {
+                record_ids: planned_action.record_ids.clone(),
+                expected_versions,
+                winner_record_id: nested.id.clone(),
+            }],
+        )?;
+        let grant = service.authorize_private_lifecycle(&request, Some(&plan), None)?;
+        service.apply_private_lifecycle(&request, &grant.grant_id, Some(&plan))?;
+
+        assert_eq!(
+            service
+                .inspect_private_lifecycle_record(&nested.id)?
+                .record
+                .status,
+            MemoryStatus::Active
+        );
+        assert_eq!(
+            service
+                .inspect_private_lifecycle_record(&backend.id)?
+                .record
+                .status,
+            MemoryStatus::Active
+        );
+        for superseded in [&frontend.id, &global.id] {
+            assert_eq!(
+                service
+                    .inspect_private_lifecycle_record(superseded)?
+                    .record
+                    .status,
+                MemoryStatus::Superseded
+            );
         }
         Ok(())
     }

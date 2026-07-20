@@ -80,6 +80,10 @@ Run `memzoi <command> --help` for exact options.
 | `lifecycle inspect record` | `<record-id>`, `--json` |
 | `lifecycle inspect grant` | `<grant-id>`, `--json` |
 | `lifecycle apply` | `--request-file <path>`, `--grant-id <id>`, optional `--plan-file <path>`, `--json` |
+| `lifecycle maintenance enable` | `--json` |
+| `lifecycle maintenance disable` | `--json` |
+| `lifecycle maintenance inspect` | `--json` |
+| `lifecycle maintenance reconcile` | `--json` |
 | `approve` | `<proposal-id>`, `--actor`, `--json` |
 | `reject` | `<proposal-id>`, `--reason`, `--actor`, `--json` |
 | `apply` | `<proposal-id>`, `--actor`, `--json` |
@@ -298,18 +302,31 @@ private flags, output, or mutation path. Private planning and owner-authorized
 execution use the separate local `memzoi lifecycle` CLI/core workflow; MCP
 `plan_maintenance` never exposes private records or lifecycle mutation.
 
-The current maintenance contract is `maintenance-plan/2` while the stable
-artifact schemas remain `memzoi/maintenance-request` and
-`memzoi/maintenance-plan`. Memzoi is pre-1.0 and current-schema-only: v1
-artifacts are rejected and must be regenerated. There is no compatibility
+The current maintenance contract remains `maintenance-plan/2` and
+`maintenance-policy/1`; the current schema now includes canonical pairwise
+contradiction edges. The stable artifact schemas remain
+`memzoi/maintenance-request` and `memzoi/maintenance-plan`. Memzoi is pre-1.0
+and current-schema-only: artifacts that do not match the current schema are
+rejected and must be regenerated. There is no compatibility
 reader, schema fallback, deprecated field alias, or SQLite migration. An old
-runtime database must be manually removed and regenerated before these commands
-can open it.
+runtime database must be manually upgraded or removed before these commands can
+open it.
 
 ## Owner-authorized private lifecycle
 
 Private lifecycle work is local CLI/core only and follows
 `plan → exact owner request → one-shot grant → atomic apply → idempotent result`:
+
+Separately, `memzoi lifecycle maintenance enable|disable|inspect|reconcile`
+manages standing authority for derived automatic-recall suppression. The
+projection is rebuildable and content-free, has explicit
+`disabled|current|dirty|blocked` state, and fails automatic private recall
+closed unless it is disabled or current for the authoritative generation.
+Inspection reports an otherwise-current projection as `stale` at its persisted
+`not_after`; audited private reads reconcile it before recall, while immutable
+reads remain non-mutating and fail closed.
+This authority never reuses an `owner_action_grant` and never resolves a
+contradiction or selects a winner.
 
 Start by inspecting the target. This shell-safe template uses a quoted variable
 instead of angle-bracket syntax that a shell would interpret as redirection:
@@ -1012,7 +1029,7 @@ JSON status values:
 
 `search_memory`, `inspect_memory_expiry`, and `build_context_pack` are
 repository-only at the MCP boundary. `include_local` and `include_session` are
-not accepted MCP arguments. `plan_maintenance` emits maintenance v2 evidence
+not accepted MCP arguments. `plan_maintenance` emits current-schema maintenance evidence
 from repository records only; MCP exposes no private lifecycle plan, grant,
 inspection, revoke, or apply capability.
 

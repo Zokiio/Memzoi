@@ -109,6 +109,7 @@ crates/memzoi-core/src/service/import_origin_journal.rs|OpenOptions::constructor
 crates/memzoi-core/src/service/import_origin_journal.rs|.write_all|1
 crates/memzoi-core/src/service/import_origin_journal.rs|open-write-mode|2
 crates/memzoi-core/src/service/private_lifecycle.rs|fs::create_dir|1
+crates/memzoi-core/src/service/private_maintenance.rs|fs::create_dir|1
 crates/memzoi-core/src/service/proposal_packets/tests.rs|fs::write|10
 crates/memzoi-core/src/service/proposal_packets/tests.rs|fs::rename|2
 crates/memzoi-core/src/service/proposal_packets/tests.rs|fs::remove_file|5
@@ -131,7 +132,7 @@ crates/memzoi-core/src/service/session_end_route_apply/journal.rs|open-write-mod
 crates/memzoi-core/src/service/session_end_route_apply/tests.rs|fs::create_dir|1
 crates/memzoi-core/src/service/session_end_route_apply/tests.rs|File::options|1
 crates/memzoi-core/src/service/session_end_route_apply/tests.rs|open-write-mode|2
-crates/memzoi-core/src/service/shared_runtime.rs|fs::write|3
+crates/memzoi-core/src/service/shared_runtime.rs|fs::write|4
 crates/memzoi-core/src/service/shared_runtime.rs|fs::rename|1
 crates/memzoi-core/src/service/shared_runtime.rs|fs::remove_file|2
 crates/memzoi-core/src/service/shared_runtime.rs|fs::create_dir_all|5
