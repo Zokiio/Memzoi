@@ -7,6 +7,7 @@ use crate::models::{MemoryLane, MemoryStatus};
 
 pub const SQL_RETENTION_STATE: &str = "memzoi_retention_state";
 pub const SQL_PRIVATE_CURRENT_ASSERTION: &str = "memzoi_private_current_assertion";
+pub(crate) const SQL_TIMESTAMP_BEFORE: &str = "memzoi_timestamp_before";
 
 const SESSION_INACTIVITY_HOURS: i64 = 24;
 const SESSION_MAXIMUM_DAYS: i64 = 7;
@@ -415,12 +416,34 @@ pub(crate) fn current_assertion_sql(table_alias: &str, evaluated_at_parameter: &
     let base = base_current_assertion_sql(table_alias, evaluated_at_parameter);
     let other_base = base_current_assertion_sql("conflict_other_record", evaluated_at_parameter);
     let policy_version = crate::MAINTENANCE_POLICY_VERSION;
+    let timestamp_before = SQL_TIMESTAMP_BEFORE;
     format!(
-        "({base})\n         AND (\n           {table_alias}.destination = 'repo'\n           OR (\n             EXISTS (\n               SELECT 1\n               FROM private_maintenance_projection AS recall_projection\n               CROSS JOIN private_lifecycle_generation AS recall_generation\n               WHERE recall_projection.singleton = 1\n                 AND recall_generation.singleton = 1\n                 AND (\n                   recall_projection.state = 'disabled'\n                   OR (\n                     recall_projection.state = 'current'\n                     AND recall_projection.authoritative_generation = recall_generation.generation\n                     AND recall_projection.policy_version = '{policy_version}'\n                     AND {evaluated_at_parameter} < recall_projection.not_after\n                   )\n                 )\n             )\n             AND NOT EXISTS (\n               SELECT 1\n               FROM private_maintenance_projection AS conflict_projection\n               JOIN private_conflict_set AS conflict_set\n                 ON conflict_set.projection_id = conflict_projection.projection_id\n                AND conflict_set.grant_fingerprint = conflict_projection.grant_fingerprint\n                AND conflict_set.policy_version = conflict_projection.policy_version\n               JOIN private_conflict_edge AS conflict_edge\n                 ON conflict_edge.conflict_id = conflict_set.conflict_id\n               JOIN private_conflict_member AS conflict_self\n                 ON conflict_self.conflict_id = conflict_set.conflict_id\n                AND conflict_self.record_id = {table_alias}.id\n               JOIN private_lifecycle_state AS conflict_self_lifecycle\n                 ON conflict_self_lifecycle.record_id = conflict_self.record_id\n                AND conflict_self_lifecycle.record_version = conflict_self.record_version\n               JOIN private_conflict_member AS conflict_other\n                 ON conflict_other.conflict_id = conflict_set.conflict_id\n                AND conflict_other.record_id = CASE\n                  WHEN conflict_edge.left_record_id = {table_alias}.id\n                    THEN conflict_edge.right_record_id\n                  ELSE conflict_edge.left_record_id\n                END\n               JOIN memory_record AS conflict_other_record\n                 ON conflict_other_record.id = conflict_other.record_id\n               JOIN private_lifecycle_state AS conflict_other_lifecycle\n                 ON conflict_other_lifecycle.record_id = conflict_other.record_id\n                AND conflict_other_lifecycle.record_version = conflict_other.record_version\n               CROSS JOIN private_lifecycle_generation AS conflict_generation\n               WHERE conflict_projection.singleton = 1\n                 AND conflict_generation.singleton = 1\n                 AND conflict_projection.state = 'current'\n                 AND conflict_projection.authoritative_generation = conflict_generation.generation\n                 AND conflict_projection.policy_version = '{policy_version}'\n                 AND {evaluated_at_parameter} < conflict_projection.not_after\n                 AND (\n                   conflict_edge.left_record_id = {table_alias}.id\n                   OR conflict_edge.right_record_id = {table_alias}.id\n                 )\n                 AND ({other_base})\n             )\n           )\n         )"
+        "({base})\n         AND (\n           {table_alias}.destination = 'repo'\n           OR (\n             EXISTS (\n               SELECT 1\n               FROM private_maintenance_projection AS recall_projection\n               CROSS JOIN private_lifecycle_generation AS recall_generation\n               WHERE recall_projection.singleton = 1\n                 AND recall_generation.singleton = 1\n                 AND (\n                   recall_projection.state = 'disabled'\n                   OR (\n                     recall_projection.state = 'current'\n                     AND recall_projection.authoritative_generation = recall_generation.generation\n                     AND recall_projection.policy_version = '{policy_version}'\n                     AND {timestamp_before}({evaluated_at_parameter}, recall_projection.not_after) = 1\n                   )\n                 )\n             )\n             AND NOT EXISTS (\n               SELECT 1\n               FROM private_maintenance_projection AS conflict_projection\n               JOIN private_conflict_set AS conflict_set\n                 ON conflict_set.projection_id = conflict_projection.projection_id\n                AND conflict_set.grant_fingerprint = conflict_projection.grant_fingerprint\n                AND conflict_set.policy_version = conflict_projection.policy_version\n               JOIN private_conflict_edge AS conflict_edge\n                 ON conflict_edge.conflict_id = conflict_set.conflict_id\n               JOIN private_conflict_member AS conflict_self\n                 ON conflict_self.conflict_id = conflict_set.conflict_id\n                AND conflict_self.record_id = {table_alias}.id\n               JOIN private_lifecycle_state AS conflict_self_lifecycle\n                 ON conflict_self_lifecycle.record_id = conflict_self.record_id\n                AND conflict_self_lifecycle.record_version = conflict_self.record_version\n               JOIN private_conflict_member AS conflict_other\n                 ON conflict_other.conflict_id = conflict_set.conflict_id\n                AND conflict_other.record_id = CASE\n                  WHEN conflict_edge.left_record_id = {table_alias}.id\n                    THEN conflict_edge.right_record_id\n                  ELSE conflict_edge.left_record_id\n                END\n               JOIN memory_record AS conflict_other_record\n                 ON conflict_other_record.id = conflict_other.record_id\n               JOIN private_lifecycle_state AS conflict_other_lifecycle\n                 ON conflict_other_lifecycle.record_id = conflict_other.record_id\n                AND conflict_other_lifecycle.record_version = conflict_other.record_version\n               CROSS JOIN private_lifecycle_generation AS conflict_generation\n               WHERE conflict_projection.singleton = 1\n                 AND conflict_generation.singleton = 1\n                 AND conflict_projection.state = 'current'\n                 AND conflict_projection.authoritative_generation = conflict_generation.generation\n                 AND conflict_projection.policy_version = '{policy_version}'\n                 AND {timestamp_before}({evaluated_at_parameter}, conflict_projection.not_after) = 1\n                 AND (\n                   conflict_edge.left_record_id = {table_alias}.id\n                   OR conflict_edge.right_record_id = {table_alias}.id\n                 )\n                 AND ({other_base})\n             )\n           )\n         )"
     )
 }
 
 pub(crate) fn register_sqlite_functions(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        SQL_TIMESTAMP_BEFORE,
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let left = context.get::<Option<String>>(0)?;
+            let right = context.get::<Option<String>>(1)?;
+            let result = (|| -> Result<bool> {
+                let (Some(left), Some(right)) = (left.as_deref(), right.as_deref()) else {
+                    return Ok(false);
+                };
+                Ok(parse_timestamp(left, "left timestamp")?
+                    < parse_timestamp(right, "right timestamp")?)
+            })();
+            result.map(i64::from).map_err(|error| {
+                rusqlite::Error::UserFunctionError(
+                    anyhow::anyhow!("timestamp comparison failed: {error:#}").into(),
+                )
+            })
+        },
+    )?;
     conn.create_scalar_function(
         SQL_RETENTION_STATE,
         4,
@@ -1099,6 +1122,29 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_timestamp_comparison_orders_fractional_rfc3339_instants_chronologically() -> Result<()>
+    {
+        let conn = Connection::open_in_memory()?;
+        register_sqlite_functions(&conn)?;
+        let before = |left: &str, right: &str| -> Result<bool> {
+            Ok(conn.query_row(
+                "SELECT memzoi_timestamp_before(?1, ?2)",
+                rusqlite::params![left, right],
+                |row| row.get(0),
+            )?)
+        };
+        assert!(before("2026-07-20T12:00:00Z", "2026-07-20T12:00:00.5Z")?);
+        assert!(!before("2026-07-20T12:00:00.5Z", "2026-07-20T12:00:00Z")?);
+        assert!(before("2026-07-20T12:00:00.5Z", "2026-07-20T12:00:00.51Z")?);
+        assert!(!before(
+            "2026-07-20T12:00:00.51Z",
+            "2026-07-20T12:00:00.5Z"
+        )?);
+        assert!(!before("2026-07-20T12:00:00Z", "2026-07-20T12:00:00Z")?);
+        Ok(())
+    }
+
+    #[test]
     fn central_sql_requires_private_state_and_enforces_quarantine_and_validity() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         register_sqlite_functions(&conn)?;
@@ -1211,6 +1257,29 @@ mod tests {
             vec!["private-current".to_owned(), "repo-current".to_owned()],
             "a fabricated lifecycle event ID must fail closed"
         );
+        conn.execute(
+            "UPDATE private_maintenance_projection
+             SET state = 'current', not_after = '2026-02-01T00:00:00.5Z'",
+            [],
+        )?;
+        assert_eq!(
+            eligible("2026-02-01T00:00:00Z")?,
+            vec!["private-current".to_owned(), "repo-current".to_owned()]
+        );
+        assert_eq!(
+            eligible("2026-02-01T00:00:00.5Z")?,
+            vec!["repo-current".to_owned()],
+            "the fractional projection boundary is exclusive"
+        );
+        assert_eq!(
+            eligible("2026-02-01T00:00:00.51Z")?,
+            vec!["repo-current".to_owned()],
+            "an expired fractional projection must fail closed"
+        );
+        conn.execute(
+            "UPDATE private_maintenance_projection SET state = 'disabled', not_after = NULL",
+            [],
+        )?;
         conn.execute(
             "INSERT INTO event_log(id, event_type, payload_json)
              VALUES (

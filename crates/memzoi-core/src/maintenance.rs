@@ -935,7 +935,7 @@ fn plan_private_maintenance_inner(
         // The private artifact exposes only identities derived from the opaque
         // record ID and random version token, preventing dictionary tests
         // against private titles, bodies, or evidence.
-        let duplicate_claim_digest = private_duplicate_claim_digest(&record)?;
+        let duplicate_claim_digest = private_duplicate_claim_digest(&record, &applicability_paths)?;
         let renewal_claim_digest = private_renewal_claim_digest(&record)?;
         let opaque_content_identity = identity(
             "memzoi/maintenance/private-content",
@@ -1569,37 +1569,15 @@ fn detect_private_contradictions(
 ) -> Result<()> {
     let candidates = loaded
         .iter()
-        .filter_map(|record| {
-            (record.snapshot.current_assertion
-                && matches!(
-                    record.record.lane,
-                    MemoryLane::Semantic | MemoryLane::Procedural
-                )
-                && claim_bearing_type(record.record.memory_type)
-                && !contains_conditional_or_temporal_language(&record.record.body))
-            .then(|| polarity_signature(&record.record.body).map(|value| (record, value)))
-            .flatten()
+        .filter(|record| {
+            record.snapshot.current_assertion && private_contradiction_candidate(&record.record)
         })
         .collect::<Vec<_>>();
-    let mut adjacency = vec![BTreeSet::<usize>::new(); candidates.len()];
-    let mut pair_comparisons = 0_usize;
-    for left_index in 0..candidates.len() {
-        for right_index in (left_index + 1)..candidates.len() {
-            consume_pair_work(&mut pair_comparisons, None)?;
-            let (left, (left_signature, left_negative)) = &candidates[left_index];
-            let (right, (right_signature, right_negative)) = &candidates[right_index];
-            if left_signature != right_signature
-                || left_negative == right_negative
-                || !same_private_claim_context(&left.record, &right.record)
-                || !paths_overlap(&left.applicability_paths, &right.applicability_paths)
-                || private_records_are_temporally_related(&left.record, &right.record)
-            {
-                continue;
-            }
-            adjacency[left_index].insert(right_index);
-            adjacency[right_index].insert(left_index);
-        }
-    }
+    let graph_inputs = candidates
+        .iter()
+        .map(|candidate| (&candidate.record, candidate.applicability_paths.as_slice()))
+        .collect::<Vec<_>>();
+    let adjacency = private_contradiction_adjacency(&graph_inputs)?;
     let mut visited = vec![false; candidates.len()];
     for start in 0..candidates.len() {
         if visited[start] || adjacency[start].is_empty() {
@@ -1623,7 +1601,7 @@ fn detect_private_contradictions(
         component.sort_unstable();
         let group = component
             .iter()
-            .map(|index| candidates[*index].0)
+            .map(|index| candidates[*index])
             .collect::<Vec<_>>();
         let record_ids = group
             .iter()
@@ -1652,7 +1630,7 @@ fn detect_private_contradictions(
                 if component.binary_search(&right_index).is_err() {
                     continue;
                 }
-                let pair = [candidates[left_index].0, candidates[right_index].0];
+                let pair = [candidates[left_index], candidates[right_index]];
                 conflict_edges.push(MaintenanceConflictEdge {
                     record_ids: canonical_private_conflict_record_ids(
                         &pair[0].snapshot.record_id,
@@ -1963,6 +1941,44 @@ fn private_renewal_eligible(record: &PrivateLoadedRecord) -> bool {
         && claim_bearing_type(record.record.memory_type)
 }
 
+pub(crate) fn private_contradiction_candidate(record: &MemoryRecord) -> bool {
+    matches!(record.lane, MemoryLane::Semantic | MemoryLane::Procedural)
+        && claim_bearing_type(record.memory_type)
+        && !contains_conditional_or_temporal_language(&record.body)
+        && polarity_signature(&record.body).is_some()
+}
+
+pub(crate) fn private_contradiction_adjacency(
+    candidates: &[(&MemoryRecord, &[String])],
+) -> Result<Vec<BTreeSet<usize>>> {
+    let mut adjacency = vec![BTreeSet::<usize>::new(); candidates.len()];
+    let mut pair_comparisons = 0_usize;
+    for left_index in 0..candidates.len() {
+        for right_index in (left_index + 1)..candidates.len() {
+            consume_pair_work(&mut pair_comparisons, None)?;
+            let (left, left_paths) = candidates[left_index];
+            let (right, right_paths) = candidates[right_index];
+            let Some((left_signature, left_negative)) = polarity_signature(&left.body) else {
+                continue;
+            };
+            let Some((right_signature, right_negative)) = polarity_signature(&right.body) else {
+                continue;
+            };
+            if left_signature != right_signature
+                || left_negative == right_negative
+                || !same_private_claim_context(left, right)
+                || !paths_overlap(left_paths, right_paths)
+                || private_records_are_temporally_related(left, right)
+            {
+                continue;
+            }
+            adjacency[left_index].insert(right_index);
+            adjacency[right_index].insert(left_index);
+        }
+    }
+    Ok(adjacency)
+}
+
 fn same_private_claim_context(left: &MemoryRecord, right: &MemoryRecord) -> bool {
     left.memory_type == right.memory_type
         && left.lane == right.lane
@@ -1993,7 +2009,10 @@ fn private_records_are_temporally_related(left: &MemoryRecord, right: &MemoryRec
             .is_some_and(|lineage| lineage.predecessor_id == left.id)
 }
 
-fn private_duplicate_claim_digest(record: &MemoryRecord) -> Result<String> {
+fn private_duplicate_claim_digest(
+    record: &MemoryRecord,
+    applicability_paths: &[String],
+) -> Result<String> {
     identity(
         "memzoi/maintenance/duplicate-claim",
         &serde_json::json!({
@@ -2007,6 +2026,7 @@ fn private_duplicate_claim_digest(record: &MemoryRecord) -> Result<String> {
             "body": record.body.trim(),
             "confidence": record.confidence,
             "retention": record.retention,
+            "applicability_paths": applicability_paths,
         }),
     )
 }
@@ -3705,7 +3725,7 @@ mod tests {
         let private_body = "PRIVATE_DUPLICATE_BODY_SENTINEL must remain private.";
         let probe = private_record("private-duplicate-a", "Private duplicate", private_body);
         let raw_content_digest = identity("memzoi/maintenance/content", &probe.body)?;
-        let raw_claim_digest = private_duplicate_claim_digest(&probe)?;
+        let raw_claim_digest = private_duplicate_claim_digest(&probe, &[])?;
         let left = private_input(probe, 'a');
         let right = private_input(
             private_record("private-duplicate-b", "Private duplicate", private_body),
@@ -3846,6 +3866,45 @@ mod tests {
             canonical_private_conflict_record_ids("private-z", "private-a"),
             ["private-a".to_owned(), "private-z".to_owned()]
         );
+    }
+
+    #[test]
+    fn private_exact_duplicates_require_equal_applicability_paths() -> Result<()> {
+        let mut frontend = private_input(
+            private_record(
+                "private-path-duplicate-a",
+                "Private path duplicate",
+                "Authentication uses the configured provider.",
+            ),
+            'a',
+        );
+        frontend.applicability_paths = vec!["frontend/**".to_owned()];
+        let mut backend = private_input(
+            private_record(
+                "private-path-duplicate-b",
+                "Private path duplicate",
+                "Authentication uses the configured provider.",
+            ),
+            'b',
+        );
+        backend.applicability_paths = vec!["backend/**".to_owned()];
+        let plan = plan_private_maintenance_at(
+            identity_fixture('8'),
+            MaintenancePlanRequest {
+                schema: MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+                evaluated_at: Some("2026-07-18T12:00:00Z".to_owned()),
+                record_ids: Vec::new(),
+            },
+            vec![frontend, backend],
+            parse_timestamp("2026-07-18T12:00:00Z", "test")?,
+        )?;
+        assert_eq!(plan.summary.exact_duplicates, 0);
+        assert!(!plan.action_groups.iter().any(|group| {
+            group.actions.iter().any(|action| {
+                action.class == MaintenanceActionClass::OwnerConsolidateExactDuplicates
+            })
+        }));
+        Ok(())
     }
 
     #[test]

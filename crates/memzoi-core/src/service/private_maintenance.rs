@@ -655,7 +655,7 @@ pub(super) fn conflict_participation(
            AND projection.state = 'current'
            AND projection.authoritative_generation = generation.generation
            AND projection.policy_version = ?3
-           AND ?2 < projection.not_after
+           AND memzoi_timestamp_before(?2, projection.not_after) = 1
            AND (edge.left_record_id = ?1 OR edge.right_record_id = ?1)
          ORDER BY conflict.conflict_id, edge.left_record_id, edge.right_record_id",
     )?;
