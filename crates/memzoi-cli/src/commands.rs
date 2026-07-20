@@ -28,8 +28,8 @@ use crate::{
     cli::{
         CaptureCommands, CheckpointCommands, Cli, Commands, DraftCommand, EvalCommands,
         EventCommands, ImportCommands, IntegrateCommands, LifecycleCommands,
-        LifecycleInspectCommands, LocalCommands, MaintenanceCommands, MaterializeCommands,
-        McpCommands, ProposalCommands, ProposalFileCommands, SafetyCommands,
+        LifecycleInspectCommands, LifecycleMaintenanceCommands, LocalCommands, MaintenanceCommands,
+        MaterializeCommands, McpCommands, ProposalCommands, ProposalFileCommands, SafetyCommands,
     },
     eval, integrate, mcp,
     output::{print_json, print_jsonl_row},
@@ -775,6 +775,20 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             } => maintenance::plan_command(record_ids, evaluated_at, output, json),
         },
         Commands::Lifecycle { command } => match command {
+            LifecycleCommands::Maintenance { command } => match command {
+                LifecycleMaintenanceCommands::Enable { json } => {
+                    lifecycle::maintenance_enable_command(json)
+                }
+                LifecycleMaintenanceCommands::Disable { json } => {
+                    lifecycle::maintenance_disable_command(json)
+                }
+                LifecycleMaintenanceCommands::Inspect { json } => {
+                    lifecycle::maintenance_inspect_command(json)
+                }
+                LifecycleMaintenanceCommands::Reconcile { json } => {
+                    lifecycle::maintenance_reconcile_command(json)
+                }
+            },
             LifecycleCommands::Plan {
                 record_ids,
                 evaluated_at,

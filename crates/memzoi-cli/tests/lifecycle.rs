@@ -147,10 +147,25 @@ fn lifecycle_help_exposes_the_exact_owner_authority_flow() {
     let mut lifecycle = fixture.command();
     let lifecycle = lifecycle.args(["lifecycle", "--help"]).assert().success();
     let lifecycle = String::from_utf8_lossy(&lifecycle.get_output().stdout);
-    for command in ["plan", "authorize", "revoke", "inspect", "apply"] {
+    for command in [
+        "maintenance",
+        "plan",
+        "authorize",
+        "revoke",
+        "inspect",
+        "apply",
+    ] {
         assert!(
             lifecycle.contains(command),
             "lifecycle help should expose {command}: {lifecycle}"
+        );
+    }
+
+    let maintenance = fixture.success_stdout(&["lifecycle", "maintenance", "--help"]);
+    for command in ["enable", "disable", "inspect", "reconcile"] {
+        assert!(
+            maintenance.contains(command),
+            "lifecycle maintenance help should expose {command}: {maintenance}"
         );
     }
 
@@ -201,6 +216,39 @@ fn lifecycle_help_exposes_the_exact_owner_authority_flow() {
     assert!(
         apply.contains("secure regular-file reads currently require Unix"),
         "apply help must disclose its artifact platform boundary: {apply}"
+    );
+}
+
+#[test]
+fn standing_private_maintenance_cli_suppresses_and_atomically_disables() {
+    let fixture = LifecycleFixture::new();
+    let first = fixture.add_private_record("Private conflict", "Authentication is required.");
+    fixture.add_private_record("Private conflict", "Authentication is not required.");
+
+    let enabled = fixture.run_json(&["lifecycle", "maintenance", "enable", "--json"]);
+    assert_eq!(enabled["outcome"], "enabled");
+    assert_eq!(enabled["projection"]["state"], "current");
+    assert_eq!(enabled["projection"]["member_count"], 2);
+    assert_eq!(enabled["projection"]["edge_count"], 1);
+
+    let record = fixture.inspect_record(&first);
+    assert_eq!(record["base_eligibility"]["is_current"], true);
+    assert_eq!(
+        record["effective_automatic_recall_eligibility"]["is_current"],
+        false
+    );
+    assert_eq!(record["conflicts"].as_array().map(Vec::len), Some(1));
+
+    let reconciled = fixture.run_json(&["lifecycle", "maintenance", "reconcile", "--json"]);
+    assert_eq!(reconciled["projection"]["state"], "current");
+    assert_eq!(reconciled["projection"]["edge_count"], 1);
+
+    let disabled = fixture.run_json(&["lifecycle", "maintenance", "disable", "--json"]);
+    assert_eq!(disabled["projection"]["state"], "disabled");
+    let record = fixture.inspect_record(&first);
+    assert_eq!(
+        record["effective_automatic_recall_eligibility"]["is_current"],
+        true
     );
 }
 
@@ -1327,6 +1375,11 @@ fn authority_storage_snapshot(paths: &MemoryPaths) -> AuthorityStorageSnapshot {
         "private_lifecycle_state",
         "private_lifecycle_relation",
         "private_lifecycle_application",
+        "private_maintenance_grant",
+        "private_maintenance_projection",
+        "private_conflict_set",
+        "private_conflict_member",
+        "private_conflict_edge",
         "read_audit",
     ];
 

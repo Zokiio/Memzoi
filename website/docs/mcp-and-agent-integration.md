@@ -146,8 +146,9 @@ the plan identity, validity times, and aggregate finding/action counts.
 
 The current contract is `maintenance-plan/2`; the stable request and plan
 schema identifiers remain `memzoi/maintenance-request` and
-`memzoi/maintenance-plan`. Pre-1.0 is current-schema-only: v1 artifacts are
-rejected and must be regenerated, with no alias or compatibility reader.
+`memzoi/maintenance-plan`. Pre-1.0 is current-schema-only: artifacts that do not
+match the current schema are rejected and must be regenerated, with no alias or
+compatibility reader.
 
 Planning has a 60-second deadline and supports MCP request cancellation. Success,
 failure, timeout, and cancellation write no records, proposals, indexes,

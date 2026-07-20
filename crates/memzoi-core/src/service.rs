@@ -42,6 +42,7 @@ mod import_lifecycle;
 mod import_origin_journal;
 mod materialization;
 mod private_lifecycle;
+mod private_maintenance;
 mod proposal_packets;
 mod repository_mutation;
 mod runtime_records;

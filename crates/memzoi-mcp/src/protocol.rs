@@ -1230,6 +1230,26 @@ fn maintenance_evidence_output_schema() -> Value {
     )
 }
 
+fn maintenance_conflict_edge_output_schema() -> Value {
+    maintenance_closed_object(
+        vec![
+            (
+                "record_ids",
+                json!({
+                    "type": "array",
+                    "items": maintenance_record_id_schema(),
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "uniqueItems": true
+                }),
+            ),
+            ("evidence_digest", maintenance_identity_schema()),
+            ("reason_code", maintenance_nonempty_string_schema()),
+        ],
+        &["record_ids", "evidence_digest", "reason_code"],
+    )
+}
+
 fn maintenance_finding_output_schema() -> Value {
     maintenance_closed_object(
         vec![
@@ -1245,6 +1265,10 @@ fn maintenance_finding_output_schema() -> Value {
                 "confidence",
                 maintenance_enum_schema(&["exact", "high", "report_only"]),
             ),
+            (
+                "conflict_edges",
+                maintenance_array_schema(maintenance_conflict_edge_output_schema()),
+            ),
             ("proposed_action_ids", maintenance_identity_array_schema()),
         ],
         &[
@@ -1254,6 +1278,7 @@ fn maintenance_finding_output_schema() -> Value {
             "comparison_set_digest",
             "evidence",
             "confidence",
+            "conflict_edges",
             "proposed_action_ids",
         ],
     )

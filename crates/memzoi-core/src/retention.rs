@@ -402,9 +402,20 @@ fn extended_validity_boundary(
 /// Every SQL-backed recall, admission, duplicate, and conflict route must use
 /// this complete boundary rather than composing status and retention clauses
 /// independently. Later lifecycle policies can extend this one builder.
-pub(crate) fn current_assertion_sql(table_alias: &str, evaluated_at_parameter: &str) -> String {
+fn base_current_assertion_sql(table_alias: &str, evaluated_at_parameter: &str) -> String {
     format!(
         "{table_alias}.status = 'active'\n         AND CASE\n               WHEN {table_alias}.destination = 'repo' THEN\n                 memzoi_retention_state(\n                   {table_alias}.id,\n                   {table_alias}.lane,\n                   {table_alias}.retention_json,\n                   {evaluated_at_parameter}\n                 ) = 'current'\n               WHEN {table_alias}.destination IN ('local', 'session') THEN EXISTS (\n                 SELECT 1\n                 FROM private_lifecycle_state AS private_lifecycle\n                 WHERE private_lifecycle.record_id = {table_alias}.id\n                   AND (\n                     private_lifecycle.automatic_recall_until IS NULL\n                     OR EXISTS (\n                       SELECT 1 FROM event_log AS recall_authority\n                       WHERE recall_authority.id = private_lifecycle.automatic_recall_event_id\n                         AND recall_authority.event_type = 'memory.private_lifecycle_applied'\n                         AND EXISTS (\n                           SELECT 1\n                           FROM json_each(recall_authority.payload_json, '$.target_record_ids') AS recall_target\n                           WHERE recall_target.type = 'text'\n                             AND recall_target.value = {table_alias}.id\n                         )\n                         AND EXISTS (\n                           SELECT 1\n                           FROM json_each(recall_authority.payload_json, '$.action_kinds') AS recall_action\n                           WHERE recall_action.type = 'text'\n                             AND recall_action.value IN ('extend_automatic_recall', 'correct')\n                         )\n                     )\n                   )\n                   AND (\n                     private_lifecycle.validity_until IS NULL\n                     OR EXISTS (\n                       SELECT 1 FROM event_log AS validity_authority\n                       WHERE validity_authority.id = private_lifecycle.validity_event_id\n                         AND validity_authority.event_type = 'memory.private_lifecycle_applied'\n                         AND EXISTS (\n                           SELECT 1\n                           FROM json_each(validity_authority.payload_json, '$.target_record_ids') AS validity_target\n                           WHERE validity_target.type = 'text'\n                             AND validity_target.value = {table_alias}.id\n                         )\n                         AND EXISTS (\n                           SELECT 1\n                           FROM json_each(validity_authority.payload_json, '$.action_kinds') AS validity_action\n                           WHERE validity_action.type = 'text'\n                             AND validity_action.value IN ('extend_validity', 'correct')\n                         )\n                     )\n                   )\n                   AND (\n                     private_lifecycle.quarantined = 0\n                     OR EXISTS (\n                       SELECT 1 FROM event_log AS quarantine_authority\n                       WHERE quarantine_authority.id = private_lifecycle.quarantine_event_id\n                         AND quarantine_authority.event_type = 'memory.private_lifecycle_applied'\n                         AND EXISTS (\n                           SELECT 1\n                           FROM json_each(quarantine_authority.payload_json, '$.target_record_ids') AS quarantine_target\n                           WHERE quarantine_target.type = 'text'\n                             AND quarantine_target.value = {table_alias}.id\n                         )\n                         AND EXISTS (\n                           SELECT 1\n                           FROM json_each(quarantine_authority.payload_json, '$.action_kinds') AS quarantine_action\n                           WHERE quarantine_action.type = 'text'\n                             AND quarantine_action.value IN ('quarantine', 'correct')\n                         )\n                     )\n                   )\n                   AND memzoi_private_current_assertion(\n                         {table_alias}.id,\n                         {table_alias}.lane,\n                         {table_alias}.retention_json,\n                         private_lifecycle.automatic_recall_until,\n                         private_lifecycle.validity_until,\n                         private_lifecycle.automatic_recall_event_id,\n                         private_lifecycle.validity_event_id,\n                         private_lifecycle.quarantined,\n                         private_lifecycle.quarantine_reason_code,\n                         {evaluated_at_parameter}\n                       ) = 1\n               )\n               ELSE 0\n             END"
+    )
+}
+
+/// Build effective ordinary-use eligibility from the stable base decision and
+/// the current derived conflict projection. Reconciliation deliberately calls
+/// the base evaluator above, so suppression can never erase its own evidence.
+pub(crate) fn current_assertion_sql(table_alias: &str, evaluated_at_parameter: &str) -> String {
+    let base = base_current_assertion_sql(table_alias, evaluated_at_parameter);
+    let other_base = base_current_assertion_sql("conflict_other_record", evaluated_at_parameter);
+    format!(
+        "({base})\n         AND (\n           {table_alias}.destination = 'repo'\n           OR (\n             EXISTS (\n               SELECT 1\n               FROM private_maintenance_projection AS recall_projection\n               CROSS JOIN private_lifecycle_generation AS recall_generation\n               WHERE recall_projection.singleton = 1\n                 AND recall_generation.singleton = 1\n                 AND (\n                   recall_projection.state = 'disabled'\n                   OR (\n                     recall_projection.state = 'current'\n                     AND recall_projection.authoritative_generation = recall_generation.generation\n                     AND recall_projection.policy_version = 'maintenance-policy/1'\n                   )\n                 )\n             )\n             AND NOT EXISTS (\n               SELECT 1\n               FROM private_maintenance_projection AS conflict_projection\n               JOIN private_conflict_set AS conflict_set\n                 ON conflict_set.projection_id = conflict_projection.projection_id\n                AND conflict_set.grant_fingerprint = conflict_projection.grant_fingerprint\n                AND conflict_set.policy_version = conflict_projection.policy_version\n               JOIN private_conflict_edge AS conflict_edge\n                 ON conflict_edge.conflict_id = conflict_set.conflict_id\n               JOIN private_conflict_member AS conflict_self\n                 ON conflict_self.conflict_id = conflict_set.conflict_id\n                AND conflict_self.record_id = {table_alias}.id\n               JOIN private_lifecycle_state AS conflict_self_lifecycle\n                 ON conflict_self_lifecycle.record_id = conflict_self.record_id\n                AND conflict_self_lifecycle.record_version = conflict_self.record_version\n               JOIN private_conflict_member AS conflict_other\n                 ON conflict_other.conflict_id = conflict_set.conflict_id\n                AND conflict_other.record_id = CASE\n                  WHEN conflict_edge.left_record_id = {table_alias}.id\n                    THEN conflict_edge.right_record_id\n                  ELSE conflict_edge.left_record_id\n                END\n               JOIN memory_record AS conflict_other_record\n                 ON conflict_other_record.id = conflict_other.record_id\n               JOIN private_lifecycle_state AS conflict_other_lifecycle\n                 ON conflict_other_lifecycle.record_id = conflict_other.record_id\n                AND conflict_other_lifecycle.record_version = conflict_other.record_version\n               CROSS JOIN private_lifecycle_generation AS conflict_generation\n               WHERE conflict_projection.singleton = 1\n                 AND conflict_generation.singleton = 1\n                 AND conflict_projection.state = 'current'\n                 AND conflict_projection.authoritative_generation = conflict_generation.generation\n                 AND conflict_projection.policy_version = 'maintenance-policy/1'\n                 AND (\n                   conflict_edge.left_record_id = {table_alias}.id\n                   OR conflict_edge.right_record_id = {table_alias}.id\n                 )\n                 AND ({other_base})\n             )\n           )\n         )"
     )
 }
 
@@ -1100,6 +1111,7 @@ mod tests {
              );
              CREATE TABLE private_lifecycle_state (
                record_id TEXT PRIMARY KEY,
+               record_version TEXT NOT NULL DEFAULT '00000000000000000000000000000000',
                automatic_recall_until TEXT,
                validity_until TEXT,
                automatic_recall_event_id TEXT,
@@ -1112,6 +1124,39 @@ mod tests {
                id TEXT PRIMARY KEY,
                event_type TEXT NOT NULL,
                payload_json TEXT NOT NULL
+             );
+             CREATE TABLE private_lifecycle_generation (
+               singleton INTEGER PRIMARY KEY,
+               generation INTEGER NOT NULL
+             );
+             INSERT INTO private_lifecycle_generation VALUES (1, 0);
+             CREATE TABLE private_maintenance_projection (
+               singleton INTEGER PRIMARY KEY,
+               state TEXT NOT NULL,
+               grant_fingerprint TEXT,
+               projection_id TEXT,
+               authoritative_generation INTEGER NOT NULL,
+               policy_version TEXT NOT NULL
+             );
+             INSERT INTO private_maintenance_projection VALUES (
+               1, 'disabled', NULL, NULL, 0,
+               'maintenance-policy/1'
+             );
+             CREATE TABLE private_conflict_set (
+               conflict_id TEXT PRIMARY KEY,
+               projection_id TEXT NOT NULL,
+               grant_fingerprint TEXT NOT NULL,
+               policy_version TEXT NOT NULL
+             );
+             CREATE TABLE private_conflict_member (
+               conflict_id TEXT NOT NULL,
+               record_id TEXT NOT NULL,
+               record_version TEXT NOT NULL
+             );
+             CREATE TABLE private_conflict_edge (
+               conflict_id TEXT NOT NULL,
+               left_record_id TEXT NOT NULL,
+               right_record_id TEXT NOT NULL
              );",
         )?;
         let durable_expired = serde_json::to_string(&RetentionFacts {

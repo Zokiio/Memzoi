@@ -9,12 +9,14 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{MemoryPaths, db, okf, repository_io};
 
 use super::{
     canonical_write::{CanonicalFileWrite, FileWriteMode},
+    private_maintenance,
     runtime_records::{
         RuntimeRecordSnapshot, RuntimeRecords, lifecycle_generation, set_lifecycle_generation,
     },
@@ -167,6 +169,7 @@ pub(super) fn refresh_index_mirrors_locked(
     index: &Connection,
 ) -> Result<()> {
     recover_pending_shared_sync_locked(paths, shared)?;
+    private_maintenance::reconcile_if_dirty_locked(paths, shared, OffsetDateTime::now_utc())?;
     if runtime_mirror_revisions_match(shared, index)? {
         return Ok(());
     }
@@ -176,6 +179,8 @@ pub(super) fn refresh_index_mirrors_locked(
     let indexed_records = RuntimeRecords::new(index).snapshots()?;
     let shared_lifecycle_events = read_private_lifecycle_authority_events(shared)?;
     let indexed_lifecycle_events = read_private_lifecycle_authority_events(index)?;
+    let shared_maintenance = private_maintenance::mirror_snapshot(shared)?;
+    let indexed_maintenance = private_maintenance::mirror_snapshot(index)?;
     let non_runtime_ids = RuntimeRecords::new(index)
         .indexed_non_runtime_record_ids()?
         .into_iter()
@@ -223,6 +228,9 @@ pub(super) fn refresh_index_mirrors_locked(
     }
     if shared_proposals != indexed_proposals {
         replace_proposals(&tx, &shared_proposals)?;
+    }
+    if shared_maintenance != indexed_maintenance {
+        private_maintenance::replace_mirror(&tx, &shared_maintenance)?;
     }
     let current_shared_revision = runtime_mirror_revision(shared)?
         .context("shared runtime mirror revision disappeared during reconciliation")?;

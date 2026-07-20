@@ -455,6 +455,9 @@ pub struct PrivateLifecycleRecordInspection {
     pub record: crate::MemoryRecord,
     pub version: String,
     pub state: PrivateLifecycleStateSnapshot,
+    pub base_eligibility: crate::CurrentAssertionDecision,
+    pub effective_automatic_recall_eligibility: crate::CurrentAssertionDecision,
+    pub conflicts: Vec<crate::PrivateConflictParticipation>,
     pub relations: Vec<PrivateLifecycleRelationSnapshot>,
 }
 

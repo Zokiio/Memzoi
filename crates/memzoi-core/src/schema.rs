@@ -340,6 +340,85 @@ CREATE TABLE IF NOT EXISTS private_lifecycle_relation (
   UNIQUE (relation_kind, subject_record_id, related_record_id, application_id)
 );
 
+CREATE TABLE IF NOT EXISTS private_maintenance_grant (
+  grant_id TEXT PRIMARY KEY CHECK (length(trim(grant_id)) > 0 AND length(grant_id) <= 128),
+  grant_fingerprint TEXT NOT NULL UNIQUE CHECK (length(trim(grant_fingerprint)) > 0),
+  state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+  policy_version TEXT NOT NULL CHECK (length(trim(policy_version)) > 0),
+  authorized_at TEXT NOT NULL CHECK (length(trim(authorized_at)) > 0),
+  revoked_at TEXT,
+  CHECK (
+    (state = 'active' AND revoked_at IS NULL)
+    OR (state = 'revoked' AND revoked_at IS NOT NULL)
+  )
+);
+
+CREATE TABLE IF NOT EXISTS private_maintenance_projection (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  state TEXT NOT NULL CHECK (state IN ('disabled', 'current', 'dirty', 'blocked')),
+  grant_fingerprint TEXT,
+  projection_id TEXT,
+  plan_id TEXT,
+  authoritative_generation INTEGER NOT NULL CHECK (authoritative_generation >= 0),
+  policy_version TEXT NOT NULL CHECK (length(trim(policy_version)) > 0),
+  detector_digest TEXT,
+  reason_code TEXT,
+  member_count INTEGER NOT NULL DEFAULT 0 CHECK (member_count >= 0),
+  edge_count INTEGER NOT NULL DEFAULT 0 CHECK (edge_count >= 0),
+  updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+  CHECK (
+    (state = 'disabled' AND grant_fingerprint IS NULL AND projection_id IS NULL AND plan_id IS NULL
+      AND detector_digest IS NULL AND reason_code IS NULL AND member_count = 0 AND edge_count = 0)
+    OR (state = 'current' AND grant_fingerprint IS NOT NULL AND projection_id IS NOT NULL
+      AND plan_id IS NOT NULL AND detector_digest IS NOT NULL AND reason_code IS NULL)
+    OR (state IN ('dirty', 'blocked') AND grant_fingerprint IS NOT NULL AND reason_code IS NOT NULL)
+  )
+);
+
+INSERT OR IGNORE INTO private_maintenance_projection(
+  singleton, state, authoritative_generation, policy_version,
+  updated_at
+) VALUES (
+  1, 'disabled', 0, 'maintenance-policy/1',
+  strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+);
+
+CREATE TABLE IF NOT EXISTS private_conflict_set (
+  conflict_id TEXT PRIMARY KEY CHECK (length(trim(conflict_id)) > 0),
+  projection_id TEXT NOT NULL CHECK (length(trim(projection_id)) > 0),
+  finding_id TEXT NOT NULL CHECK (length(trim(finding_id)) > 0),
+  comparison_set_digest TEXT NOT NULL CHECK (length(trim(comparison_set_digest)) > 0),
+  grant_fingerprint TEXT NOT NULL CHECK (length(trim(grant_fingerprint)) > 0),
+  detector_version TEXT NOT NULL CHECK (length(trim(detector_version)) > 0),
+  policy_version TEXT NOT NULL CHECK (length(trim(policy_version)) > 0),
+  reason_code TEXT NOT NULL CHECK (reason_code = 'high_confidence_unresolved_contradiction'),
+  resolution_state TEXT NOT NULL CHECK (resolution_state = 'unresolved'),
+  recall_effect TEXT NOT NULL CHECK (recall_effect = 'suppress_all_automatic_recall')
+);
+
+CREATE TABLE IF NOT EXISTS private_conflict_member (
+  conflict_id TEXT NOT NULL REFERENCES private_conflict_set(conflict_id) ON DELETE CASCADE,
+  record_id TEXT NOT NULL REFERENCES memory_record(id) ON DELETE CASCADE,
+  record_version TEXT NOT NULL CHECK (
+    length(record_version) = 32 AND record_version NOT GLOB '*[^0-9a-f]*'
+  ),
+  PRIMARY KEY (conflict_id, record_id)
+);
+
+CREATE TABLE IF NOT EXISTS private_conflict_edge (
+  conflict_id TEXT NOT NULL REFERENCES private_conflict_set(conflict_id) ON DELETE CASCADE,
+  left_record_id TEXT NOT NULL REFERENCES memory_record(id) ON DELETE CASCADE,
+  right_record_id TEXT NOT NULL REFERENCES memory_record(id) ON DELETE CASCADE,
+  evidence_digest TEXT NOT NULL CHECK (length(trim(evidence_digest)) > 0),
+  reason_code TEXT NOT NULL CHECK (reason_code = 'high_confidence_unresolved_contradiction'),
+  CHECK (left_record_id < right_record_id),
+  PRIMARY KEY (conflict_id, left_record_id, right_record_id),
+  FOREIGN KEY (conflict_id, left_record_id)
+    REFERENCES private_conflict_member(conflict_id, record_id) ON DELETE CASCADE,
+  FOREIGN KEY (conflict_id, right_record_id)
+    REFERENCES private_conflict_member(conflict_id, record_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS read_audit (
   id TEXT PRIMARY KEY,
   operation TEXT NOT NULL,
@@ -381,6 +460,14 @@ CREATE INDEX IF NOT EXISTS idx_private_lifecycle_relation_subject ON private_lif
 CREATE INDEX IF NOT EXISTS idx_private_lifecycle_relation_related ON private_lifecycle_relation(related_record_id, relation_kind);
 CREATE INDEX IF NOT EXISTS idx_owner_action_grant_request_state ON owner_action_grant(request_id, state, expires_at);
 CREATE INDEX IF NOT EXISTS idx_private_lifecycle_application_request ON private_lifecycle_application(request_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_private_maintenance_one_active_grant
+  ON private_maintenance_grant(state) WHERE state = 'active';
+CREATE INDEX IF NOT EXISTS idx_private_conflict_member_record
+  ON private_conflict_member(record_id, record_version);
+CREATE INDEX IF NOT EXISTS idx_private_conflict_edge_left
+  ON private_conflict_edge(left_record_id, right_record_id);
+CREATE INDEX IF NOT EXISTS idx_private_conflict_edge_right
+  ON private_conflict_edge(right_record_id, left_record_id);
 "#;
 
 const RUNTIME_MIRROR_TRIGGERS: &str = r#"
@@ -693,6 +780,124 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS runtime_mirror_proposal_ad
 AFTER DELETE ON proposal
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_maintenance_generation_dirty
+AFTER UPDATE OF generation ON private_lifecycle_generation
+WHEN NEW.generation <> OLD.generation
+  AND EXISTS (SELECT 1 FROM private_maintenance_grant WHERE state = 'active')
+BEGIN
+  UPDATE private_maintenance_projection
+  SET state = 'dirty',
+      grant_fingerprint = (
+        SELECT grant_fingerprint FROM private_maintenance_grant WHERE state = 'active'
+      ),
+      authoritative_generation = NEW.generation,
+      reason_code = 'authoritative_generation_changed',
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE singleton = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_maintenance_grant_insert_dirty
+AFTER INSERT ON private_maintenance_grant
+WHEN NEW.state = 'active'
+BEGIN
+  UPDATE private_maintenance_projection
+  SET state = 'dirty',
+      grant_fingerprint = NEW.grant_fingerprint,
+      authoritative_generation = (
+        SELECT generation FROM private_lifecycle_generation WHERE singleton = 1
+      ),
+      reason_code = 'grant_fingerprint_changed',
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE singleton = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_maintenance_grant_update_dirty
+AFTER UPDATE OF grant_fingerprint, policy_version ON private_maintenance_grant
+WHEN NEW.state = 'active'
+  AND (NEW.grant_fingerprint <> OLD.grant_fingerprint
+       OR NEW.policy_version <> OLD.policy_version)
+BEGIN
+  UPDATE private_maintenance_projection
+  SET state = 'dirty',
+      grant_fingerprint = NEW.grant_fingerprint,
+      authoritative_generation = (
+        SELECT generation FROM private_lifecycle_generation WHERE singleton = 1
+      ),
+      reason_code = 'grant_fingerprint_changed',
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE singleton = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_maintenance_grant_ai
+AFTER INSERT ON private_maintenance_grant
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_maintenance_grant_au
+AFTER UPDATE ON private_maintenance_grant
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_maintenance_grant_ad
+AFTER DELETE ON private_maintenance_grant
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_maintenance_projection_au
+AFTER UPDATE ON private_maintenance_projection
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_conflict_set_ai
+AFTER INSERT ON private_conflict_set
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_conflict_set_ad
+AFTER DELETE ON private_conflict_set
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_conflict_member_ai
+AFTER INSERT ON private_conflict_member
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_conflict_member_ad
+AFTER DELETE ON private_conflict_member
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_conflict_edge_ai
+AFTER INSERT ON private_conflict_edge
+BEGIN
+  INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
+  VALUES (1, lower(hex(randomblob(16))));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_mirror_private_conflict_edge_ad
+AFTER DELETE ON private_conflict_edge
 BEGIN
   INSERT OR REPLACE INTO runtime_mirror_state(singleton, revision)
   VALUES (1, lower(hex(randomblob(16))));

@@ -161,6 +161,7 @@ pub struct MaintenanceAuthoritySnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceAuthorityMode {
     ReportOnly,
+    AutomaticPrivateMaintenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +238,14 @@ pub struct MaintenanceEvidence {
     pub boundary: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceConflictEdge {
+    pub record_ids: [String; 2],
+    pub evidence_digest: String,
+    pub reason_code: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceFinding {
@@ -246,6 +255,7 @@ pub struct MaintenanceFinding {
     pub comparison_set_digest: String,
     pub evidence: Vec<MaintenanceEvidence>,
     pub confidence: MaintenanceConfidence,
+    pub conflict_edges: Vec<MaintenanceConflictEdge>,
     pub proposed_action_ids: Vec<String>,
 }
 
@@ -778,9 +788,51 @@ fn plan_maintenance_inner(
 /// evidence digests and is never copied into the returned artifact.
 pub fn plan_private_maintenance_at(
     runtime_fingerprint: String,
+    request: MaintenancePlanRequest,
+    inputs: Vec<PrivateMaintenanceRecordInput>,
+    fallback_now: OffsetDateTime,
+) -> Result<MaintenancePlan> {
+    plan_private_maintenance_inner(
+        runtime_fingerprint,
+        request,
+        inputs,
+        fallback_now,
+        MaintenanceAuthoritySnapshot {
+            mode: MaintenanceAuthorityMode::ReportOnly,
+            grant_fingerprint: identity("memzoi/maintenance/grant", &"report-only")?,
+        },
+    )
+}
+
+pub(crate) fn plan_private_maintenance_with_authority_at(
+    runtime_fingerprint: String,
+    request: MaintenancePlanRequest,
+    inputs: Vec<PrivateMaintenanceRecordInput>,
+    fallback_now: OffsetDateTime,
+    grant_fingerprint: String,
+) -> Result<MaintenancePlan> {
+    crate::validate_materialization_identity(
+        &grant_fingerprint,
+        "private maintenance grant fingerprint",
+    )?;
+    plan_private_maintenance_inner(
+        runtime_fingerprint,
+        request,
+        inputs,
+        fallback_now,
+        MaintenanceAuthoritySnapshot {
+            mode: MaintenanceAuthorityMode::AutomaticPrivateMaintenance,
+            grant_fingerprint,
+        },
+    )
+}
+
+fn plan_private_maintenance_inner(
+    runtime_fingerprint: String,
     mut request: MaintenancePlanRequest,
     mut inputs: Vec<PrivateMaintenanceRecordInput>,
     fallback_now: OffsetDateTime,
+    authority: MaintenanceAuthoritySnapshot,
 ) -> Result<MaintenancePlan> {
     validate_request(&request)?;
     crate::validate_materialization_identity(
@@ -940,11 +992,8 @@ pub fn plan_private_maintenance_at(
     let comparison_set_digest = comparison_digest(&records)?;
     let policy = maintenance_policy()?;
     let detectors = maintenance_detectors()?;
-    let authority = MaintenanceAuthoritySnapshot {
-        mode: MaintenanceAuthorityMode::ReportOnly,
-        grant_fingerprint: identity("memzoi/maintenance/grant", &"report-only")?,
-    };
     let mut findings = Vec::new();
+    let mut derived_actions = Vec::new();
     let mut owner_actions = Vec::new();
     detect_private_exact_duplicates(
         &loaded,
@@ -958,7 +1007,9 @@ pub fn plan_private_maintenance_at(
         &selected,
         &comparison_set_digest,
         &mut findings,
+        &mut derived_actions,
         &mut owner_actions,
+        authority.mode == MaintenanceAuthorityMode::AutomaticPrivateMaintenance,
     )?;
     detect_private_staleness(&loaded, &selected, evaluated_at, &mut findings)?;
     detect_private_expiry(&loaded, &selected, &mut findings)?;
@@ -971,13 +1022,16 @@ pub fn plan_private_maintenance_at(
         &mut owner_actions,
     )?;
     findings.sort_by(|left, right| left.finding_id.cmp(&right.finding_id));
+    derived_actions.sort_by(|left, right| left.action_id.cmp(&right.action_id));
     owner_actions.sort_by(|left, right| left.action_id.cmp(&right.action_id));
     for finding in &mut findings {
-        finding.proposed_action_ids = owner_actions
+        finding.proposed_action_ids = derived_actions
             .iter()
+            .chain(owner_actions.iter())
             .filter(|action| action.finding_id == finding.finding_id)
             .map(|action| action.action_id.clone())
             .collect();
+        finding.proposed_action_ids.sort();
     }
     let action_groups = vec![
         MaintenanceActionGroup {
@@ -986,7 +1040,7 @@ pub fn plan_private_maintenance_at(
         },
         MaintenanceActionGroup {
             kind: MaintenanceActionGroupKind::PrivateDerivedState,
-            actions: Vec::new(),
+            actions: derived_actions,
         },
         MaintenanceActionGroup {
             kind: MaintenanceActionGroupKind::OwnerAuthorizedPrivateMutation,
@@ -1209,20 +1263,37 @@ fn detect_contradictions(
             "memzoi/maintenance/contradiction-signature",
             &candidates[start].1.0,
         )?;
-        push_finding(
-            findings,
-            new_finding(
-                MaintenanceFindingKind::HighConfidenceContradiction,
-                record_ids,
-                finding_comparison_digest(&records)?,
-                vec![MaintenanceEvidence {
-                    code: "allowlisted_symmetric_polarity".to_owned(),
-                    digest: signature_digest,
-                    boundary: None,
-                }],
-                MaintenanceConfidence::High,
-            )?,
+        let mut finding = new_finding(
+            MaintenanceFindingKind::HighConfidenceContradiction,
+            record_ids,
+            finding_comparison_digest(&records)?,
+            vec![MaintenanceEvidence {
+                code: "allowlisted_symmetric_polarity".to_owned(),
+                digest: signature_digest,
+                boundary: None,
+            }],
+            MaintenanceConfidence::High,
         )?;
+        for &left_index in &component {
+            for &right_index in adjacency[left_index].range((left_index + 1)..) {
+                if component.binary_search(&right_index).is_err() {
+                    continue;
+                }
+                let mut edge_ids = [
+                    candidates[left_index].0.snapshot.record_id.clone(),
+                    candidates[right_index].0.snapshot.record_id.clone(),
+                ];
+                edge_ids.sort();
+                finding.conflict_edges.push(MaintenanceConflictEdge {
+                    evidence_digest: identity("memzoi/maintenance/contradiction-edge", &edge_ids)?,
+                    record_ids: edge_ids,
+                    reason_code: "high_confidence_unresolved_contradiction".to_owned(),
+                });
+            }
+        }
+        finding.conflict_edges.sort();
+        finding.finding_id = maintenance_finding_id(&finding)?;
+        push_finding(findings, finding)?;
     }
     Ok(())
 }
@@ -1485,7 +1556,9 @@ fn detect_private_contradictions(
     selected: &BTreeSet<String>,
     comparison_set_digest: &str,
     findings: &mut Vec<MaintenanceFinding>,
-    actions: &mut Vec<MaintenanceAction>,
+    derived_actions: &mut Vec<MaintenanceAction>,
+    owner_actions: &mut Vec<MaintenanceAction>,
+    automatic_maintenance_enabled: bool,
 ) -> Result<()> {
     let candidates = loaded
         .iter()
@@ -1565,18 +1638,63 @@ fn detect_private_contradictions(
             }],
             MaintenanceConfidence::High,
         )?;
-        let action = new_private_action(
+        let mut conflict_edges = Vec::new();
+        for &left_index in &component {
+            for &right_index in adjacency[left_index].range((left_index + 1)..) {
+                if component.binary_search(&right_index).is_err() {
+                    continue;
+                }
+                let pair = [candidates[left_index].0, candidates[right_index].0];
+                conflict_edges.push(MaintenanceConflictEdge {
+                    record_ids: [
+                        pair[0].snapshot.record_id.clone(),
+                        pair[1].snapshot.record_id.clone(),
+                    ],
+                    evidence_digest: private_artifact_digest(
+                        "allowlisted_symmetric_polarity_edge",
+                        &pair,
+                    )?,
+                    reason_code: "high_confidence_unresolved_contradiction".to_owned(),
+                });
+            }
+        }
+        conflict_edges.sort();
+        ensure!(
+            !conflict_edges.is_empty(),
+            "private contradiction component has no incompatibility edge"
+        );
+        finding.conflict_edges = conflict_edges;
+        finding.finding_id = maintenance_finding_id(&finding)?;
+        let owner_action = new_private_action(
             MaintenanceActionClass::OwnerResolveContradiction,
             &finding.finding_id,
-            record_ids,
+            record_ids.clone(),
             None,
             None,
             comparison_set_digest,
             &group,
         )?;
-        finding.proposed_action_ids.push(action.action_id.clone());
+        finding
+            .proposed_action_ids
+            .push(owner_action.action_id.clone());
+        if automatic_maintenance_enabled {
+            let suppression = new_private_action(
+                MaintenanceActionClass::SuppressUnresolvedConflict,
+                &finding.finding_id,
+                record_ids,
+                None,
+                None,
+                comparison_set_digest,
+                &group,
+            )?;
+            finding
+                .proposed_action_ids
+                .push(suppression.action_id.clone());
+            push_action(derived_actions, suppression)?;
+        }
+        finding.proposed_action_ids.sort();
         push_finding(findings, finding)?;
-        push_action(actions, action)?;
+        push_action(owner_actions, owner_action)?;
     }
     Ok(())
 }
@@ -1910,6 +2028,7 @@ fn new_finding(
             "comparison_set_digest": comparison_set_digest,
             "evidence": evidence,
             "confidence": confidence,
+            "conflict_edges": [],
         }),
     )?;
     Ok(MaintenanceFinding {
@@ -1919,6 +2038,7 @@ fn new_finding(
         comparison_set_digest,
         evidence,
         confidence,
+        conflict_edges: Vec::new(),
         proposed_action_ids: Vec::new(),
     })
 }
@@ -2456,6 +2576,10 @@ fn maintenance_detectors() -> Result<Vec<MaintenanceDetectorSnapshot>> {
         .collect()
 }
 
+pub(crate) fn current_maintenance_detector_digest() -> Result<String> {
+    identity("memzoi/maintenance/detectors", &maintenance_detectors()?)
+}
+
 fn comparison_digest(records: &[MaintenanceRecordSnapshot]) -> Result<String> {
     identity(
         "memzoi/maintenance/comparison-set",
@@ -2849,6 +2973,11 @@ impl MaintenancePlan {
             &self.authority.grant_fingerprint,
             "maintenance grant fingerprint",
         )?;
+        ensure!(
+            !matches!(self.scope, MaintenanceScope::Repository { .. })
+                || self.authority.mode == MaintenanceAuthorityMode::ReportOnly,
+            "repository maintenance must remain report-only"
+        );
         ensure_sorted_unique(
             self.records.iter().map(|record| record.record_id.as_str()),
             "maintenance record snapshots",
@@ -3003,6 +3132,38 @@ impl MaintenancePlan {
                 if let Some(boundary) = evidence.boundary.as_deref() {
                     parse_canonical_timestamp(boundary, "maintenance evidence boundary")?;
                 }
+            }
+            if finding.kind == MaintenanceFindingKind::HighConfidenceContradiction {
+                ensure!(
+                    !finding.conflict_edges.is_empty(),
+                    "maintenance contradiction finding must preserve incompatibility edges"
+                );
+            } else {
+                ensure!(
+                    finding.conflict_edges.is_empty(),
+                    "only maintenance contradiction findings may contain incompatibility edges"
+                );
+            }
+            ensure!(
+                finding
+                    .conflict_edges
+                    .windows(2)
+                    .all(|window| window[0] < window[1]),
+                "maintenance conflict edges must be sorted and unique"
+            );
+            for edge in &finding.conflict_edges {
+                ensure!(
+                    edge.record_ids[0] < edge.record_ids[1]
+                        && edge.record_ids.iter().all(|record_id| {
+                            finding.record_ids.binary_search(record_id).is_ok()
+                        })
+                        && edge.reason_code == "high_confidence_unresolved_contradiction",
+                    "maintenance conflict edge is not canonical"
+                );
+                crate::validate_materialization_identity(
+                    &edge.evidence_digest,
+                    "maintenance conflict edge evidence digest",
+                )?;
             }
             ensure!(
                 finding.record_ids.iter().all(|record_id| {
@@ -3209,6 +3370,7 @@ fn maintenance_finding_id(finding: &MaintenanceFinding) -> Result<String> {
             "comparison_set_digest": finding.comparison_set_digest,
             "evidence": finding.evidence,
             "confidence": finding.confidence,
+            "conflict_edges": finding.conflict_edges,
         }),
     )
 }
@@ -3613,6 +3775,98 @@ mod tests {
         assert!(action.keeper_record_id.is_none());
         assert!(action.predecessor_record_id.is_none());
         assert!(action.evidence_record_id.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_private_authority_emits_edges_and_suppression() -> Result<()> {
+        let inputs = vec![
+            private_input(
+                private_record(
+                    "private-conflict-a",
+                    "Private conflict",
+                    "Authentication is required.",
+                ),
+                'a',
+            ),
+            private_input(
+                private_record(
+                    "private-conflict-b",
+                    "Private conflict",
+                    "Authentication is not required.",
+                ),
+                'b',
+            ),
+        ];
+        let plan = plan_private_maintenance_with_authority_at(
+            identity_fixture('3'),
+            MaintenancePlanRequest {
+                schema: MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+                evaluated_at: Some("2026-07-18T12:00:00Z".to_owned()),
+                record_ids: Vec::new(),
+            },
+            inputs,
+            parse_timestamp("2026-07-18T12:00:00Z", "test")?,
+            identity_fixture('4'),
+        )?;
+        let finding = plan
+            .findings
+            .iter()
+            .find(|finding| finding.kind == MaintenanceFindingKind::HighConfidenceContradiction)
+            .context("missing contradiction finding")?;
+        assert_eq!(finding.conflict_edges.len(), 1);
+        assert_eq!(plan.action_groups[1].actions.len(), 1);
+        assert_eq!(
+            plan.action_groups[1].actions[0].class,
+            MaintenanceActionClass::SuppressUnresolvedConflict
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn equal_members_with_different_edge_topology_have_distinct_identities() -> Result<()> {
+        let plan = |b_body: &str, c_body: &str| {
+            plan_private_maintenance_with_authority_at(
+                identity_fixture('5'),
+                MaintenancePlanRequest {
+                    schema: MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+                    evaluated_at: Some("2026-07-18T12:00:00Z".to_owned()),
+                    record_ids: Vec::new(),
+                },
+                vec![
+                    private_input(
+                        private_record("edge-a", "Auth policy", "Authentication is required."),
+                        'a',
+                    ),
+                    private_input(private_record("edge-b", "Auth policy", b_body), 'b'),
+                    private_input(private_record("edge-c", "Auth policy", c_body), 'c'),
+                ],
+                parse_timestamp("2026-07-18T12:00:00Z", "test")?,
+                identity_fixture('6'),
+            )
+        };
+        let first = plan(
+            "Authentication is required.",
+            "Authentication is not required.",
+        )?;
+        let second = plan(
+            "Authentication is not required.",
+            "Authentication is not required.",
+        )?;
+        let first_finding = first
+            .findings
+            .iter()
+            .find(|finding| finding.kind == MaintenanceFindingKind::HighConfidenceContradiction)
+            .expect("contradiction finding");
+        let second_finding = second
+            .findings
+            .iter()
+            .find(|finding| finding.kind == MaintenanceFindingKind::HighConfidenceContradiction)
+            .expect("contradiction finding");
+        assert_eq!(first_finding.record_ids, second_finding.record_ids);
+        assert_ne!(first_finding.conflict_edges, second_finding.conflict_edges);
+        assert_ne!(first_finding.finding_id, second_finding.finding_id);
+        assert_ne!(first.plan_id, second.plan_id);
         Ok(())
     }
 

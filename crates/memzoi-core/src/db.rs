@@ -121,6 +121,11 @@ mod tests {
         "private_lifecycle_relation",
         "owner_action_grant",
         "private_lifecycle_application",
+        "private_maintenance_grant",
+        "private_maintenance_projection",
+        "private_conflict_set",
+        "private_conflict_member",
+        "private_conflict_edge",
         "read_audit",
         "memory_fts",
     ];

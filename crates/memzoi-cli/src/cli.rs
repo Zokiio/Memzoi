@@ -726,6 +726,12 @@ pub(crate) enum MaintenanceCommands {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum LifecycleCommands {
+    /// Manage standing private contradiction-suppression authority.
+    Maintenance {
+        #[command(subcommand)]
+        command: LifecycleMaintenanceCommands,
+    },
+
     /// Build read-only maintenance evidence over private runtime records.
     Plan {
         /// Restrict targets to these record IDs while retaining their comparison neighbourhood.
@@ -781,6 +787,30 @@ pub(crate) enum LifecycleCommands {
         /// Optional strict JSON/YAML plan artifact; secure regular-file reads currently require Unix.
         #[arg(long = "plan-file", value_name = "PATH")]
         plan_file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum LifecycleMaintenanceCommands {
+    /// Enable standing authority only if the first projection can be published.
+    Enable {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Atomically revoke standing authority and clear derived suppression.
+    Disable {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect the standing grant and derived projection state.
+    Inspect {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rebuild the projection against the current private generation.
+    Reconcile {
         #[arg(long)]
         json: bool,
     },

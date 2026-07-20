@@ -172,6 +172,7 @@ command's JSON output, event, or database row does not change what it writes.
 | **Private lifecycle authority** | `memzoi lifecycle authorize` | Validate the exact request, optional source plan, policy, scope, lane, and version bindings, then create only one `owner_action_grant` row. It performs no private-record or lifecycle change. |
 |  | `memzoi lifecycle revoke` | Update only `owner_action_grant`; it never rewrites private records, lifecycle state, relations, receipts, or audit events. |
 | **Private lifecycle execution** | `memzoi lifecycle apply` | Atomically consume exactly one active grant and apply its complete action group. This is the only command that mutates private records, lifecycle state or relations, ordinary-read eligibility, lifecycle application receipts, or lifecycle audit events. Any failed revalidation rolls back the complete group and leaves the grant unconsumed. |
+| **Derived private recall suppression** | `memzoi lifecycle maintenance enable`; `disable`; `inspect`; `reconcile` | Manage a separate standing owner opt-in that maintains a rebuildable, record-token-matched suppression projection for accepted high-confidence unresolved contradictions. It never selects a winner or mutates canonical/private record content. |
 | **No-write outcomes** | `discard` or `needs_review` candidates in `memzoi session-end` | Write neither a canonical record, pending proposal file, nor runtime memory row. `discard` is skipped; `needs_review` is blocked until a human decides. |
 |  | `memzoi capture plan`; `memzoi capture review`; MCP `plan_capture` | Do not write memory state. CLI `--output` may write a classified plan/review artifact to an allowed caller-selected path outside `.memzoi`, private runtime state, and generated exports; MCP never writes an artifact. |
 |  | `memzoi maintenance plan`; MCP `plan_maintenance` | Read canonical repository records directly and emit an immutable report/candidate artifact. They do not open a writable service or mutate records, proposals, indexes, overlays, private runtime, WAL/event logs, or Git. CLI `--output` is the sole optional write and must be outside the Git worktree and all managed runtime roots; MCP never writes an artifact. |
@@ -204,15 +205,34 @@ retention.
 The current contract is `maintenance-plan/2`; the stable artifact identifiers
 remain `memzoi/maintenance-request` and `memzoi/maintenance-plan`. Repository
 CLI and MCP planning remain repository-only and read-only. The separate local
-`memzoi lifecycle plan` command uses the same v2 contract over private runtime
+`memzoi lifecycle plan` command uses the same current contract over private runtime
 snapshots, with opaque IDs and random version tokens instead of bodies or
 titles. Neither detector selects a duplicate keeper or contradiction winner;
 only an exact owner request may make that choice.
 
-Memzoi is pre-1.0 and current-schema-only. V1 maintenance artifacts and old
-SQLite schemas are rejected before any write. There are no compatibility
-readers, schema aliases, fallbacks, or automatic migrations; manually remove
-or regenerate incompatible runtime databases and artifacts before retrying.
+Memzoi is pre-1.0 and current-schema-only. Maintenance artifacts and SQLite
+databases that do not match the current schema are rejected before any write.
+There are no compatibility
+readers, schema aliases, fallbacks, or automatic migrations; manually upgrade
+or remove incompatible runtime databases and artifacts before retrying.
+
+## Standing private maintenance authority
+
+`memzoi lifecycle maintenance enable` creates a standing opt-in distinct from
+the one-shot, time-bounded `owner_action_grant`. Enablement becomes visible only
+when its first projection is `current`; disablement atomically revokes the opt-in
+and clears derived suppression. Reconciliation uses base eligibility (lifecycle,
+retention, validity, quarantine, applicability, and safety) and ordinary recall
+uses effective eligibility (base plus the current conflict projection), so the
+overlay cannot erase its own contradiction evidence.
+
+The projection states are `disabled`, `current`, `dirty`, and `blocked`. A
+successful zero-edge evaluation publishes a current empty projection. Stale
+snapshots are retried rather than published. Detector, policy, bounds, or
+validation failure retains prior edges, records a content-free blocked reason,
+and fails automatic private recall closed until an explicit reconciliation
+publishes a current projection. Explicit record inspection reports both base and
+effective eligibility plus content-free conflict participation.
 
 ## Exact owner-authorized private lifecycle
 

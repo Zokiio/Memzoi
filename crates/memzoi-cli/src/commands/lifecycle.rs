@@ -15,6 +15,58 @@ use serde_json::Value;
 use super::normalize_absolute_path;
 use crate::output::print_json;
 
+pub(super) fn maintenance_enable_command(as_json: bool) -> Result<()> {
+    let service = PrivateLifecycleService::open_paths_for_authority(lifecycle_paths()?)?;
+    print_maintenance_result(service.enable_private_maintenance()?, as_json)
+}
+
+pub(super) fn maintenance_disable_command(as_json: bool) -> Result<()> {
+    let service = PrivateLifecycleService::open_paths_for_authority(lifecycle_paths()?)?;
+    print_maintenance_result(service.disable_private_maintenance()?, as_json)
+}
+
+pub(super) fn maintenance_reconcile_command(as_json: bool) -> Result<()> {
+    let service = PrivateLifecycleService::open_paths_for_authority(lifecycle_paths()?)?;
+    print_maintenance_result(service.reconcile_private_maintenance()?, as_json)
+}
+
+pub(super) fn maintenance_inspect_command(as_json: bool) -> Result<()> {
+    let service = PrivateLifecycleService::open_paths_for_read(lifecycle_paths()?)?;
+    let inspection = service.inspect_private_maintenance()?;
+    if as_json {
+        print_json(&serde_json::to_value(&inspection)?)
+    } else {
+        println!("private-maintenance");
+        println!("state\t{}", json_enum(inspection.projection.state)?);
+        println!("members\t{}", inspection.projection.member_count);
+        println!("edges\t{}", inspection.projection.edge_count);
+        Ok(())
+    }
+}
+
+fn print_maintenance_result(
+    result: memzoi_core::PrivateMaintenanceResult,
+    as_json: bool,
+) -> Result<()> {
+    if as_json {
+        print_json(&serde_json::to_value(&result)?)
+    } else {
+        println!("private-maintenance");
+        println!("outcome\t{}", json_enum(result.outcome)?);
+        println!("state\t{}", json_enum(result.projection.state)?);
+        println!("members\t{}", result.projection.member_count);
+        println!("edges\t{}", result.projection.edge_count);
+        Ok(())
+    }
+}
+
+fn json_enum(value: impl serde::Serialize) -> Result<String> {
+    Ok(serde_json::to_value(value)?
+        .as_str()
+        .unwrap_or("unknown")
+        .to_owned())
+}
+
 pub(super) fn plan_command(
     record_ids: Vec<String>,
     evaluated_at: Option<String>,

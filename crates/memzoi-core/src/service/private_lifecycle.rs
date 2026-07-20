@@ -17,7 +17,7 @@ use crate::{
     PrivateLifecycleRelationSnapshot, PrivateLifecycleRequest, PrivateLifecycleRevokeOutcome,
     PrivateLifecycleRevokeResult, PrivateLifecycleSource, PrivateLifecycleStateSnapshot,
     PrivateMaintenanceRecordInput, ScopeKind, Visibility, plan_private_maintenance_at,
-    private_maintenance_runtime_fingerprint,
+    plan_private_maintenance_with_authority_at, private_maintenance_runtime_fingerprint,
 };
 
 use super::{
@@ -208,7 +208,12 @@ impl MemoryService {
         &self,
         record_id: &str,
     ) -> Result<PrivateLifecycleRecordInspection> {
-        inspect_private_lifecycle_record_for(&self.paths, &self.shared_conn, record_id)
+        inspect_private_lifecycle_record_for(
+            &self.paths,
+            &self.shared_conn,
+            record_id,
+            self.clock.now_utc(),
+        )
     }
 
     #[cfg(test)]
@@ -397,7 +402,7 @@ fn apply_private_lifecycle_for(
 }
 
 impl PrivateLifecycleService {
-    fn acquire_transient_read_lock(&self) -> Result<Option<RepoLifecycleReadLock>> {
+    pub(super) fn acquire_transient_read_lock(&self) -> Result<Option<RepoLifecycleReadLock>> {
         if self._lifecycle_read_lock.is_some() {
             Ok(None)
         } else {
@@ -455,7 +460,12 @@ impl PrivateLifecycleService {
         record_id: &str,
     ) -> Result<PrivateLifecycleRecordInspection> {
         let _read_lock = self.acquire_transient_read_lock()?;
-        inspect_private_lifecycle_record_for(&self.paths, &self.shared_conn, record_id)
+        inspect_private_lifecycle_record_for(
+            &self.paths,
+            &self.shared_conn,
+            record_id,
+            self.clock.now_utc(),
+        )
     }
 
     pub fn inspect_private_lifecycle_grant(&self, grant_id: &str) -> Result<PrivateLifecycleGrant> {
@@ -623,6 +633,7 @@ fn inspect_private_lifecycle_record_for(
     paths: &crate::MemoryPaths,
     conn: &Connection,
     record_id: &str,
+    evaluated_at: OffsetDateTime,
 ) -> Result<PrivateLifecycleRecordInspection> {
     ensure_identifier(record_id, "record_id")?;
     shared_runtime::ensure_read_only_lifecycle_snapshot_ready(paths)?;
@@ -632,6 +643,49 @@ fn inspect_private_lifecycle_record_for(
     run_after_private_lifecycle_record_snapshot_hook()?;
     let storage = PrivateLifecycleStorage::new(&transaction);
     let state = storage.require_state(record_id)?;
+    let base_eligibility = match base_current_assertion(&transaction, &record, &state, evaluated_at)
+    {
+        Ok(decision) => decision,
+        Err(_) => crate::evaluate_current_assertion(
+            &record.id,
+            record.status,
+            record.lane,
+            &record.retention,
+            evaluated_at,
+            vec![crate::CurrentAssertionExclusion::Safety {
+                reason: "private_lifecycle_authority_unverifiable".to_owned(),
+            }],
+        )?,
+    };
+    let conflicts = super::private_maintenance::conflict_participation(&transaction, record_id)?;
+    let evaluated_at_text = crate::expiry::format_timestamp(evaluated_at)?;
+    let eligibility_sql = crate::retention::current_assertion_sql("inspected_record", "?2");
+    let effective_is_current = transaction.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM memory_record AS inspected_record
+             WHERE inspected_record.id = ?1 AND ({eligibility_sql}))"
+        ),
+        rusqlite::params![record_id, evaluated_at_text],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let mut effective_eligibility = base_eligibility.clone();
+    if base_eligibility.is_current && !effective_is_current {
+        let projection_state: String = transaction.query_row(
+            "SELECT state FROM private_maintenance_projection WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        effective_eligibility
+            .exclusions
+            .push(if projection_state == "current" {
+                crate::CurrentAssertionExclusion::UnresolvedConflict
+            } else {
+                crate::CurrentAssertionExclusion::Safety {
+                    reason: format!("private_maintenance_projection_{projection_state}"),
+                }
+            });
+        effective_eligibility.is_current = false;
+    }
     let relations = storage
         .relations_for_record(record_id)?
         .into_iter()
@@ -642,6 +696,9 @@ fn inspect_private_lifecycle_record_for(
         record,
         version: state.record_version.clone(),
         state: state_snapshot(&state),
+        base_eligibility,
+        effective_automatic_recall_eligibility: effective_eligibility,
+        conflicts,
         relations,
     };
     transaction.rollback()?;
@@ -662,7 +719,7 @@ fn inspect_private_lifecycle_grant_for(
     grant_from_row(&row, &binding)
 }
 
-fn plan_private_lifecycle_with_conn(
+pub(super) fn plan_private_lifecycle_with_conn(
     paths: &crate::MemoryPaths,
     conn: &Connection,
     request: MaintenancePlanRequest,
@@ -687,7 +744,7 @@ fn plan_private_lifecycle_with_conn(
     for record in records {
         ensure_private_shape(&record)?;
         let state = storage.require_state(&record.id)?;
-        let decision = effective_current_assertion(conn, &record, &state, evaluated_at)?;
+        let decision = base_current_assertion(conn, &record, &state, evaluated_at)?;
         inputs.push(PrivateMaintenanceRecordInput {
             record,
             version_token: state.record_version,
@@ -697,7 +754,25 @@ fn plan_private_lifecycle_with_conn(
             retention_boundary: decision.retention.effective_boundary,
         });
     }
-    plan_private_maintenance_at(runtime_fingerprint, request, inputs, fallback_now)
+    let grant_fingerprint = conn
+        .query_row(
+            "SELECT grant_fingerprint
+             FROM private_maintenance_grant
+             WHERE state = 'active'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match grant_fingerprint {
+        Some(grant_fingerprint) => plan_private_maintenance_with_authority_at(
+            runtime_fingerprint,
+            request,
+            inputs,
+            fallback_now,
+            grant_fingerprint,
+        ),
+        None => plan_private_maintenance_at(runtime_fingerprint, request, inputs, fallback_now),
+    }
 }
 
 fn build_grant_binding_for(
@@ -921,7 +996,7 @@ fn effective_grant_expiry(
     Ok(expiry)
 }
 
-fn effective_current_assertion(
+fn base_current_assertion(
     conn: &Connection,
     record: &MemoryRecord,
     state: &PrivateLifecycleState,
@@ -1373,7 +1448,7 @@ fn validate_action_semantics(
             for evidence_id in evidence_versions.keys() {
                 let evidence = require_private_record(conn, evidence_id)?;
                 let state = storage.require_state(evidence_id)?;
-                let decision = effective_current_assertion(conn, &evidence, &state, now)?;
+                let decision = base_current_assertion(conn, &evidence, &state, now)?;
                 ensure!(
                     evidence.status == MemoryStatus::Active && decision.is_current,
                     "correction evidence {evidence_id} is not a current accepted private record"
@@ -1473,8 +1548,7 @@ fn validate_renewal(
     );
     let storage = PrivateLifecycleStorage::new(conn);
     let predecessor_state = storage.require_state(predecessor_id)?;
-    let predecessor_decision =
-        effective_current_assertion(conn, &predecessor, &predecessor_state, now)?;
+    let predecessor_decision = base_current_assertion(conn, &predecessor, &predecessor_state, now)?;
     ensure!(
         predecessor_decision.retention.state == crate::RetentionState::QueryOnly,
         "renewal predecessor is not expired"
@@ -1487,7 +1561,7 @@ fn validate_renewal(
     let boundary = crate::private_lifecycle::parse_timestamp(boundary, "renewal boundary")?;
     let evidence_state = storage.require_state(evidence_record_id)?;
     ensure!(
-        effective_current_assertion(conn, &evidence, &evidence_state, now)?.is_current,
+        base_current_assertion(conn, &evidence, &evidence_state, now)?.is_current,
         "renewal evidence is not current"
     );
     let capture = evidence
@@ -1555,7 +1629,7 @@ fn validate_consolidation(
             continue;
         }
         let state = storage.require_state(&record.id)?;
-        if effective_current_assertion(conn, &record, &state, now)?.is_current {
+        if base_current_assertion(conn, &record, &state, now)?.is_current {
             complete.insert(record.id);
         }
     }
@@ -1617,7 +1691,7 @@ fn validate_contradiction_resolution(
             continue;
         }
         let state = storage.require_state(&record.id)?;
-        if !effective_current_assertion(conn, &record, &state, now)?.is_current {
+        if !base_current_assertion(conn, &record, &state, now)?.is_current {
             continue;
         }
         let Some((candidate_signature, negative)) = polarity_signature(&record.body) else {
