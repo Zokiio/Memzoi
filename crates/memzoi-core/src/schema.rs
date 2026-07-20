@@ -362,15 +362,18 @@ CREATE TABLE IF NOT EXISTS private_maintenance_projection (
   authoritative_generation INTEGER NOT NULL CHECK (authoritative_generation >= 0),
   policy_version TEXT NOT NULL CHECK (length(trim(policy_version)) > 0),
   detector_digest TEXT,
+  not_after TEXT,
   reason_code TEXT,
   member_count INTEGER NOT NULL DEFAULT 0 CHECK (member_count >= 0),
   edge_count INTEGER NOT NULL DEFAULT 0 CHECK (edge_count >= 0),
   updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
   CHECK (
     (state = 'disabled' AND grant_fingerprint IS NULL AND projection_id IS NULL AND plan_id IS NULL
-      AND detector_digest IS NULL AND reason_code IS NULL AND member_count = 0 AND edge_count = 0)
+      AND detector_digest IS NULL AND not_after IS NULL AND reason_code IS NULL
+      AND member_count = 0 AND edge_count = 0)
     OR (state = 'current' AND grant_fingerprint IS NOT NULL AND projection_id IS NOT NULL
-      AND plan_id IS NOT NULL AND detector_digest IS NOT NULL AND reason_code IS NULL)
+      AND plan_id IS NOT NULL AND detector_digest IS NOT NULL AND not_after IS NOT NULL
+      AND reason_code IS NULL)
     OR (state IN ('dirty', 'blocked') AND grant_fingerprint IS NOT NULL AND reason_code IS NOT NULL)
   )
 );
@@ -828,7 +831,11 @@ BEGIN
       authoritative_generation = (
         SELECT generation FROM private_lifecycle_generation WHERE singleton = 1
       ),
-      reason_code = 'grant_fingerprint_changed',
+      reason_code = CASE
+        WHEN NEW.grant_fingerprint <> OLD.grant_fingerprint
+          THEN 'grant_fingerprint_changed'
+        ELSE 'policy_version_changed'
+      END,
       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   WHERE singleton = 1;
 END;

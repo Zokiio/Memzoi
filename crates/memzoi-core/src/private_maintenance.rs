@@ -25,6 +25,7 @@ impl PrivateMaintenanceGrantState {
 pub enum PrivateMaintenanceProjectionState {
     Disabled,
     Current,
+    Stale,
     Dirty,
     Blocked,
 }
@@ -34,6 +35,7 @@ impl PrivateMaintenanceProjectionState {
         match self {
             Self::Disabled => "disabled",
             Self::Current => "current",
+            Self::Stale => "stale",
             Self::Dirty => "dirty",
             Self::Blocked => "blocked",
         }
@@ -67,6 +69,8 @@ pub struct PrivateMaintenanceProjectionInspection {
     pub policy_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detector_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_after: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
     pub member_count: usize,

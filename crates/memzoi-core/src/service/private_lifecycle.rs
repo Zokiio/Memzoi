@@ -657,8 +657,12 @@ fn inspect_private_lifecycle_record_for(
             }],
         )?,
     };
-    let conflicts = super::private_maintenance::conflict_participation(&transaction, record_id)?;
     let evaluated_at_text = crate::expiry::format_timestamp(evaluated_at)?;
+    let conflicts = super::private_maintenance::conflict_participation(
+        &transaction,
+        record_id,
+        &evaluated_at_text,
+    )?;
     let eligibility_sql = crate::retention::current_assertion_sql("inspected_record", "?2");
     let effective_is_current = transaction.query_row(
         &format!(
@@ -745,8 +749,16 @@ pub(super) fn plan_private_lifecycle_with_conn(
         ensure_private_shape(&record)?;
         let state = storage.require_state(&record.id)?;
         let decision = base_current_assertion(conn, &record, &state, evaluated_at)?;
+        let applicability_paths = {
+            let mut statement = conn
+                .prepare("SELECT path FROM memory_path WHERE record_id = ?1 ORDER BY path, id")?;
+            statement
+                .query_map([&record.id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         inputs.push(PrivateMaintenanceRecordInput {
             record,
+            applicability_paths,
             version_token: state.record_version,
             current_assertion: decision.is_current,
             retention_state: decision.retention.state,

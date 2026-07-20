@@ -140,11 +140,23 @@ pub(super) fn refresh_index_mirrors(
     shared: &Connection,
     index: &Connection,
 ) -> Result<()> {
-    if !shared_sync_journal_entry_exists(paths)? && runtime_mirror_revisions_match(shared, index)? {
+    refresh_index_mirrors_at(paths, shared, index, OffsetDateTime::now_utc())
+}
+
+pub(super) fn refresh_index_mirrors_at(
+    paths: &MemoryPaths,
+    shared: &Connection,
+    index: &Connection,
+    now: OffsetDateTime,
+) -> Result<()> {
+    if !shared_sync_journal_entry_exists(paths)?
+        && runtime_mirror_revisions_match(shared, index)?
+        && !private_maintenance::reconciliation_required(shared, now)?
+    {
         return Ok(());
     }
     let _lifecycle_lock = RepoLifecycleLock::acquire(paths)?;
-    refresh_index_mirrors_locked(paths, shared, index)
+    refresh_index_mirrors_locked_at(paths, shared, index, now)
 }
 
 pub(super) fn ensure_read_only_lifecycle_snapshot_ready(paths: &MemoryPaths) -> Result<()> {
@@ -168,8 +180,17 @@ pub(super) fn refresh_index_mirrors_locked(
     shared: &Connection,
     index: &Connection,
 ) -> Result<()> {
+    refresh_index_mirrors_locked_at(paths, shared, index, OffsetDateTime::now_utc())
+}
+
+pub(super) fn refresh_index_mirrors_locked_at(
+    paths: &MemoryPaths,
+    shared: &Connection,
+    index: &Connection,
+    now: OffsetDateTime,
+) -> Result<()> {
     recover_pending_shared_sync_locked(paths, shared)?;
-    private_maintenance::reconcile_if_dirty_locked(paths, shared, OffsetDateTime::now_utc())?;
+    private_maintenance::reconcile_if_dirty_locked(paths, shared, now)?;
     if runtime_mirror_revisions_match(shared, index)? {
         return Ok(());
     }
@@ -180,7 +201,6 @@ pub(super) fn refresh_index_mirrors_locked(
     let shared_lifecycle_events = read_private_lifecycle_authority_events(shared)?;
     let indexed_lifecycle_events = read_private_lifecycle_authority_events(index)?;
     let shared_maintenance = private_maintenance::mirror_snapshot(shared)?;
-    let indexed_maintenance = private_maintenance::mirror_snapshot(index)?;
     let non_runtime_ids = RuntimeRecords::new(index)
         .indexed_non_runtime_record_ids()?
         .into_iter()
@@ -229,9 +249,6 @@ pub(super) fn refresh_index_mirrors_locked(
     if shared_proposals != indexed_proposals {
         replace_proposals(&tx, &shared_proposals)?;
     }
-    if shared_maintenance != indexed_maintenance {
-        private_maintenance::replace_mirror(&tx, &shared_maintenance)?;
-    }
     let current_shared_revision = runtime_mirror_revision(shared)?
         .context("shared runtime mirror revision disappeared during reconciliation")?;
     if current_shared_revision != shared_revision {
@@ -240,7 +257,13 @@ pub(super) fn refresh_index_mirrors_locked(
     if lifecycle_generation(shared)? != shared_lifecycle_generation {
         bail!("shared private lifecycle generation changed during reconciliation");
     }
+    // Installing records and lifecycle state advances the index generation and
+    // dirties any active projection through database triggers. Set the exact
+    // authoritative generation first, then install the authoritative
+    // maintenance snapshot last so the mirror cannot publish a synchronized
+    // revision with a projection that those triggers immediately dirtied.
     set_lifecycle_generation(&tx, shared_lifecycle_generation)?;
+    private_maintenance::replace_mirror(&tx, &shared_maintenance)?;
     set_runtime_mirror_revision(&tx, &shared_revision)?;
     tx.commit()?;
     Ok(())
@@ -1002,6 +1025,12 @@ fn shared_sync_marker_is_committed(
 
 fn shared_sync_journal_path(paths: &MemoryPaths) -> PathBuf {
     paths.repository_runtime_dir.join(SHARED_SYNC_JOURNAL_FILE)
+}
+
+#[cfg(test)]
+pub(super) fn inject_pending_shared_sync_marker(paths: &MemoryPaths) -> Result<()> {
+    fs::write(shared_sync_journal_path(paths), b"{}")?;
+    Ok(())
 }
 
 fn read_shared_sync_journal(paths: &MemoryPaths) -> Result<Option<SharedSyncJournal>> {

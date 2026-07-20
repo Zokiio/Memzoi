@@ -225,6 +225,9 @@ and clears derived suppression. Reconciliation uses base eligibility (lifecycle,
 retention, validity, quarantine, applicability, and safety) and ordinary recall
 uses effective eligibility (base plus the current conflict projection), so the
 overlay cannot erase its own contradiction evidence.
+Private contradiction applicability includes the persisted path bindings:
+disjoint path scopes are not contradictory, nested scopes overlap, and an empty
+path set is global.
 
 The projection states are `disabled`, `current`, `dirty`, and `blocked`. A
 successful zero-edge evaluation publishes a current empty projection. Stale
@@ -233,6 +236,9 @@ validation failure retains prior edges, records a content-free blocked reason,
 and fails automatic private recall closed until an explicit reconciliation
 publishes a current projection. Explicit record inspection reports both base and
 effective eligibility plus content-free conflict participation.
+Every current projection persists the source plan's `not_after`. At that
+boundary inspection reports `stale`, immutable recall fails closed, and an
+audited private read reconciles under the lifecycle lock before returning.
 
 ## Exact owner-authorized private lifecycle
 

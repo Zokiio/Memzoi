@@ -322,6 +322,9 @@ manages standing authority for derived automatic-recall suppression. The
 projection is rebuildable and content-free, has explicit
 `disabled|current|dirty|blocked` state, and fails automatic private recall
 closed unless it is disabled or current for the authoritative generation.
+Inspection reports an otherwise-current projection as `stale` at its persisted
+`not_after`; audited private reads reconcile it before recall, while immutable
+reads remain non-mutating and fail closed.
 This authority never reuses an `owner_action_grant` and never resolves a
 contradiction or selects a winner.
 

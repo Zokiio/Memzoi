@@ -95,6 +95,7 @@ pub struct MaintenancePlanRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrivateMaintenanceRecordInput {
     pub record: MemoryRecord,
+    pub applicability_paths: Vec<String>,
     pub version_token: String,
     pub current_assertion: bool,
     pub retention_state: RetentionState,
@@ -410,6 +411,7 @@ struct LoadedRecord {
 struct PrivateLoadedRecord {
     snapshot: MaintenanceRecordSnapshot,
     record: MemoryRecord,
+    applicability_paths: Vec<String>,
     duplicate_claim_digest: String,
     renewal_claim_digest: String,
     freshness: OffsetDateTime,
@@ -886,6 +888,7 @@ fn plan_private_maintenance_inner(
     for input in inputs {
         let PrivateMaintenanceRecordInput {
             record,
+            mut applicability_paths,
             version_token,
             current_assertion,
             retention_state,
@@ -893,6 +896,8 @@ fn plan_private_maintenance_inner(
             retention_boundary,
         } = input;
         crate::validate_canonical_record_id(&record.id)?;
+        applicability_paths.sort();
+        applicability_paths.dedup();
         validate_private_record_version_token(&version_token)?;
         ensure!(
             matches!(
@@ -947,6 +952,7 @@ fn plan_private_maintenance_inner(
                 "scope_kind": record.scope_kind,
                 "scope_id": record.scope_id,
                 "visibility": record.visibility,
+                "paths": applicability_paths,
             }),
         )?;
         let temporal_digest = identity(
@@ -978,6 +984,7 @@ fn plan_private_maintenance_inner(
         loaded.push(PrivateLoadedRecord {
             snapshot,
             record,
+            applicability_paths,
             duplicate_claim_digest,
             renewal_claim_digest,
             freshness,
@@ -1584,6 +1591,7 @@ fn detect_private_contradictions(
             if left_signature != right_signature
                 || left_negative == right_negative
                 || !same_private_claim_context(&left.record, &right.record)
+                || !paths_overlap(&left.applicability_paths, &right.applicability_paths)
                 || private_records_are_temporally_related(&left.record, &right.record)
             {
                 continue;
@@ -3612,6 +3620,7 @@ mod tests {
     fn private_input(record: MemoryRecord, token_fill: char) -> PrivateMaintenanceRecordInput {
         PrivateMaintenanceRecordInput {
             record,
+            applicability_paths: Vec::new(),
             version_token: token_fill.to_string().repeat(32),
             current_assertion: true,
             retention_state: RetentionState::Current,
@@ -3820,6 +3829,57 @@ mod tests {
             plan.action_groups[1].actions[0].class,
             MaintenanceActionClass::SuppressUnresolvedConflict
         );
+        Ok(())
+    }
+
+    #[test]
+    fn private_contradictions_require_overlapping_applicability_paths() -> Result<()> {
+        let plan_for = |left_paths: &[&str], right_paths: &[&str]| {
+            let mut positive = private_input(
+                private_record(
+                    "private-path-conflict-a",
+                    "Private path conflict",
+                    "Authentication is required.",
+                ),
+                'a',
+            );
+            positive.applicability_paths =
+                left_paths.iter().map(|path| (*path).to_owned()).collect();
+            let mut negative = private_input(
+                private_record(
+                    "private-path-conflict-b",
+                    "Private path conflict",
+                    "Authentication is not required.",
+                ),
+                'b',
+            );
+            negative.applicability_paths =
+                right_paths.iter().map(|path| (*path).to_owned()).collect();
+            plan_private_maintenance_at(
+                identity_fixture('7'),
+                MaintenancePlanRequest {
+                    schema: MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+                    evaluated_at: Some("2026-07-18T12:00:00Z".to_owned()),
+                    record_ids: Vec::new(),
+                },
+                vec![positive, negative],
+                parse_timestamp("2026-07-18T12:00:00Z", "test")?,
+            )
+        };
+
+        assert_eq!(
+            plan_for(&["frontend/**"], &["backend/**"])?
+                .summary
+                .contradictions,
+            0
+        );
+        assert_eq!(
+            plan_for(&["src/**"], &["src/auth/**"])?
+                .summary
+                .contradictions,
+            1
+        );
+        assert_eq!(plan_for(&[], &["backend/**"])?.summary.contradictions, 1);
         Ok(())
     }
 

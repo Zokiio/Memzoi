@@ -982,10 +982,11 @@ impl MemoryService {
         }
         for _attempt in 0..2 {
             let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
-            shared_runtime::refresh_index_mirrors_locked(
+            shared_runtime::refresh_index_mirrors_locked_at(
                 &self.paths,
                 &self.shared_conn,
                 &self.conn,
+                self.now(),
             )
             .map_err(|_| anyhow::anyhow!("mirror refresh required"))?;
             self.ensure_repository_index_current()?;
@@ -999,6 +1000,23 @@ impl MemoryService {
             }
         }
         bail!("mirror refresh required")
+    }
+
+    fn read_private_authority<T>(&self, read: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        if self.read_mode == ServiceReadMode::ImmutableNoAuditRetainedLock {
+            shared_runtime::ensure_read_only_mirror_ready(&self.shared_conn, &self.conn)
+                .map_err(|_| anyhow::anyhow!("mirror refresh required"))?;
+            return read(self);
+        }
+        let _lifecycle_lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::refresh_index_mirrors_locked_at(
+            &self.paths,
+            &self.shared_conn,
+            &self.conn,
+            self.now(),
+        )
+        .map_err(|_| anyhow::anyhow!("mirror refresh required"))?;
+        read(self)
     }
 
     fn ensure_repository_index_current_with_conn(&self, conn: &Connection) -> Result<()> {
@@ -1065,21 +1083,25 @@ impl MemoryService {
     }
 
     pub fn list_local_memory(&self) -> Result<Vec<MemoryRecord>> {
-        RuntimeRecords::new(&self.shared_conn)
-            .active_for_destination(MemoryDestination::Local, self.now())
+        self.read_private_authority(|service| {
+            RuntimeRecords::new(&service.shared_conn)
+                .active_for_destination(MemoryDestination::Local, service.now())
+        })
     }
 
     pub fn search_local_memory(&self, query: String, limit: usize) -> Result<Vec<SearchResult>> {
-        self.search_memory_with_conn(
-            &self.shared_conn,
-            SearchInput {
-                query,
-                destination: Some(MemoryDestination::Local),
-                limit,
-                include_inactive: false,
-                ..SearchInput::default()
-            },
-        )
+        self.read_private_authority(|service| {
+            service.search_memory_with_conn(
+                &service.shared_conn,
+                SearchInput {
+                    query: query.clone(),
+                    destination: Some(MemoryDestination::Local),
+                    limit,
+                    include_inactive: false,
+                    ..SearchInput::default()
+                },
+            )
+        })
     }
 
     pub fn create_checkpoint(&self, actor: &str, input: CheckpointInput) -> Result<MemoryRecord> {
@@ -1243,13 +1265,17 @@ impl MemoryService {
     }
 
     pub fn list_checkpoints(&self) -> Result<Vec<MemoryRecord>> {
-        RuntimeRecords::new(&self.shared_conn).active_checkpoints(self.now())
+        self.read_private_authority(|service| {
+            RuntimeRecords::new(&service.shared_conn).active_checkpoints(service.now())
+        })
     }
 
     pub fn show_checkpoint(&self, record_id: &str) -> Result<MemoryRecord> {
-        RuntimeRecords::new(&self.shared_conn)
-            .checkpoint(record_id, self.now())?
-            .with_context(|| format!("checkpoint not found: {record_id}"))
+        self.read_private_authority(|service| {
+            RuntimeRecords::new(&service.shared_conn)
+                .checkpoint(record_id, service.now())?
+                .with_context(|| format!("checkpoint not found: {record_id}"))
+        })
     }
 
     /// Returns the optimistic-concurrency version for a checkpoint, including

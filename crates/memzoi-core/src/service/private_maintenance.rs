@@ -63,6 +63,7 @@ struct ProjectionRow {
     authoritative_generation: i64,
     policy_version: String,
     detector_digest: Option<String>,
+    not_after: Option<String>,
     reason_code: Option<String>,
     member_count: i64,
     edge_count: i64,
@@ -200,7 +201,8 @@ impl PrivateLifecycleService {
             "UPDATE private_maintenance_projection
              SET state = 'disabled', grant_fingerprint = NULL, projection_id = NULL,
                  plan_id = NULL, authoritative_generation = ?1,
-                 policy_version = ?2, detector_digest = NULL, reason_code = NULL,
+                 policy_version = ?2, detector_digest = NULL, not_after = NULL,
+                 reason_code = NULL,
                  member_count = 0, edge_count = 0, updated_at = ?3
              WHERE singleton = 1",
             rusqlite::params![generation, MAINTENANCE_POLICY_VERSION, now_text],
@@ -229,7 +231,10 @@ impl PrivateLifecycleService {
                 grant.revoked_at = Some(now_text.clone());
                 grant_public(&grant)
             }),
-            projection: projection_inspection(&projection_row(&self.shared_conn)?)?,
+            projection: projection_inspection(
+                &projection_row(&self.shared_conn)?,
+                self.clock.now_utc(),
+            )?,
         })
     }
 
@@ -239,6 +244,7 @@ impl PrivateLifecycleService {
             "private maintenance reconcile requires an authority service"
         );
         let _lock = RepoLifecycleLock::acquire(&self.paths)?;
+        shared_runtime::ensure_read_only_lifecycle_snapshot_ready(&self.paths)?;
         let outcome = reconcile_locked(&self.paths, &self.shared_conn, self.clock.now_utc())?;
         refresh_existing_index_locked(&self.paths, &self.shared_conn)?;
         Ok(outcome)
@@ -246,10 +252,14 @@ impl PrivateLifecycleService {
 
     pub fn inspect_private_maintenance(&self) -> Result<PrivateMaintenanceInspection> {
         let _read_lock = self.acquire_transient_read_lock()?;
+        shared_runtime::ensure_read_only_lifecycle_snapshot_ready(&self.paths)?;
         Ok(PrivateMaintenanceInspection {
             schema: PRIVATE_MAINTENANCE_INSPECTION_SCHEMA.to_owned(),
             active_grant: active_grant(&self.shared_conn)?.as_ref().map(grant_public),
-            projection: projection_inspection(&projection_row(&self.shared_conn)?)?,
+            projection: projection_inspection(
+                &projection_row(&self.shared_conn)?,
+                self.clock.now_utc(),
+            )?,
         })
     }
 }
@@ -260,6 +270,17 @@ pub(super) fn reconcile_if_dirty_locked(
     now: OffsetDateTime,
 ) -> Result<()> {
     let grant = active_grant(conn)?;
+    if grant.is_some() && reconciliation_required(conn, now)? {
+        let _ = reconcile_locked(paths, conn, now)?;
+    }
+    Ok(())
+}
+
+pub(super) fn reconciliation_required(conn: &Connection, now: OffsetDateTime) -> Result<bool> {
+    let grant = active_grant(conn)?;
+    if grant.is_none() {
+        return Ok(false);
+    }
     let projection = projection_row(conn)?;
     let detector_digest = crate::maintenance::current_maintenance_detector_digest()?;
     let needs_reconciliation = projection.state == PrivateMaintenanceProjectionState::Dirty
@@ -268,11 +289,10 @@ pub(super) fn reconcile_if_dirty_locked(
                 projection.grant_fingerprint.as_deref() != Some(&grant.grant_fingerprint)
                     || projection.policy_version != MAINTENANCE_POLICY_VERSION
                     || projection.detector_digest.as_deref() != Some(&detector_digest)
-            }));
-    if grant.is_some() && needs_reconciliation {
-        let _ = reconcile_locked(paths, conn, now)?;
-    }
-    Ok(())
+            }))
+        || (projection.state == PrivateMaintenanceProjectionState::Current
+            && projection_is_expired(&projection, now)?);
+    Ok(needs_reconciliation)
 }
 
 fn reconcile_locked(
@@ -296,7 +316,7 @@ fn reconcile_locked_attempt(
             schema: PRIVATE_MAINTENANCE_RESULT_SCHEMA.to_owned(),
             outcome: PrivateMaintenanceOutcome::Disabled,
             grant: None,
-            projection: projection_inspection(&projection_row(conn)?)?,
+            projection: projection_inspection(&projection_row(conn)?, now)?,
         });
     };
     match reconcile_transaction(paths, &tx, now, &grant) {
@@ -352,7 +372,7 @@ fn reconcile_locked_attempt(
                 schema: PRIVATE_MAINTENANCE_RESULT_SCHEMA.to_owned(),
                 outcome: PrivateMaintenanceOutcome::Blocked,
                 grant: Some(grant_public(&grant)),
-                projection: projection_inspection(&projection_row(conn)?)?,
+                projection: projection_inspection(&projection_row(conn)?, now)?,
             })
         }
     }
@@ -490,8 +510,8 @@ fn reconcile_transaction(
         "UPDATE private_maintenance_projection
          SET state = 'current', grant_fingerprint = ?1, projection_id = ?2,
              plan_id = ?3, authoritative_generation = ?4, policy_version = ?5,
-             detector_digest = ?6, reason_code = NULL,
-             member_count = ?7, edge_count = ?8, updated_at = ?9
+             detector_digest = ?6, not_after = ?7, reason_code = NULL,
+             member_count = ?8, edge_count = ?9, updated_at = ?10
          WHERE singleton = 1",
         rusqlite::params![
             grant.grant_fingerprint,
@@ -500,6 +520,7 @@ fn reconcile_transaction(
             generation,
             MAINTENANCE_POLICY_VERSION,
             plan.preconditions.detector_digest,
+            plan.not_after,
             member_ids.len() as i64,
             edge_count as i64,
             now_text,
@@ -519,7 +540,7 @@ fn reconcile_transaction(
         None,
         &now_text,
     )?;
-    projection_inspection(&projection_row(conn)?)
+    projection_inspection(&projection_row(conn)?, now)
 }
 
 pub(super) fn mirror_snapshot(conn: &Connection) -> Result<PrivateMaintenanceMirrorSnapshot> {
@@ -593,7 +614,8 @@ pub(super) fn replace_mirror(
         "UPDATE private_maintenance_projection SET
            state=?1,grant_fingerprint=?2,projection_id=?3,plan_id=?4,
            authoritative_generation=?5,policy_version=?6,detector_digest=?7,
-           reason_code=?8,member_count=?9,edge_count=?10,updated_at=?11 WHERE singleton=1",
+           not_after=?8,reason_code=?9,member_count=?10,edge_count=?11,updated_at=?12
+         WHERE singleton=1",
         rusqlite::params![
             row.state.as_str(),
             row.grant_fingerprint,
@@ -602,6 +624,7 @@ pub(super) fn replace_mirror(
             row.authoritative_generation,
             row.policy_version,
             row.detector_digest,
+            row.not_after,
             row.reason_code,
             row.member_count,
             row.edge_count,
@@ -614,29 +637,44 @@ pub(super) fn replace_mirror(
 pub(super) fn conflict_participation(
     conn: &Connection,
     record_id: &str,
+    evaluated_at: &str,
 ) -> Result<Vec<PrivateConflictParticipation>> {
     let mut statement = conn.prepare(
         "SELECT conflict.conflict_id, edge.left_record_id, edge.right_record_id,
                 conflict.reason_code, conflict.resolution_state, conflict.recall_effect,
                 conflict.detector_version, conflict.policy_version
          FROM private_conflict_set AS conflict
+         JOIN private_maintenance_projection AS projection
+           ON projection.singleton = 1
+          AND projection.projection_id = conflict.projection_id
+          AND projection.grant_fingerprint = conflict.grant_fingerprint
+          AND projection.policy_version = conflict.policy_version
          JOIN private_conflict_edge AS edge ON edge.conflict_id = conflict.conflict_id
-         WHERE edge.left_record_id = ?1 OR edge.right_record_id = ?1
+         CROSS JOIN private_lifecycle_generation AS generation
+         WHERE generation.singleton = 1
+           AND projection.state = 'current'
+           AND projection.authoritative_generation = generation.generation
+           AND projection.policy_version = ?3
+           AND ?2 < projection.not_after
+           AND (edge.left_record_id = ?1 OR edge.right_record_id = ?1)
          ORDER BY conflict.conflict_id, edge.left_record_id, edge.right_record_id",
     )?;
-    let rows = statement.query_map([record_id], |row| {
-        let left: String = row.get(1)?;
-        let right: String = row.get(2)?;
-        Ok(PrivateConflictParticipation {
-            conflict_id: row.get(0)?,
-            other_member_ids: vec![if left == record_id { right } else { left }],
-            reason_code: row.get(3)?,
-            resolution_state: row.get(4)?,
-            recall_effect: row.get(5)?,
-            detector_version: row.get(6)?,
-            policy_version: row.get(7)?,
-        })
-    })?;
+    let rows = statement.query_map(
+        rusqlite::params![record_id, evaluated_at, MAINTENANCE_POLICY_VERSION],
+        |row| {
+            let left: String = row.get(1)?;
+            let right: String = row.get(2)?;
+            Ok(PrivateConflictParticipation {
+                conflict_id: row.get(0)?,
+                other_member_ids: vec![if left == record_id { right } else { left }],
+                reason_code: row.get(3)?,
+                resolution_state: row.get(4)?,
+                recall_effect: row.get(5)?,
+                detector_version: row.get(6)?,
+                policy_version: row.get(7)?,
+            })
+        },
+    )?;
     let mut grouped = BTreeMap::<String, PrivateConflictParticipation>::new();
     for item in rows {
         let item = item?;
@@ -694,7 +732,7 @@ fn insert_grant(conn: &Connection, row: &GrantRow) -> Result<()> {
 fn projection_row(conn: &Connection) -> Result<ProjectionRow> {
     conn.query_row(
         "SELECT state, grant_fingerprint, projection_id, plan_id, authoritative_generation,
-                policy_version, detector_digest, reason_code,
+                policy_version, detector_digest, not_after, reason_code,
                 member_count, edge_count, updated_at
          FROM private_maintenance_projection WHERE singleton = 1",
         [],
@@ -715,19 +753,41 @@ fn projection_row(conn: &Connection) -> Result<ProjectionRow> {
                 authoritative_generation: row.get(4)?,
                 policy_version: row.get(5)?,
                 detector_digest: row.get(6)?,
-                reason_code: row.get(7)?,
-                member_count: row.get(8)?,
-                edge_count: row.get(9)?,
-                updated_at: row.get(10)?,
+                not_after: row.get(7)?,
+                reason_code: row.get(8)?,
+                member_count: row.get(9)?,
+                edge_count: row.get(10)?,
+                updated_at: row.get(11)?,
             })
         },
     )
     .context("private maintenance projection is not initialized")
 }
 
-fn projection_inspection(row: &ProjectionRow) -> Result<PrivateMaintenanceProjectionInspection> {
+fn projection_is_expired(row: &ProjectionRow, now: OffsetDateTime) -> Result<bool> {
+    let Some(not_after) = row.not_after.as_deref() else {
+        return Ok(true);
+    };
+    Ok(now
+        >= crate::private_lifecycle::parse_timestamp(
+            not_after,
+            "private maintenance projection not_after",
+        )?)
+}
+
+fn projection_inspection(
+    row: &ProjectionRow,
+    now: OffsetDateTime,
+) -> Result<PrivateMaintenanceProjectionInspection> {
+    let state = if row.state == PrivateMaintenanceProjectionState::Current
+        && projection_is_expired(row, now)?
+    {
+        PrivateMaintenanceProjectionState::Stale
+    } else {
+        row.state
+    };
     Ok(PrivateMaintenanceProjectionInspection {
-        state: row.state,
+        state,
         grant_fingerprint: row.grant_fingerprint.clone(),
         projection_id: row.projection_id.clone(),
         plan_id: row.plan_id.clone(),
@@ -735,6 +795,7 @@ fn projection_inspection(row: &ProjectionRow) -> Result<PrivateMaintenanceProjec
             .context("private maintenance generation is negative")?,
         policy_version: row.policy_version.clone(),
         detector_digest: row.detector_digest.clone(),
+        not_after: row.not_after.clone(),
         reason_code: row.reason_code.clone(),
         member_count: usize::try_from(row.member_count).context("member count is negative")?,
         edge_count: usize::try_from(row.edge_count).context("edge count is negative")?,
@@ -922,8 +983,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        FixedClock, InitRequest, LocalMemoryInput, MemoryLane, MemoryService, MemoryType,
-        PrivateMaintenanceProjectionState,
+        ContextPackInput, FixedClock, HandoffInput, InitRequest, LocalMemoryInput, MemoryLane,
+        MemoryService, MemoryType, PrivateMaintenanceProjectionState,
     };
 
     fn fixture() -> Result<(TempDir, MemoryService, PrivateLifecycleService)> {
@@ -1005,6 +1066,148 @@ mod tests {
     }
 
     #[test]
+    fn generation_changing_write_installs_current_projection_in_index_backed_reads() -> Result<()> {
+        let (_temp, service, authority) = fixture()?;
+        authority.enable_private_maintenance()?;
+        let visible = service.create_local_memory(
+            "test",
+            LocalMemoryInput {
+                memory_type: MemoryType::Fact,
+                lane: MemoryLane::Semantic,
+                title: "Mirror parity sentinel".to_owned(),
+                body: "Mirror parity sentinel remains independently recallable.".to_owned(),
+            },
+        )?;
+
+        for conn in [&service.shared_conn, &service.conn] {
+            let state: String = conn.query_row(
+                "SELECT state FROM private_maintenance_projection WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(state, "current");
+        }
+        let context = service.build_context_pack(ContextPackInput {
+            task: "Mirror parity sentinel".to_owned(),
+            include_local: true,
+            ..ContextPackInput::default()
+        })?;
+        assert!(
+            context
+                .records
+                .iter()
+                .any(|item| item.record.id == visible.id)
+        );
+        let handoff = service.build_handoff_pack(HandoffInput {
+            task: Some("Mirror parity sentinel".to_owned()),
+            include_local: true,
+            ..HandoffInput::default()
+        })?;
+        assert!(
+            handoff
+                .context
+                .records
+                .iter()
+                .any(|item| item.record.id == visible.id)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn private_path_scopes_are_loaded_before_conflict_detection() -> Result<()> {
+        let (_temp, _service, authority) = fixture()?;
+        let record_ids = authority
+            .shared_conn
+            .prepare("SELECT id FROM memory_record WHERE destination = 'local' ORDER BY id")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (index, (record_id, path)) in record_ids
+            .iter()
+            .zip(["frontend/**", "backend/**"])
+            .enumerate()
+        {
+            authority.shared_conn.execute(
+                "INSERT INTO memory_path(id, record_id, path) VALUES (?1, ?2, ?3)",
+                rusqlite::params![format!("private-path-{index}"), record_id, path],
+            )?;
+        }
+
+        let enabled = authority.enable_private_maintenance()?;
+        assert_eq!(enabled.projection.member_count, 0);
+        assert_eq!(enabled.projection.edge_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_projection_is_stale_until_an_audited_read_reconciles_it() -> Result<()> {
+        let (_temp, mut service, mut authority) = fixture()?;
+        let enabled = authority.enable_private_maintenance()?;
+        assert_eq!(
+            enabled.projection.not_after.as_deref(),
+            Some("2026-07-21T12:00:00Z")
+        );
+        let record_id = authority.shared_conn.query_row(
+            "SELECT id FROM memory_record WHERE destination = 'local' ORDER BY id LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+
+        let boundary_clock = Arc::new(FixedClock::from_rfc3339("2026-07-21T12:00:00Z")?);
+        authority.clock = boundary_clock.clone();
+        service.clock = boundary_clock;
+        let stale = authority.inspect_private_maintenance()?;
+        assert_eq!(
+            stale.projection.state,
+            PrivateMaintenanceProjectionState::Stale
+        );
+        assert!(
+            authority
+                .inspect_private_lifecycle_record(&record_id)?
+                .conflicts
+                .is_empty()
+        );
+
+        let _ = service.build_context_pack(ContextPackInput {
+            task: "Private conflict".to_owned(),
+            include_local: true,
+            ..ContextPackInput::default()
+        })?;
+        let refreshed = authority.inspect_private_maintenance()?;
+        assert_eq!(
+            refreshed.projection.state,
+            PrivateMaintenanceProjectionState::Current
+        );
+        assert_eq!(
+            refreshed.projection.not_after.as_deref(),
+            Some("2026-07-22T12:00:00Z")
+        );
+        assert_eq!(refreshed.projection.edge_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_and_reconcile_refuse_pending_shared_sync() -> Result<()> {
+        let (_temp, _service, authority) = fixture()?;
+        shared_runtime::inject_pending_shared_sync_marker(&authority.paths)?;
+        for error in [
+            authority
+                .inspect_private_maintenance()
+                .expect_err("inspection must reject pending shared sync"),
+            authority
+                .reconcile_private_maintenance()
+                .expect_err("reconciliation must reject pending shared sync"),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("read-only lifecycle access requires shared runtime recovery"),
+                "{error:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn maintenance_audits_use_the_exact_content_free_schema() -> Result<()> {
         let (_temp, _service, authority) = fixture()?;
         authority.enable_private_maintenance()?;
@@ -1081,20 +1284,12 @@ mod tests {
              WHERE singleton = 1",
             [],
         )?;
-        assert!(service.list_local_memory()?.is_empty());
-
         inject_reconciliation_failure();
-        let blocked = authority.reconcile_private_maintenance()?;
-        assert_eq!(blocked.outcome, PrivateMaintenanceOutcome::Blocked);
-        assert_eq!(
-            blocked.projection.state,
-            PrivateMaintenanceProjectionState::Blocked
-        );
-        assert_eq!(
-            blocked.projection.projection_id,
-            prior_projection.projection_id
-        );
-        assert_eq!(blocked.projection.edge_count, 1);
+        assert!(service.list_local_memory()?.is_empty());
+        let blocked = authority.inspect_private_maintenance()?.projection;
+        assert_eq!(blocked.state, PrivateMaintenanceProjectionState::Blocked);
+        assert_eq!(blocked.projection_id, prior_projection.projection_id);
+        assert_eq!(blocked.edge_count, 1);
         assert!(service.list_local_memory()?.is_empty());
         Ok(())
     }
@@ -1208,6 +1403,12 @@ mod tests {
              WHERE state = 'active'",
             [],
         )?;
+        let policy_dirty = authority.inspect_private_maintenance()?.projection;
+        assert_eq!(policy_dirty.state, PrivateMaintenanceProjectionState::Dirty);
+        assert_eq!(
+            policy_dirty.reason_code.as_deref(),
+            Some("policy_version_changed")
+        );
         reconcile_if_dirty_locked(
             &authority.paths,
             &authority.shared_conn,
