@@ -674,20 +674,42 @@ fn inspect_private_lifecycle_record_for(
     )?;
     let mut effective_eligibility = base_eligibility.clone();
     if base_eligibility.is_current && !effective_is_current {
-        let projection_state: String = transaction.query_row(
-            "SELECT state FROM private_maintenance_projection WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )?;
-        effective_eligibility
-            .exclusions
-            .push(if projection_state == "current" {
-                crate::CurrentAssertionExclusion::UnresolvedConflict
+        let exclusion = if !conflicts.is_empty() {
+            crate::CurrentAssertionExclusion::UnresolvedConflict
+        } else {
+            let (state, generation_matches, policy_matches, before_not_after) = transaction
+                .query_row(
+                    "SELECT projection.state,
+                            projection.authoritative_generation = generation.generation,
+                            projection.policy_version = ?2,
+                            projection.not_after IS NOT NULL AND ?1 < projection.not_after
+                     FROM private_maintenance_projection AS projection
+                     CROSS JOIN private_lifecycle_generation AS generation
+                     WHERE projection.singleton = 1 AND generation.singleton = 1",
+                    rusqlite::params![&evaluated_at_text, crate::MAINTENANCE_POLICY_VERSION],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, bool>(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get::<_, bool>(3)?,
+                        ))
+                    },
+                )?;
+            let reason = if state != "current" {
+                format!("private_maintenance_projection_{state}")
+            } else if !generation_matches {
+                "private_maintenance_projection_generation_mismatch".to_owned()
+            } else if !policy_matches {
+                "private_maintenance_projection_policy_mismatch".to_owned()
+            } else if !before_not_after {
+                "private_maintenance_projection_stale".to_owned()
             } else {
-                crate::CurrentAssertionExclusion::Safety {
-                    reason: format!("private_maintenance_projection_{projection_state}"),
-                }
-            });
+                "private_maintenance_projection_unavailable".to_owned()
+            };
+            crate::CurrentAssertionExclusion::Safety { reason }
+        };
+        effective_eligibility.exclusions.push(exclusion);
         effective_eligibility.is_current = false;
     }
     let relations = storage

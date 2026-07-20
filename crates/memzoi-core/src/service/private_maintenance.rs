@@ -1041,6 +1041,12 @@ mod tests {
         let inspected = authority.inspect_private_lifecycle_record(&record_id)?;
         assert!(inspected.base_eligibility.is_current);
         assert!(!inspected.effective_automatic_recall_eligibility.is_current);
+        assert!(
+            inspected
+                .effective_automatic_recall_eligibility
+                .exclusions
+                .contains(&crate::CurrentAssertionExclusion::UnresolvedConflict)
+        );
         assert_eq!(inspected.conflicts.len(), 1);
 
         let second = authority.reconcile_private_maintenance()?;
@@ -1160,11 +1166,24 @@ mod tests {
             stale.projection.state,
             PrivateMaintenanceProjectionState::Stale
         );
+        let record_inspection = authority.inspect_private_lifecycle_record(&record_id)?;
+        assert!(record_inspection.conflicts.is_empty());
         assert!(
-            authority
-                .inspect_private_lifecycle_record(&record_id)?
-                .conflicts
-                .is_empty()
+            record_inspection
+                .effective_automatic_recall_eligibility
+                .exclusions
+                .iter()
+                .any(|exclusion| matches!(
+                    exclusion,
+                    crate::CurrentAssertionExclusion::Safety { reason }
+                        if reason == "private_maintenance_projection_stale"
+                ))
+        );
+        assert!(
+            !record_inspection
+                .effective_automatic_recall_eligibility
+                .exclusions
+                .contains(&crate::CurrentAssertionExclusion::UnresolvedConflict)
         );
 
         let _ = service.build_context_pack(ContextPackInput {

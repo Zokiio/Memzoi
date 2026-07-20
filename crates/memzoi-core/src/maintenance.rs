@@ -1654,10 +1654,10 @@ fn detect_private_contradictions(
                 }
                 let pair = [candidates[left_index].0, candidates[right_index].0];
                 conflict_edges.push(MaintenanceConflictEdge {
-                    record_ids: [
-                        pair[0].snapshot.record_id.clone(),
-                        pair[1].snapshot.record_id.clone(),
-                    ],
+                    record_ids: canonical_private_conflict_record_ids(
+                        &pair[0].snapshot.record_id,
+                        &pair[1].snapshot.record_id,
+                    ),
                     evidence_digest: private_artifact_digest(
                         "allowlisted_symmetric_polarity_edge",
                         &pair,
@@ -1970,6 +1970,14 @@ fn same_private_claim_context(left: &MemoryRecord, right: &MemoryRecord) -> bool
         && normalize_text(&left.title) == normalize_text(&right.title)
         && left.scope_kind == right.scope_kind
         && left.scope_id == right.scope_id
+}
+
+fn canonical_private_conflict_record_ids(left: &str, right: &str) -> [String; 2] {
+    if left < right {
+        [left.to_owned(), right.to_owned()]
+    } else {
+        [right.to_owned(), left.to_owned()]
+    }
 }
 
 fn private_records_are_temporally_related(left: &MemoryRecord, right: &MemoryRecord) -> bool {
@@ -3830,6 +3838,14 @@ mod tests {
             MaintenanceActionClass::SuppressUnresolvedConflict
         );
         Ok(())
+    }
+
+    #[test]
+    fn private_conflict_edge_record_ids_are_canonical_in_reverse_input_order() {
+        assert_eq!(
+            canonical_private_conflict_record_ids("private-z", "private-a"),
+            ["private-a".to_owned(), "private-z".to_owned()]
+        );
     }
 
     #[test]
