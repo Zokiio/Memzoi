@@ -21,7 +21,9 @@ use super::{PreparedMaintenanceMaterialization, path_text};
 use crate::service::{
     repository_mutation::{
         AuthorizedRepositoryProjectionBatch, OwnedRepositoryProjection, RepositoryFileIdentity,
-        borrowed_repository_projections, repository_transaction_path, repository_transaction_root,
+        RepositoryMutationAuthorization, borrowed_repository_projections,
+        remove_authorized_created_maintenance_journal_temporary, repository_transaction_path,
+        repository_transaction_root,
     },
     safe_files::{remove_staged_file, sync_directory},
 };
@@ -125,9 +127,10 @@ fn journal_temporary_path(
     paths: &MemoryPaths,
     journal: &MaintenanceMaterializationJournal,
 ) -> PathBuf {
-    paths
-        .runtime_dir
-        .join(format!(".{JOURNAL_FILE}.{}.tmp", journal.transaction_id))
+    paths.runtime_dir.join(format!(
+        ".{JOURNAL_FILE}.{}.{}.tmp",
+        journal.transaction_id, journal.authorization_digest
+    ))
 }
 
 pub(super) fn journal_exists(paths: &MemoryPaths) -> Result<bool> {
@@ -291,8 +294,13 @@ pub(super) fn load_journal(paths: &MemoryPaths) -> Result<Option<LoadedMaintenan
 pub(super) fn write_journal(
     paths: &MemoryPaths,
     journal: &MaintenanceMaterializationJournal,
+    mutation: RepositoryMutationAuthorization<'_>,
 ) -> Result<()> {
     validate_journal(journal)?;
+    ensure!(
+        journal.authorization_digest == mutation.authorization.capability.digest(),
+        "repository maintenance journal authorization changed before persistence"
+    );
     fs::create_dir_all(&paths.runtime_dir)
         .context("failed to create repository maintenance journal directory")?;
     ensure!(
@@ -321,11 +329,12 @@ pub(super) fn write_journal(
     if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
         let persistence =
             anyhow::Error::new(error).context("failed to persist repository maintenance journal");
-        return match repository_io::remove_created_direct_child_file(
-            &paths.runtime_dir,
-            &temporary,
+        return match remove_authorized_created_maintenance_journal_temporary(
+            paths,
+            mutation,
+            &journal.transaction_id,
+            None,
             &file,
-            "incomplete repository maintenance journal",
         ) {
             Ok(()) => Err(persistence),
             Err(cleanup) => Err(persistence).context(format!(
@@ -349,8 +358,13 @@ pub(super) fn rewrite_journal(
     paths: &MemoryPaths,
     loaded: &LoadedMaintenanceJournal,
     journal: &MaintenanceMaterializationJournal,
+    mutation: RepositoryMutationAuthorization<'_>,
 ) -> Result<LoadedMaintenanceJournal> {
     validate_journal(journal)?;
+    ensure!(
+        journal.authorization_digest == mutation.authorization.capability.digest(),
+        "repository maintenance journal authorization changed before rewrite"
+    );
     ensure!(
         loaded.journal.transaction_id == journal.transaction_id,
         "repository maintenance journal rewrite changed transaction identity"
@@ -364,10 +378,10 @@ pub(super) fn rewrite_journal(
         "repository maintenance journal",
     )?;
     let bytes = journal_bytes(journal)?;
+    let content_digest = hash(&bytes);
     let temporary = paths.runtime_dir.join(format!(
-        ".{JOURNAL_FILE}.{}.{}.rewrite.tmp",
-        journal.transaction_id,
-        hash(&bytes)
+        ".{JOURNAL_FILE}.{}.{}.{content_digest}.rewrite.tmp",
+        journal.transaction_id, journal.authorization_digest
     ));
     remove_runtime_file_if_matching(
         paths,
@@ -402,11 +416,12 @@ pub(super) fn rewrite_journal(
     if let Err(error) = persistence {
         let persistence = anyhow::Error::new(error)
             .context("failed to persist repository maintenance journal rewrite");
-        return match repository_io::remove_created_direct_child_file(
-            &paths.runtime_dir,
-            &temporary,
+        return match remove_authorized_created_maintenance_journal_temporary(
+            paths,
+            mutation,
+            &journal.transaction_id,
+            Some(&content_digest),
             &file,
-            "incomplete repository maintenance journal rewrite",
         ) {
             Ok(()) => Err(persistence),
             Err(cleanup) => Err(persistence).context(format!(

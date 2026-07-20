@@ -1080,7 +1080,7 @@ fn apply_prepared_materialization(
             )),
         };
     }
-    if let Err(error) = journal::write_journal(&service.paths, &journal) {
+    if let Err(error) = journal::write_journal(&service.paths, &journal, mutation) {
         return match journal::load_journal(&service.paths) {
             Ok(Some(loaded)) if loaded.journal == journal => Err(error).context(
                 "repository maintenance journal was installed; recovery artifacts were retained",
@@ -1170,7 +1170,12 @@ fn apply_prepared_materialization(
         entry.post_device = identity.device;
         entry.post_inode = identity.inode;
     }
-    loaded_journal = match journal::rewrite_journal(&service.paths, &loaded_journal, &journal) {
+    loaded_journal = match journal::rewrite_journal(
+        &service.paths,
+        &loaded_journal,
+        &journal,
+        mutation,
+    ) {
         Ok(loaded) => loaded,
         Err(error) => {
             let rollback_tx = tx.rollback().err().map(anyhow::Error::new);

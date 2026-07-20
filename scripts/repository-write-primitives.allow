@@ -8,6 +8,7 @@ crates/memzoi-cli/src/commands/lifecycle.rs|openat|4
 crates/memzoi-cli/src/commands/lifecycle.rs|unlinkat|3
 crates/memzoi-cli/src/commands/lifecycle.rs|linkat|1
 crates/memzoi-cli/src/commands/maintenance.rs|.write_all|1
+crates/memzoi-cli/src/commands/maintenance.rs|openat|1
 crates/memzoi-cli/src/commands/materialize.rs|.write_all|1
 crates/memzoi-cli/src/commands/materialize.rs|openat|1
 crates/memzoi-cli/src/eval.rs|fs::create_dir_all|5
@@ -43,8 +44,9 @@ crates/memzoi-core/src/db.rs|fs::create_dir_all|1
 crates/memzoi-core/src/exporters.rs|fs::write|2
 crates/memzoi-core/src/exporters.rs|fs::remove_file|1
 crates/memzoi-core/src/exporters.rs|fs::create_dir_all|2
-crates/memzoi-core/src/git_repository.rs|fs::write|4
-crates/memzoi-core/src/git_repository.rs|fs::create_dir_all|2
+crates/memzoi-core/src/git_repository.rs|fs::write|16
+crates/memzoi-core/src/git_repository.rs|fs::create_dir_all|8
+crates/memzoi-core/src/git_repository.rs|fs::set_permissions|1
 crates/memzoi-core/src/maintenance.rs|fs::write|2
 crates/memzoi-core/src/maintenance.rs|fs::remove_file|1
 crates/memzoi-core/src/maintenance.rs|fs::create_dir_all|1
@@ -76,7 +78,7 @@ crates/memzoi-core/src/repository_io.rs|fs::create_dir|4
 crates/memzoi-core/src/repository_io.rs|File::create|1
 crates/memzoi-core/src/repository_io.rs|.write_all|12
 crates/memzoi-core/src/repository_io.rs|.set_len|1
-crates/memzoi-core/src/repository_io.rs|openat|11
+crates/memzoi-core/src/repository_io.rs|openat|12
 crates/memzoi-core/src/repository_io.rs|unlinkat|1
 crates/memzoi-core/src/repository_io.rs|mkdirat|1
 crates/memzoi-core/src/repository_io.rs|renameat_with|3
@@ -116,6 +118,12 @@ crates/memzoi-core/src/service/proposal_packets/tests.rs|fs::remove_file|5
 crates/memzoi-core/src/service/proposal_packets/tests.rs|fs::remove_dir_all|1
 crates/memzoi-core/src/service/proposal_packets/tests.rs|fs::create_dir_all|1
 crates/memzoi-core/src/service/proposal_packets/tests.rs|fs::create_dir|2
+crates/memzoi-core/src/service/repository_maintenance_materialization/journal.rs|fs::rename|1
+crates/memzoi-core/src/service/repository_maintenance_materialization/journal.rs|fs::hard_link|1
+crates/memzoi-core/src/service/repository_maintenance_materialization/journal.rs|fs::create_dir_all|1
+crates/memzoi-core/src/service/repository_maintenance_materialization/journal.rs|OpenOptions::constructor|2
+crates/memzoi-core/src/service/repository_maintenance_materialization/journal.rs|.write_all|4
+crates/memzoi-core/src/service/repository_maintenance_materialization/journal.rs|open-write-mode|4
 crates/memzoi-core/src/service/repository_mutation.rs|OpenOptions::constructor|1
 crates/memzoi-core/src/service/repository_mutation.rs|.write_all|1
 crates/memzoi-core/src/service/repository_mutation.rs|open-write-mode|2
@@ -139,7 +147,7 @@ crates/memzoi-core/src/service/shared_runtime.rs|fs::create_dir_all|5
 crates/memzoi-core/src/service/shared_runtime.rs|OpenOptions::constructor|1
 crates/memzoi-core/src/service/shared_runtime.rs|.write_all|1
 crates/memzoi-core/src/service/shared_runtime.rs|open-write-mode|2
-crates/memzoi-core/src/service/tests.rs|fs::write|2
+crates/memzoi-core/src/service/tests.rs|fs::write|5
 crates/memzoi-core/src/service/tests.rs|fs::remove_file|1
 crates/memzoi-core/src/service/tests.rs|fs::create_dir_all|1
 crates/memzoi-core/src/service/tests.rs|fs::create_dir|1

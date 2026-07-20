@@ -440,21 +440,60 @@ pub(crate) fn read_bounded_direct_child_file_if_exists(
     }
 }
 
-pub(crate) fn remove_created_direct_child_file(
-    parent: &Path,
-    path: &Path,
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn remove_created_maintenance_journal_temporary(
+    project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
+    runtime_dir: &Path,
+    transaction_id: &str,
+    rewrite_content_digest: Option<&str>,
     opened: &fs::File,
-    label: &str,
 ) -> Result<()> {
+    verify_repository_batch(
+        project_root,
+        expected_route,
+        expected_policy_context_digest,
+        authorization,
+        projections,
+    )?;
+    let transaction = uuid::Uuid::parse_str(transaction_id)
+        .context("maintenance journal temporary transaction ID is invalid")?;
+    if transaction.to_string() != transaction_id {
+        bail!("maintenance journal temporary transaction ID is not canonical");
+    }
+    if let Some(digest) = rewrite_content_digest
+        && (digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        bail!("maintenance journal rewrite content digest is invalid");
+    }
+    let authorization_digest = authorization.digest();
+    let file_name = match rewrite_content_digest {
+        Some(content_digest) => format!(
+            ".repository-maintenance-materialization-journal.json.{transaction_id}.{authorization_digest}.{content_digest}.rewrite.tmp"
+        ),
+        None => format!(
+            ".repository-maintenance-materialization-journal.json.{transaction_id}.{authorization_digest}.tmp"
+        ),
+    };
+    let path = runtime_dir.join(file_name);
+    let label = if rewrite_content_digest.is_some() {
+        "incomplete repository maintenance journal rewrite"
+    } else {
+        "incomplete repository maintenance journal"
+    };
+
     #[cfg(not(unix))]
     {
-        let _ = (parent, path, opened, label);
+        let _ = (&path, opened, label);
         bail!("secure direct-child file removal is unavailable on this platform");
     }
 
     #[cfg(unix)]
     {
-        let (directory, file_name) = open_transaction_parent(parent, path)?;
+        let (directory, file_name) = open_transaction_parent(runtime_dir, &path)?;
         remove_pinned_named_file(&directory, &file_name, opened, None, label)
     }
 }

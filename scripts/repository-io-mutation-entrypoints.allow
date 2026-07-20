@@ -1,3 +1,4 @@
+remove_created_maintenance_journal_temporary|pub(crate)|delegated|authorized|verified
 create_authorized_repository_projection|private|content,delegated|authorized|verified
 remove_pinned_named_file|private|delete,rename|unauthorized|unverified
 cleanup_created_file|private|delegated|unauthorized|unverified

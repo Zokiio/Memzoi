@@ -595,6 +595,27 @@ pub(super) struct RepositoryMutationAuthorization<'a> {
     pub(super) projections: &'a [OwnedRepositoryProjection],
 }
 
+pub(super) fn remove_authorized_created_maintenance_journal_temporary(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    transaction_id: &str,
+    rewrite_content_digest: Option<&str>,
+    opened: &fs::File,
+) -> Result<()> {
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    repository_io::remove_created_maintenance_journal_temporary(
+        &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+        &paths.runtime_dir,
+        transaction_id,
+        rewrite_content_digest,
+        opened,
+    )
+}
+
 pub(super) fn repository_transaction_root(paths: &MemoryPaths) -> PathBuf {
     paths.runtime_dir.join("repository-transactions")
 }
@@ -602,18 +623,18 @@ pub(super) fn repository_transaction_root(paths: &MemoryPaths) -> PathBuf {
 pub(super) fn repository_transaction_path(
     paths: &MemoryPaths,
     repository_path: &Path,
-    nonce: &str,
+    operation_id: &str,
     role: &str,
 ) -> PathBuf {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"memzoi.repository-transaction-path.v1\0");
     hasher.update(repository_path.as_os_str().as_encoded_bytes());
     hasher.update(b"\0");
-    hasher.update(nonce.as_bytes());
+    hasher.update(operation_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(role.as_bytes());
     repository_transaction_root(paths).join(format!(
-        ".{nonce}.{}.{}.tmp",
+        ".{operation_id}.{}.{}.tmp",
         hasher.finalize().to_hex(),
         role
     ))
@@ -627,7 +648,7 @@ pub(super) fn stage_authorized_file(
     projections: &[OwnedRepositoryProjection],
     final_path: &Path,
     contents: &str,
-    nonce: &str,
+    operation_id: &str,
 ) -> Result<PathBuf> {
     let borrowed = borrowed_repository_projections(projections);
     repository_io::verify_repository_batch(
@@ -646,7 +667,7 @@ pub(super) fn stage_authorized_file(
     }) {
         bail!("staged repository file is not present in the authorized projection batch");
     }
-    let temp_path = repository_transaction_path(paths, final_path, nonce, "write");
+    let temp_path = repository_transaction_path(paths, final_path, operation_id, "write");
     let parent = temp_path.parent().context("staged file has no parent")?;
     if parent.starts_with(&paths.project_root) {
         bail!("local repository transaction storage must be outside the project worktree");
