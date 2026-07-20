@@ -167,6 +167,13 @@ fn repository_file_mode() -> rustix::fs::Mode {
 }
 
 #[cfg(unix)]
+fn repository_transaction_file_mode() -> rustix::fs::Mode {
+    use rustix::fs::Mode;
+
+    Mode::RUSR | Mode::WUSR
+}
+
+#[cfg(unix)]
 fn directory_flags() -> rustix::fs::OFlags {
     use rustix::fs::OFlags;
 
@@ -373,6 +380,82 @@ pub(crate) fn read_transaction_file_if_exists(
             read_regular_at_if_exists(&directory, &file_name, expected_len, label)?
                 .map(|(_, bytes)| bytes),
         )
+    }
+}
+
+pub(crate) fn read_bounded_direct_child_file_if_exists(
+    parent: &Path,
+    path: &Path,
+    maximum_len: u64,
+    label: &str,
+) -> Result<Option<(Vec<u8>, RepositoryFileIdentity, u32)>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (parent, path, maximum_len, label);
+        bail!("secure bounded file reads are unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags, openat};
+        use rustix::io::Errno;
+        use std::os::unix::fs::MetadataExt;
+
+        let (directory, file_name) = open_transaction_parent(parent, path)?;
+        let file = match openat(
+            &directory,
+            &file_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => file,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to open {label} without following symlinks"));
+            }
+        };
+        let mut file = fs::File::from(file);
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("failed to inspect {label}"))?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > maximum_len {
+            bail!("{label} has an invalid file type or size");
+        }
+        let expected_len = metadata.len();
+        let mut bytes = Vec::with_capacity(expected_len as usize);
+        Read::take(&mut file, expected_len.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("failed to read {label}"))?;
+        if bytes.len() as u64 != expected_len
+            || !named_file_still_matches(&directory, &file_name, &file)?
+        {
+            bail!("{label} changed while it was being read");
+        }
+        Ok(Some((
+            bytes,
+            repository_file_identity(&file, label)?,
+            metadata.mode(),
+        )))
+    }
+}
+
+pub(crate) fn remove_created_direct_child_file(
+    parent: &Path,
+    path: &Path,
+    opened: &fs::File,
+    label: &str,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (parent, path, opened, label);
+        bail!("secure direct-child file removal is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        let (directory, file_name) = open_transaction_parent(parent, path)?;
+        remove_pinned_named_file(&directory, &file_name, opened, None, label)
     }
 }
 
@@ -1141,6 +1224,7 @@ pub(crate) fn backup_repository_file(
     expected_identity: Option<RepositoryFileIdentity>,
     transaction_root: &Path,
     backup_path: &Path,
+    remove_source: bool,
 ) -> Result<()> {
     #[cfg(not(unix))]
     {
@@ -1154,6 +1238,7 @@ pub(crate) fn backup_repository_file(
             expected_identity,
             transaction_root,
             backup_path,
+            remove_source,
         );
         bail!("secure repository backup is unavailable on this platform");
     }
@@ -1216,7 +1301,7 @@ pub(crate) fn backup_repository_file(
             &backup_directory,
             &backup_name,
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            repository_file_mode(),
+            repository_transaction_file_mode(),
         )
         .context("failed to create repository transaction backup without replacement")?;
         let mut backup = fs::File::from(backup);
@@ -1250,14 +1335,18 @@ pub(crate) fn backup_repository_file(
                 )),
             };
         }
-        remove_pinned_named_file(
-            &source_directory,
-            &source_name,
-            &source,
-            Some(projection.bytes),
-            "securely backed-up repository source",
-        )
-        .context("failed to remove securely backed-up repository source")?;
+        if remove_source {
+            remove_pinned_named_file(
+                &source_directory,
+                &source_name,
+                &source,
+                Some(projection.bytes),
+                "securely backed-up repository source",
+            )
+            .context("failed to remove securely backed-up repository source")?;
+        } else if !named_file_still_matches(&source_directory, &source_name, &source)? {
+            bail!("repository source changed while its transaction backup was created");
+        }
         Ok(())
     }
 }
@@ -2524,6 +2613,7 @@ mod tests {
         let writable_by_others = Mode::WGRP | Mode::WOTH;
         assert!(!repository_directory_mode().intersects(writable_by_others));
         assert!(!repository_file_mode().intersects(writable_by_others));
+        assert_eq!(repository_transaction_file_mode().bits(), 0o600);
 
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path().canonicalize().unwrap();

@@ -722,6 +722,25 @@ pub(crate) enum MaintenanceCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Materialize explicitly selected repository actions from one immutable plan.
+    Materialize {
+        /// Complete current-format maintenance plan artifact.
+        #[arg(long = "plan-file", value_name = "PATH")]
+        plan_file: PathBuf,
+        /// Exact plan identity pinned by the caller.
+        #[arg(long = "plan-id", value_name = "ID")]
+        plan_id: String,
+        /// Explicit repository-materialization action to apply; repeat for each action.
+        #[arg(long = "action-id", value_name = "ID", required = true)]
+        action_ids: Vec<String>,
+        /// Explicit canonical UTC RFC 3339 lifecycle decision time.
+        #[arg(long = "decision-at", value_name = "RFC3339-UTC")]
+        decision_at: String,
+        /// Emit the strict materialization result as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

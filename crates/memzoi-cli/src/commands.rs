@@ -773,6 +773,15 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
                 output,
                 json,
             } => maintenance::plan_command(record_ids, evaluated_at, output, json),
+            MaintenanceCommands::Materialize {
+                plan_file,
+                plan_id,
+                action_ids,
+                decision_at,
+                json,
+            } => {
+                maintenance::materialize_command(plan_file, plan_id, action_ids, decision_at, json)
+            }
         },
         Commands::Lifecycle { command } => match command {
             LifecycleCommands::Maintenance { command } => match command {

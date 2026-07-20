@@ -284,7 +284,7 @@ fn private_plan_is_read_only_and_contains_no_private_title_or_body() {
         "fixed-time private planning should be deterministic"
     );
     assert_eq!(first["schema"], "memzoi/maintenance-plan");
-    assert_eq!(first["policy"]["contract_version"], "maintenance-plan/2");
+    assert!(first["policy"].get("contract_version").is_none());
     assert_eq!(first["scope"]["kind"], "private_runtime");
     let rendered = serde_json::to_string(&first).expect("serialize private plan assertion");
     for forbidden in [title, body, "\"title\"", "\"body\""] {
@@ -1189,14 +1189,16 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
         &["exceeds the 2 MiB limit"],
     );
 
-    let mut v1_plan = private_plan;
-    v1_plan["policy"]["contract_version"] = Value::String("maintenance-plan/1".to_owned());
-    let v1_plan_path = fixture.artifacts.path().join("v1-plan.json");
+    let mut removed_contract_plan = private_plan;
+    removed_contract_plan["policy"]["contract_version"] =
+        Value::String("maintenance-plan/2".to_owned());
+    let removed_contract_plan_path = fixture.artifacts.path().join("removed-contract-plan.json");
     fs::write(
-        &v1_plan_path,
-        serde_json::to_vec_pretty(&v1_plan).expect("serialize v1 plan fixture"),
+        &removed_contract_plan_path,
+        serde_json::to_vec_pretty(&removed_contract_plan)
+            .expect("serialize removed contract plan fixture"),
     )
-    .expect("write v1 maintenance plan fixture");
+    .expect("write removed contract maintenance plan fixture");
     assert_failure_preserves_runtime(
         &fixture,
         &[
@@ -1205,10 +1207,10 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
             "--request-file",
             path_text(&valid_request_path),
             "--plan-file",
-            path_text(&v1_plan_path),
+            path_text(&removed_contract_plan_path),
             "--json",
         ],
-        &["current contract"],
+        &["invalid memzoi/maintenance-plan artifact"],
     );
     assert_failure_preserves_runtime(
         &fixture,
@@ -1220,10 +1222,10 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
             "--grant-id",
             "grant-must-not-be-looked-up",
             "--plan-file",
-            path_text(&v1_plan_path),
+            path_text(&removed_contract_plan_path),
             "--json",
         ],
-        &["current contract"],
+        &["invalid memzoi/maintenance-plan artifact"],
     );
 
     #[cfg(unix)]

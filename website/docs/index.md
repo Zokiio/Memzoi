@@ -27,7 +27,7 @@ Memzoi v0 is local-first and intended for dogfooding and early experimentation. 
 - Repository runtime state under `~/.memzoi/projects/<repository-key>/`: durable local/session
   memory and proposal state in `shared.db`, plus per-worktree derived indexes and exports.
 - Safe memory lifecycle: propose, approve, reject, apply, supersede, and tombstone.
-- Immutable repository maintenance planning with report/candidate output and no execution path.
+- Immutable repository maintenance planning plus CLI-only atomic materialization of explicitly selected duplicate and renewal actions as unstaged Git-reviewable changes; MCP remains planning-only.
 - Rebuild from canonical records with `memzoi rebuild` when the derived runtime index
   needs to be regenerated.
 - Text search, prompt-ready context packs, and CLI handoff packs.

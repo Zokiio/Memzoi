@@ -23,7 +23,6 @@ use crate::{
 
 pub const MAINTENANCE_REQUEST_SCHEMA: &str = "memzoi/maintenance-request";
 pub const MAINTENANCE_PLAN_SCHEMA: &str = "memzoi/maintenance-plan";
-pub const MAINTENANCE_CONTRACT_VERSION: &str = "maintenance-plan/2";
 pub const MAINTENANCE_POLICY_VERSION: &str = "maintenance-policy/1";
 /// Upper bound while repository admission still performs synchronous Git review checks per file.
 pub const MAINTENANCE_MAX_RECORDS: usize = 256;
@@ -86,9 +85,8 @@ impl MaintenancePlanningControl {
 #[serde(deny_unknown_fields)]
 pub struct MaintenancePlanRequest {
     pub schema: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub evaluated_at: Option<String>,
-    #[serde(default)]
     pub record_ids: Vec<String>,
 }
 
@@ -136,7 +134,6 @@ impl MaintenanceScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenancePolicySnapshot {
-    pub contract_version: String,
     pub policy_version: String,
     pub maximum_validity_seconds: u64,
     pub stale_after_seconds: u64,
@@ -2558,7 +2555,6 @@ fn record_freshness(record: &OkfRecordFile) -> Result<OffsetDateTime> {
 
 fn maintenance_policy() -> Result<MaintenancePolicySnapshot> {
     let mut policy = MaintenancePolicySnapshot {
-        contract_version: MAINTENANCE_CONTRACT_VERSION.to_owned(),
         policy_version: MAINTENANCE_POLICY_VERSION.to_owned(),
         maximum_validity_seconds: (MAX_VALIDITY_HOURS * 60 * 60) as u64,
         stale_after_seconds: (STALE_AFTER_DAYS * 24 * 60 * 60) as u64,
@@ -2568,11 +2564,34 @@ fn maintenance_policy() -> Result<MaintenancePolicySnapshot> {
     Ok(policy)
 }
 
+pub(crate) fn validate_current_maintenance_snapshots(plan: &MaintenancePlan) -> Result<()> {
+    let current_policy = maintenance_policy()?;
+    ensure!(
+        plan.policy == current_policy
+            && plan.preconditions.policy_digest == current_policy.policy_digest,
+        "maintenance plan does not use the current policy snapshot"
+    );
+    let current_detectors = maintenance_detectors()?;
+    let current_detector_digest = identity("memzoi/maintenance/detectors", &current_detectors)?;
+    ensure!(
+        plan.detectors == current_detectors
+            && plan.preconditions.detector_digest == current_detector_digest,
+        "maintenance plan does not use the current detector snapshot"
+    );
+    let current_grant = identity("memzoi/maintenance/grant", &"report-only")?;
+    ensure!(
+        plan.authority.mode == MaintenanceAuthorityMode::ReportOnly
+            && plan.authority.grant_fingerprint == current_grant
+            && plan.preconditions.grant_fingerprint == current_grant,
+        "maintenance plan does not use the current report-only grant snapshot"
+    );
+    Ok(())
+}
+
 fn maintenance_policy_digest(policy: &MaintenancePolicySnapshot) -> Result<String> {
     identity(
         "memzoi/maintenance/policy",
         &serde_json::json!({
-            "contract_version": policy.contract_version,
             "policy_version": policy.policy_version,
             "maximum_validity_seconds": policy.maximum_validity_seconds,
             "stale_after_seconds": policy.stale_after_seconds,
@@ -2947,9 +2966,8 @@ impl MaintenancePlan {
             "maintenance plan schema must be {MAINTENANCE_PLAN_SCHEMA}"
         );
         ensure!(
-            self.policy.contract_version == MAINTENANCE_CONTRACT_VERSION
-                && self.policy.policy_version == MAINTENANCE_POLICY_VERSION,
-            "maintenance policy snapshot does not use the current contract"
+            self.policy.policy_version == MAINTENANCE_POLICY_VERSION,
+            "maintenance policy snapshot does not use the current policy"
         );
         validate_request(&self.request)?;
         ensure!(
@@ -3345,11 +3363,10 @@ impl MaintenancePlan {
             "maintenance policy digest does not match the policy snapshot"
         );
         ensure!(
-            self.policy.contract_version == MAINTENANCE_CONTRACT_VERSION
-                && self.policy.policy_version == MAINTENANCE_POLICY_VERSION
+            self.policy.policy_version == MAINTENANCE_POLICY_VERSION
                 && self.policy.maximum_validity_seconds > 0
                 && self.policy.stale_after_seconds > 0,
-            "maintenance policy snapshot does not use the current contract"
+            "maintenance policy snapshot does not use the current policy"
         );
         ensure!(
             self.detectors
@@ -4047,7 +4064,6 @@ mod tests {
         assert!(first.action_groups[2].actions.is_empty());
         assert_eq!(first.schema, MAINTENANCE_PLAN_SCHEMA);
         assert_eq!(first.request.schema, MAINTENANCE_REQUEST_SCHEMA);
-        assert_eq!(first.policy.contract_version, "maintenance-plan/2");
         assert_eq!(first.policy.policy_version, "maintenance-policy/1");
         assert!(matches!(&first.scope, MaintenanceScope::Repository { .. }));
         assert!(first.records.iter().all(|record| matches!(
@@ -4062,7 +4078,7 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_v2_is_current_only_and_rejects_v1_artifacts() -> Result<()> {
+    fn maintenance_plan_is_current_format_only_and_rejects_removed_fields() -> Result<()> {
         let fixture = Fixture::new()?;
         fixture.write(&record(
             "maintenance-current-contract",
@@ -4077,23 +4093,52 @@ mod tests {
             "canonical_repository"
         );
 
-        let mut v1 = current.clone();
-        v1["policy"]["contract_version"] = serde_json::json!("maintenance-plan/1");
-        let error = parse_maintenance_plan(&serde_json::to_string(&v1)?)
-            .expect_err("v1 maintenance artifacts must be rejected");
-        assert!(error.to_string().contains("current contract"), "{error:#}");
+        let mut removed_contract_version = current.clone();
+        removed_contract_version["policy"]["contract_version"] =
+            serde_json::json!("maintenance-plan/2");
+        assert!(
+            parse_maintenance_plan(&serde_json::to_string(&removed_contract_version)?).is_err(),
+            "removed maintenance contract-version fields must be rejected"
+        );
 
-        let mut legacy_record_shape = current;
-        let version = legacy_record_shape["records"][0]["version"].clone();
-        legacy_record_shape["records"][0]["source_path"] = version["source_path"].clone();
-        legacy_record_shape["records"][0]["revision"] = version["revision"].clone();
-        legacy_record_shape["records"][0]
+        let mut removed_top_level = current.clone();
+        removed_top_level["contract_version"] = serde_json::json!("maintenance-plan/1");
+        assert!(
+            parse_maintenance_plan(&serde_json::to_string(&removed_top_level)?).is_err(),
+            "removed top-level contract-version fields must be rejected"
+        );
+
+        let mut missing_policy_version = current.clone();
+        missing_policy_version["policy"]
+            .as_object_mut()
+            .expect("policy object")
+            .remove("policy_version");
+        assert!(
+            parse_maintenance_plan(&serde_json::to_string(&missing_policy_version)?).is_err(),
+            "the current policy version must remain required"
+        );
+
+        let mut missing_record_ids = current.clone();
+        missing_record_ids["request"]
+            .as_object_mut()
+            .expect("request object")
+            .remove("record_ids");
+        assert!(
+            parse_maintenance_plan(&serde_json::to_string(&missing_record_ids)?).is_err(),
+            "current maintenance requests must not infer missing record IDs"
+        );
+
+        let mut removed_record_shape = current;
+        let version = removed_record_shape["records"][0]["version"].clone();
+        removed_record_shape["records"][0]["source_path"] = version["source_path"].clone();
+        removed_record_shape["records"][0]["revision"] = version["revision"].clone();
+        removed_record_shape["records"][0]
             .as_object_mut()
             .expect("record object")
             .remove("version");
         assert!(
-            parse_maintenance_plan(&serde_json::to_string(&legacy_record_shape)?).is_err(),
-            "legacy source_path/revision fields must not be accepted"
+            parse_maintenance_plan(&serde_json::to_string(&removed_record_shape)?).is_err(),
+            "removed source_path/revision fields must not be accepted"
         );
         Ok(())
     }

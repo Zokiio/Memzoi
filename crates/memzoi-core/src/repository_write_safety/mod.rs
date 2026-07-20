@@ -11,6 +11,7 @@ pub use policy::{
     AuthorizationProof, FreshnessCheck, ProvenanceAssessment, RepositoryContentClass,
     RepositoryScope, RepositoryWriteRequest, RepositoryWriteRoute, SafetyField, SafetyFieldKind,
 };
+pub(crate) use projection::projection_digest;
 pub use projection::{RepositoryProjection, RepositoryProjectionPurpose};
 
 use std::fmt;

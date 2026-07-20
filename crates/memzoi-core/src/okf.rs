@@ -13,7 +13,7 @@ use crate::{
     CaptureProvenance, MemoryDestination, MemoryDraft, MemoryLane, MemoryRecord, MemoryStatus,
     MemoryType, OriginDescriptor, OriginRoute, RecordLineage, RepositoryContentClass,
     RetentionFacts, ScopeKind, Visibility, capture,
-    materialization::{MaterializationMetadata, canonical_revision_for_okf_record},
+    materialization::{RepositoryMaterializationMetadata, canonical_revision_for_okf_record},
     proposals::title_to_concept_slug,
     retention::evaluate_retention,
 };
@@ -35,7 +35,7 @@ pub struct OkfRecordFile {
     pub proposal_id: Option<String>,
     pub capture: Option<CaptureProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub materialization: Option<MaterializationMetadata>,
+    pub materialization: Option<RepositoryMaterializationMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -887,7 +887,7 @@ fn validate_record_materialization(record: &OkfRecordFile) -> Result<()> {
         .validate()
         .with_context(|| format!("invalid materialization metadata for {}", record.concept_id))?;
     let expected_revision = canonical_revision_for_okf_record(record)?;
-    if metadata.revision != expected_revision {
+    if metadata.intended_semantic_revision() != &expected_revision {
         bail!(
             "materialization revision does not match semantic record content for {}",
             record.concept_id
@@ -1427,7 +1427,7 @@ struct OkfFrontmatter {
     applies_to: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     capture: Option<CaptureProvenance>,
-    materialization: Option<MaterializationMetadata>,
+    materialization: Option<RepositoryMaterializationMetadata>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2209,9 +2209,9 @@ mod tests {
 
     use crate::{
         CANONICAL_REVISION_SCHEMA, CanonicalRevision, MATERIALIZATION_METADATA_SCHEMA,
-        MaterializationAction, MaterializationMetadata, MemoryDestination, MemoryLane,
-        MemoryRecord, MemoryStatus, MemoryType, OriginDescriptor, OriginRoute, RetentionFacts,
-        ScopeKind, Visibility, canonical_revision_for_okf_record,
+        MaterializationAction, MemoryDestination, MemoryLane, MemoryRecord, MemoryStatus,
+        MemoryType, OriginDescriptor, OriginRoute, RepositoryMaterializationMetadata,
+        RetentionFacts, ScopeKind, Visibility, canonical_revision_for_okf_record,
     };
 
     const EXAMPLE_MEMORY: &str = include_str!("../../../examples/example-memory.md");
@@ -2699,27 +2699,32 @@ Do not import this.
             "ordinary current-format records may be unattested"
         );
 
-        record.materialization = Some(MaterializationMetadata {
-            schema: MATERIALIZATION_METADATA_SCHEMA.to_owned(),
-            action: MaterializationAction::Create,
-            plan_id: format!("blake3:{}", "1".repeat(64)),
-            candidate_id: format!("blake3:{}", "2".repeat(64)),
-            decision_id: format!("blake3:{}", "3".repeat(64)),
-            decision_at: "2026-07-16T12:00:00Z".to_owned(),
-            safety_contract: crate::REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
-            revision: CanonicalRevision {
-                schema: CANONICAL_REVISION_SCHEMA.to_owned(),
-                revision_hash: format!("blake3:{}", "4".repeat(64)),
+        record.materialization = Some(RepositoryMaterializationMetadata::Direct(
+            crate::MaterializationMetadata {
+                schema: MATERIALIZATION_METADATA_SCHEMA.to_owned(),
+                action: MaterializationAction::Create,
+                plan_id: format!("blake3:{}", "1".repeat(64)),
+                candidate_id: format!("blake3:{}", "2".repeat(64)),
+                decision_id: format!("blake3:{}", "3".repeat(64)),
+                decision_at: "2026-07-16T12:00:00Z".to_owned(),
+                safety_contract: crate::REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
+                revision: CanonicalRevision {
+                    schema: CANONICAL_REVISION_SCHEMA.to_owned(),
+                    revision_hash: format!("blake3:{}", "4".repeat(64)),
+                },
+                target: None,
+                reason: None,
             },
-            target: None,
-            reason: None,
-        });
+        ));
         let revision = canonical_revision_for_okf_record(&record)?;
-        record
+        let RepositoryMaterializationMetadata::Direct(metadata) = record
             .materialization
             .as_mut()
             .expect("test record has metadata")
-            .revision = revision;
+        else {
+            panic!("test record must use direct materialization metadata");
+        };
+        metadata.revision = revision;
 
         let rendered = super::render_okf_record_markdown(&record)?;
         assert!(rendered.contains("materialization:\n"), "{rendered}");

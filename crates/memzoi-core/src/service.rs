@@ -44,6 +44,7 @@ mod materialization;
 mod private_lifecycle;
 mod private_maintenance;
 mod proposal_packets;
+mod repository_maintenance_materialization;
 mod repository_mutation;
 mod runtime_records;
 mod safe_files;
@@ -438,6 +439,7 @@ impl MemoryService {
         import_origin_journal::recover_on_open(&paths, &shared_conn)?;
         shared_runtime::refresh_index_mirrors(&paths, &shared_conn, &conn)?;
         capture_route_apply::recover_on_open(&paths, &conn)?;
+        repository_maintenance_materialization::recover_on_open(&paths, &conn)?;
         SessionEndRouteApply::new(&paths, &conn, &shared_conn, &clock).recover_on_open()?;
         Ok(Self {
             paths,

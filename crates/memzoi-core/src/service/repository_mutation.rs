@@ -363,22 +363,38 @@ pub(super) fn capture_authorized_existing_repository_projection_identity(
     mutation: RepositoryMutationAuthorization<'_>,
     destination: &Path,
 ) -> Result<RepositoryFileIdentity> {
+    capture_authorized_repository_projection_identity(
+        paths,
+        mutation,
+        destination,
+        RepositoryProjectionPurpose::Existing,
+    )
+}
+
+pub(super) fn capture_authorized_repository_projection_identity(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    destination: &Path,
+    purpose: RepositoryProjectionPurpose,
+) -> Result<RepositoryFileIdentity> {
     let relative = destination
         .strip_prefix(&paths.project_root)
         .context("repository predecessor is outside the project root")?;
     let projection_index = select_unique_projection_index(
         mutation.projections,
         relative,
-        RepositoryProjectionPurpose::Existing,
+        purpose,
         "repository predecessor capture",
     )?;
     let projection = &mutation.projections[projection_index];
-    let expected_revision = projection
-        .target_revision
-        .as_deref()
-        .context("authorized repository predecessor is missing its target revision")?;
-    if blake3::hash(&projection.bytes).to_hex().as_str() != expected_revision {
-        bail!("authorized repository predecessor revision does not match its bytes");
+    if purpose == RepositoryProjectionPurpose::Existing {
+        let expected_revision = projection
+            .target_revision
+            .as_deref()
+            .context("authorized repository predecessor is missing its target revision")?;
+        if blake3::hash(&projection.bytes).to_hex().as_str() != expected_revision {
+            bail!("authorized repository predecessor revision does not match its bytes");
+        }
     }
     let borrowed = borrowed_repository_projections(mutation.projections);
     repository_io::verify_repository_batch(
@@ -447,6 +463,42 @@ pub(super) fn install_authorized_repository_projection(
         &borrowed,
         projection_index,
         expected_target,
+    )
+    .map(InstalledRepositoryProjection)
+}
+
+pub(super) fn replace_authorized_repository_projection(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    destination: &Path,
+    install_purpose: RepositoryProjectionPurpose,
+    expected_purpose: RepositoryProjectionPurpose,
+    expected_identity: RepositoryFileIdentity,
+) -> Result<InstalledRepositoryProjection> {
+    let relative = destination
+        .strip_prefix(&paths.project_root)
+        .context("repository install destination is outside the project root")?;
+    let install_index = select_unique_projection_index(
+        mutation.projections,
+        relative,
+        install_purpose,
+        "repository recovery install",
+    )?;
+    let expected_index = select_unique_projection_index(
+        mutation.projections,
+        relative,
+        expected_purpose,
+        "repository recovery predecessor",
+    )?;
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    repository_io::install_authorized_repository_projection(
+        &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+        install_index,
+        Some((expected_index, expected_identity)),
     )
     .map(InstalledRepositoryProjection)
 }
@@ -812,6 +864,47 @@ pub(super) fn backup_repository_file_to_transaction_with_identity(
         expected_identity,
         &repository_transaction_root(paths),
         backup,
+        true,
+    )
+}
+
+pub(super) fn copy_repository_file_to_transaction_with_identity(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    source: &Path,
+    backup: &Path,
+    expected_hash: &str,
+    expected_identity: RepositoryFileIdentity,
+) -> Result<()> {
+    let relative = source
+        .strip_prefix(&paths.project_root)
+        .context("repository backup source is outside the project root")?;
+    let matches = mutation
+        .projections
+        .iter()
+        .enumerate()
+        .filter(|(_, projection)| {
+            projection.purpose == RepositoryProjectionPurpose::Existing
+                && projection.relative_path == relative
+                && projection.target_revision.as_deref() == Some(expected_hash)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [projection_index] = matches.as_slice() else {
+        bail!("repository backup must select exactly one authorized target revision");
+    };
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    repository_io::backup_repository_file(
+        &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+        *projection_index,
+        Some(expected_identity),
+        &repository_transaction_root(paths),
+        backup,
+        false,
     )
 }
 

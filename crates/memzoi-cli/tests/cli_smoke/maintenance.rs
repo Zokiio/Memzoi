@@ -44,12 +44,16 @@ fn git_fixture_output(directory: &Path, args: &[&str]) -> Vec<u8> {
 }
 
 #[test]
-fn maintenance_help_exposes_plan_only_repository_surface() {
+fn maintenance_help_exposes_plan_and_cli_only_materialization_surface() {
     let mut root = memzoi();
     root.args(["maintenance", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("plan").and(predicate::str::contains("\n  apply ").not()));
+        .stdout(
+            predicate::str::contains("plan")
+                .and(predicate::str::contains("materialize"))
+                .and(predicate::str::contains("\n  apply ").not()),
+        );
 
     let mut plan = memzoi();
     plan.args(["maintenance", "plan", "--help"])
@@ -63,6 +67,180 @@ fn maintenance_help_exposes_plan_only_repository_surface() {
                 .and(predicate::str::contains("--include-local").not())
                 .and(predicate::str::contains("--include-session").not()),
         );
+
+    let mut materialize = memzoi();
+    materialize
+        .args(["maintenance", "materialize", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--plan-file <PATH>")
+                .and(predicate::str::contains("--plan-id <ID>"))
+                .and(predicate::str::contains("--action-id <ID>"))
+                .and(predicate::str::contains("repeat for each action"))
+                .and(predicate::str::contains("--decision-at <RFC3339-UTC>"))
+                .and(predicate::str::contains("--json")),
+        );
+}
+
+#[test]
+fn maintenance_materialize_writes_reviewable_duplicate_projection_and_replays() {
+    let repo = initialized_temp_repo();
+    for id in ["cli-materialize-a", "cli-materialize-b"] {
+        write_canonical_record_fixture(
+            repo.path(),
+            id,
+            "repo",
+            None,
+            "active",
+            "2026-07-01T00:00:00Z",
+            "2026-07-01T00:00:00Z",
+        );
+    }
+    run_git_fixture(repo.path(), &["add", ".memzoi"]);
+    run_git_fixture(
+        repo.path(),
+        &[
+            "-c",
+            "user.name=Memzoi Test",
+            "-c",
+            "user.email=memzoi-test@example.invalid",
+            "commit",
+            "-qm",
+            "maintenance baseline",
+        ],
+    );
+    let index_path = repo.path().join(".git/index");
+    let index_before = fs::read(&index_path).expect("read baseline index");
+    let plan_text = run_command_stdout(repo.path(), &["maintenance", "plan", "--json"]);
+    let plan: Value = serde_json::from_str(&plan_text).expect("parse current maintenance plan");
+    let action = plan["action_groups"]
+        .as_array()
+        .expect("maintenance groups")
+        .iter()
+        .find(|group| group["kind"] == "repository_materialization")
+        .and_then(|group| group["actions"].as_array())
+        .and_then(|actions| {
+            actions
+                .iter()
+                .find(|action| action["class"] == "consolidate_exact_duplicates")
+        })
+        .expect("duplicate consolidation action");
+    let action_id = action["action_id"].as_str().expect("action ID");
+    let keeper = action["keeper_record_id"].as_str().expect("keeper ID");
+    let keeper_path = repo
+        .path()
+        .join(".memzoi/records")
+        .join(format!("{keeper}.md"));
+    let keeper_before = fs::read(&keeper_path).expect("read keeper");
+    let artifact_dir = tempfile::tempdir().expect("plan artifact directory");
+    let plan_path = artifact_dir.path().join("plan.json");
+    fs::write(&plan_path, &plan_text).expect("write plan artifact");
+    let args = [
+        "maintenance",
+        "materialize",
+        "--plan-file",
+        plan_path.to_str().expect("plan path UTF-8"),
+        "--plan-id",
+        plan["plan_id"].as_str().expect("plan ID"),
+        "--action-id",
+        action_id,
+        "--decision-at",
+        plan["evaluated_at"].as_str().expect("evaluated time"),
+        "--json",
+    ];
+
+    let paths = test_paths(repo.path());
+    let managed_before_invalid = managed_state_snapshot(&paths);
+    let runtime_before_invalid = repository_runtime_snapshot(&paths);
+    let invalid_action_id = format!("blake3:{}", "f".repeat(64));
+    let mut invalid = memzoi();
+    invalid
+        .args([
+            "maintenance",
+            "materialize",
+            "--plan-file",
+            plan_path.to_str().expect("plan path UTF-8"),
+            "--plan-id",
+            plan["plan_id"].as_str().expect("plan ID"),
+            "--action-id",
+            &invalid_action_id,
+            "--decision-at",
+            plan["evaluated_at"].as_str().expect("evaluated time"),
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is not a repository-materialization action",
+        ));
+    assert_eq!(managed_state_snapshot(&paths), managed_before_invalid);
+    assert_eq!(repository_runtime_snapshot(&paths), runtime_before_invalid);
+
+    let mut duplicate = memzoi();
+    duplicate
+        .args([
+            "maintenance",
+            "materialize",
+            "--plan-file",
+            plan_path.to_str().expect("plan path UTF-8"),
+            "--plan-id",
+            plan["plan_id"].as_str().expect("plan ID"),
+            "--action-id",
+            action_id,
+            "--action-id",
+            action_id,
+            "--decision-at",
+            plan["evaluated_at"].as_str().expect("evaluated time"),
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "duplicate --action-id values are not allowed",
+        ));
+
+    let written = run_json_command(repo.path(), &args);
+    assert_eq!(written["outputs"][0]["outcome"], "written");
+    assert_eq!(written["outputs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        fs::read(&keeper_path).expect("reread keeper"),
+        keeper_before
+    );
+    assert_eq!(
+        fs::read(&index_path).expect("reread Git index"),
+        index_before,
+        "maintenance must not stage its output"
+    );
+    assert_eq!(written["review_commands"][0]["program"], "git");
+    let nested = repo.path().join("nested/review");
+    fs::create_dir_all(&nested).expect("create nested review directory");
+    let review_args = written["review_commands"][0]["args"]
+        .as_array()
+        .expect("structured review args")
+        .iter()
+        .map(|value| value.as_str().expect("review arg string"))
+        .collect::<Vec<_>>();
+    let review = std::process::Command::new("git")
+        .args(review_args)
+        .current_dir(&nested)
+        .output()
+        .expect("execute structured review command from nested directory");
+    assert!(review.status.success(), "{:?}", review.stderr);
+    assert!(
+        !review.stdout.is_empty(),
+        "structured review command did not show the maintenance diff"
+    );
+
+    let replay = run_json_command(repo.path(), &args);
+    assert_eq!(replay["outputs"][0]["outcome"], "already_current");
+    assert_eq!(
+        git_fixture_output(repo.path(), &["diff", "--cached"]),
+        Vec::<u8>::new(),
+        "maintenance must not mutate the Git index"
+    );
 }
 
 #[test]
@@ -113,7 +291,7 @@ fn maintenance_plan_is_deterministic_content_free_and_zero_write() {
     );
     let plan: Value = serde_json::from_str(&first).expect("parse maintenance plan JSON");
     assert_json_string_field(&plan, &["schema"], "memzoi/maintenance-plan");
-    assert_json_string_field(&plan["policy"], &["contract_version"], "maintenance-plan/2");
+    assert!(plan["policy"].get("contract_version").is_none());
     assert_json_string_field(&plan["scope"], &["kind"], "repository");
     assert_json_string_field(
         &plan["records"][0]["version"],

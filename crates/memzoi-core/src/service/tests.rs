@@ -1835,10 +1835,545 @@ fn materialization_create_installs_one_pinned_canonical_record() -> anyhow::Resu
     let record = okf::parse_okf_record_markdown(service.paths.records_dir(), &path, &markdown)?
         .context("materialization create must write a canonical record")?;
     assert_eq!(record.concept_id, candidate.record.concept_id);
-    assert_eq!(
-        record.materialization.as_ref().map(|value| &value.plan_id),
-        Some(&plan.plan_id)
+    let crate::RepositoryMaterializationMetadata::Direct(metadata) = record
+        .materialization
+        .as_ref()
+        .context("materialization create must carry direct metadata")?
+    else {
+        bail!("materialization create must use direct metadata");
+    };
+    assert_eq!(metadata.plan_id, plan.plan_id);
+    Ok(())
+}
+
+#[test]
+fn repository_maintenance_consolidates_duplicates_and_replays_exactly() -> anyhow::Result<()> {
+    use time::format_description::well_known::Rfc3339;
+
+    let (_temp, service) = initialized_git_service()?;
+    for id in ["duplicate-a", "duplicate-b"] {
+        let candidate = materialization_candidate(id, "Duplicate policy")?;
+        let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+        service.apply_repository_materialization(&plan, &decision, &candidate)?;
+    }
+    let evaluated_at = service.now().format(&Rfc3339)?;
+    let plan = crate::plan_maintenance(
+        &service.paths,
+        crate::MaintenancePlanRequest {
+            schema: crate::MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+            evaluated_at: Some(evaluated_at.clone()),
+            record_ids: vec!["duplicate-a".to_owned(), "duplicate-b".to_owned()],
+        },
+    )?;
+    let action = plan
+        .action_groups
+        .iter()
+        .find(|group| group.kind == crate::MaintenanceActionGroupKind::RepositoryMaterialization)
+        .and_then(|group| {
+            group.actions.iter().find(|action| {
+                action.class == crate::MaintenanceActionClass::ConsolidateExactDuplicates
+            })
+        })
+        .context("maintenance plan did not contain duplicate consolidation")?;
+    let keeper = action
+        .keeper_record_id
+        .as_deref()
+        .context("duplicate action did not choose a keeper")?;
+    let nonkeeper = action
+        .record_ids
+        .iter()
+        .find(|record_id| record_id.as_str() != keeper)
+        .context("duplicate action did not contain a nonkeeper")?;
+    let keeper_path = service.paths.records_dir().join(format!("{keeper}.md"));
+    let keeper_before = fs::read(&keeper_path)?;
+    let request = crate::RepositoryMaintenanceMaterializationRequest {
+        schema: crate::REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA.to_owned(),
+        plan_id: plan.plan_id.clone(),
+        selected_action_ids: vec![action.action_id.clone()],
+        decision_at: evaluated_at,
+    };
+
+    let written = service.apply_repository_maintenance_materialization(&plan, &request)?;
+    assert!(
+        written
+            .outputs
+            .iter()
+            .all(|output| output.outcome == crate::MaterializationOutputOutcome::Written)
     );
+    assert_eq!(fs::read(&keeper_path)?, keeper_before);
+    let nonkeeper_path = service.paths.records_dir().join(format!("{nonkeeper}.md"));
+    let nonkeeper_markdown = fs::read_to_string(&nonkeeper_path)?;
+    let nonkeeper_record = okf::parse_okf_record_markdown(
+        service.paths.records_dir(),
+        &nonkeeper_path,
+        &nonkeeper_markdown,
+    )?
+    .context("maintenance output must remain canonical OKF")?;
+    assert_eq!(nonkeeper_record.status, MemoryStatus::Superseded);
+    let crate::RepositoryMaterializationMetadata::Maintenance(metadata) = nonkeeper_record
+        .materialization
+        .context("maintenance output must carry maintenance metadata")?
+    else {
+        bail!("maintenance output used direct metadata");
+    };
+    assert_eq!(
+        metadata
+            .counterpart
+            .context("duplicate output must bind its keeper")?
+            .relationship,
+        crate::MaterializationCounterpartRelationship::SupersededBy
+    );
+
+    let replay = service.apply_repository_maintenance_materialization(&plan, &request)?;
+    assert!(
+        replay.outputs.iter().all(|output| {
+            output.outcome == crate::MaterializationOutputOutcome::AlreadyCurrent
+        })
+    );
+    assert!(
+        !service
+            .paths
+            .runtime_dir
+            .join("repository-maintenance-materialization-journal.json")
+            .exists()
+    );
+    let paths = service.paths.clone();
+    let after_expiry =
+        time::OffsetDateTime::parse(&plan.not_after, &Rfc3339)? + time::Duration::seconds(1);
+    drop(service);
+    let expired_service =
+        MemoryService::open_paths_with_clock(paths, crate::FixedClock::new(after_expiry))?;
+    let expired_replay =
+        expired_service.apply_repository_maintenance_materialization(&plan, &request)?;
+    assert!(
+        expired_replay.outputs.iter().all(|output| {
+            output.outcome == crate::MaterializationOutputOutcome::AlreadyCurrent
+        })
+    );
+
+    let tampered_path = expired_service
+        .paths
+        .records_dir()
+        .join(format!("{nonkeeper}.md"));
+    let tampered_markdown = fs::read_to_string(&tampered_path)?;
+    let mut tampered = okf::parse_okf_record_markdown(
+        expired_service.paths.records_dir(),
+        &tampered_path,
+        &tampered_markdown,
+    )?
+    .context("tampered maintenance fixture must parse")?;
+    tampered.status = MemoryStatus::Active;
+    let tampered_revision = crate::canonical_revision_for_okf_record(&tampered)?;
+    let (action_id, expected_prior_revision, reason) = {
+        let crate::RepositoryMaterializationMetadata::Maintenance(metadata) = tampered
+            .materialization
+            .as_mut()
+            .context("tampered fixture must carry maintenance metadata")?
+        else {
+            bail!("tampered fixture used direct metadata");
+        };
+        metadata.intended_semantic_revision = tampered_revision.clone();
+        (
+            metadata.action_id.clone(),
+            metadata.expected_prior_revision.clone(),
+            metadata.reason.clone(),
+        )
+    };
+    let intent = crate::RepositoryMaintenanceOutputIntent {
+        action_id,
+        path: format!(".memzoi/records/{nonkeeper}.md"),
+        record_id: nonkeeper.clone(),
+        action: crate::MaterializationAction::Supersede,
+        role: crate::MaterializationOutputRole::LifecycleCounterpart,
+        expected_prior_revision,
+        intended_semantic_revision: tampered_revision,
+        reason,
+    };
+    let binding = crate::RepositoryMaintenanceDecisionBinding {
+        policy_version: plan.policy.policy_version.clone(),
+        policy_digest: plan.policy.policy_digest.clone(),
+        safety_contract: crate::REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
+        authorization_capability: crate::MaterializationAuthorizationCapability::ExplicitCli,
+        outputs: vec![intent],
+        decision_at: request.decision_at.clone(),
+    };
+    let tampered_decision_id =
+        crate::repository_maintenance_decision_id(&expired_replay.selection_id, &binding)?;
+    let crate::RepositoryMaterializationMetadata::Maintenance(metadata) = tampered
+        .materialization
+        .as_mut()
+        .context("tampered fixture must carry maintenance metadata")?
+    else {
+        bail!("tampered fixture used direct metadata");
+    };
+    metadata.decision_id = tampered_decision_id;
+    let tampered_bytes = okf::render_okf_record_markdown(&tampered)?.into_bytes();
+    fs::write(&tampered_path, &tampered_bytes)?;
+
+    let error = expired_service
+        .apply_repository_maintenance_materialization(&plan, &request)
+        .expect_err("a self-consistent but wrong lifecycle must not be already current");
+    assert!(
+        format!("{error:#}").contains("deterministic action projection"),
+        "{error:#}"
+    );
+    assert_eq!(fs::read(&tampered_path)?, tampered_bytes);
+    Ok(())
+}
+
+#[test]
+fn repository_maintenance_reuses_renewal_evidence_without_changing_timestamps() -> anyhow::Result<()>
+{
+    use time::format_description::well_known::Rfc3339;
+
+    let (_temp, service) = initialized_git_service()?;
+    let mut predecessor = materialization_candidate_record("renewal-old", "Renewal policy");
+    predecessor.created = "2026-01-01T00:00:00Z".to_owned();
+    predecessor.updated = Some("2026-02-01T00:00:00Z".to_owned());
+    predecessor.retention.explicit_expires_at = Some("2026-06-01T00:00:00Z".to_owned());
+    let predecessor = build_repository_materialization_candidate(
+        predecessor,
+        crate::MaterializationAction::Create,
+        ExpectedPriorRevision::Absent,
+        None,
+        None,
+    )?;
+    let (plan, decision) = materialization_plan_and_decision(&predecessor)?;
+    service.apply_repository_materialization(&plan, &decision, &predecessor)?;
+
+    let mut evidence = materialization_candidate_record("renewal-evidence", "Renewal policy");
+    evidence.created = "2026-07-01T00:00:00Z".to_owned();
+    evidence.updated = Some("2026-07-02T00:00:00Z".to_owned());
+    evidence.capture = Some(materialization_capture());
+    evidence.lineage = Some(crate::RecordLineage {
+        kind: crate::RecordLineageKind::SessionSuccessor,
+        predecessor_id: "earlier-session-record".to_owned(),
+    });
+    let evidence = build_repository_materialization_candidate(
+        evidence,
+        crate::MaterializationAction::Create,
+        ExpectedPriorRevision::Absent,
+        None,
+        None,
+    )?;
+    let (plan, decision) = materialization_plan_and_decision(&evidence)?;
+    service.apply_repository_materialization(&plan, &decision, &evidence)?;
+
+    let evaluated_at = service.now().format(&Rfc3339)?;
+    let plan = crate::plan_maintenance(
+        &service.paths,
+        crate::MaintenancePlanRequest {
+            schema: crate::MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+            evaluated_at: Some(evaluated_at.clone()),
+            record_ids: vec!["renewal-old".to_owned(), "renewal-evidence".to_owned()],
+        },
+    )?;
+    let action = plan
+        .action_groups
+        .iter()
+        .find(|group| group.kind == crate::MaintenanceActionGroupKind::RepositoryMaterialization)
+        .and_then(|group| {
+            group.actions.iter().find(|action| {
+                action.class == crate::MaintenanceActionClass::CreateRenewalSuccessor
+            })
+        })
+        .context("maintenance plan did not contain renewal action")?;
+    let request = crate::RepositoryMaintenanceMaterializationRequest {
+        schema: crate::REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA.to_owned(),
+        plan_id: plan.plan_id.clone(),
+        selected_action_ids: vec![action.action_id.clone()],
+        decision_at: evaluated_at,
+    };
+    let result = service.apply_repository_maintenance_materialization(&plan, &request)?;
+    assert_eq!(result.outputs.len(), 2);
+
+    let load = |record_id: &str| -> anyhow::Result<crate::OkfRecordFile> {
+        let path = service.paths.records_dir().join(format!("{record_id}.md"));
+        let markdown = fs::read_to_string(&path)?;
+        okf::parse_okf_record_markdown(service.paths.records_dir(), &path, &markdown)?
+            .context("renewal output must remain canonical OKF")
+    };
+    let successor = load("renewal-evidence")?;
+    let old = load("renewal-old")?;
+    assert_eq!(successor.status, MemoryStatus::Active);
+    assert_eq!(successor.supersedes_id.as_deref(), Some("renewal-old"));
+    assert_eq!(
+        successor.lineage.as_ref().map(|lineage| lineage.kind),
+        Some(crate::RecordLineageKind::Renewal)
+    );
+    assert_eq!(successor.created, "2026-07-01T00:00:00Z");
+    assert_eq!(successor.updated.as_deref(), Some("2026-07-02T00:00:00Z"));
+    assert_eq!(old.status, MemoryStatus::Superseded);
+    assert_eq!(old.created, "2026-01-01T00:00:00Z");
+    assert_eq!(old.updated.as_deref(), Some("2026-02-01T00:00:00Z"));
+    for (record, relationship) in [
+        (
+            successor,
+            crate::MaterializationCounterpartRelationship::Supersedes,
+        ),
+        (
+            old,
+            crate::MaterializationCounterpartRelationship::SupersededBy,
+        ),
+    ] {
+        let crate::RepositoryMaterializationMetadata::Maintenance(metadata) = record
+            .materialization
+            .context("renewal output must carry maintenance metadata")?
+        else {
+            bail!("renewal output used direct metadata");
+        };
+        assert_eq!(
+            metadata
+                .counterpart
+                .context("renewal output must bind counterpart")?
+                .relationship,
+            relationship
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn repository_maintenance_recovers_pre_mixed_and_committed_post_interruptions() -> anyhow::Result<()>
+{
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use time::format_description::well_known::Rfc3339;
+
+    for point in [
+        "before_stage",
+        "after_stage",
+        "before_backup",
+        "after_backup",
+        "after_journal_temp_sync",
+        "after_journal_link",
+        "after_journal",
+        "before_install",
+        "after_install",
+        "during_recovery_restore",
+        "journal_rewrite_partial_write",
+        "after_canonical_commit",
+        "after_index_commit",
+        "after_journal_cleanup",
+        "after_cleanup",
+        "after_index_commit_manual_restore",
+        "after_index_commit_complete_manual_restore",
+    ] {
+        let (_temp, service) = initialized_git_service()?;
+        for id in ["recovery-a", "recovery-b", "recovery-c", "recovery-d"] {
+            let candidate = materialization_candidate(id, "Recovery duplicate")?;
+            let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+            service.apply_repository_materialization(&plan, &decision, &candidate)?;
+        }
+        let evaluated_at = service.now().format(&Rfc3339)?;
+        let plan = crate::plan_maintenance(
+            &service.paths,
+            crate::MaintenancePlanRequest {
+                schema: crate::MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+                evaluated_at: Some(evaluated_at.clone()),
+                record_ids: vec![
+                    "recovery-a".to_owned(),
+                    "recovery-b".to_owned(),
+                    "recovery-c".to_owned(),
+                    "recovery-d".to_owned(),
+                ],
+            },
+        )?;
+        let action = plan
+            .action_groups
+            .iter()
+            .find(|group| {
+                group.kind == crate::MaintenanceActionGroupKind::RepositoryMaterialization
+            })
+            .and_then(|group| {
+                group.actions.iter().find(|action| {
+                    action.class == crate::MaintenanceActionClass::ConsolidateExactDuplicates
+                })
+            })
+            .context("maintenance recovery plan did not contain duplicate consolidation")?;
+        let request = crate::RepositoryMaintenanceMaterializationRequest {
+            schema: crate::REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA.to_owned(),
+            plan_id: plan.plan_id.clone(),
+            selected_action_ids: vec![action.action_id.clone()],
+            decision_at: evaluated_at,
+        };
+        let paths = service.paths.clone();
+        let before = action
+            .record_ids
+            .iter()
+            .map(|record_id| {
+                Ok((
+                    record_id.clone(),
+                    fs::read(paths.records_dir().join(format!("{record_id}.md")))?,
+                ))
+            })
+            .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
+        let (hook_point, hook_index) = if matches!(
+            point,
+            "after_index_commit_manual_restore" | "after_index_commit_complete_manual_restore"
+        ) {
+            ("after_index_commit", 0)
+        } else if point == "during_recovery_restore" {
+            ("after_install", 1)
+        } else {
+            (point, 0)
+        };
+        if point == "journal_rewrite_partial_write" {
+            super::repository_maintenance_materialization::inject_journal_rewrite_partial_write_failure();
+            let error = service
+                .apply_repository_maintenance_materialization(&plan, &request)
+                .expect_err("partial journal rewrite must fail the transaction");
+            assert!(
+                format!("{error:#}").contains("injected maintenance journal rewrite failure"),
+                "{error:#}"
+            );
+        } else {
+            super::repository_maintenance_materialization::inject_transition_hook(
+                move |actual, index| {
+                    if actual == hook_point
+                        && (hook_point != "after_install" || index == hook_index)
+                    {
+                        panic!("simulated maintenance interruption at {point}");
+                    }
+                },
+            );
+            let interrupted = catch_unwind(AssertUnwindSafe(|| {
+                service.apply_repository_maintenance_materialization(&plan, &request)
+            }));
+            assert!(
+                interrupted.is_err(),
+                "{point} did not interrupt materialization"
+            );
+        }
+        drop(service);
+
+        if point == "during_recovery_restore" {
+            super::repository_maintenance_materialization::inject_transition_hook(
+                |actual, index| {
+                    if actual == "after_recovery_restore" && index == 1 {
+                        panic!("simulated interruption during maintenance recovery rollback");
+                    }
+                },
+            );
+            let interrupted = catch_unwind(AssertUnwindSafe(|| {
+                MemoryService::open_paths(paths.clone())
+            }));
+            assert!(
+                interrupted.is_err(),
+                "maintenance recovery rollback was not interrupted"
+            );
+        }
+
+        if point == "after_index_commit_manual_restore" {
+            let reverted_id = action
+                .record_ids
+                .iter()
+                .find(|record_id| Some(record_id.as_str()) != action.keeper_record_id.as_deref())
+                .context("duplicate action must have a nonkeeper")?;
+            let reverted = before
+                .get(reverted_id)
+                .context("prior bytes must include the reverted record")?;
+            let reverted_path = paths.records_dir().join(format!("{reverted_id}.md"));
+            fs::write(&reverted_path, reverted)?;
+            let error = match MemoryService::open_paths(paths.clone()) {
+                Ok(_) => bail!("manual exact-byte restoration unexpectedly recovered"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("not transaction-owned")
+                    || format!("{error:#}").contains("unowned mixture"),
+                "{error:#}"
+            );
+            assert_eq!(fs::read(&reverted_path)?, *reverted);
+            assert!(
+                paths
+                    .runtime_dir
+                    .join("repository-maintenance-materialization-journal.json")
+                    .exists()
+            );
+            continue;
+        }
+
+        if point == "after_index_commit_complete_manual_restore" {
+            for record_id in action
+                .record_ids
+                .iter()
+                .filter(|record_id| Some(record_id.as_str()) != action.keeper_record_id.as_deref())
+            {
+                fs::write(
+                    paths.records_dir().join(format!("{record_id}.md")),
+                    before
+                        .get(record_id)
+                        .context("prior bytes must include every restored record")?,
+                )?;
+            }
+        }
+
+        let recovered = MemoryService::open_paths(paths.clone())?;
+        assert!(recovered.repo_index_drift()?.is_current());
+        assert!(
+            !paths
+                .runtime_dir
+                .join("repository-maintenance-materialization-journal.json")
+                .exists()
+        );
+        if matches!(
+            point,
+            "after_canonical_commit"
+                | "after_index_commit"
+                | "after_journal_cleanup"
+                | "after_cleanup"
+        ) {
+            for record_id in action
+                .record_ids
+                .iter()
+                .filter(|record_id| Some(record_id.as_str()) != action.keeper_record_id.as_deref())
+            {
+                let path = paths.records_dir().join(format!("{record_id}.md"));
+                let markdown = fs::read_to_string(&path)?;
+                let record = okf::parse_okf_record_markdown(paths.records_dir(), &path, &markdown)?
+                    .context("recovered post-state record must be canonical")?;
+                assert_eq!(record.status, MemoryStatus::Superseded);
+            }
+            let replay = recovered.apply_repository_maintenance_materialization(&plan, &request)?;
+            assert!(replay.outputs.iter().all(|output| {
+                output.outcome == crate::MaterializationOutputOutcome::AlreadyCurrent
+            }));
+        } else {
+            for (record_id, bytes) in &before {
+                assert_eq!(
+                    fs::read(paths.records_dir().join(format!("{record_id}.md")))?,
+                    *bytes,
+                    "{point} recovery did not restore exact pre-state"
+                );
+            }
+            let written =
+                recovered.apply_repository_maintenance_materialization(&plan, &request)?;
+            assert!(
+                written.outputs.iter().all(|output| {
+                    output.outcome == crate::MaterializationOutputOutcome::Written
+                })
+            );
+        }
+        let transaction_root = paths.runtime_dir.join("repository-transactions");
+        if transaction_root.exists() {
+            assert_eq!(
+                fs::read_dir(&transaction_root)?.count(),
+                0,
+                "{point} left repository transaction artifacts"
+            );
+        }
+        assert!(
+            fs::read_dir(&paths.runtime_dir)?.all(|entry| {
+                !entry.is_ok_and(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains("repository-maintenance-materialization-journal.json")
+                })
+            }),
+            "{point} left maintenance journal artifacts"
+        );
+    }
     Ok(())
 }
 

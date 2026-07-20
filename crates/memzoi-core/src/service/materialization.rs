@@ -13,9 +13,10 @@ use crate::{
     MaterializationMetadata, MaterializationOutputIntent, MaterializationOutputOutcome,
     MaterializationOutputResult, MaterializationOutputRole, OkfProposalSensitivity, OkfRecordFile,
     RepositoryContentClass, RepositoryMaterializationCandidate, RepositoryMaterializationDecision,
-    RepositoryMaterializationPlan, RepositoryMaterializationResult, RepositoryWriteRoute,
-    SafetyFieldKind, ScopeKind, Visibility, canonical_revision_for_okf_record,
-    canonical_revision_for_projection, git_repository::git_review_visibility, okf, repository_io,
+    RepositoryMaterializationMetadata, RepositoryMaterializationPlan,
+    RepositoryMaterializationResult, RepositoryWriteRoute, SafetyFieldKind, ScopeKind, Visibility,
+    canonical_revision_for_okf_record, canonical_revision_for_projection,
+    git_repository::git_review_visibility, okf, repository_io,
     repository_materialization_candidate_plan, repository_materialization_candidate_to_okf_record,
 };
 
@@ -268,7 +269,7 @@ fn prepare_materialization(
         reason: None,
     };
     metadata.validate()?;
-    record.materialization = Some(metadata);
+    record.materialization = Some(RepositoryMaterializationMetadata::Direct(metadata));
 
     let markdown = okf::render_okf_record_markdown(&record)?;
     let relative_path = PathBuf::from(&derived_path);

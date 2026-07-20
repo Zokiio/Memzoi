@@ -131,9 +131,9 @@ workflow only after treating it as untrusted review input, then use `memzoi capt
 }
 ```
 
-`schema` is required. `evaluated_at` is optional RFC 3339; omitting it captures
-one system-clock instant. `record_ids` is optional; when present it contains at
-most 256 unique canonical record IDs. Omitting it evaluates all admitted
+`schema` and `record_ids` are required. `evaluated_at` is optional RFC 3339;
+omitting it captures one system-clock instant. `record_ids` contains at most
+256 unique canonical record IDs; an empty array evaluates all admitted
 canonical repository records, up to the same 256-record planning ceiling. Unknown
 fields, output paths, private/local/session
 selectors, grant fields, and mutation-like arguments are rejected.
@@ -144,9 +144,9 @@ read private runtime records. The complete `memzoi/maintenance-plan` appears in
 `structuredContent`. Text content is a bounded, content-free summary containing
 the plan identity, validity times, and aggregate finding/action counts.
 
-The current contract is `maintenance-plan/2`; the stable request and plan
-schema identifiers remain `memzoi/maintenance-request` and
-`memzoi/maintenance-plan`. Pre-1.0 is current-schema-only: artifacts that do not
+The exact current request and plan schema identifiers are
+`memzoi/maintenance-request` and `memzoi/maintenance-plan`; the plan schema is
+the sole plan-format identity. Pre-1.0 is current-schema-only: artifacts that do not
 match the current schema are rejected and must be regenerated, with no alias or
 compatibility reader.
 

@@ -132,7 +132,7 @@ fn verify_existing_materialization_attestation(record: &okf::OkfRecordFile) -> R
         .map_err(|_| redacted_refusal("materialization-metadata"))?;
     let current_revision = canonical_revision_for_okf_record(record)
         .map_err(|_| redacted_refusal("materialization-revision"))?;
-    if metadata.revision != current_revision {
+    if metadata.intended_semantic_revision() != &current_revision {
         bail!("repository-record admission refused: materialization-revision");
     }
     Ok(())

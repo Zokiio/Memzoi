@@ -432,31 +432,39 @@ fn attach_valid_materialization(record_path: &Path, records_root: &Path) -> anyh
     let markdown = fs::read_to_string(record_path)?;
     let mut record = crate::okf::parse_okf_record_markdown(records_root, record_path, &markdown)?
         .context("record for materialization fixture was ignored")?;
-    record.materialization = Some(MaterializationMetadata {
-        schema: MATERIALIZATION_METADATA_SCHEMA.to_owned(),
-        action: MaterializationAction::Create,
-        plan_id: format!("blake3:{}", "a".repeat(64)),
-        candidate_id: format!("blake3:{}", "b".repeat(64)),
-        decision_id: format!("blake3:{}", "c".repeat(64)),
-        decision_at: "2026-07-16T00:00:00Z".to_owned(),
-        safety_contract: "test-repository-safety-contract".to_owned(),
-        revision: CanonicalRevision {
-            schema: CANONICAL_REVISION_SCHEMA.to_owned(),
-            revision_hash: format!("blake3:{}", "0".repeat(64)),
+    record.materialization = Some(crate::RepositoryMaterializationMetadata::Direct(
+        MaterializationMetadata {
+            schema: MATERIALIZATION_METADATA_SCHEMA.to_owned(),
+            action: MaterializationAction::Create,
+            plan_id: format!("blake3:{}", "a".repeat(64)),
+            candidate_id: format!("blake3:{}", "b".repeat(64)),
+            decision_id: format!("blake3:{}", "c".repeat(64)),
+            decision_at: "2026-07-16T00:00:00Z".to_owned(),
+            safety_contract: "test-repository-safety-contract".to_owned(),
+            revision: CanonicalRevision {
+                schema: CANONICAL_REVISION_SCHEMA.to_owned(),
+                revision_hash: format!("blake3:{}", "0".repeat(64)),
+            },
+            target: None,
+            reason: None,
         },
-        target: None,
-        reason: None,
-    });
+    ));
     let revision = canonical_revision_for_okf_record(&record)?;
-    record
+    let crate::RepositoryMaterializationMetadata::Direct(metadata) = record
         .materialization
         .as_mut()
         .context("materialization fixture metadata disappeared")?
-        .revision = revision;
-    let metadata = record
+    else {
+        bail!("materialization fixture must use direct metadata");
+    };
+    metadata.revision = revision;
+    let crate::RepositoryMaterializationMetadata::Direct(metadata) = record
         .materialization
         .as_ref()
-        .context("materialization fixture metadata is missing")?;
+        .context("materialization fixture metadata is missing")?
+    else {
+        bail!("materialization fixture must use direct metadata");
+    };
     let (frontmatter, body) = markdown
         .split_once("\n---\n")
         .context("canonical record fixture has no closing frontmatter delimiter")?;

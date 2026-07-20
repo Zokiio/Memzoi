@@ -20,7 +20,7 @@ This page summarizes Memzoi v0's public CLI, MCP, and model values.
 | `memzoi events` | Export runtime event-log rows. |
 | `memzoi session-end` | Promote explicit structured session-end candidates into proposal files or runtime memory. |
 | `memzoi capture` | Plan evidence-backed capture from one explicit Markdown, instruction, ADR, or Git-change source; record a complete review; and route reviewed candidates. |
-| `memzoi maintenance` | Generate an immutable, repository-only maintenance evidence plan without applying or authorizing any action. |
+| `memzoi maintenance` | Generate an immutable repository-only maintenance plan, or materialize explicitly selected repository actions as one unstaged, reviewable transaction. |
 | `memzoi lifecycle` | Plan, authorize, revoke, inspect, and atomically apply exact owner-authorized private lifecycle actions. This local CLI/core workflow is not exposed through MCP. |
 | `memzoi approve` | Approve a pending or validated memory proposal. |
 | `memzoi reject` | Reject a proposed memory. |
@@ -74,6 +74,7 @@ Run `memzoi <command> --help` for exact options.
 | `capture review` | `--plan-file`, `--decisions-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--reviewed-by`, `--reviewed-at`, `--output`, `--json` |
 | `capture apply` | `--plan-file`, `--review-file`, `--prior-review-file`, `--source-bytes <path\|->` when replaying `supplied_bytes`, `--plan-id`, `--review-id`, `--actor`, `--json` |
 | `maintenance plan` | repeated `--record-id`, `--evaluated-at <RFC3339>`, `--output`, `--json` |
+| `maintenance materialize` | `--plan-file <path>`, `--plan-id <id>`, repeated `--action-id <id>`, `--decision-at <RFC3339-UTC>`, `--json` |
 | `lifecycle plan` | repeated `--record-id`, `--evaluated-at <RFC3339>`, `--output`, `--json` |
 | `lifecycle authorize` | `--request-file <path>`, optional `--plan-file <path>`, optional `--expires-at <RFC3339>`, `--json` |
 | `lifecycle revoke` | `--grant-id <id>`, `--json` |
@@ -263,7 +264,7 @@ for metric definitions and fixture guidance.
 and emits an immutable `memzoi/maintenance-plan` evidence artifact. It reports
 exact duplicates, conservative high-confidence contradictions, staleness,
 expiry, renewal candidates, and typed action candidates. These are reviewable
-findings, not execution authority: this command has no apply mode and never
+findings, not execution authority: the planning command never
 mutates a record, proposal, index, private runtime row, overlay, WAL/event log,
 or Git state.
 
@@ -295,17 +296,38 @@ and aggregate counts. `--json` emits the complete repository-safe artifact.
 existing file. Its parent must already be a real directory, and the destination
 must be outside the Git worktree and all Memzoi-managed runtime roots.
 
-The artifact schema reserves separate repository materialization, private
+The artifact schema contains separate repository materialization, private
 derived-state, and owner-authorized private action groups for downstream work.
-`memzoi maintenance plan` remains deliberately repository-only and exposes no
-private flags, output, or mutation path. Private planning and owner-authorized
+`memzoi maintenance materialize` accepts only explicit action IDs from the
+repository-materialization group. Private planning and owner-authorized
 execution use the separate local `memzoi lifecycle` CLI/core workflow; MCP
 `plan_maintenance` never exposes private records or lifecycle mutation.
 
-The current maintenance contract remains `maintenance-plan/2` and
-`maintenance-policy/1`; the current schema now includes canonical pairwise
-contradiction edges. The stable artifact schemas remain
-`memzoi/maintenance-request` and `memzoi/maintenance-plan`. Memzoi is pre-1.0
+Materialization requires one current immutable plan, its exact plan ID, at
+least one explicitly selected action ID, and a canonical UTC decision time:
+
+```bash
+memzoi maintenance materialize \
+  --plan-file /path/outside/the/worktree/maintenance-plan.json \
+  --plan-id "$(jq -r .plan_id /path/outside/the/worktree/maintenance-plan.json)" \
+  --action-id ACTION_ID \
+  --decision-at 2026-07-20T12:00:00Z \
+  --json
+```
+
+The command supports exact duplicate consolidation and renewal successors. It
+projects every final OKF byte before authorizing one complete maintenance batch,
+then installs all changed paths through a durable journal with exact backups and
+disposable-index reconciliation. Exact reruns return `already_current`, even
+after plan expiry. Fresh writes require a currently valid plan and clean selected
+Git targets. Outputs remain unstaged; Memzoi returns narrow structured `git diff`
+commands but never stages, commits, pushes, changes Git configuration, or opens a
+pull request. MCP remains planning-only.
+
+The exact current maintenance artifact schemas are `memzoi/maintenance-request`
+and `memzoi/maintenance-plan`; the plan schema is the sole plan-format identity,
+and `maintenance-policy/1` identifies policy behavior. The current schema includes
+canonical pairwise contradiction edges. Memzoi is pre-1.0
 and current-schema-only: artifacts that do not match the current schema are
 rejected and must be regenerated. There is no compatibility
 reader, schema fallback, deprecated field alias, or SQLite migration. An old
