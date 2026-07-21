@@ -3428,7 +3428,7 @@ fn maintenance_finding_id(finding: &MaintenanceFinding) -> Result<String> {
     )
 }
 
-fn maintenance_action_id(action: &MaintenanceAction) -> Result<String> {
+pub(crate) fn maintenance_action_id(action: &MaintenanceAction) -> Result<String> {
     identity(
         "memzoi/maintenance/action",
         &serde_json::json!({
@@ -3443,7 +3443,7 @@ fn maintenance_action_id(action: &MaintenanceAction) -> Result<String> {
     )
 }
 
-fn validate_action_shape(action: &MaintenanceAction) -> Result<()> {
+pub(crate) fn validate_action_shape(action: &MaintenanceAction) -> Result<()> {
     match action.class {
         MaintenanceActionClass::ConsolidateExactDuplicates => {
             ensure!(

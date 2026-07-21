@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -22,7 +22,8 @@ use crate::service::{
     repository_mutation::{
         AuthorizedRepositoryProjectionBatch, OwnedRepositoryProjection, RepositoryFileIdentity,
         RepositoryMutationAuthorization, borrowed_repository_projections,
-        remove_authorized_created_maintenance_journal_temporary, repository_transaction_path,
+        remove_authorized_created_maintenance_journal_temporary,
+        replace_authorized_maintenance_journal_compare_and_swap, repository_transaction_path,
         repository_transaction_root,
     },
     safe_files::{remove_staged_file, sync_directory},
@@ -116,7 +117,9 @@ struct MaintenanceCommitMarker {
     plan_id: String,
     selection_id: String,
     decision_id: String,
-    journal_digest: String,
+    authorization_digest: String,
+    projection_digest: String,
+    safety_fields_digest: String,
 }
 
 pub(super) fn journal_path(paths: &MemoryPaths) -> PathBuf {
@@ -127,10 +130,13 @@ fn journal_temporary_path(
     paths: &MemoryPaths,
     journal: &MaintenanceMaterializationJournal,
 ) -> PathBuf {
-    paths.runtime_dir.join(format!(
-        ".{JOURNAL_FILE}.{}.{}.tmp",
-        journal.transaction_id, journal.authorization_digest
-    ))
+    repository_io::maintenance_journal_temporary_path(
+        &paths.runtime_dir,
+        &journal.transaction_id,
+        &journal.authorization_digest,
+        None,
+    )
+    .expect("validated maintenance journal temporary path")
 }
 
 pub(super) fn journal_exists(paths: &MemoryPaths) -> Result<bool> {
@@ -317,7 +323,7 @@ pub(super) fn write_journal(
         "orphan repository maintenance journal temporary",
     )?;
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true).write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -369,20 +375,28 @@ pub(super) fn rewrite_journal(
         loaded.journal.transaction_id == journal.transaction_id,
         "repository maintenance journal rewrite changed transaction identity"
     );
-    verify_regular_file(
-        paths,
+    let current = repository_io::read_bounded_direct_child_file_with_handle_if_exists(
+        &paths.runtime_dir,
         &journal_path(paths),
         loaded.content_bytes,
-        &loaded.content_hash,
-        Some(loaded.file_identity),
         "repository maintenance journal",
-    )?;
+    )?
+    .context("repository maintenance journal is missing")?;
+    ensure!(
+        current.bytes.len() as u64 == loaded.content_bytes
+            && hash(&current.bytes) == loaded.content_hash
+            && current.identity == loaded.file_identity
+            && current.mode & 0o077 == 0,
+        "repository maintenance journal changed before rewrite"
+    );
     let bytes = journal_bytes(journal)?;
     let content_digest = hash(&bytes);
-    let temporary = paths.runtime_dir.join(format!(
-        ".{JOURNAL_FILE}.{}.{}.{content_digest}.rewrite.tmp",
-        journal.transaction_id, journal.authorization_digest
-    ));
+    let temporary = repository_io::maintenance_journal_temporary_path(
+        &paths.runtime_dir,
+        &journal.transaction_id,
+        &journal.authorization_digest,
+        Some(&content_digest),
+    )?;
     remove_runtime_file_if_matching(
         paths,
         &temporary,
@@ -391,7 +405,7 @@ pub(super) fn rewrite_journal(
         "orphan repository maintenance journal rewrite",
     )?;
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true).write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -429,11 +443,17 @@ pub(super) fn rewrite_journal(
             )),
         };
     }
+    replace_authorized_maintenance_journal_compare_and_swap(
+        paths,
+        mutation,
+        &journal.transaction_id,
+        &content_digest,
+        &current.file,
+        &current.bytes,
+        &file,
+        &bytes,
+    )?;
     drop(file);
-    fs::rename(&temporary, journal_path(paths))
-        .context("failed to install repository maintenance journal rewrite")?;
-    sync_directory(&paths.runtime_dir)
-        .context("failed to sync repository maintenance journal rewrite")?;
     let reloaded =
         load_journal(paths)?.context("rewritten repository maintenance journal disappeared")?;
     ensure!(
@@ -497,6 +517,26 @@ pub(super) fn cleanup(paths: &MemoryPaths, loaded: &LoadedMaintenanceJournal) ->
         Some(loaded.file_identity),
         "repository maintenance journal",
     )?;
+    remove_pre_exchange_rewrite_temporary(paths, loaded)?;
+    let mut initial_journal = journal.clone();
+    for output in &mut initial_journal.outputs {
+        output.post_device = 0;
+        output.post_inode = 0;
+    }
+    let initial_bytes = journal_bytes(&initial_journal)?;
+    let rewrite_temporary = repository_io::maintenance_journal_temporary_path(
+        &paths.runtime_dir,
+        &journal.transaction_id,
+        &journal.authorization_digest,
+        Some(&loaded.content_hash),
+    )?;
+    remove_runtime_file_if_matching(
+        paths,
+        &rewrite_temporary,
+        initial_bytes.len() as u64,
+        &hash(&initial_bytes),
+        "superseded repository maintenance journal rewrite",
+    )?;
     remove_staged_file(&journal_path(paths))?;
     sync_directory(&paths.runtime_dir)?;
     super::maintenance_transition("after_journal_cleanup", journal.outputs.len());
@@ -512,6 +552,61 @@ pub(super) fn cleanup(paths: &MemoryPaths, loaded: &LoadedMaintenanceJournal) ->
         remove_staged_file(&backup_path(paths, journal, entry))?;
     }
     sync_directory(&repository_transaction_root(paths))
+}
+
+fn remove_pre_exchange_rewrite_temporary(
+    paths: &MemoryPaths,
+    loaded: &LoadedMaintenanceJournal,
+) -> Result<()> {
+    if loaded
+        .journal
+        .outputs
+        .iter()
+        .any(|output| output.post_device != 0 || output.post_inode != 0)
+    {
+        return Ok(());
+    }
+    let mut rewritten = loaded.journal.clone();
+    for output in &mut rewritten.outputs {
+        let relative = PathBuf::from(&output.path);
+        let metadata = fs::symlink_metadata(paths.project_root.join(&relative))
+            .context("failed to inspect repository maintenance rewrite recovery output")?;
+        if !metadata.is_file()
+            || (metadata.len() != output.prior_bytes && metadata.len() != output.post_bytes)
+        {
+            return Ok(());
+        }
+        let Some((bytes, identity)) = repository_io::read_repository_file_with_identity_if_exists(
+            &paths.project_root,
+            &relative,
+            metadata.len(),
+            "repository maintenance rewrite recovery output",
+        )?
+        else {
+            return Ok(());
+        };
+        if bytes.len() as u64 != output.post_bytes || hash(&bytes) != output.post_hash {
+            return Ok(());
+        }
+        output.post_device = identity.device;
+        output.post_inode = identity.inode;
+    }
+    validate_journal(&rewritten)?;
+    let rewritten_bytes = journal_bytes(&rewritten)?;
+    let rewritten_digest = hash(&rewritten_bytes);
+    let rewrite_temporary = repository_io::maintenance_journal_temporary_path(
+        &paths.runtime_dir,
+        &rewritten.transaction_id,
+        &rewritten.authorization_digest,
+        Some(&rewritten_digest),
+    )?;
+    remove_runtime_file_if_matching(
+        paths,
+        &rewrite_temporary,
+        rewritten_bytes.len() as u64,
+        &rewritten_digest,
+        "staged repository maintenance journal rewrite",
+    )
 }
 
 pub(super) fn cleanup_orphans_for_completed_decision(
@@ -609,6 +704,19 @@ pub(super) fn append_commit_marker(
     )
     .context("failed to append repository maintenance commit marker")?;
     Ok(())
+}
+
+pub(super) fn retire_prior_commit_marker(
+    conn: &Connection,
+    journal: &MaintenanceMaterializationJournal,
+) -> Result<()> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .context("failed to begin maintenance marker retirement")?;
+    if commit_marker_exists(&tx, journal)? {
+        delete_commit_marker(&tx, journal)?;
+    }
+    tx.commit()
+        .context("failed to commit maintenance marker retirement")
 }
 
 pub(super) fn commit_marker_exists(
@@ -895,7 +1003,9 @@ fn commit_marker(journal: &MaintenanceMaterializationJournal) -> Result<Maintena
         plan_id: journal.plan.plan_id.clone(),
         selection_id: journal.selection_id.clone(),
         decision_id: journal.decision_id.clone(),
-        journal_digest: hash(&journal_bytes(journal)?),
+        authorization_digest: journal.authorization_digest.clone(),
+        projection_digest: journal.projection_digest.clone(),
+        safety_fields_digest: journal.safety_fields_digest.clone(),
     })
 }
 

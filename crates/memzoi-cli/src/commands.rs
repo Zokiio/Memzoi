@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use memzoi_core::{
     CheckpointInput, CloseCheckpointCommand, ContextPackInput, ContinueCheckpointCommand,
     CreateCheckpointCommand, CreateCheckpointSuccessorCommand, ExportFormat, ExportInput,
@@ -62,6 +62,62 @@ fn normalize_absolute_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+#[cfg(unix)]
+fn open_regular_artifact_without_symlinks(path: &Path, label: &str) -> Result<fs::File> {
+    use rustix::fs::{CWD, Mode, OFlags, openat};
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to read current directory")?
+            .join(path)
+    };
+    ensure!(absolute.is_absolute(), "{label} path must be absolute");
+    let components = absolute.components().collect::<Vec<_>>();
+    let (file_component, parent_components) = components
+        .split_last()
+        .context("artifact path has no file name")?;
+    let Component::Normal(file_name) = file_component else {
+        bail!("{label} path must end in a regular file name");
+    };
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = openat(CWD, Path::new("/"), directory_flags, Mode::empty())
+        .with_context(|| format!("failed to pin filesystem root for {label}"))?;
+    for component in parent_components {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(component) => {
+                directory = openat(&directory, *component, directory_flags, Mode::empty())
+                    .with_context(|| {
+                        format!("failed to open {label} parent without following symlinks")
+                    })?;
+            }
+            _ => bail!("{label} parent contains an unsafe path component"),
+        }
+    }
+    let file = openat(
+        &directory,
+        *file_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("failed to open {label} without following symlinks"))?;
+    let file = fs::File::from(file);
+    ensure!(
+        file.metadata()
+            .with_context(|| format!("failed to inspect opened {label}"))?
+            .is_file(),
+        "{label} must be a regular, non-symlink file"
+    );
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_regular_artifact_without_symlinks(_path: &Path, label: &str) -> Result<fs::File> {
+    bail!("secure {label} reads are unavailable on this platform")
 }
 
 const NON_UTF8_GIT_PATH_SENTINEL: &str = ".memzoi/memory/<non-utf8-git-path>";

@@ -13,7 +13,7 @@ use memzoi_core::{
     plan_maintenance, runtime_home, validate_repository_maintenance_selection,
 };
 
-use super::{normalize_absolute_path, open_service};
+use super::{normalize_absolute_path, open_regular_artifact_without_symlinks, open_service};
 use crate::output::print_json;
 
 const MAINTENANCE_ARTIFACT_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -114,7 +114,7 @@ fn enum_text(value: impl serde::Serialize) -> Result<String> {
 }
 
 fn read_maintenance_plan(path: &Path) -> Result<MaintenancePlan> {
-    let file = open_regular_maintenance_artifact(path)?;
+    let file = open_regular_artifact_without_symlinks(path, "maintenance plan artifact")?;
     let metadata = file
         .metadata()
         .context("failed to inspect opened maintenance plan artifact")?;
@@ -132,30 +132,6 @@ fn read_maintenance_plan(path: &Path) -> Result<MaintenancePlan> {
     );
     let text = String::from_utf8(bytes).context("maintenance plan artifact must be UTF-8")?;
     parse_maintenance_plan(&text).context("invalid memzoi/maintenance-plan artifact")
-}
-
-#[cfg(unix)]
-fn open_regular_maintenance_artifact(path: &Path) -> Result<fs::File> {
-    use rustix::fs::{CWD, Mode, OFlags, openat};
-
-    let file = openat(
-        CWD,
-        path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .context("failed to open maintenance plan artifact without following symlinks")?;
-    let file = fs::File::from(file);
-    ensure!(
-        file.metadata()?.is_file(),
-        "maintenance plan artifact must be a regular non-symlink file"
-    );
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_regular_maintenance_artifact(_path: &Path) -> Result<fs::File> {
-    bail!("secure maintenance plan artifact reads are unavailable on this platform")
 }
 
 fn print_maintenance_human(plan: &MaintenancePlan) {

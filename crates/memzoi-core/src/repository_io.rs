@@ -15,6 +15,14 @@ pub(crate) struct RepositoryFileIdentity {
 }
 
 #[derive(Debug)]
+pub(crate) struct PinnedRepositoryFileRead {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) identity: RepositoryFileIdentity,
+    pub(crate) mode: u32,
+    pub(crate) file: fs::File,
+}
+
+#[derive(Debug)]
 pub(crate) struct CreatedRepositoryFile {
     pub(crate) path: PathBuf,
     pub(crate) identity: RepositoryFileIdentity,
@@ -389,6 +397,18 @@ pub(crate) fn read_bounded_direct_child_file_if_exists(
     maximum_len: u64,
     label: &str,
 ) -> Result<Option<(Vec<u8>, RepositoryFileIdentity, u32)>> {
+    Ok(
+        read_bounded_direct_child_file_with_handle_if_exists(parent, path, maximum_len, label)?
+            .map(|read| (read.bytes, read.identity, read.mode)),
+    )
+}
+
+pub(crate) fn read_bounded_direct_child_file_with_handle_if_exists(
+    parent: &Path,
+    path: &Path,
+    maximum_len: u64,
+    label: &str,
+) -> Result<Option<PinnedRepositoryFileRead>> {
     #[cfg(not(unix))]
     {
         let _ = (parent, path, maximum_len, label);
@@ -432,12 +452,49 @@ pub(crate) fn read_bounded_direct_child_file_if_exists(
         {
             bail!("{label} changed while it was being read");
         }
-        Ok(Some((
+        Ok(Some(PinnedRepositoryFileRead {
             bytes,
-            repository_file_identity(&file, label)?,
-            metadata.mode(),
-        )))
+            identity: repository_file_identity(&file, label)?,
+            mode: metadata.mode(),
+            file,
+        }))
     }
+}
+
+pub(crate) fn maintenance_journal_temporary_path(
+    runtime_dir: &Path,
+    transaction_id: &str,
+    authorization_digest: &str,
+    rewrite_content_digest: Option<&str>,
+) -> Result<PathBuf> {
+    let transaction = uuid::Uuid::parse_str(transaction_id)
+        .context("maintenance journal temporary transaction ID is invalid")?;
+    if transaction.to_string() != transaction_id {
+        bail!("maintenance journal temporary transaction ID is not canonical");
+    }
+    for (digest, label) in [
+        (
+            authorization_digest,
+            "maintenance journal authorization digest",
+        ),
+        (
+            rewrite_content_digest.unwrap_or(authorization_digest),
+            "maintenance journal rewrite content digest",
+        ),
+    ] {
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("{label} is invalid");
+        }
+    }
+    let file_name = match rewrite_content_digest {
+        Some(content_digest) => format!(
+            ".repository-maintenance-materialization-journal.json.{transaction_id}.{authorization_digest}.{content_digest}.rewrite.tmp"
+        ),
+        None => format!(
+            ".repository-maintenance-materialization-journal.json.{transaction_id}.{authorization_digest}.tmp"
+        ),
+    };
+    Ok(runtime_dir.join(file_name))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -452,6 +509,9 @@ pub(crate) fn remove_created_maintenance_journal_temporary(
     rewrite_content_digest: Option<&str>,
     opened: &fs::File,
 ) -> Result<()> {
+    if expected_route != RepositoryWriteRoute::Maintenance {
+        bail!("maintenance journal cleanup requires the maintenance route");
+    }
     verify_repository_batch(
         project_root,
         expected_route,
@@ -459,26 +519,13 @@ pub(crate) fn remove_created_maintenance_journal_temporary(
         authorization,
         projections,
     )?;
-    let transaction = uuid::Uuid::parse_str(transaction_id)
-        .context("maintenance journal temporary transaction ID is invalid")?;
-    if transaction.to_string() != transaction_id {
-        bail!("maintenance journal temporary transaction ID is not canonical");
-    }
-    if let Some(digest) = rewrite_content_digest
-        && (digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-    {
-        bail!("maintenance journal rewrite content digest is invalid");
-    }
     let authorization_digest = authorization.digest();
-    let file_name = match rewrite_content_digest {
-        Some(content_digest) => format!(
-            ".repository-maintenance-materialization-journal.json.{transaction_id}.{authorization_digest}.{content_digest}.rewrite.tmp"
-        ),
-        None => format!(
-            ".repository-maintenance-materialization-journal.json.{transaction_id}.{authorization_digest}.tmp"
-        ),
-    };
-    let path = runtime_dir.join(file_name);
+    let path = maintenance_journal_temporary_path(
+        runtime_dir,
+        transaction_id,
+        &authorization_digest,
+        rewrite_content_digest,
+    )?;
     let label = if rewrite_content_digest.is_some() {
         "incomplete repository maintenance journal rewrite"
     } else {
@@ -496,6 +543,244 @@ pub(crate) fn remove_created_maintenance_journal_temporary(
         let (directory, file_name) = open_transaction_parent(runtime_dir, &path)?;
         remove_pinned_named_file(&directory, &file_name, opened, None, label)
     }
+}
+
+#[cfg(test)]
+type BeforeMaintenanceJournalExchangeHook = Box<dyn FnOnce() -> Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_MAINTENANCE_JOURNAL_EXCHANGE_HOOK: std::cell::RefCell<
+        Option<BeforeMaintenanceJournalExchangeHook>
+    > = std::cell::RefCell::new(None);
+    static AFTER_MAINTENANCE_JOURNAL_EXCHANGE_HOOK: std::cell::RefCell<
+        Option<BeforeMaintenanceJournalExchangeHook>
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn inject_before_maintenance_journal_exchange_hook(
+    hook: impl FnOnce() -> Result<()> + 'static,
+) {
+    BEFORE_MAINTENANCE_JOURNAL_EXCHANGE_HOOK.with(|injected| {
+        *injected.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn inject_after_maintenance_journal_exchange_hook(
+    hook: impl FnOnce() -> Result<()> + 'static,
+) {
+    AFTER_MAINTENANCE_JOURNAL_EXCHANGE_HOOK.with(|injected| {
+        *injected.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_maintenance_journal_exchange_hook() -> Result<()> {
+    let hook =
+        BEFORE_MAINTENANCE_JOURNAL_EXCHANGE_HOOK.with(|injected| injected.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_after_maintenance_journal_exchange_hook() -> Result<()> {
+    let hook =
+        AFTER_MAINTENANCE_JOURNAL_EXCHANGE_HOOK.with(|injected| injected.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook()?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn replace_maintenance_journal_compare_and_swap(
+    project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
+    runtime_dir: &Path,
+    transaction_id: &str,
+    rewrite_content_digest: &str,
+    expected_current: &fs::File,
+    expected_current_bytes: &[u8],
+    replacement: &fs::File,
+    replacement_bytes: &[u8],
+) -> Result<()> {
+    if expected_route != RepositoryWriteRoute::Maintenance {
+        bail!("maintenance journal replacement requires the maintenance route");
+    }
+    if blake3::hash(replacement_bytes).to_hex().as_str() != rewrite_content_digest {
+        bail!("maintenance journal replacement digest does not match its bytes");
+    }
+    verify_repository_batch(
+        project_root,
+        expected_route,
+        expected_policy_context_digest,
+        authorization,
+        projections,
+    )?;
+    let replacement_path = maintenance_journal_temporary_path(
+        runtime_dir,
+        transaction_id,
+        &authorization.digest(),
+        Some(rewrite_content_digest),
+    )?;
+    let journal_path = runtime_dir.join("repository-maintenance-materialization-journal.json");
+
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            replacement_path,
+            journal_path,
+            expected_current,
+            expected_current_bytes,
+            replacement,
+            replacement_bytes,
+        );
+        bail!("secure maintenance journal replacement is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{RenameFlags, fsync, renameat_with};
+
+        let (directory, journal_name) = open_transaction_parent(runtime_dir, &journal_path)?;
+        let (_, replacement_name) = open_transaction_parent(runtime_dir, &replacement_path)?;
+        #[cfg(test)]
+        run_before_maintenance_journal_exchange_hook()?;
+        ensure_named_pinned_file(
+            &directory,
+            &journal_name,
+            expected_current,
+            expected_current_bytes,
+            "repository maintenance journal",
+        )?;
+        ensure_named_pinned_file(
+            &directory,
+            &replacement_name,
+            replacement,
+            replacement_bytes,
+            "repository maintenance journal replacement",
+        )?;
+        renameat_with(
+            &directory,
+            &replacement_name,
+            &directory,
+            &journal_name,
+            RenameFlags::EXCHANGE,
+        )
+        .context("failed to exchange repository maintenance journal replacement")?;
+
+        let exchanged = ensure_named_pinned_file(
+            &directory,
+            &journal_name,
+            replacement,
+            replacement_bytes,
+            "installed repository maintenance journal",
+        )
+        .and_then(|_| {
+            ensure_named_pinned_file(
+                &directory,
+                &replacement_name,
+                expected_current,
+                expected_current_bytes,
+                "superseded repository maintenance journal",
+            )
+        });
+        if let Err(exchange_error) = exchanged {
+            let restore = renameat_with(
+                &directory,
+                &replacement_name,
+                &directory,
+                &journal_name,
+                RenameFlags::EXCHANGE,
+            );
+            let sync = fsync(&directory);
+            match (restore, sync) {
+                (Ok(()), Ok(())) => {
+                    return Err(exchange_error)
+                        .context("repository maintenance journal changed during compare-and-swap");
+                }
+                (restore, sync) => bail!(
+                    "repository maintenance journal compare-and-swap was ambiguous; restore={restore:?}; sync={sync:?}"
+                ),
+            }
+        }
+        if let Err(error) = fsync(&directory) {
+            let restore = renameat_with(
+                &directory,
+                &replacement_name,
+                &directory,
+                &journal_name,
+                RenameFlags::EXCHANGE,
+            );
+            let sync = fsync(&directory);
+            return Err(error).context(format!(
+                "failed to sync repository maintenance journal exchange; restore={restore:?}; restore_sync={sync:?}"
+            ));
+        }
+        let durable_exchange = ensure_named_pinned_file(
+            &directory,
+            &journal_name,
+            replacement,
+            replacement_bytes,
+            "installed repository maintenance journal",
+        )
+        .and_then(|_| {
+            ensure_named_pinned_file(
+                &directory,
+                &replacement_name,
+                expected_current,
+                expected_current_bytes,
+                "superseded repository maintenance journal",
+            )
+        });
+        if let Err(exchange_error) = durable_exchange {
+            let restore = renameat_with(
+                &directory,
+                &replacement_name,
+                &directory,
+                &journal_name,
+                RenameFlags::EXCHANGE,
+            );
+            let sync = fsync(&directory);
+            return match (restore, sync) {
+                (Ok(()), Ok(())) => Err(exchange_error)
+                    .context("repository maintenance journal changed after its durable exchange"),
+                (restore, sync) => bail!(
+                    "repository maintenance journal durable exchange was ambiguous; restore={restore:?}; sync={sync:?}; verification={exchange_error:#}"
+                ),
+            };
+        }
+        #[cfg(test)]
+        run_after_maintenance_journal_exchange_hook()?;
+        remove_pinned_named_file(
+            &directory,
+            &replacement_name,
+            expected_current,
+            Some(expected_current_bytes),
+            "superseded repository maintenance journal",
+        )
+    }
+}
+
+#[cfg(unix)]
+fn ensure_named_pinned_file(
+    directory: &std::os::fd::OwnedFd,
+    file_name: &std::ffi::OsStr,
+    file: &fs::File,
+    expected_bytes: &[u8],
+    label: &str,
+) -> Result<()> {
+    if !named_file_still_matches(directory, file_name, file)? {
+        bail!("{label} changed before its authorized mutation");
+    }
+    ensure_pinned_file_bytes(file, expected_bytes, label)
 }
 
 pub(crate) fn read_repository_file_if_exists(

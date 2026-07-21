@@ -1,4 +1,7 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -11,8 +14,11 @@ use crate::{
     MaterializationAuthorizationCapability, MaterializationCounterpartRelationship,
     MaterializationOutputOutcome, MaterializationOutputRole, MemoryStatus,
     REPOSITORY_WRITE_SAFETY_SCHEMA, RecordLineage,
-    maintenance::validate_current_maintenance_snapshots, validate_canonical_record_id,
-    validate_materialization_identity, validate_repository_relative_path,
+    maintenance::{
+        maintenance_action_id, validate_action_shape, validate_current_maintenance_snapshots,
+    },
+    validate_canonical_record_id, validate_materialization_identity,
+    validate_repository_relative_path,
 };
 
 pub const REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA: &str =
@@ -203,6 +209,7 @@ impl RepositoryMaintenanceOutputIntent {
         validate_materialization_identity(&self.action_id, "maintenance action_id")?;
         validate_repository_relative_path(&self.path)?;
         validate_canonical_record_id(&self.record_id)?;
+        validate_action_role(self.action, self.role)?;
         self.expected_prior_revision.validate()?;
         self.intended_semantic_revision.validate()?;
         validate_reason(&self.reason)
@@ -266,6 +273,7 @@ pub struct RepositoryMaintenanceMaterializationResult {
     pub decision_id: String,
     pub decision_at: String,
     pub selected_actions: Vec<MaintenanceAction>,
+    pub decision: RepositoryMaintenanceDecisionBinding,
     pub outputs: Vec<RepositoryMaintenanceMaterializationOutputResult>,
     pub review_commands: Vec<RepositoryReviewCommand>,
 }
@@ -286,18 +294,379 @@ impl RepositoryMaintenanceMaterializationResult {
         if self.selected_actions.is_empty() || self.outputs.is_empty() {
             bail!("maintenance materialization result cannot be empty");
         }
-        let mut paths = BTreeSet::new();
-        for output in &self.outputs {
+        for action in &self.selected_actions {
+            validate_materialization_identity(&action.action_id, "maintenance action_id")?;
+        }
+        if !self
+            .selected_actions
+            .windows(2)
+            .all(|window| window[0].action_id < window[1].action_id)
+        {
+            bail!("maintenance result selected actions must be sorted and unique");
+        }
+        let selection_id = repository_maintenance_selection_id(
+            REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA,
+            &self.plan_id,
+            &self.selected_actions,
+        )?;
+        if selection_id != self.selection_id {
+            bail!("maintenance result selection identity is invalid");
+        }
+        self.decision.validate()?;
+        if self.decision.decision_at != self.decision_at
+            || repository_maintenance_decision_id(&self.selection_id, &self.decision)?
+                != self.decision_id
+        {
+            bail!("maintenance result decision identity is invalid");
+        }
+        if self.outputs.len() != self.decision.outputs.len() {
+            bail!("maintenance result output topology is incomplete");
+        }
+        let mut expected_outputs = expected_result_outputs(&self.selected_actions)?;
+        if expected_outputs.len() != self.outputs.len() {
+            bail!("maintenance result output membership is incomplete");
+        }
+        let selected_ids = self
+            .selected_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut prior_key: Option<(&str, u8, &str)> = None;
+        let mut outcome = None;
+        for (output, intent) in self.outputs.iter().zip(&self.decision.outputs) {
             validate_materialization_identity(&output.action_id, "maintenance action_id")?;
             validate_repository_relative_path(&output.path)?;
             validate_canonical_record_id(&output.record_id)?;
             output.semantic_revision.validate()?;
-            if !paths.insert(output.path.as_str()) {
-                bail!("maintenance result contains duplicate output paths");
+            if !selected_ids.contains(output.action_id.as_str()) {
+                bail!("maintenance result output does not belong to a selected action");
+            }
+            validate_action_role(output.action, output.role)?;
+            let canonical_path = format!(".memzoi/records/{}.md", output.record_id);
+            let expected_revision = expected_outputs.remove(&(
+                output.action_id.clone(),
+                output.record_id.clone(),
+                role_rank(output.role),
+            ));
+            if output.path != canonical_path
+                || output.action != MaterializationAction::Supersede
+                || expected_revision.as_ref().is_none_or(|expected| {
+                    intent.expected_prior_revision
+                        != ExpectedPriorRevision::Revision(expected.prior_revision.clone())
+                        || intent.reason != expected.reason
+                })
+            {
+                bail!("maintenance result output does not match its selected action");
+            }
+            let key = (
+                output.path.as_str(),
+                role_rank(output.role),
+                output.action_id.as_str(),
+            );
+            if prior_key.is_some_and(|prior| prior >= key) {
+                bail!("maintenance result outputs are not canonically ordered");
+            }
+            prior_key = Some(key);
+            if output.action_id != intent.action_id
+                || output.path != intent.path
+                || output.record_id != intent.record_id
+                || output.action != intent.action
+                || output.role != intent.role
+                || output.semantic_revision != intent.intended_semantic_revision
+            {
+                bail!("maintenance result output does not match its decision binding");
+            }
+            if outcome.get_or_insert(output.outcome) != &output.outcome {
+                bail!("maintenance result outputs disagree on outcome");
             }
         }
+        if !expected_outputs.is_empty() {
+            bail!("maintenance result omits selected-action outputs");
+        }
+        validate_review_commands(&self.review_commands, &self.outputs)?;
         Ok(())
     }
+}
+
+struct ExpectedResultOutput {
+    prior_revision: CanonicalRevision,
+    reason: String,
+}
+
+type ExpectedResultOutputs = BTreeMap<(String, String, u8), ExpectedResultOutput>;
+
+fn expected_result_outputs(actions: &[MaintenanceAction]) -> Result<ExpectedResultOutputs> {
+    let mut expected = BTreeMap::new();
+    let mut occupied = BTreeSet::new();
+    let mut comparison_set_digest = None;
+    for action in actions {
+        validate_materialization_identity(&action.finding_id, "maintenance finding_id")?;
+        validate_materialization_identity(
+            &action.preconditions.comparison_set_digest,
+            "maintenance comparison_set_digest",
+        )?;
+        match comparison_set_digest {
+            Some(digest) if digest != action.preconditions.comparison_set_digest => {
+                bail!("maintenance result actions use different comparison sets");
+            }
+            None => {
+                comparison_set_digest = Some(action.preconditions.comparison_set_digest.as_str())
+            }
+            Some(_) => {}
+        }
+        validate_action_shape(action)?;
+        if action.action_id != maintenance_action_id(action)? {
+            bail!("maintenance result action identity is invalid");
+        }
+        for record_id in &action.record_ids {
+            validate_canonical_record_id(record_id)?;
+            if !occupied.insert(record_id.as_str()) {
+                bail!("maintenance result selected actions overlap");
+            }
+            let version = action
+                .preconditions
+                .record_versions
+                .get(record_id)
+                .context("maintenance result action has no expected record revision")?;
+            let MaintenanceRecordVersion::CanonicalRepository {
+                source_path,
+                revision,
+            } = version
+            else {
+                bail!("maintenance result action does not use repository revisions");
+            };
+            if source_path != &format!(".memzoi/records/{record_id}.md") {
+                bail!("maintenance result action does not use a canonical repository path");
+            }
+            revision.validate()?;
+        }
+        if !action
+            .record_ids
+            .windows(2)
+            .all(|window| window[0] < window[1])
+            || action.preconditions.record_versions.len() != action.record_ids.len()
+            || action
+                .record_ids
+                .iter()
+                .any(|record_id| !action.preconditions.record_versions.contains_key(record_id))
+        {
+            bail!("maintenance result selected action has invalid record topology");
+        }
+        match action.class {
+            MaintenanceActionClass::ConsolidateExactDuplicates => {
+                let keeper = action
+                    .keeper_record_id
+                    .as_ref()
+                    .context("maintenance result duplicate action has no keeper")?;
+                if action.record_ids.len() < 2
+                    || action.record_ids.first() != Some(keeper)
+                    || action.predecessor_record_id.is_some()
+                    || action.evidence_record_id.is_some()
+                {
+                    bail!("maintenance result duplicate action has an invalid shape");
+                }
+                for record_id in action
+                    .record_ids
+                    .iter()
+                    .filter(|record_id| *record_id != keeper)
+                {
+                    insert_expected_result_output(
+                        &mut expected,
+                        action,
+                        record_id,
+                        MaterializationOutputRole::LifecycleCounterpart,
+                        bounded_repository_maintenance_reason("exact duplicate of keeper ", keeper),
+                    )?;
+                }
+            }
+            MaintenanceActionClass::CreateRenewalSuccessor => {
+                let predecessor = action
+                    .predecessor_record_id
+                    .as_ref()
+                    .context("maintenance result renewal action has no predecessor")?;
+                let evidence = action
+                    .evidence_record_id
+                    .as_ref()
+                    .context("maintenance result renewal action has no evidence record")?;
+                if action.record_ids.len() != 2
+                    || action.keeper_record_id.is_some()
+                    || predecessor == evidence
+                    || !action.record_ids.contains(predecessor)
+                    || !action.record_ids.contains(evidence)
+                {
+                    bail!("maintenance result renewal action has an invalid shape");
+                }
+                insert_expected_result_output(
+                    &mut expected,
+                    action,
+                    evidence,
+                    MaterializationOutputRole::CanonicalRecord,
+                    bounded_repository_maintenance_reason(
+                        "renewal successor for predecessor ",
+                        predecessor,
+                    ),
+                )?;
+                insert_expected_result_output(
+                    &mut expected,
+                    action,
+                    predecessor,
+                    MaterializationOutputRole::LifecycleCounterpart,
+                    bounded_repository_maintenance_reason("renewed by evidence record ", evidence),
+                )?;
+            }
+            _ => bail!("maintenance result contains an unsupported action class"),
+        }
+    }
+    Ok(expected)
+}
+
+fn insert_expected_result_output(
+    expected: &mut ExpectedResultOutputs,
+    action: &MaintenanceAction,
+    record_id: &str,
+    role: MaterializationOutputRole,
+    reason: String,
+) -> Result<()> {
+    let version = action
+        .preconditions
+        .record_versions
+        .get(record_id)
+        .context("maintenance result action has no expected record revision")?;
+    let MaintenanceRecordVersion::CanonicalRepository {
+        source_path,
+        revision,
+    } = version
+    else {
+        bail!("maintenance result action does not use repository revisions");
+    };
+    if source_path != &format!(".memzoi/records/{record_id}.md") {
+        bail!("maintenance result action does not use a canonical repository path");
+    }
+    revision.validate()?;
+    validate_reason(&reason)?;
+    if expected
+        .insert(
+            (
+                action.action_id.clone(),
+                record_id.to_owned(),
+                role_rank(role),
+            ),
+            ExpectedResultOutput {
+                prior_revision: revision.clone(),
+                reason,
+            },
+        )
+        .is_some()
+    {
+        bail!("maintenance result selected actions have overlapping outputs");
+    }
+    Ok(())
+}
+
+fn validate_action_role(
+    action: MaterializationAction,
+    role: MaterializationOutputRole,
+) -> Result<()> {
+    match (action, role) {
+        (
+            MaterializationAction::Create | MaterializationAction::Update,
+            MaterializationOutputRole::CanonicalRecord,
+        )
+        | (MaterializationAction::Supersede, _)
+        | (MaterializationAction::Tombstone, MaterializationOutputRole::LifecycleCounterpart) => {
+            Ok(())
+        }
+        _ => bail!("maintenance result action and role are incompatible"),
+    }
+}
+
+fn validate_review_commands(
+    commands: &[RepositoryReviewCommand],
+    outputs: &[RepositoryMaintenanceMaterializationOutputResult],
+) -> Result<()> {
+    if commands.is_empty() || commands.len() > outputs.len() {
+        bail!("maintenance result review command topology is incomplete");
+    }
+    let expected_paths = outputs
+        .iter()
+        .map(|output| output.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut covered = BTreeSet::new();
+    let mut saw_tracked = false;
+    let mut saw_untracked = false;
+    let mut prior_untracked = None;
+    let mut repository_root = None;
+    for command in commands {
+        if command.program != "git"
+            || command
+                .args
+                .iter()
+                .any(|argument| argument.contains(['\n', '\r', '\0']))
+        {
+            bail!("maintenance review command is unsafe");
+        }
+        if command.args.len() >= 6
+            && command.args[0] == "--no-optional-locks"
+            && command.args[1] == "-C"
+            && Path::new(&command.args[2]).is_absolute()
+            && command.args[3] == "diff"
+            && command.args[4] == "--"
+        {
+            if saw_tracked || saw_untracked {
+                bail!("maintenance tracked review command is not canonical");
+            }
+            saw_tracked = true;
+            match repository_root {
+                Some(root) if root != command.args[2].as_str() => {
+                    bail!("maintenance review commands disagree on repository root");
+                }
+                None => repository_root = Some(command.args[2].as_str()),
+                Some(_) => {}
+            }
+            for path in &command.args[5..] {
+                if !expected_paths.contains(path.as_str()) || !covered.insert(path.as_str()) {
+                    bail!("maintenance tracked review command has an unknown output path");
+                }
+            }
+            if !command.args[5..]
+                .windows(2)
+                .all(|window| window[0] < window[1])
+            {
+                bail!("maintenance tracked review paths are not canonical");
+            }
+        } else if command.args.len() == 8
+            && command.args[0] == "--no-optional-locks"
+            && command.args[1] == "-C"
+            && Path::new(&command.args[2]).is_absolute()
+            && command.args[3] == "diff"
+            && command.args[4] == "--no-index"
+            && command.args[5] == "--"
+            && command.args[6] == "/dev/null"
+        {
+            saw_untracked = true;
+            match repository_root {
+                Some(root) if root != command.args[2].as_str() => {
+                    bail!("maintenance review commands disagree on repository root");
+                }
+                None => repository_root = Some(command.args[2].as_str()),
+                Some(_) => {}
+            }
+            let path = command.args[7].as_str();
+            if !expected_paths.contains(path) || !covered.insert(path) {
+                bail!("maintenance untracked review command has an unknown output path");
+            }
+            if prior_untracked.is_some_and(|prior| prior >= path) {
+                bail!("maintenance untracked review commands are not canonical");
+            }
+            prior_untracked = Some(path);
+        } else {
+            bail!("maintenance review command has an unsupported shape");
+        }
+    }
+    if covered != expected_paths {
+        bail!("maintenance review commands omit output paths");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +848,7 @@ fn validate_counterpart_shape(
     role: MaterializationOutputRole,
     counterpart: Option<&MaintenanceCounterpart>,
 ) -> Result<()> {
+    validate_action_role(action, role)?;
     let expected = match (action, role) {
         (MaterializationAction::Supersede, MaterializationOutputRole::CanonicalRecord) => {
             Some(MaterializationCounterpartRelationship::Supersedes)
@@ -489,7 +859,10 @@ fn validate_counterpart_shape(
         (MaterializationAction::Tombstone, MaterializationOutputRole::LifecycleCounterpart) => {
             Some(MaterializationCounterpartRelationship::Tombstones)
         }
-        (MaterializationAction::Create | MaterializationAction::Update, _) => None,
+        (
+            MaterializationAction::Create | MaterializationAction::Update,
+            MaterializationOutputRole::CanonicalRecord,
+        ) => None,
         _ => bail!("unsupported maintenance action and output-role combination"),
     };
     match (expected, counterpart) {
@@ -546,6 +919,18 @@ pub(crate) fn role_rank(role: MaterializationOutputRole) -> u8 {
     match role {
         MaterializationOutputRole::CanonicalRecord => 0,
         MaterializationOutputRole::LifecycleCounterpart => 1,
+    }
+}
+
+pub(crate) fn bounded_repository_maintenance_reason(prefix: &str, record_id: &str) -> String {
+    let full = format!("{prefix}{record_id}");
+    if full.len() <= crate::MAX_MATERIALIZATION_REASON_BYTES {
+        full
+    } else {
+        format!(
+            "{prefix}blake3:{}",
+            blake3::hash(record_id.as_bytes()).to_hex()
+        )
     }
 }
 

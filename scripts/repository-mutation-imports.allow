@@ -5,7 +5,6 @@ crates/memzoi-cli/src/commands/capture.rs|unlinkat
 crates/memzoi-cli/src/commands/lifecycle.rs|linkat
 crates/memzoi-cli/src/commands/lifecycle.rs|openat
 crates/memzoi-cli/src/commands/lifecycle.rs|unlinkat
-crates/memzoi-cli/src/commands/maintenance.rs|openat
 crates/memzoi-cli/src/commands/materialize.rs|openat
 crates/memzoi-core/src/capture.rs|File
 crates/memzoi-core/src/capture.rs|openat

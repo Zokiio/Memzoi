@@ -1886,6 +1886,8 @@ fn repository_maintenance_consolidates_duplicates_and_replays_exactly() -> anyho
         .context("duplicate action did not contain a nonkeeper")?;
     let keeper_path = service.paths.records_dir().join(format!("{keeper}.md"));
     let keeper_before = fs::read(&keeper_path)?;
+    let nonkeeper_path = service.paths.records_dir().join(format!("{nonkeeper}.md"));
+    let nonkeeper_before = fs::read(&nonkeeper_path)?;
     let request = crate::RepositoryMaintenanceMaterializationRequest {
         schema: crate::REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA.to_owned(),
         plan_id: plan.plan_id.clone(),
@@ -1894,6 +1896,59 @@ fn repository_maintenance_consolidates_duplicates_and_replays_exactly() -> anyho
     };
 
     let written = service.apply_repository_maintenance_materialization(&plan, &request)?;
+    written.validate()?;
+    let wire = serde_json::to_value(&written)?;
+    assert!(wire.get("decision").is_some());
+    let wire_round_trip: crate::RepositoryMaintenanceMaterializationResult =
+        serde_json::from_value(wire)?;
+    assert_eq!(wire_round_trip, written);
+    wire_round_trip.validate()?;
+    let mut invalid_selection = written.clone();
+    invalid_selection.selection_id = format!("blake3:{}", "f".repeat(64));
+    assert!(invalid_selection.validate().is_err());
+    let mut invalid_decision = written.clone();
+    invalid_decision.decision_id = format!("blake3:{}", "e".repeat(64));
+    assert!(invalid_decision.validate().is_err());
+    let mut invalid_action = written.clone();
+    invalid_action.outputs[0].action_id = format!("blake3:{}", "d".repeat(64));
+    assert!(invalid_action.validate().is_err());
+    let mut invalid_role = written.clone();
+    invalid_role.outputs[0].role = crate::MaterializationOutputRole::CanonicalRecord;
+    assert!(invalid_role.validate().is_err());
+    let mut forged_topology = written.clone();
+    forged_topology.outputs[0].action = crate::MaterializationAction::Update;
+    forged_topology.outputs[0].role = crate::MaterializationOutputRole::CanonicalRecord;
+    forged_topology.decision.outputs[0].action = crate::MaterializationAction::Update;
+    forged_topology.decision.outputs[0].role = crate::MaterializationOutputRole::CanonicalRecord;
+    forged_topology.decision_id = crate::repository_maintenance_decision_id(
+        &forged_topology.selection_id,
+        &forged_topology.decision,
+    )?;
+    assert!(forged_topology.validate().is_err());
+    let mut stale_action_identity = written.clone();
+    stale_action_identity.selected_actions[0]
+        .preconditions
+        .comparison_set_digest = format!("blake3:{}", "c".repeat(64));
+    stale_action_identity.selection_id = crate::repository_maintenance_selection_id(
+        crate::REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA,
+        &stale_action_identity.plan_id,
+        &stale_action_identity.selected_actions,
+    )?;
+    stale_action_identity.decision_id = crate::repository_maintenance_decision_id(
+        &stale_action_identity.selection_id,
+        &stale_action_identity.decision,
+    )?;
+    assert!(stale_action_identity.validate().is_err());
+    let mut nondeterministic_reason = written.clone();
+    nondeterministic_reason.decision.outputs[0].reason = "caller supplied reason".to_owned();
+    nondeterministic_reason.decision_id = crate::repository_maintenance_decision_id(
+        &nondeterministic_reason.selection_id,
+        &nondeterministic_reason.decision,
+    )?;
+    assert!(nondeterministic_reason.validate().is_err());
+    let mut invalid_review = written.clone();
+    invalid_review.review_commands[0].program = "sh".to_owned();
+    assert!(invalid_review.validate().is_err());
     assert!(
         written
             .outputs
@@ -1901,7 +1956,6 @@ fn repository_maintenance_consolidates_duplicates_and_replays_exactly() -> anyho
             .all(|output| output.outcome == crate::MaterializationOutputOutcome::Written)
     );
     assert_eq!(fs::read(&keeper_path)?, keeper_before);
-    let nonkeeper_path = service.paths.records_dir().join(format!("{nonkeeper}.md"));
     let nonkeeper_markdown = fs::read_to_string(&nonkeeper_path)?;
     let nonkeeper_record = okf::parse_okf_record_markdown(
         service.paths.records_dir(),
@@ -1930,6 +1984,21 @@ fn repository_maintenance_consolidates_duplicates_and_replays_exactly() -> anyho
             output.outcome == crate::MaterializationOutputOutcome::AlreadyCurrent
         })
     );
+    fs::write(&nonkeeper_path, &nonkeeper_before)?;
+    let reproduced = service.apply_repository_maintenance_materialization(&plan, &request)?;
+    assert!(
+        reproduced
+            .outputs
+            .iter()
+            .all(|output| { output.outcome == crate::MaterializationOutputOutcome::Written })
+    );
+    let committed_markers: i64 = service.conn.query_row(
+        "SELECT COUNT(*) FROM event_log
+         WHERE event_type = 'repository_maintenance.materialization_committed'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(committed_markers, 1);
     assert!(
         !service
             .paths
@@ -2085,7 +2154,12 @@ fn repository_maintenance_reuses_renewal_evidence_without_changing_timestamps() 
         decision_at: evaluated_at,
     };
     let result = service.apply_repository_maintenance_materialization(&plan, &request)?;
+    result.validate()?;
     assert_eq!(result.outputs.len(), 2);
+    let mut unordered = result.clone();
+    unordered.outputs.reverse();
+    unordered.review_commands.reverse();
+    assert!(unordered.validate().is_err());
 
     let load = |record_id: &str| -> anyhow::Result<crate::OkfRecordFile> {
         let path = service.paths.records_dir().join(format!("{record_id}.md"));
@@ -2149,14 +2223,19 @@ fn repository_maintenance_recovers_pre_mixed_and_committed_post_interruptions() 
         "after_journal",
         "before_install",
         "after_install",
+        "before_journal_exchange",
+        "after_journal_exchange",
+        "after_post_verification",
         "during_recovery_restore",
         "journal_rewrite_partial_write",
         "after_canonical_commit",
         "after_index_commit",
+        "after_index_commit_index_rebuild",
         "after_journal_cleanup",
         "after_cleanup",
         "after_index_commit_manual_restore",
         "after_index_commit_complete_manual_restore",
+        "reproduced_after_install",
     ] {
         let (_temp, service) = initialized_git_service()?;
         for id in ["recovery-a", "recovery-b", "recovery-c", "recovery-d"] {
@@ -2209,11 +2288,15 @@ fn repository_maintenance_recovers_pre_mixed_and_committed_post_interruptions() 
             .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
         let (hook_point, hook_index) = if matches!(
             point,
-            "after_index_commit_manual_restore" | "after_index_commit_complete_manual_restore"
+            "after_index_commit_manual_restore"
+                | "after_index_commit_complete_manual_restore"
+                | "after_index_commit_index_rebuild"
         ) {
             ("after_index_commit", 0)
         } else if point == "during_recovery_restore" {
             ("after_install", 1)
+        } else if point == "reproduced_after_install" {
+            ("after_install", 0)
         } else {
             (point, 0)
         };
@@ -2227,6 +2310,22 @@ fn repository_maintenance_recovers_pre_mixed_and_committed_post_interruptions() 
                 "{error:#}"
             );
         } else {
+            if point == "reproduced_after_install" {
+                service.apply_repository_maintenance_materialization(&plan, &request)?;
+                for (record_id, bytes) in &before {
+                    fs::write(paths.records_dir().join(format!("{record_id}.md")), bytes)?;
+                }
+            }
+            if point == "before_journal_exchange" {
+                super::repository_maintenance_materialization::inject_before_journal_exchange_hook(
+                    || panic!("simulated interruption before maintenance journal exchange"),
+                );
+            }
+            if point == "after_journal_exchange" {
+                super::repository_maintenance_materialization::inject_after_journal_exchange_hook(
+                    || panic!("simulated interruption after maintenance journal exchange"),
+                );
+            }
             super::repository_maintenance_materialization::inject_transition_hook(
                 move |actual, index| {
                     if actual == hook_point
@@ -2245,6 +2344,18 @@ fn repository_maintenance_recovers_pre_mixed_and_committed_post_interruptions() 
             );
         }
         drop(service);
+
+        if point == "after_index_commit_index_rebuild" {
+            for path in [
+                paths.index_db_path.clone(),
+                paths.index_db_path.with_extension("db-wal"),
+                paths.index_db_path.with_extension("db-shm"),
+            ] {
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
 
         if point == "during_recovery_restore" {
             super::repository_maintenance_materialization::inject_transition_hook(
@@ -2318,8 +2429,12 @@ fn repository_maintenance_recovers_pre_mixed_and_committed_post_interruptions() 
         );
         if matches!(
             point,
-            "after_canonical_commit"
+            "before_journal_exchange"
+                | "after_journal_exchange"
+                | "after_post_verification"
+                | "after_canonical_commit"
                 | "after_index_commit"
+                | "after_index_commit_index_rebuild"
                 | "after_journal_cleanup"
                 | "after_cleanup"
         ) {
@@ -2373,6 +2488,324 @@ fn repository_maintenance_recovers_pre_mixed_and_committed_post_interruptions() 
             }),
             "{point} left maintenance journal artifacts"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn repository_maintenance_precommit_failures_restore_live_pre_state() -> anyhow::Result<()> {
+    use time::format_description::well_known::Rfc3339;
+
+    for (failure, record_label) in [
+        ("marker", "marker"),
+        ("index_validation", "index"),
+        ("commit", "commit"),
+    ] {
+        let (_temp, service) = initialized_git_service()?;
+        let record_ids = (0..3)
+            .map(|index| format!("precommit-{record_label}-{index}"))
+            .collect::<Vec<_>>();
+        for record_id in &record_ids {
+            let candidate = materialization_candidate(record_id, "Precommit duplicate")?;
+            let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+            service.apply_repository_materialization(&plan, &decision, &candidate)?;
+        }
+        let evaluated_at = service.now().format(&Rfc3339)?;
+        let plan = crate::plan_maintenance(
+            &service.paths,
+            crate::MaintenancePlanRequest {
+                schema: crate::MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+                evaluated_at: Some(evaluated_at.clone()),
+                record_ids: record_ids.clone(),
+            },
+        )?;
+        let action = plan
+            .action_groups
+            .iter()
+            .find(|group| {
+                group.kind == crate::MaintenanceActionGroupKind::RepositoryMaterialization
+            })
+            .and_then(|group| {
+                group.actions.iter().find(|action| {
+                    action.class == crate::MaintenanceActionClass::ConsolidateExactDuplicates
+                })
+            })
+            .context("precommit plan did not contain duplicate consolidation")?;
+        let request = crate::RepositoryMaintenanceMaterializationRequest {
+            schema: crate::REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA.to_owned(),
+            plan_id: plan.plan_id.clone(),
+            selected_action_ids: vec![action.action_id.clone()],
+            decision_at: evaluated_at,
+        };
+        let before = action
+            .record_ids
+            .iter()
+            .map(|record_id| {
+                Ok((
+                    record_id.clone(),
+                    fs::read(service.paths.records_dir().join(format!("{record_id}.md")))?,
+                ))
+            })
+            .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
+
+        match failure {
+            "marker" => service.conn.execute_batch(
+                "CREATE TRIGGER maintenance_marker_failure
+                 BEFORE INSERT ON event_log
+                 WHEN NEW.event_type = 'repository_maintenance.materialization_committed'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected maintenance marker failure');
+                 END;",
+            )?,
+            "index_validation" => {
+                super::repository_maintenance_materialization::inject_failure("index_validation");
+            }
+            "commit" => service.conn.execute_batch(
+                "CREATE TABLE maintenance_commit_parent (id INTEGER PRIMARY KEY);
+                 CREATE TABLE maintenance_commit_guard (
+                   event_id TEXT NOT NULL,
+                   parent_id INTEGER NOT NULL,
+                   FOREIGN KEY (parent_id) REFERENCES maintenance_commit_parent(id)
+                     DEFERRABLE INITIALLY DEFERRED
+                 );
+                 CREATE TRIGGER maintenance_commit_failure
+                 AFTER INSERT ON event_log
+                 WHEN NEW.event_type = 'repository_maintenance.materialization_committed'
+                 BEGIN
+                   INSERT INTO maintenance_commit_guard (event_id, parent_id)
+                   VALUES (NEW.id, 1);
+                 END;",
+            )?,
+            _ => unreachable!(),
+        }
+
+        let error = service
+            .apply_repository_maintenance_materialization(&plan, &request)
+            .expect_err("precommit failure must fail materialization");
+        assert!(
+            format!("{error:#}").contains("injected")
+                || format!("{error:#}").contains("FOREIGN KEY constraint failed"),
+            "{error:#}"
+        );
+        for (record_id, expected) in &before {
+            assert_eq!(
+                fs::read(service.paths.records_dir().join(format!("{record_id}.md")))?,
+                *expected,
+                "{failure} did not restore exact canonical pre-state"
+            );
+        }
+        assert!(service.repo_index_drift()?.is_current());
+        assert!(
+            !service
+                .paths
+                .runtime_dir
+                .join("repository-maintenance-materialization-journal.json")
+                .exists()
+        );
+        let marker_count: i64 = service.conn.query_row(
+            "SELECT COUNT(*) FROM event_log
+             WHERE event_type = 'repository_maintenance.materialization_committed'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(marker_count, 0, "{failure} retained an uncommitted marker");
+    }
+    Ok(())
+}
+
+#[test]
+fn repository_maintenance_journal_compare_and_swap_preserves_raced_evidence() -> anyhow::Result<()>
+{
+    use time::format_description::well_known::Rfc3339;
+
+    let (_temp, service) = initialized_git_service()?;
+    for record_id in ["journal-cas-a", "journal-cas-b", "journal-cas-c"] {
+        let candidate = materialization_candidate(record_id, "Journal CAS duplicate")?;
+        let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+        service.apply_repository_materialization(&plan, &decision, &candidate)?;
+    }
+    let evaluated_at = service.now().format(&Rfc3339)?;
+    let plan = crate::plan_maintenance(
+        &service.paths,
+        crate::MaintenancePlanRequest {
+            schema: crate::MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+            evaluated_at: Some(evaluated_at.clone()),
+            record_ids: vec![
+                "journal-cas-a".to_owned(),
+                "journal-cas-b".to_owned(),
+                "journal-cas-c".to_owned(),
+            ],
+        },
+    )?;
+    let action = plan
+        .action_groups
+        .iter()
+        .find(|group| group.kind == crate::MaintenanceActionGroupKind::RepositoryMaterialization)
+        .and_then(|group| {
+            group.actions.iter().find(|action| {
+                action.class == crate::MaintenanceActionClass::ConsolidateExactDuplicates
+            })
+        })
+        .context("journal CAS plan did not contain duplicate consolidation")?;
+    let request = crate::RepositoryMaintenanceMaterializationRequest {
+        schema: crate::REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA.to_owned(),
+        plan_id: plan.plan_id.clone(),
+        selected_action_ids: vec![action.action_id.clone()],
+        decision_at: evaluated_at,
+    };
+    let before = action
+        .record_ids
+        .iter()
+        .map(|record_id| {
+            Ok((
+                record_id.clone(),
+                fs::read(service.paths.records_dir().join(format!("{record_id}.md")))?,
+            ))
+        })
+        .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
+    let journal = service
+        .paths
+        .runtime_dir
+        .join("repository-maintenance-materialization-journal.json");
+    let displaced = service
+        .paths
+        .runtime_dir
+        .join("raced-original-journal.json");
+    let raced_bytes = b"manually replaced recovery evidence\n".to_vec();
+    let hook_journal = journal.clone();
+    let hook_displaced = displaced.clone();
+    let hook_bytes = raced_bytes.clone();
+    super::repository_maintenance_materialization::inject_before_journal_exchange_hook(move || {
+        fs::rename(&hook_journal, &hook_displaced)?;
+        fs::write(&hook_journal, &hook_bytes)?;
+        Ok(())
+    });
+
+    let error = service
+        .apply_repository_maintenance_materialization(&plan, &request)
+        .expect_err("raced journal replacement must fail materialization");
+    assert!(
+        format!("{error:#}").contains("authorized mutation")
+            || format!("{error:#}").contains("compare-and-swap"),
+        "{error:#}"
+    );
+    assert_eq!(fs::read(&journal)?, raced_bytes);
+    assert!(displaced.exists(), "original journal evidence was lost");
+    for (record_id, expected) in &before {
+        assert_eq!(
+            fs::read(service.paths.records_dir().join(format!("{record_id}.md")))?,
+            *expected
+        );
+    }
+    assert!(service.repo_index_drift()?.is_current());
+    Ok(())
+}
+
+#[test]
+fn repository_maintenance_journal_compare_and_swap_rejects_in_place_edits() -> anyhow::Result<()> {
+    use time::format_description::well_known::Rfc3339;
+
+    for edit_target in ["current", "replacement"] {
+        let (_temp, service) = initialized_git_service()?;
+        let record_ids = (0..3)
+            .map(|index| format!("journal-in-place-{edit_target}-{index}"))
+            .collect::<Vec<_>>();
+        for record_id in &record_ids {
+            let candidate = materialization_candidate(record_id, "Journal in-place duplicate")?;
+            let (plan, decision) = materialization_plan_and_decision(&candidate)?;
+            service.apply_repository_materialization(&plan, &decision, &candidate)?;
+        }
+        let evaluated_at = service.now().format(&Rfc3339)?;
+        let plan = crate::plan_maintenance(
+            &service.paths,
+            crate::MaintenancePlanRequest {
+                schema: crate::MAINTENANCE_REQUEST_SCHEMA.to_owned(),
+                evaluated_at: Some(evaluated_at.clone()),
+                record_ids,
+            },
+        )?;
+        let action = plan
+            .action_groups
+            .iter()
+            .find(|group| {
+                group.kind == crate::MaintenanceActionGroupKind::RepositoryMaterialization
+            })
+            .and_then(|group| {
+                group.actions.iter().find(|action| {
+                    action.class == crate::MaintenanceActionClass::ConsolidateExactDuplicates
+                })
+            })
+            .context("journal in-place plan did not contain duplicate consolidation")?;
+        let request = crate::RepositoryMaintenanceMaterializationRequest {
+            schema: crate::REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA.to_owned(),
+            plan_id: plan.plan_id.clone(),
+            selected_action_ids: vec![action.action_id.clone()],
+            decision_at: evaluated_at,
+        };
+        let before = action
+            .record_ids
+            .iter()
+            .map(|record_id| {
+                Ok((
+                    record_id.clone(),
+                    fs::read(service.paths.records_dir().join(format!("{record_id}.md")))?,
+                ))
+            })
+            .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
+        let runtime_dir = service.paths.runtime_dir.clone();
+        let journal = runtime_dir.join("repository-maintenance-materialization-journal.json");
+        let edited_bytes = format!("in-place {edit_target} recovery evidence\n").into_bytes();
+        let hook_journal = journal.clone();
+        let hook_runtime = runtime_dir.clone();
+        let hook_bytes = edited_bytes.clone();
+        super::repository_maintenance_materialization::inject_before_journal_exchange_hook(
+            move || {
+                let target = if edit_target == "current" {
+                    hook_journal
+                } else {
+                    fs::read_dir(&hook_runtime)?
+                        .filter_map(std::result::Result::ok)
+                        .map(|entry| entry.path())
+                        .find(|path| {
+                            path.file_name().is_some_and(|name| {
+                                name.to_string_lossy().ends_with(".rewrite.tmp")
+                            })
+                        })
+                        .context("maintenance rewrite temporary was not staged")?
+                };
+                fs::write(target, &hook_bytes)?;
+                Ok(())
+            },
+        );
+
+        let error = service
+            .apply_repository_maintenance_materialization(&plan, &request)
+            .expect_err("in-place journal edit must fail materialization");
+        assert!(
+            format!("{error:#}").contains("journal")
+                || format!("{error:#}").contains("authorized mutation"),
+            "{error:#}"
+        );
+        if edit_target == "current" {
+            assert_eq!(fs::read(&journal)?, edited_bytes);
+        } else {
+            let retained = fs::read_dir(&runtime_dir)?
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().ends_with(".rewrite.tmp"))
+                })
+                .context("edited replacement evidence was not retained")?;
+            assert_eq!(fs::read(retained)?, edited_bytes);
+        }
+        for (record_id, expected) in &before {
+            assert_eq!(
+                fs::read(service.paths.records_dir().join(format!("{record_id}.md")))?,
+                *expected
+            );
+        }
+        assert!(service.repo_index_drift()?.is_current());
     }
     Ok(())
 }

@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{DropBehavior, Transaction, TransactionBehavior};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+use crate::repository_maintenance_materialization::bounded_repository_maintenance_reason;
 use crate::{
     AuthorizationProof, CANONICAL_REVISION_SCHEMA, CanonicalLifecycleProjection,
     CanonicalRecordSemanticContent, CanonicalRevision, CanonicalRevisionProjection,
@@ -53,6 +54,8 @@ type MaintenanceTransitionHook = Box<dyn FnMut(&'static str, usize)>;
 thread_local! {
     static MAINTENANCE_TRANSITION_HOOK: std::cell::RefCell<Option<MaintenanceTransitionHook>> =
         const { std::cell::RefCell::new(None) };
+    static MAINTENANCE_FAILURE_POINT: std::cell::RefCell<Option<&'static str>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -63,6 +66,21 @@ pub(super) fn inject_transition_hook(hook: impl FnMut(&'static str, usize) + 'st
 #[cfg(test)]
 pub(super) fn inject_journal_rewrite_partial_write_failure() {
     journal::inject_rewrite_partial_write_failure();
+}
+
+#[cfg(test)]
+pub(super) fn inject_before_journal_exchange_hook(hook: impl FnOnce() -> Result<()> + 'static) {
+    repository_io::inject_before_maintenance_journal_exchange_hook(hook);
+}
+
+#[cfg(test)]
+pub(super) fn inject_after_journal_exchange_hook(hook: impl FnOnce() -> Result<()> + 'static) {
+    repository_io::inject_after_maintenance_journal_exchange_hook(hook);
+}
+
+#[cfg(test)]
+pub(super) fn inject_failure(point: &'static str) {
+    MAINTENANCE_FAILURE_POINT.with(|slot| *slot.borrow_mut() = Some(point));
 }
 
 #[cfg(test)]
@@ -78,6 +96,27 @@ fn maintenance_transition(point: &'static str, index: usize) {
 
 #[cfg(not(test))]
 fn maintenance_transition(_point: &'static str, _index: usize) {}
+
+#[cfg(test)]
+fn maintenance_failure(point: &'static str) -> Result<()> {
+    let injected = MAINTENANCE_FAILURE_POINT.with(|slot| {
+        if slot.borrow().as_ref() == Some(&point) {
+            slot.borrow_mut().take()
+        } else {
+            None
+        }
+    });
+    ensure!(
+        injected.is_none(),
+        "injected repository maintenance failure at {point}"
+    );
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn maintenance_failure(_point: &'static str) -> Result<()> {
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 struct OutputSpec {
@@ -226,24 +265,16 @@ fn recover_locked(paths: &crate::MemoryPaths, conn: &rusqlite::Connection) -> Re
         projections: &projections,
     };
 
-    if !all_pre && !all_post {
-        restore_journal_state(
-            paths,
-            persisted,
-            mutation,
-            &states,
-            if marker {
-                JournalPathState::Post
-            } else {
-                JournalPathState::Pre
-            },
-        )?;
-    }
-    let final_state = if all_post || (!all_pre && marker) {
+    let final_state = if all_pre {
+        JournalPathState::Pre
+    } else if all_post || marker {
         JournalPathState::Post
     } else {
         JournalPathState::Pre
     };
+    if !states.iter().all(|state| *state == final_state) {
+        restore_journal_state(paths, persisted, mutation, &states, final_state)?;
+    }
     match final_state {
         JournalPathState::Pre => {
             verify_complete_pre_state(paths, &prepared)?;
@@ -295,7 +326,10 @@ fn output_specs(
                         counterpart_record_id: keeper.to_owned(),
                         counterpart_revision: keeper_revision.clone(),
                         expected_prior_revision: plan_revision(&records, record_id)?.clone(),
-                        reason: bounded_record_reason("exact duplicate of keeper ", keeper),
+                        reason: bounded_repository_maintenance_reason(
+                            "exact duplicate of keeper ",
+                            keeper,
+                        ),
                         renewal_predecessor: None,
                     });
                 }
@@ -320,7 +354,7 @@ fn output_specs(
                     counterpart_record_id: predecessor.to_owned(),
                     counterpart_revision: predecessor_revision.clone(),
                     expected_prior_revision: evidence_revision.clone(),
-                    reason: bounded_record_reason(
+                    reason: bounded_repository_maintenance_reason(
                         "renewal successor for predecessor ",
                         predecessor,
                     ),
@@ -335,7 +369,10 @@ fn output_specs(
                     counterpart_record_id: evidence.to_owned(),
                     counterpart_revision: evidence_revision,
                     expected_prior_revision: predecessor_revision,
-                    reason: bounded_record_reason("renewed by evidence record ", evidence),
+                    reason: bounded_repository_maintenance_reason(
+                        "renewed by evidence record ",
+                        evidence,
+                    ),
                     renewal_predecessor: None,
                 });
             }
@@ -1071,6 +1108,7 @@ fn apply_prepared_materialization(
         &projections,
         safety_fields_digest(&safety_values),
     )?;
+    journal::retire_prior_commit_marker(&service.conn, &journal)?;
     if let Err(error) = stage_and_backup(&service.paths, mutation, &prepared, &identities, &journal)
     {
         return match journal::cleanup_artifacts_only(&service.paths, &journal) {
@@ -1213,36 +1251,55 @@ fn apply_prepared_materialization(
         let error = rollback_installed(&service.paths, mutation, &mut installed, error);
         return cleanup_verified_pre_state(service, &prepared, &loaded_journal, error, rollback_tx);
     }
-    maintenance_transition("after_canonical_commit", prepared.outputs.len());
-
-    // Canonical commit point: every intended file is installed, synced, and
-    // verified. Index or cleanup failures after this point must preserve post.
-    if let Err(error) = journal::append_commit_marker(&tx, &journal)
-        .and_then(|_| service.ensure_repository_index_current_with_conn(&tx))
-    {
+    maintenance_transition("after_post_verification", prepared.outputs.len());
+    let index_precommit = journal::append_commit_marker(&tx, &journal)
+        .and_then(|_| maintenance_failure("index_validation"))
+        .and_then(|_| service.ensure_repository_index_current_with_conn(&tx));
+    if let Err(error) = index_precommit {
         let rollback = tx.rollback();
-        return Err(error).context(format!(
-            "canonical maintenance files are committed; index recovery is required{}",
-            rollback
-                .err()
-                .map(|failure| format!("; index rollback also failed: {failure}"))
-                .unwrap_or_default()
-        ));
+        let error = rollback_installed(&service.paths, mutation, &mut installed, error);
+        return cleanup_verified_pre_state(
+            service,
+            &prepared,
+            &loaded_journal,
+            error,
+            rollback.err().map(anyhow::Error::new),
+        );
     }
     if let Err(error) = tx.execute_batch("COMMIT") {
-        let rollback = tx.execute_batch("ROLLBACK");
-        tx.set_drop_behavior(DropBehavior::Ignore);
-        return Err(anyhow::Error::new(error)).context(format!(
-            "canonical maintenance files are committed; index commit recovery is required{}",
-            rollback
-                .err()
-                .map(|failure| format!("; explicit index rollback also failed: {failure}"))
-                .unwrap_or_default()
-        ));
+        let mut rollback_error = tx.execute_batch("ROLLBACK").err().map(anyhow::Error::new);
+        drop(tx);
+        if !service.conn.is_autocommit()
+            && let Err(retry_error) = service.conn.execute_batch("ROLLBACK")
+        {
+            let retry_error = anyhow::Error::new(retry_error);
+            rollback_error = Some(match rollback_error {
+                Some(initial) => initial.context(format!(
+                    "retrying the maintenance index rollback also failed: {retry_error:#}"
+                )),
+                None => retry_error,
+            });
+        }
+        let error = rollback_installed(
+            &service.paths,
+            mutation,
+            &mut installed,
+            anyhow::Error::new(error).context("failed to commit maintenance index transaction"),
+        );
+        return cleanup_verified_pre_state(
+            service,
+            &prepared,
+            &loaded_journal,
+            error,
+            rollback_error,
+        );
     }
     tx.set_drop_behavior(DropBehavior::Ignore);
     drop(tx);
     maintenance_transition("after_index_commit", prepared.outputs.len());
+    // Commit point: canonical files and the disposable index are both durable
+    // and verified. Cleanup failures after this point preserve the post-state.
+    maintenance_transition("after_canonical_commit", prepared.outputs.len());
     journal::cleanup(&service.paths, &loaded_journal)
         .context("canonical maintenance files are committed; transaction cleanup is required")?;
     maintenance_transition("after_cleanup", prepared.outputs.len());
@@ -1311,6 +1368,27 @@ fn cleanup_verified_pre_state<T>(
                 .map(|failure| format!("; index rollback also failed: {failure:#}"))
                 .unwrap_or_default()
         ));
+    }
+    if !service.conn.is_autocommit() {
+        return Err(error).context(format!(
+            "maintenance canonical pre-state was restored, but the index transaction is still active; recovery evidence was retained{}",
+            rollback_error
+                .map(|failure| format!("; index rollback also failed: {failure:#}"))
+                .unwrap_or_default()
+        ));
+    }
+    match service.repo_index_drift() {
+        Ok(drift) if drift.is_current() => {}
+        Ok(_) => {
+            return Err(error).context(
+                "maintenance canonical pre-state was restored, but the disposable index is stale; recovery evidence was retained",
+            );
+        }
+        Err(index_error) => {
+            return Err(error).context(format!(
+                "maintenance canonical pre-state was restored, but the disposable index could not be verified; recovery evidence was retained: {index_error:#}"
+            ));
+        }
     }
     match journal::cleanup(&service.paths, loaded_journal) {
         Ok(()) => Err(error),
@@ -1560,6 +1638,7 @@ fn materialization_result(
         decision_id: prepared.decision_id.clone(),
         decision_at: prepared.decision.decision_at.clone(),
         selected_actions: prepared.selection.selected_actions.clone(),
+        decision: prepared.decision.clone(),
         outputs: prepared
             .outputs
             .iter()
@@ -1587,44 +1666,49 @@ fn review_commands(
         .project_root
         .to_str()
         .context("repository root is not UTF-8 for structured review guidance")?;
-    let mut commands = Vec::with_capacity(outputs.len());
+    let mut tracked = Vec::new();
+    let mut untracked = Vec::new();
     for output in outputs {
         let path = path_text(&output.spec.path)?;
         match git_repository::git_review_visibility(&paths.project_root, &output.spec.path)
             .map_err(anyhow::Error::new)?
         {
-            git_repository::GitReviewVisibility::Tracked => {
-                commands.push(RepositoryReviewCommand {
-                    program: "git".to_owned(),
-                    args: vec![
-                        "--no-optional-locks".to_owned(),
-                        "-C".to_owned(),
-                        project_root.to_owned(),
-                        "diff".to_owned(),
-                        "--".to_owned(),
-                        path,
-                    ],
-                });
-            }
-            git_repository::GitReviewVisibility::UntrackedAndNotIgnored => {
-                commands.push(RepositoryReviewCommand {
-                    program: "git".to_owned(),
-                    args: vec![
-                        "--no-optional-locks".to_owned(),
-                        "-C".to_owned(),
-                        project_root.to_owned(),
-                        "diff".to_owned(),
-                        "--no-index".to_owned(),
-                        "--".to_owned(),
-                        "/dev/null".to_owned(),
-                        path,
-                    ],
-                });
-            }
+            git_repository::GitReviewVisibility::Tracked => tracked.push(path),
+            git_repository::GitReviewVisibility::UntrackedAndNotIgnored => untracked.push(path),
             git_repository::GitReviewVisibility::IgnoredUntracked => {
                 bail!("maintenance output is ignored by Git")
             }
         }
+    }
+    let mut commands = Vec::with_capacity(usize::from(!tracked.is_empty()) + untracked.len());
+    if !tracked.is_empty() {
+        let mut args = vec![
+            "--no-optional-locks".to_owned(),
+            "-C".to_owned(),
+            project_root.to_owned(),
+            "diff".to_owned(),
+            "--".to_owned(),
+        ];
+        args.extend(tracked);
+        commands.push(RepositoryReviewCommand {
+            program: "git".to_owned(),
+            args,
+        });
+    }
+    for path in untracked {
+        commands.push(RepositoryReviewCommand {
+            program: "git".to_owned(),
+            args: vec![
+                "--no-optional-locks".to_owned(),
+                "-C".to_owned(),
+                project_root.to_owned(),
+                "diff".to_owned(),
+                "--no-index".to_owned(),
+                "--".to_owned(),
+                "/dev/null".to_owned(),
+                path,
+            ],
+        });
     }
     Ok(commands)
 }
@@ -1830,18 +1914,6 @@ fn path_text(path: &Path) -> Result<String> {
         .context("maintenance path is not UTF-8")
 }
 
-fn bounded_record_reason(prefix: &str, record_id: &str) -> String {
-    let full = format!("{prefix}{record_id}");
-    if full.len() <= crate::MAX_MATERIALIZATION_REASON_BYTES {
-        full
-    } else {
-        format!(
-            "{prefix}blake3:{}",
-            blake3::hash(record_id.as_bytes()).to_hex()
-        )
-    }
-}
-
 #[cfg(unix)]
 fn ensure_repository_maintenance_platform_supported() -> Result<()> {
     Ok(())
@@ -1856,7 +1928,11 @@ fn ensure_repository_maintenance_platform_supported() -> Result<()> {
 mod tests {
     #[test]
     fn record_reasons_remain_bounded_for_maximal_identifiers() {
-        let reason = super::bounded_record_reason("exact duplicate of keeper ", &"a".repeat(255));
+        let reason =
+            crate::repository_maintenance_materialization::bounded_repository_maintenance_reason(
+                "exact duplicate of keeper ",
+                &"a".repeat(255),
+            );
         assert!(reason.len() <= crate::MAX_MATERIALIZATION_REASON_BYTES);
         assert!(reason.contains("blake3:"));
     }

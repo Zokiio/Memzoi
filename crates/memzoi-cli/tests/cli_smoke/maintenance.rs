@@ -136,6 +136,7 @@ fn maintenance_materialize_writes_reviewable_duplicate_projection_and_replays() 
     let artifact_dir = tempfile::tempdir().expect("plan artifact directory");
     let plan_path = artifact_dir.path().join("plan.json");
     fs::write(&plan_path, &plan_text).expect("write plan artifact");
+    let plan_path = fs::canonicalize(&plan_path).expect("canonical plan artifact path");
     let args = [
         "maintenance",
         "materialize",
@@ -241,6 +242,69 @@ fn maintenance_materialize_writes_reviewable_duplicate_projection_and_replays() 
         Vec::<u8>::new(),
         "maintenance must not mutate the Git index"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn maintenance_materialize_rejects_immediate_and_higher_symlink_plan_parents() {
+    use std::os::unix::fs::symlink;
+
+    let repo = initialized_temp_repo();
+    let artifacts = tempfile::tempdir().expect("artifact root");
+    let artifacts_root = fs::canonicalize(artifacts.path()).expect("canonical artifact root");
+    let real_parent = artifacts_root.join("real/inner");
+    fs::create_dir_all(&real_parent).expect("create real artifact parent");
+    let plan = real_parent.join("plan.json");
+    fs::write(&plan, b"{}\n").expect("write hostile plan target");
+
+    let immediate = artifacts_root.join("immediate-link");
+    symlink(&real_parent, &immediate).expect("create immediate parent symlink");
+    let higher = artifacts_root.join("higher-link");
+    symlink(artifacts_root.join("real"), &higher).expect("create higher parent symlink");
+
+    let control_error = run_command_failure_stderr(
+        repo.path(),
+        &[
+            "maintenance",
+            "materialize",
+            "--plan-file",
+            plan.to_str().expect("control plan path UTF-8"),
+            "--plan-id",
+            &format!("blake3:{}", "a".repeat(64)),
+            "--action-id",
+            &format!("blake3:{}", "b".repeat(64)),
+            "--decision-at",
+            "2026-07-20T12:00:00Z",
+        ],
+    );
+    assert!(
+        control_error.contains("invalid memzoi/maintenance-plan artifact"),
+        "{control_error}"
+    );
+
+    for path in [immediate.join("plan.json"), higher.join("inner/plan.json")] {
+        let error = run_command_failure_stderr(
+            repo.path(),
+            &[
+                "maintenance",
+                "materialize",
+                "--plan-file",
+                path.to_str().expect("symlink plan path UTF-8"),
+                "--plan-id",
+                &format!("blake3:{}", "a".repeat(64)),
+                "--action-id",
+                &format!("blake3:{}", "b".repeat(64)),
+                "--decision-at",
+                "2026-07-20T12:00:00Z",
+            ],
+        );
+        assert!(
+            error.contains("parent without following symlinks"),
+            "{error}"
+        );
+        assert!(!error.contains("invalid memzoi/maintenance-plan artifact"));
+    }
+    assert_eq!(fs::read(&plan).expect("reread hostile target"), b"{}\n");
 }
 
 #[test]

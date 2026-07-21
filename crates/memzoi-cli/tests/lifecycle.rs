@@ -17,7 +17,8 @@ use serde_json::Value;
 struct LifecycleFixture {
     repo: tempfile::TempDir,
     home: tempfile::TempDir,
-    artifacts: tempfile::TempDir,
+    _artifacts: tempfile::TempDir,
+    artifacts_root: PathBuf,
 }
 
 impl LifecycleFixture {
@@ -25,12 +26,15 @@ impl LifecycleFixture {
         let repo = tempfile::tempdir().expect("temporary Git repository");
         let home = tempfile::tempdir().expect("temporary Memzoi home");
         let artifacts = tempfile::tempdir().expect("temporary authority artifact directory");
+        let artifacts_root = fs::canonicalize(artifacts.path())
+            .expect("canonical temporary authority artifact directory");
         run_git(repo.path(), &["init", "-q"]);
 
         let fixture = Self {
             repo,
             home,
-            artifacts,
+            _artifacts: artifacts,
+            artifacts_root,
         };
         fixture.run_json(&["init", "--json"]);
         fixture
@@ -110,7 +114,7 @@ impl LifecycleFixture {
             vec![action],
         )
         .expect("valid private lifecycle request fixture");
-        let path = self.artifacts.path().join(format!("{stem}.json"));
+        let path = self.artifacts_root.join(format!("{stem}.json"));
         let mut bytes = serde_json::to_vec_pretty(&request).expect("serialize lifecycle request");
         bytes.push(b'\n');
         fs::write(&path, bytes).expect("write lifecycle request fixture");
@@ -374,7 +378,7 @@ fn private_plan_output_is_no_clobber_and_cannot_enter_worktree_or_runtime_state(
         "private plan artifacts stay outside versioned and managed runtime paths",
     );
 
-    let external = fixture.artifacts.path().join("private-plan.json");
+    let external = fixture.artifacts_root.join("private-plan.json");
     let emitted = fixture.run_json(&[
         "lifecycle",
         "plan",
@@ -392,7 +396,7 @@ fn private_plan_output_is_no_clobber_and_cannot_enter_worktree_or_runtime_state(
     .expect("installed private plan is JSON");
     assert_eq!(installed, emitted);
 
-    let occupied = fixture.artifacts.path().join("occupied-plan.json");
+    let occupied = fixture.artifacts_root.join("occupied-plan.json");
     let sentinel = b"OWNER-CONTROLLED-NO-CLOBBER-SENTINEL\n";
     fs::write(&occupied, sentinel).expect("write no-clobber destination fixture");
     let error = fixture.failure_stderr(&[
@@ -1066,7 +1070,7 @@ fn authorize_rejects_non_regular_request_artifacts_before_lifecycle_writes() {
         "lifecycle",
         "authorize",
         "--request-file",
-        path_text(fixture.artifacts.path()),
+        path_text(&fixture.artifacts_root),
         "--json",
     ]);
 
@@ -1101,7 +1105,7 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
     let hidden_config = paths.repository_runtime_dir.join("config.hidden-by-test");
     fs::rename(&paths.config_path, &hidden_config).expect("hide lifecycle config fixture");
 
-    let invalid = fixture.artifacts.path().join("malformed.json");
+    let invalid = fixture.artifacts_root.join("malformed.json");
     fs::write(&invalid, b"{not-json\n").expect("write malformed lifecycle request");
     assert_failure_preserves_runtime(
         &fixture,
@@ -1128,7 +1132,7 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
         &["strict JSON"],
     );
 
-    let v1_request = fixture.artifacts.path().join("v1-request.json");
+    let v1_request = fixture.artifacts_root.join("v1-request.json");
     fs::write(
         &v1_request,
         valid_request.replacen(
@@ -1150,7 +1154,7 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
         &["unsupported private lifecycle request schema"],
     );
 
-    let duplicate_key = fixture.artifacts.path().join("duplicate-key.json");
+    let duplicate_key = fixture.artifacts_root.join("duplicate-key.json");
     fs::write(
         &duplicate_key,
         format!(
@@ -1171,7 +1175,7 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
         &["duplicate mapping key", "schema"],
     );
 
-    let oversized = fixture.artifacts.path().join("oversized.json");
+    let oversized = fixture.artifacts_root.join("oversized.json");
     fs::write(
         &oversized,
         vec![b' '; PRIVATE_LIFECYCLE_MAX_ARTIFACT_BYTES + 1],
@@ -1192,7 +1196,7 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
     let mut removed_contract_plan = private_plan;
     removed_contract_plan["policy"]["contract_version"] =
         Value::String("maintenance-plan/2".to_owned());
-    let removed_contract_plan_path = fixture.artifacts.path().join("removed-contract-plan.json");
+    let removed_contract_plan_path = fixture.artifacts_root.join("removed-contract-plan.json");
     fs::write(
         &removed_contract_plan_path,
         serde_json::to_vec_pretty(&removed_contract_plan)
@@ -1230,7 +1234,7 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
 
     #[cfg(unix)]
     {
-        let symlink = fixture.artifacts.path().join("request-symlink.json");
+        let symlink = fixture.artifacts_root.join("request-symlink.json");
         std::os::unix::fs::symlink(&valid_request_path, &symlink)
             .expect("create request symlink fixture");
         assert_failure_preserves_runtime(
@@ -1245,7 +1249,7 @@ fn strict_authority_artifacts_are_rejected_before_the_lifecycle_bundle_is_opened
             &["without following symlinks"],
         );
 
-        let fifo = fixture.artifacts.path().join("request.fifo");
+        let fifo = fixture.artifacts_root.join("request.fifo");
         let status = StdCommand::new("mkfifo")
             .arg(&fifo)
             .status()

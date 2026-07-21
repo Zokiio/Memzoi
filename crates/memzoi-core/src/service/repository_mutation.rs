@@ -616,6 +616,34 @@ pub(super) fn remove_authorized_created_maintenance_journal_temporary(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn replace_authorized_maintenance_journal_compare_and_swap(
+    paths: &MemoryPaths,
+    mutation: RepositoryMutationAuthorization<'_>,
+    transaction_id: &str,
+    rewrite_content_digest: &str,
+    expected_current: &fs::File,
+    expected_current_bytes: &[u8],
+    replacement: &fs::File,
+    replacement_bytes: &[u8],
+) -> Result<()> {
+    let borrowed = borrowed_repository_projections(mutation.projections);
+    repository_io::replace_maintenance_journal_compare_and_swap(
+        &paths.project_root,
+        mutation.route,
+        &mutation.authorization.policy_context_digest,
+        &mutation.authorization.capability,
+        &borrowed,
+        &paths.runtime_dir,
+        transaction_id,
+        rewrite_content_digest,
+        expected_current,
+        expected_current_bytes,
+        replacement,
+        replacement_bytes,
+    )
+}
+
 pub(super) fn repository_transaction_root(paths: &MemoryPaths) -> PathBuf {
     paths.runtime_dir.join("repository-transactions")
 }
