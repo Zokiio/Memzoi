@@ -69,10 +69,10 @@ crates/memzoi-core/src/recall_eval.rs|open-write-mode|2
 crates/memzoi-core/src/recall_eval_v3.rs|fs::write|1
 crates/memzoi-core/src/recall_eval_v3.rs|fs::copy|1
 crates/memzoi-core/src/recall_eval_v3.rs|fs::create_dir_all|1
-crates/memzoi-core/src/repository_io.rs|fs::write|15
+crates/memzoi-core/src/repository_io.rs|fs::write|17
 crates/memzoi-core/src/repository_io.rs|fs::rename|3
 crates/memzoi-core/src/repository_io.rs|fs::remove_file|2
-crates/memzoi-core/src/repository_io.rs|fs::create_dir_all|8
+crates/memzoi-core/src/repository_io.rs|fs::create_dir_all|9
 crates/memzoi-core/src/repository_io.rs|fs::create_dir|4
 crates/memzoi-core/src/repository_io.rs|File::create|1
 crates/memzoi-core/src/repository_io.rs|.write_all|12

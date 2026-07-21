@@ -160,6 +160,35 @@ fn run_before_repository_quarantine_hook() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+type BeforeRepositoryBackupSourceRevalidationHook = Box<dyn FnOnce() -> Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_REPOSITORY_BACKUP_SOURCE_REVALIDATION_HOOK: std::cell::RefCell<
+        Option<BeforeRepositoryBackupSourceRevalidationHook>,
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn inject_before_repository_backup_source_revalidation_hook(
+    hook: impl FnOnce() -> Result<()> + 'static,
+) {
+    BEFORE_REPOSITORY_BACKUP_SOURCE_REVALIDATION_HOOK.with(|injected| {
+        *injected.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_repository_backup_source_revalidation_hook() -> Result<()> {
+    let hook = BEFORE_REPOSITORY_BACKUP_SOURCE_REVALIDATION_HOOK
+        .with(|injected| injected.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook()?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn repository_directory_mode() -> rustix::fs::Mode {
     use rustix::fs::Mode;
@@ -1668,8 +1697,15 @@ pub(crate) fn backup_repository_file(
                 "securely backed-up repository source",
             )
             .context("failed to remove securely backed-up repository source")?;
-        } else if !named_file_still_matches(&source_directory, &source_name, &source)? {
-            bail!("repository source changed while its transaction backup was created");
+        } else {
+            #[cfg(test)]
+            run_before_repository_backup_source_revalidation_hook()
+                .context("injected change before repository backup source revalidation")?;
+            if !named_file_still_matches(&source_directory, &source_name, &source)? {
+                bail!("repository source changed while its transaction backup was created");
+            }
+            ensure_pinned_file_bytes(&source, projection.bytes, "repository source")
+                .context("repository source changed while its transaction backup was created")?;
         }
         Ok(())
     }
@@ -2863,6 +2899,58 @@ mod tests {
             fs::read(project_root.join(existing)).unwrap(),
             b"preexisting"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_removing_backup_revalidates_pinned_source_bytes_after_copy() {
+        let project = tempfile::tempdir().unwrap();
+        let transactions = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let transaction_root = transactions.path().canonicalize().unwrap();
+        let relative = Path::new(".memzoi/records/source.md");
+        let source = project_root.join(relative);
+        let backup = transaction_root.join("source.backup");
+        let authorized_bytes = b"authorized bytes";
+        let concurrent_bytes = b"concurrent edit!";
+        assert_eq!(authorized_bytes.len(), concurrent_bytes.len());
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, authorized_bytes).unwrap();
+        let revision = blake3::hash(authorized_bytes).to_hex().to_string();
+        let projections = [RepositoryProjection {
+            path: relative,
+            bytes: authorized_bytes,
+            target_revision: Some(&revision),
+            purpose: crate::RepositoryProjectionPurpose::Existing,
+        }];
+        let (context_digest, token) = authorize_create(&project_root, &projections);
+        let changed_source = source.clone();
+        inject_before_repository_backup_source_revalidation_hook(move || {
+            fs::write(&changed_source, concurrent_bytes)?;
+            Ok(())
+        });
+
+        let error = backup_repository_file(
+            &project_root,
+            RepositoryWriteRoute::FileProposalCreate,
+            &context_digest,
+            &token,
+            &projections,
+            0,
+            None,
+            &transaction_root,
+            &backup,
+            false,
+        )
+        .expect_err("an in-place source edit during backup must fail closed");
+
+        assert!(
+            format!("{error:#}")
+                .contains("repository source changed while its transaction backup was created"),
+            "unexpected source revalidation error: {error:#}"
+        );
+        assert_eq!(fs::read(&source).unwrap(), concurrent_bytes);
+        assert_eq!(fs::read(&backup).unwrap(), authorized_bytes);
     }
 
     #[cfg(unix)]
