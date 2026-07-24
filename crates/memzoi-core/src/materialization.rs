@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
@@ -50,6 +50,7 @@ impl MaterializationAction {
 #[serde(rename_all = "snake_case")]
 pub enum MaterializationCounterpartRelationship {
     Supersedes,
+    SupersededBy,
     Tombstones,
 }
 
@@ -99,7 +100,7 @@ pub enum ExpectedPriorRevision {
 }
 
 impl ExpectedPriorRevision {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if let Self::Revision(revision) = self {
             revision.validate()?;
         }
@@ -295,6 +296,75 @@ impl MaterializationMetadata {
     }
 }
 
+/// Strictly dispatches current materialization metadata by its nested schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum RepositoryMaterializationMetadata {
+    Direct(MaterializationMetadata),
+    Maintenance(crate::RepositoryMaintenanceMaterializationMetadata),
+}
+
+impl RepositoryMaterializationMetadata {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Direct(metadata) => metadata.validate(),
+            Self::Maintenance(metadata) => metadata.validate(),
+        }
+    }
+
+    pub fn intended_semantic_revision(&self) -> &CanonicalRevision {
+        match self {
+            Self::Direct(metadata) => &metadata.revision,
+            Self::Maintenance(metadata) => &metadata.intended_semantic_revision,
+        }
+    }
+
+    pub fn lifecycle_projection(&self) -> CanonicalLifecycleProjection {
+        match self {
+            Self::Direct(metadata) => metadata.lifecycle_projection(),
+            Self::Maintenance(metadata) => metadata.lifecycle_projection(),
+        }
+    }
+}
+
+impl Serialize for RepositoryMaterializationMetadata {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Direct(metadata) => metadata.serialize(serializer),
+            Self::Maintenance(metadata) => metadata.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RepositoryMaterializationMetadata {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let schema = value
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| D::Error::custom("materialization metadata requires a schema"))?;
+        match schema {
+            MATERIALIZATION_METADATA_SCHEMA => serde_json::from_value(value)
+                .map(Self::Direct)
+                .map_err(D::Error::custom),
+            crate::REPOSITORY_MAINTENANCE_MATERIALIZATION_METADATA_SCHEMA => {
+                serde_json::from_value(value)
+                    .map(Self::Maintenance)
+                    .map_err(D::Error::custom)
+            }
+            _ => Err(D::Error::custom(format!(
+                "unsupported materialization metadata schema {schema:?}"
+            ))),
+        }
+    }
+}
+
 /// Complete semantic record content supplied by a direct repository candidate.
 ///
 /// This deliberately does not contain materialization metadata. A candidate is
@@ -414,7 +484,7 @@ pub struct CanonicalLifecycleProjection {
 }
 
 impl CanonicalLifecycleProjection {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         match self.action {
             None => {
                 if self.target_expected_revision.is_some()
@@ -438,7 +508,23 @@ impl CanonicalLifecycleProjection {
                     _ => bail!("canonical lifecycle target record and revision must be paired"),
                 };
                 validate_lifecycle_shape(action, target.as_ref(), self.reason.as_deref())?;
-                if self.counterpart_relationship != action.counterpart_relationship() {
+                let relationship_matches = match action {
+                    MaterializationAction::Create | MaterializationAction::Update => {
+                        self.counterpart_relationship.is_none()
+                    }
+                    MaterializationAction::Supersede => matches!(
+                        self.counterpart_relationship,
+                        Some(
+                            MaterializationCounterpartRelationship::Supersedes
+                                | MaterializationCounterpartRelationship::SupersededBy
+                        )
+                    ),
+                    MaterializationAction::Tombstone => {
+                        self.counterpart_relationship
+                            == Some(MaterializationCounterpartRelationship::Tombstones)
+                    }
+                };
+                if !relationship_matches {
                     bail!("canonical lifecycle counterpart relationship does not match action");
                 }
             }
@@ -466,7 +552,7 @@ impl CanonicalRevisionProjection {
             lifecycle: record
                 .materialization
                 .as_ref()
-                .map(MaterializationMetadata::lifecycle_projection)
+                .map(RepositoryMaterializationMetadata::lifecycle_projection)
                 .unwrap_or_default(),
         }
     }
@@ -1147,18 +1233,20 @@ mod tests {
             lineage: None,
             proposal_id: None,
             capture: None,
-            materialization: Some(MaterializationMetadata {
-                schema: MATERIALIZATION_METADATA_SCHEMA.to_owned(),
-                action: MaterializationAction::Create,
-                plan_id: identity('b'),
-                candidate_id: identity('c'),
-                decision_id,
-                decision_at: "2026-07-16T12:00:00Z".to_owned(),
-                safety_contract: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
-                revision: revision('d'),
-                target: None,
-                reason: None,
-            }),
+            materialization: Some(RepositoryMaterializationMetadata::Direct(
+                MaterializationMetadata {
+                    schema: MATERIALIZATION_METADATA_SCHEMA.to_owned(),
+                    action: MaterializationAction::Create,
+                    plan_id: identity('b'),
+                    candidate_id: identity('c'),
+                    decision_id,
+                    decision_at: "2026-07-16T12:00:00Z".to_owned(),
+                    safety_contract: REPOSITORY_WRITE_SAFETY_SCHEMA.to_owned(),
+                    revision: revision('d'),
+                    target: None,
+                    reason: None,
+                },
+            )),
         }
     }
 
@@ -1199,10 +1287,13 @@ mod tests {
     fn canonical_revision_excludes_materialization_decision_identity() -> Result<()> {
         let first = attested_record(identity('e'));
         let mut second = first.clone();
-        let metadata = second
+        let RepositoryMaterializationMetadata::Direct(metadata) = second
             .materialization
             .as_mut()
-            .expect("test record includes materialization metadata");
+            .expect("test record includes materialization metadata")
+        else {
+            panic!("test record must use direct materialization metadata");
+        };
         metadata.plan_id = identity('f');
         metadata.candidate_id = identity('0');
         metadata.decision_id = identity('1');

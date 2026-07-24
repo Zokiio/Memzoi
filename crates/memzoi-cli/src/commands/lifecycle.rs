@@ -212,7 +212,10 @@ fn read_plan(path: &Path, label: &str) -> Result<MaintenancePlan> {
 }
 
 fn read_artifact(path: &Path, label: &str) -> Result<String> {
-    let file = open_regular_lifecycle_artifact(path, label)?;
+    let file = super::open_regular_artifact_without_symlinks(
+        path,
+        &format!("private lifecycle {label} artifact"),
+    )?;
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect opened private lifecycle {label} artifact"))?;
@@ -230,52 +233,6 @@ fn read_artifact(path: &Path, label: &str) -> Result<String> {
     );
     String::from_utf8(bytes)
         .with_context(|| format!("private lifecycle {label} artifact must be UTF-8"))
-}
-
-#[cfg(unix)]
-fn open_regular_lifecycle_artifact(path: &Path, label: &str) -> Result<fs::File> {
-    use rustix::fs::{Mode, OFlags, openat};
-
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .context("failed to read current directory")?
-            .join(path)
-    };
-    let parent = absolute
-        .parent()
-        .context("private lifecycle artifact has no parent")?
-        .canonicalize()
-        .with_context(|| format!("failed to resolve private lifecycle {label} artifact parent"))?;
-    let directory = open_real_directory(&parent)?;
-    let file_name = absolute
-        .file_name()
-        .context("private lifecycle artifact has no file name")?;
-    let file = openat(
-        &directory,
-        file_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .with_context(|| {
-        format!("failed to open private lifecycle {label} artifact without following symlinks")
-    })?;
-    let file = fs::File::from(file);
-    ensure!(
-        file.metadata()
-            .with_context(|| format!(
-                "failed to inspect opened private lifecycle {label} artifact"
-            ))?
-            .is_file(),
-        "private lifecycle {label} artifact must be a regular, non-symlink file"
-    );
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_regular_lifecycle_artifact(_path: &Path, _label: &str) -> Result<fs::File> {
-    bail!("secure private lifecycle artifact reads are unavailable on this platform")
 }
 
 fn write_private_plan(plan: &Value, destination: &Path, paths: &MemoryPaths) -> Result<()> {

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -70,6 +71,235 @@ pub(crate) enum GitReviewVisibilityError {
 }
 
 const MAX_GIT_REVIEW_VISIBILITY_OUTPUT_BYTES: usize = 8 * 1024;
+const MAX_GIT_MAINTENANCE_OUTPUT_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitMaintenanceTargetReview {
+    pub(crate) tracked_paths: Vec<PathBuf>,
+    pub(crate) untracked_paths: Vec<PathBuf>,
+}
+
+/// Verifies that only the selected canonical paths are clean enough for a new
+/// maintenance projection. This intentionally does not inspect unrelated dirt.
+pub(crate) fn git_maintenance_targets_clean(
+    project_root: &Path,
+    paths: &[PathBuf],
+) -> Result<GitMaintenanceTargetReview> {
+    if paths.is_empty()
+        || paths
+            .iter()
+            .any(|path| !is_canonical_project_relative_path(path))
+    {
+        bail!("maintenance Git inspection requires canonical selected paths");
+    }
+    let mut canonical = paths.to_vec();
+    canonical.sort();
+    canonical.dedup();
+    if canonical.len() != paths.len() {
+        bail!("maintenance Git inspection paths must be unique");
+    }
+
+    let mut status_args = vec![
+        OsStr::new("--no-optional-locks"),
+        OsStr::new("-c"),
+        OsStr::new("core.fsmonitor=false"),
+        OsStr::new("status"),
+        OsStr::new("--porcelain=v2"),
+        OsStr::new("-z"),
+        OsStr::new("--untracked-files=all"),
+        OsStr::new("--ignored=matching"),
+        OsStr::new("--no-renames"),
+        OsStr::new("--"),
+    ];
+    status_args.extend(canonical.iter().map(|path| path.as_os_str()));
+    let status = run_git_maintenance_command(project_root, &status_args)?;
+    if !status.status.success() {
+        bail!(
+            "maintenance Git status failed: {}",
+            bounded_stderr(&status.stderr)
+        );
+    }
+
+    let mut untracked = BTreeSet::new();
+    for entry in status
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        match entry.first().copied() {
+            Some(b'?') => {
+                let path = entry
+                    .strip_prefix(b"? ")
+                    .context("maintenance Git status returned malformed untracked output")?;
+                untracked.insert(matched_maintenance_path(path, &canonical)?);
+            }
+            Some(b'!') => bail!("maintenance target is ignored by Git"),
+            Some(b'u') => bail!("maintenance target has an unresolved Git conflict"),
+            Some(b'1' | b'2') => {
+                let xy = entry
+                    .get(2..4)
+                    .context("maintenance Git status returned malformed tracked output")?;
+                if xy != b".." {
+                    bail!("maintenance target has staged or unstaged Git changes");
+                }
+            }
+            _ => bail!("maintenance Git status returned unexpected output"),
+        }
+    }
+
+    let mut index_args = vec![
+        OsStr::new("--no-optional-locks"),
+        OsStr::new("-c"),
+        OsStr::new("core.fsmonitor=false"),
+        OsStr::new("ls-files"),
+        OsStr::new("--stage"),
+        OsStr::new("-z"),
+        OsStr::new("--"),
+    ];
+    index_args.extend(canonical.iter().map(|path| path.as_os_str()));
+    let index = run_git_maintenance_command(project_root, &index_args)?;
+    if !index.status.success() {
+        bail!(
+            "maintenance Git index inspection failed: {}",
+            bounded_stderr(&index.stderr)
+        );
+    }
+
+    let mut tracked = BTreeSet::new();
+    for entry in index
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let tab = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("maintenance Git index inspection returned malformed output")?;
+        let (metadata, path_with_tab) = entry.split_at(tab);
+        let path = &path_with_tab[1..];
+        let fields = metadata.split(|byte| *byte == b' ').collect::<Vec<_>>();
+        if fields.len() != 3 || fields[2] != b"0" || fields[1].iter().all(|byte| *byte == b'0') {
+            bail!("maintenance target has an unsupported Git index entry");
+        }
+        let path = matched_maintenance_path(path, &canonical)?;
+        if !canonical.binary_search(&path).is_ok() || !tracked.insert(path) {
+            bail!("maintenance Git index inspection returned an unexpected path");
+        }
+    }
+
+    let untracked_or_absent = canonical
+        .iter()
+        .filter(|path| !tracked.contains(*path))
+        .collect::<Vec<_>>();
+    if !untracked_or_absent.is_empty() {
+        let mut ignore_args = vec![
+            OsStr::new("--no-optional-locks"),
+            OsStr::new("-c"),
+            OsStr::new("core.fsmonitor=false"),
+            OsStr::new("check-ignore"),
+            OsStr::new("--no-index"),
+            OsStr::new("--"),
+        ];
+        ignore_args.extend(untracked_or_absent.iter().map(|path| path.as_os_str()));
+        let ignored = run_git_maintenance_command(project_root, &ignore_args)?;
+        match ignored.status.code() {
+            Some(0) if !ignored.stdout.is_empty() => {
+                for path in ignored
+                    .stdout
+                    .split(|byte| *byte == b'\n')
+                    .filter(|entry| !entry.is_empty())
+                {
+                    let _ = matched_maintenance_path(path, &canonical)?;
+                }
+                bail!("maintenance target is ignored by Git");
+            }
+            Some(1) if ignored.stdout.is_empty() => {}
+            _ => bail!(
+                "maintenance Git ignore inspection failed: {}",
+                bounded_stderr(&ignored.stderr)
+            ),
+        }
+    }
+
+    for path in &canonical {
+        let absolute = project_root.join(path);
+        if tracked.contains(path) && !absolute.exists() {
+            bail!("absent maintenance target already has a Git index entry");
+        }
+        if !tracked.contains(path) && absolute.exists() && !untracked.contains(path) {
+            bail!("maintenance target Git visibility is ambiguous");
+        }
+    }
+    Ok(GitMaintenanceTargetReview {
+        tracked_paths: tracked.into_iter().collect(),
+        untracked_paths: untracked.into_iter().collect(),
+    })
+}
+
+fn matched_maintenance_path(bytes: &[u8], expected: &[PathBuf]) -> Result<PathBuf> {
+    expected
+        .iter()
+        .find(|path| path.as_os_str().as_encoded_bytes() == bytes)
+        .cloned()
+        .context("maintenance Git command returned an unexpected path")
+}
+
+fn run_git_maintenance_command(
+    project_root: &Path,
+    arguments: &[&OsStr],
+) -> Result<GitReviewCommandOutput> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(project_root)
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_discovery_command(&mut command);
+    let mut child = command
+        .spawn()
+        .context("failed to execute maintenance Git inspection")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("maintenance Git stdout is missing")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("maintenance Git stderr is missing")?;
+    let stdout_reader = std::thread::spawn(move || {
+        collect_bounded_git_output(stdout, MAX_GIT_MAINTENANCE_OUTPUT_BYTES)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        collect_bounded_git_output(stderr, MAX_GIT_MAINTENANCE_OUTPUT_BYTES)
+    });
+    let status = child
+        .wait()
+        .context("failed to wait for maintenance Git inspection")?;
+    let (stdout, stdout_truncated) = stdout_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("maintenance Git stdout reader panicked"))??;
+    let (stderr, stderr_truncated) = stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("maintenance Git stderr reader panicked"))??;
+    if stdout_truncated || stderr_truncated {
+        bail!("maintenance Git output exceeded its safety limit");
+    }
+    Ok(GitReviewCommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn bounded_stderr(stderr: &[u8]) -> String {
+    let value = String::from_utf8_lossy(stderr).trim().to_owned();
+    if value.is_empty() {
+        "no error output".to_owned()
+    } else {
+        value
+    }
+}
 
 /// Determines whether `record_path` is visible to Git review from `project_root`.
 ///
@@ -193,8 +423,12 @@ fn run_git_review_command(
         .stderr
         .take()
         .expect("piped Git review command stderr must be available");
-    let stdout_reader = std::thread::spawn(move || collect_bounded_git_output(stdout));
-    let stderr_reader = std::thread::spawn(move || collect_bounded_git_output(stderr));
+    let stdout_reader = std::thread::spawn(move || {
+        collect_bounded_git_output(stdout, MAX_GIT_REVIEW_VISIBILITY_OUTPUT_BYTES)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        collect_bounded_git_output(stderr, MAX_GIT_REVIEW_VISIBILITY_OUTPUT_BYTES)
+    });
 
     let status = child
         .wait()
@@ -233,7 +467,10 @@ fn run_git_review_command(
     })
 }
 
-fn collect_bounded_git_output(mut reader: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+fn collect_bounded_git_output(
+    mut reader: impl Read,
+    maximum_bytes: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
     let mut output = Vec::new();
     let mut buffer = [0_u8; 1024];
     let mut truncated = false;
@@ -242,7 +479,7 @@ fn collect_bounded_git_output(mut reader: impl Read) -> std::io::Result<(Vec<u8>
         if read == 0 {
             return Ok((output, truncated));
         }
-        let remaining = MAX_GIT_REVIEW_VISIBILITY_OUTPUT_BYTES.saturating_sub(output.len());
+        let remaining = maximum_bytes.saturating_sub(output.len());
         let retained = read.min(remaining);
         output.extend_from_slice(&buffer[..retained]);
         truncated |= retained != read;
@@ -457,6 +694,124 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn maintenance_git_check_is_path_scoped_and_read_only() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let selected = PathBuf::from(".memzoi/records/selected.md");
+        initialize_git_repository(temp.path())?;
+        fs::create_dir_all(temp.path().join(".memzoi/records"))?;
+        fs::write(temp.path().join(&selected), "selected canonical record")?;
+        fs::write(temp.path().join("unrelated.md"), "baseline")?;
+        stage_git_path(temp.path(), &selected)?;
+        stage_git_path(temp.path(), Path::new("unrelated.md"))?;
+        commit_git_repository(temp.path())?;
+        fs::write(temp.path().join("unrelated.md"), "unrelated dirty work")?;
+        let index_before = fs::read(temp.path().join(".git/index"))?;
+
+        let review = git_maintenance_targets_clean(temp.path(), std::slice::from_ref(&selected))?;
+
+        assert_eq!(review.tracked_paths, vec![selected]);
+        assert!(review.untracked_paths.is_empty());
+        assert_eq!(fs::read(temp.path().join(".git/index"))?, index_before);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("unrelated.md"))?,
+            "unrelated dirty work"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_git_check_blocks_dirty_staged_intent_and_ignored_targets() -> Result<()> {
+        let selected = PathBuf::from(".memzoi/records/selected.md");
+
+        let dirty = tempfile::TempDir::new()?;
+        initialize_git_repository(dirty.path())?;
+        fs::create_dir_all(dirty.path().join(".memzoi/records"))?;
+        fs::write(dirty.path().join(&selected), "baseline")?;
+        stage_git_path(dirty.path(), &selected)?;
+        commit_git_repository(dirty.path())?;
+        fs::write(dirty.path().join(&selected), "dirty")?;
+        assert!(
+            git_maintenance_targets_clean(dirty.path(), std::slice::from_ref(&selected)).is_err()
+        );
+
+        let staged = tempfile::TempDir::new()?;
+        initialize_git_repository(staged.path())?;
+        fs::create_dir_all(staged.path().join(".memzoi/records"))?;
+        fs::write(staged.path().join(&selected), "staged")?;
+        stage_git_path(staged.path(), &selected)?;
+        assert!(
+            git_maintenance_targets_clean(staged.path(), std::slice::from_ref(&selected)).is_err()
+        );
+
+        let intent = tempfile::TempDir::new()?;
+        initialize_git_repository(intent.path())?;
+        fs::create_dir_all(intent.path().join(".memzoi/records"))?;
+        fs::write(intent.path().join(&selected), "intent to add")?;
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(intent.path())
+            .args(["add", "-N", "--"])
+            .arg(&selected)
+            .output()?;
+        assert!(output.status.success());
+        assert!(
+            git_maintenance_targets_clean(intent.path(), std::slice::from_ref(&selected)).is_err()
+        );
+
+        let ignored = tempfile::TempDir::new()?;
+        initialize_git_repository(ignored.path())?;
+        fs::create_dir_all(ignored.path().join(".memzoi/records"))?;
+        fs::write(ignored.path().join(".gitignore"), ".memzoi/records/*.md\n")?;
+        fs::write(ignored.path().join(&selected), "ignored")?;
+        assert!(git_maintenance_targets_clean(ignored.path(), &[selected]).is_err());
+
+        let absent_ignored = tempfile::TempDir::new()?;
+        initialize_git_repository(absent_ignored.path())?;
+        fs::write(
+            absent_ignored.path().join(".gitignore"),
+            ".memzoi/records/*.md\n",
+        )?;
+        let absent = PathBuf::from(".memzoi/records/absent.md");
+        assert!(git_maintenance_targets_clean(absent_ignored.path(), &[absent]).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_git_check_disables_configured_fsmonitor() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new()?;
+        let selected = PathBuf::from(".memzoi/records/selected.md");
+        initialize_git_repository(temp.path())?;
+        fs::create_dir_all(temp.path().join(".memzoi/records"))?;
+        fs::write(temp.path().join(&selected), "selected canonical record")?;
+        stage_git_path(temp.path(), &selected)?;
+        commit_git_repository(temp.path())?;
+
+        let sentinel = temp.path().join("fsmonitor-invoked");
+        let monitor = temp.path().join("fsmonitor-hook.sh");
+        fs::write(
+            &monitor,
+            format!("#!/bin/sh\ntouch '{}'\nprintf '\\n'\n", sentinel.display()),
+        )?;
+        let mut permissions = fs::metadata(&monitor)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&monitor, permissions)?;
+        let configured = Command::new("git")
+            .arg("-C")
+            .arg(temp.path())
+            .args(["config", "core.fsmonitor"])
+            .arg(&monitor)
+            .status()?;
+        assert!(configured.success());
+
+        git_maintenance_targets_clean(temp.path(), &[selected])?;
+        assert!(!sentinel.exists(), "Git preflight executed core.fsmonitor");
+        Ok(())
+    }
+
     fn stage_git_path(repository: &Path, path: &Path) -> Result<()> {
         let mut command = Command::new("git");
         command
@@ -485,6 +840,29 @@ mod tests {
         if !output.status.success() {
             bail!(
                 "failed to initialize Git test repository: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    fn commit_git_repository(path: &Path) -> Result<()> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "-c",
+                "user.name=Memzoi Test",
+                "-c",
+                "user.email=memzoi-test@example.invalid",
+                "commit",
+                "-qm",
+                "baseline",
+            ])
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "failed to commit Git test repository: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }

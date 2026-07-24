@@ -15,6 +15,14 @@ pub(crate) struct RepositoryFileIdentity {
 }
 
 #[derive(Debug)]
+pub(crate) struct PinnedRepositoryFileRead {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) identity: RepositoryFileIdentity,
+    pub(crate) mode: u32,
+    pub(crate) file: fs::File,
+}
+
+#[derive(Debug)]
 pub(crate) struct CreatedRepositoryFile {
     pub(crate) path: PathBuf,
     pub(crate) identity: RepositoryFileIdentity,
@@ -152,6 +160,35 @@ fn run_before_repository_quarantine_hook() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+type BeforeRepositoryBackupSourceRevalidationHook = Box<dyn FnOnce() -> Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_REPOSITORY_BACKUP_SOURCE_REVALIDATION_HOOK: std::cell::RefCell<
+        Option<BeforeRepositoryBackupSourceRevalidationHook>,
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn inject_before_repository_backup_source_revalidation_hook(
+    hook: impl FnOnce() -> Result<()> + 'static,
+) {
+    BEFORE_REPOSITORY_BACKUP_SOURCE_REVALIDATION_HOOK.with(|injected| {
+        *injected.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_repository_backup_source_revalidation_hook() -> Result<()> {
+    let hook = BEFORE_REPOSITORY_BACKUP_SOURCE_REVALIDATION_HOOK
+        .with(|injected| injected.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook()?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn repository_directory_mode() -> rustix::fs::Mode {
     use rustix::fs::Mode;
@@ -164,6 +201,13 @@ fn repository_file_mode() -> rustix::fs::Mode {
     use rustix::fs::Mode;
 
     Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH
+}
+
+#[cfg(unix)]
+fn repository_transaction_file_mode() -> rustix::fs::Mode {
+    use rustix::fs::Mode;
+
+    Mode::RUSR | Mode::WUSR
 }
 
 #[cfg(unix)]
@@ -374,6 +418,398 @@ pub(crate) fn read_transaction_file_if_exists(
                 .map(|(_, bytes)| bytes),
         )
     }
+}
+
+pub(crate) fn read_bounded_direct_child_file_if_exists(
+    parent: &Path,
+    path: &Path,
+    maximum_len: u64,
+    label: &str,
+) -> Result<Option<(Vec<u8>, RepositoryFileIdentity, u32)>> {
+    Ok(
+        read_bounded_direct_child_file_with_handle_if_exists(parent, path, maximum_len, label)?
+            .map(|read| (read.bytes, read.identity, read.mode)),
+    )
+}
+
+pub(crate) fn read_bounded_direct_child_file_with_handle_if_exists(
+    parent: &Path,
+    path: &Path,
+    maximum_len: u64,
+    label: &str,
+) -> Result<Option<PinnedRepositoryFileRead>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (parent, path, maximum_len, label);
+        bail!("secure bounded file reads are unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags, openat};
+        use rustix::io::Errno;
+        use std::os::unix::fs::MetadataExt;
+
+        let (directory, file_name) = open_transaction_parent(parent, path)?;
+        let file = match openat(
+            &directory,
+            &file_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => file,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to open {label} without following symlinks"));
+            }
+        };
+        let mut file = fs::File::from(file);
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("failed to inspect {label}"))?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > maximum_len {
+            bail!("{label} has an invalid file type or size");
+        }
+        let expected_len = metadata.len();
+        let mut bytes = Vec::with_capacity(expected_len as usize);
+        Read::take(&mut file, expected_len.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("failed to read {label}"))?;
+        if bytes.len() as u64 != expected_len
+            || !named_file_still_matches(&directory, &file_name, &file)?
+        {
+            bail!("{label} changed while it was being read");
+        }
+        Ok(Some(PinnedRepositoryFileRead {
+            bytes,
+            identity: repository_file_identity(&file, label)?,
+            mode: metadata.mode(),
+            file,
+        }))
+    }
+}
+
+pub(crate) fn maintenance_journal_temporary_path(
+    runtime_dir: &Path,
+    transaction_id: &str,
+    authorization_digest: &str,
+    rewrite_content_digest: Option<&str>,
+) -> Result<PathBuf> {
+    let transaction = uuid::Uuid::parse_str(transaction_id)
+        .context("maintenance journal temporary transaction ID is invalid")?;
+    if transaction.to_string() != transaction_id {
+        bail!("maintenance journal temporary transaction ID is not canonical");
+    }
+    for (digest, label) in [
+        (
+            authorization_digest,
+            "maintenance journal authorization digest",
+        ),
+        (
+            rewrite_content_digest.unwrap_or(authorization_digest),
+            "maintenance journal rewrite content digest",
+        ),
+    ] {
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("{label} is invalid");
+        }
+    }
+    let file_name = match rewrite_content_digest {
+        Some(content_digest) => format!(
+            ".repository-maintenance-materialization-journal.json.{transaction_id}.{authorization_digest}.{content_digest}.rewrite.tmp"
+        ),
+        None => format!(
+            ".repository-maintenance-materialization-journal.json.{transaction_id}.{authorization_digest}.tmp"
+        ),
+    };
+    Ok(runtime_dir.join(file_name))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn remove_created_maintenance_journal_temporary(
+    project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
+    runtime_dir: &Path,
+    transaction_id: &str,
+    rewrite_content_digest: Option<&str>,
+    opened: &fs::File,
+) -> Result<()> {
+    if expected_route != RepositoryWriteRoute::Maintenance {
+        bail!("maintenance journal cleanup requires the maintenance route");
+    }
+    verify_repository_batch(
+        project_root,
+        expected_route,
+        expected_policy_context_digest,
+        authorization,
+        projections,
+    )?;
+    let authorization_digest = authorization.digest();
+    let path = maintenance_journal_temporary_path(
+        runtime_dir,
+        transaction_id,
+        &authorization_digest,
+        rewrite_content_digest,
+    )?;
+    let label = if rewrite_content_digest.is_some() {
+        "incomplete repository maintenance journal rewrite"
+    } else {
+        "incomplete repository maintenance journal"
+    };
+
+    #[cfg(not(unix))]
+    {
+        let _ = (&path, opened, label);
+        bail!("secure direct-child file removal is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        let (directory, file_name) = open_transaction_parent(runtime_dir, &path)?;
+        remove_pinned_named_file(&directory, &file_name, opened, None, label)
+    }
+}
+
+#[cfg(test)]
+type BeforeMaintenanceJournalExchangeHook = Box<dyn FnOnce() -> Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_MAINTENANCE_JOURNAL_EXCHANGE_HOOK: std::cell::RefCell<
+        Option<BeforeMaintenanceJournalExchangeHook>
+    > = std::cell::RefCell::new(None);
+    static AFTER_MAINTENANCE_JOURNAL_EXCHANGE_HOOK: std::cell::RefCell<
+        Option<BeforeMaintenanceJournalExchangeHook>
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn inject_before_maintenance_journal_exchange_hook(
+    hook: impl FnOnce() -> Result<()> + 'static,
+) {
+    BEFORE_MAINTENANCE_JOURNAL_EXCHANGE_HOOK.with(|injected| {
+        *injected.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn inject_after_maintenance_journal_exchange_hook(
+    hook: impl FnOnce() -> Result<()> + 'static,
+) {
+    AFTER_MAINTENANCE_JOURNAL_EXCHANGE_HOOK.with(|injected| {
+        *injected.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_maintenance_journal_exchange_hook() -> Result<()> {
+    let hook =
+        BEFORE_MAINTENANCE_JOURNAL_EXCHANGE_HOOK.with(|injected| injected.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_after_maintenance_journal_exchange_hook() -> Result<()> {
+    let hook =
+        AFTER_MAINTENANCE_JOURNAL_EXCHANGE_HOOK.with(|injected| injected.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook()?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn replace_maintenance_journal_compare_and_swap(
+    project_root: &Path,
+    expected_route: RepositoryWriteRoute,
+    expected_policy_context_digest: &[u8; 32],
+    authorization: &AuthorizedRepositoryWriteBatch,
+    projections: &[RepositoryProjection<'_>],
+    runtime_dir: &Path,
+    transaction_id: &str,
+    rewrite_content_digest: &str,
+    expected_current: &fs::File,
+    expected_current_bytes: &[u8],
+    replacement: &fs::File,
+    replacement_bytes: &[u8],
+) -> Result<()> {
+    if expected_route != RepositoryWriteRoute::Maintenance {
+        bail!("maintenance journal replacement requires the maintenance route");
+    }
+    if blake3::hash(replacement_bytes).to_hex().as_str() != rewrite_content_digest {
+        bail!("maintenance journal replacement digest does not match its bytes");
+    }
+    verify_repository_batch(
+        project_root,
+        expected_route,
+        expected_policy_context_digest,
+        authorization,
+        projections,
+    )?;
+    let replacement_path = maintenance_journal_temporary_path(
+        runtime_dir,
+        transaction_id,
+        &authorization.digest(),
+        Some(rewrite_content_digest),
+    )?;
+    let journal_path = runtime_dir.join("repository-maintenance-materialization-journal.json");
+
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            replacement_path,
+            journal_path,
+            expected_current,
+            expected_current_bytes,
+            replacement,
+            replacement_bytes,
+        );
+        bail!("secure maintenance journal replacement is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{RenameFlags, fsync, renameat_with};
+
+        let (directory, journal_name) = open_transaction_parent(runtime_dir, &journal_path)?;
+        let (_, replacement_name) = open_transaction_parent(runtime_dir, &replacement_path)?;
+        #[cfg(test)]
+        run_before_maintenance_journal_exchange_hook()?;
+        ensure_named_pinned_file(
+            &directory,
+            &journal_name,
+            expected_current,
+            expected_current_bytes,
+            "repository maintenance journal",
+        )?;
+        ensure_named_pinned_file(
+            &directory,
+            &replacement_name,
+            replacement,
+            replacement_bytes,
+            "repository maintenance journal replacement",
+        )?;
+        renameat_with(
+            &directory,
+            &replacement_name,
+            &directory,
+            &journal_name,
+            RenameFlags::EXCHANGE,
+        )
+        .context("failed to exchange repository maintenance journal replacement")?;
+
+        let exchanged = ensure_named_pinned_file(
+            &directory,
+            &journal_name,
+            replacement,
+            replacement_bytes,
+            "installed repository maintenance journal",
+        )
+        .and_then(|_| {
+            ensure_named_pinned_file(
+                &directory,
+                &replacement_name,
+                expected_current,
+                expected_current_bytes,
+                "superseded repository maintenance journal",
+            )
+        });
+        if let Err(exchange_error) = exchanged {
+            let restore = renameat_with(
+                &directory,
+                &replacement_name,
+                &directory,
+                &journal_name,
+                RenameFlags::EXCHANGE,
+            );
+            let sync = fsync(&directory);
+            match (restore, sync) {
+                (Ok(()), Ok(())) => {
+                    return Err(exchange_error)
+                        .context("repository maintenance journal changed during compare-and-swap");
+                }
+                (restore, sync) => bail!(
+                    "repository maintenance journal compare-and-swap was ambiguous; restore={restore:?}; sync={sync:?}"
+                ),
+            }
+        }
+        if let Err(error) = fsync(&directory) {
+            let restore = renameat_with(
+                &directory,
+                &replacement_name,
+                &directory,
+                &journal_name,
+                RenameFlags::EXCHANGE,
+            );
+            let sync = fsync(&directory);
+            return Err(error).context(format!(
+                "failed to sync repository maintenance journal exchange; restore={restore:?}; restore_sync={sync:?}"
+            ));
+        }
+        let durable_exchange = ensure_named_pinned_file(
+            &directory,
+            &journal_name,
+            replacement,
+            replacement_bytes,
+            "installed repository maintenance journal",
+        )
+        .and_then(|_| {
+            ensure_named_pinned_file(
+                &directory,
+                &replacement_name,
+                expected_current,
+                expected_current_bytes,
+                "superseded repository maintenance journal",
+            )
+        });
+        if let Err(exchange_error) = durable_exchange {
+            let restore = renameat_with(
+                &directory,
+                &replacement_name,
+                &directory,
+                &journal_name,
+                RenameFlags::EXCHANGE,
+            );
+            let sync = fsync(&directory);
+            return match (restore, sync) {
+                (Ok(()), Ok(())) => Err(exchange_error)
+                    .context("repository maintenance journal changed after its durable exchange"),
+                (restore, sync) => bail!(
+                    "repository maintenance journal durable exchange was ambiguous; restore={restore:?}; sync={sync:?}; verification={exchange_error:#}"
+                ),
+            };
+        }
+        #[cfg(test)]
+        run_after_maintenance_journal_exchange_hook()?;
+        remove_pinned_named_file(
+            &directory,
+            &replacement_name,
+            expected_current,
+            Some(expected_current_bytes),
+            "superseded repository maintenance journal",
+        )
+    }
+}
+
+#[cfg(unix)]
+fn ensure_named_pinned_file(
+    directory: &std::os::fd::OwnedFd,
+    file_name: &std::ffi::OsStr,
+    file: &fs::File,
+    expected_bytes: &[u8],
+    label: &str,
+) -> Result<()> {
+    if !named_file_still_matches(directory, file_name, file)? {
+        bail!("{label} changed before its authorized mutation");
+    }
+    ensure_pinned_file_bytes(file, expected_bytes, label)
 }
 
 pub(crate) fn read_repository_file_if_exists(
@@ -1141,6 +1577,7 @@ pub(crate) fn backup_repository_file(
     expected_identity: Option<RepositoryFileIdentity>,
     transaction_root: &Path,
     backup_path: &Path,
+    remove_source: bool,
 ) -> Result<()> {
     #[cfg(not(unix))]
     {
@@ -1154,6 +1591,7 @@ pub(crate) fn backup_repository_file(
             expected_identity,
             transaction_root,
             backup_path,
+            remove_source,
         );
         bail!("secure repository backup is unavailable on this platform");
     }
@@ -1216,7 +1654,7 @@ pub(crate) fn backup_repository_file(
             &backup_directory,
             &backup_name,
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            repository_file_mode(),
+            repository_transaction_file_mode(),
         )
         .context("failed to create repository transaction backup without replacement")?;
         let mut backup = fs::File::from(backup);
@@ -1250,14 +1688,25 @@ pub(crate) fn backup_repository_file(
                 )),
             };
         }
-        remove_pinned_named_file(
-            &source_directory,
-            &source_name,
-            &source,
-            Some(projection.bytes),
-            "securely backed-up repository source",
-        )
-        .context("failed to remove securely backed-up repository source")?;
+        if remove_source {
+            remove_pinned_named_file(
+                &source_directory,
+                &source_name,
+                &source,
+                Some(projection.bytes),
+                "securely backed-up repository source",
+            )
+            .context("failed to remove securely backed-up repository source")?;
+        } else {
+            #[cfg(test)]
+            run_before_repository_backup_source_revalidation_hook()
+                .context("injected change before repository backup source revalidation")?;
+            if !named_file_still_matches(&source_directory, &source_name, &source)? {
+                bail!("repository source changed while its transaction backup was created");
+            }
+            ensure_pinned_file_bytes(&source, projection.bytes, "repository source")
+                .context("repository source changed while its transaction backup was created")?;
+        }
         Ok(())
     }
 }
@@ -2454,6 +2903,58 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn non_removing_backup_revalidates_pinned_source_bytes_after_copy() {
+        let project = tempfile::tempdir().unwrap();
+        let transactions = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let transaction_root = transactions.path().canonicalize().unwrap();
+        let relative = Path::new(".memzoi/records/source.md");
+        let source = project_root.join(relative);
+        let backup = transaction_root.join("source.backup");
+        let authorized_bytes = b"authorized bytes";
+        let concurrent_bytes = b"concurrent edit!";
+        assert_eq!(authorized_bytes.len(), concurrent_bytes.len());
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, authorized_bytes).unwrap();
+        let revision = blake3::hash(authorized_bytes).to_hex().to_string();
+        let projections = [RepositoryProjection {
+            path: relative,
+            bytes: authorized_bytes,
+            target_revision: Some(&revision),
+            purpose: crate::RepositoryProjectionPurpose::Existing,
+        }];
+        let (context_digest, token) = authorize_create(&project_root, &projections);
+        let changed_source = source.clone();
+        inject_before_repository_backup_source_revalidation_hook(move || {
+            fs::write(&changed_source, concurrent_bytes)?;
+            Ok(())
+        });
+
+        let error = backup_repository_file(
+            &project_root,
+            RepositoryWriteRoute::FileProposalCreate,
+            &context_digest,
+            &token,
+            &projections,
+            0,
+            None,
+            &transaction_root,
+            &backup,
+            false,
+        )
+        .expect_err("an in-place source edit during backup must fail closed");
+
+        assert!(
+            format!("{error:#}")
+                .contains("repository source changed while its transaction backup was created"),
+            "unexpected source revalidation error: {error:#}"
+        );
+        assert_eq!(fs::read(&source).unwrap(), concurrent_bytes);
+        assert_eq!(fs::read(&backup).unwrap(), authorized_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn atomic_quarantine_restores_a_replacement_after_initial_validation() {
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path().canonicalize().unwrap();
@@ -2524,6 +3025,7 @@ mod tests {
         let writable_by_others = Mode::WGRP | Mode::WOTH;
         assert!(!repository_directory_mode().intersects(writable_by_others));
         assert!(!repository_file_mode().intersects(writable_by_others));
+        assert_eq!(repository_transaction_file_mode().bits(), 0o600);
 
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path().canonicalize().unwrap();

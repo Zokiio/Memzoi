@@ -27,6 +27,7 @@ mod recall_eval;
 mod recall_eval_v3;
 mod recall_operational_eval;
 mod repository_io;
+mod repository_maintenance_materialization;
 mod repository_write_safety;
 mod retention;
 mod schema;
@@ -89,14 +90,15 @@ pub use materialization::{
     REPOSITORY_MATERIALIZATION_DECISION_SCHEMA, REPOSITORY_MATERIALIZATION_PLAN_SCHEMA,
     REPOSITORY_MATERIALIZATION_RESULT_SCHEMA, RepositoryMaterializationCandidate,
     RepositoryMaterializationCandidateRecord, RepositoryMaterializationDecision,
-    RepositoryMaterializationPlan, RepositoryMaterializationResult,
-    build_repository_materialization_candidate, build_repository_materialization_decision,
-    build_repository_materialization_plan, canonical_revision_for_okf_record,
-    canonical_revision_for_projection, repository_materialization_candidate_id,
-    repository_materialization_candidate_plan, repository_materialization_candidate_to_okf_record,
-    repository_materialization_decision_id, repository_materialization_plan_id,
-    repository_materialization_policy, validate_canonical_record_id,
-    validate_materialization_identity, validate_repository_relative_path,
+    RepositoryMaterializationMetadata, RepositoryMaterializationPlan,
+    RepositoryMaterializationResult, build_repository_materialization_candidate,
+    build_repository_materialization_decision, build_repository_materialization_plan,
+    canonical_revision_for_okf_record, canonical_revision_for_projection,
+    repository_materialization_candidate_id, repository_materialization_candidate_plan,
+    repository_materialization_candidate_to_okf_record, repository_materialization_decision_id,
+    repository_materialization_plan_id, repository_materialization_policy,
+    validate_canonical_record_id, validate_materialization_identity,
+    validate_repository_relative_path,
 };
 pub use memory_policy::{
     MemoryDestinationPolicy, MemoryPlane, MemoryReviewRequirement, MemoryWriteRoute,
@@ -150,6 +152,7 @@ pub use recall_eval::{
 };
 pub use recall_eval_v3::*;
 pub use recall_operational_eval::*;
+pub use repository_maintenance_materialization::*;
 pub use repository_write_safety::{
     AuthorizationProof, AuthorizedRepositoryWriteBatch, FreshnessCheck, ProvenanceAssessment,
     REPOSITORY_WRITE_MAX_BLOB_BYTES, REPOSITORY_WRITE_SAFETY_SCHEMA, RepositoryContentClass,

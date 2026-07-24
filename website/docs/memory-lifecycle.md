@@ -176,6 +176,7 @@ command's JSON output, event, or database row does not change what it writes.
 | **No-write outcomes** | `discard` or `needs_review` candidates in `memzoi session-end` | Write neither a canonical record, pending proposal file, nor runtime memory row. `discard` is skipped; `needs_review` is blocked until a human decides. |
 |  | `memzoi capture plan`; `memzoi capture review`; MCP `plan_capture` | Do not write memory state. CLI `--output` may write a classified plan/review artifact to an allowed caller-selected path outside `.memzoi`, private runtime state, and generated exports; MCP never writes an artifact. |
 |  | `memzoi maintenance plan`; MCP `plan_maintenance` | Read canonical repository records directly and emit an immutable report/candidate artifact. They do not open a writable service or mutate records, proposals, indexes, overlays, private runtime, WAL/event logs, or Git. CLI `--output` is the sole optional write and must be outside the Git worktree and all managed runtime roots; MCP never writes an artifact. |
+| **Repository maintenance execution** | `memzoi maintenance materialize` | Consume one exact current plan plus explicit repository action IDs, authorize one complete batch, and atomically produce unstaged OKF lifecycle changes. The journal and disposable index are recovery state; verified canonical files are the commit authority. MCP exposes no equivalent tool. |
 |  | Rejected, deferred, duplicate, conflicting, blocked, or unresolved capture candidates | Write no proposal, canonical record, or runtime record. A stale source, inventory, policy, plan ID, or review ID also fails before writes. |
 | **Operational runtime state** | `memzoi init`; `memzoi rebuild`; `memzoi export`; event recording used by normal operations | Initialize/update bundle directories including `.memzoi/` and `.memzoi/records/`, runtime SQLite/configuration, derived indexes, event rows, and generated files under the runtime project directory. These are operational or derived state, not canonical memory records. `rebuild` reads canonical Git records; it does not write them. |
 | **Non-memory integration-file writes** | `memzoi integrate instructions [--file <path>]` | Update or create an agent instruction file such as `AGENTS.md` or `CLAUDE.md` (or the explicit file). This is an integration-file write, not a canonical memory or proposal write. `memzoi integrate prompt` and `integrate list` print information only. |
@@ -196,15 +197,17 @@ versions, evidence digests, findings, action candidates, and stale
 preconditions. Replaying the same request against the same snapshot, policy,
 and time produces the same semantics and identities.
 
-A plan is a decision artifact, not permission to change memory. Exact duplicate
+A plan is evidence, not permission to change memory. Exact duplicate
 candidates remain distinct from contradictions; unresolved contradictions name
 the full set and choose no winner. Staleness and expiry are report-only, and a
 renewal candidate never extends or otherwise changes its predecessor's
 retention.
 
-The current contract is `maintenance-plan/2`; the stable artifact identifiers
-remain `memzoi/maintenance-request` and `memzoi/maintenance-plan`. Repository
-CLI and MCP planning remain repository-only and read-only. The separate local
+The exact current artifact identifiers are `memzoi/maintenance-request` and
+`memzoi/maintenance-plan`. The plan schema is the sole plan-format identity. Repository
+CLI and MCP planning remain repository-only and read-only. The CLI-only
+`maintenance materialize` command is a separate explicit decision boundary for
+selected repository actions and leaves all outputs unstaged. The separate local
 `memzoi lifecycle plan` command uses the same current contract over private runtime
 snapshots, with opaque IDs and random version tokens instead of bodies or
 titles. Neither detector selects a duplicate keeper or contradiction winner;

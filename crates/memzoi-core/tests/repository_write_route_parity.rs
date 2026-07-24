@@ -20,6 +20,7 @@ fn every_route_has_a_unique_stable_identifier() {
         .map(|route| route.as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(identifiers.len(), RepositoryWriteRoute::ALL.len());
+    assert!(identifiers.contains("maintenance"));
     assert!(identifiers.contains("materialization"));
     assert!(identifiers.contains("recovery"));
 }
@@ -43,13 +44,18 @@ fn direct_structured_materialization_is_the_only_direct_attested_record_route() 
     let records = read_okf_record_files(service.paths().records_dir())?;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].concept_id, candidate.record.concept_id);
+    let memzoi_core::RepositoryMaterializationMetadata::Direct(metadata) = records[0]
+        .materialization
+        .as_ref()
+        .context("direct materialization must mint direct metadata")?
+    else {
+        bail!("direct materialization must not mint maintenance metadata");
+    };
+    assert_eq!(metadata.plan_id, plan.plan_id);
     assert_eq!(
-        records[0]
-            .materialization
-            .as_ref()
-            .map(|metadata| &metadata.plan_id),
-        Some(&plan.plan_id),
-        "only the direct structured route may mint a materialization attestation",
+        metadata.schema,
+        memzoi_core::MATERIALIZATION_METADATA_SCHEMA,
+        "the direct route must remain the only route that emits the direct schema",
     );
     assert!(
         has_unstaged_record(&service.paths().project_root, &candidate.record.concept_id)?,

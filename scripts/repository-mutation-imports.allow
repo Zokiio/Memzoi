@@ -16,6 +16,7 @@ crates/memzoi-core/src/repository_io.rs|renameat_with
 crates/memzoi-core/src/repository_io.rs|unlinkat
 crates/memzoi-core/src/service/capture_route_apply/journal.rs|OpenOptions
 crates/memzoi-core/src/service/import_origin_journal.rs|OpenOptions
+crates/memzoi-core/src/service/repository_maintenance_materialization/journal.rs|OpenOptions
 crates/memzoi-core/src/service/repository_mutation.rs|OpenOptions
 crates/memzoi-core/src/service/safe_files.rs|OpenOptions
 crates/memzoi-core/src/service/session_end_route_apply/journal.rs|OpenOptions

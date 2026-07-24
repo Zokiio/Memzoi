@@ -10,13 +10,12 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use memzoi_core::{
     CANONICAL_REVISION_SCHEMA, CaptureDataClass, CapturePlanningControl, CaptureRequest,
-    CaptureSourceLocator, Clock, ContextPackInput, FixedClock, MAINTENANCE_CONTRACT_VERSION,
-    MAINTENANCE_MAX_RECORDS, MAINTENANCE_PLAN_SCHEMA, MAINTENANCE_POLICY_VERSION,
-    MAINTENANCE_REQUEST_SCHEMA, MARKDOWN_EXTRACTOR_PROFILE, MaintenancePlanRequest,
-    MaintenancePlanningControl, MemoryDestination, MemoryPaths, MemoryService, MemoryType,
-    PrecheckInput, ScopeKind, SearchInput, SystemClock, plan_capture_at,
-    plan_capture_with_control_at, plan_maintenance, plan_maintenance_with_control,
-    validate_canonical_record_id,
+    CaptureSourceLocator, Clock, ContextPackInput, FixedClock, MAINTENANCE_MAX_RECORDS,
+    MAINTENANCE_PLAN_SCHEMA, MAINTENANCE_POLICY_VERSION, MAINTENANCE_REQUEST_SCHEMA,
+    MARKDOWN_EXTRACTOR_PROFILE, MaintenancePlanRequest, MaintenancePlanningControl,
+    MemoryDestination, MemoryPaths, MemoryService, MemoryType, PrecheckInput, ScopeKind,
+    SearchInput, SystemClock, plan_capture_at, plan_capture_with_control_at, plan_maintenance,
+    plan_maintenance_with_control, validate_canonical_record_id,
 };
 use serde_json::{Value, json};
 
@@ -875,10 +874,10 @@ fn tools_list_result() -> Value {
                                 "minLength": 1,
                                 "pattern": CANONICAL_RECORD_ID_PATTERN
                             },
-                            "description": "Optional repository record IDs to target; their complete comparison neighbourhood remains in scope."
+                            "description": "Repository record IDs to target; use an empty array for all records. Their complete comparison neighbourhood remains in scope."
                         }
                     },
-                    "required": ["schema"]
+                    "required": ["schema", "record_ids"]
                 })
             ),
             tool_schema(
@@ -1083,10 +1082,6 @@ fn maintenance_policy_output_schema() -> Value {
     maintenance_closed_object(
         vec![
             (
-                "contract_version",
-                maintenance_constant_schema(MAINTENANCE_CONTRACT_VERSION),
-            ),
-            (
                 "policy_version",
                 maintenance_constant_schema(MAINTENANCE_POLICY_VERSION),
             ),
@@ -1095,7 +1090,6 @@ fn maintenance_policy_output_schema() -> Value {
             ("policy_digest", maintenance_identity_schema()),
         ],
         &[
-            "contract_version",
             "policy_version",
             "maximum_validity_seconds",
             "stale_after_seconds",
@@ -2612,7 +2606,7 @@ mod tests {
             .unwrap_or_else(|| panic!("plan_maintenance tool should be exposed: {tools:?}"));
         let schema = &maintenance_tool["inputSchema"];
         assert_eq!(schema["additionalProperties"], false);
-        assert_eq!(schema["required"], json!(["schema"]));
+        assert_eq!(schema["required"], json!(["schema", "record_ids"]));
         assert_eq!(
             schema["properties"]["schema"]["const"],
             "memzoi/maintenance-request"
@@ -2626,10 +2620,10 @@ mod tests {
             maintenance_tool["outputSchema"]["properties"]["schema"]["const"],
             "memzoi/maintenance-plan"
         );
-        assert_eq!(
-            maintenance_tool["outputSchema"]["properties"]["policy"]["properties"]["contract_version"]
-                ["const"],
-            "maintenance-plan/2"
+        assert!(
+            maintenance_tool["outputSchema"]["properties"]["policy"]["properties"]
+                .get("contract_version")
+                .is_none()
         );
         assert_eq!(
             maintenance_tool["outputSchema"]["properties"]["action_groups"]["type"],
@@ -2696,6 +2690,100 @@ mod tests {
                 state.service.get().is_none(),
                 "rejected maintenance arguments must not open mutable memory state"
             );
+        }
+    }
+
+    #[test]
+    fn maintenance_mcp_registration_remains_plan_only() {
+        let (_temp, state) = capture_test_state();
+        let response = response(
+            &state,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "maintenance-tools",
+                "method": "tools/list"
+            }),
+        );
+        let tools = response["result"]["tools"].as_array().unwrap();
+        let maintenance_names = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|name| name.contains("maintenance"))
+            .collect::<Vec<_>>();
+        assert_eq!(maintenance_names, vec!["plan_maintenance"]);
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "plan_maintenance")
+            .expect("maintenance planning tool");
+        let properties = tool["inputSchema"]["properties"]
+            .as_object()
+            .expect("maintenance input properties");
+        assert_eq!(
+            properties.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["evaluated_at", "record_ids", "schema"]
+        );
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!(["schema", "record_ids"])
+        );
+        for forbidden in [
+            "action_id",
+            "actor",
+            "authorization",
+            "decision_at",
+            "grant",
+            "materialize",
+            "plan_file",
+            "private_records",
+            "recover",
+        ] {
+            assert!(
+                !properties.contains_key(forbidden),
+                "maintenance MCP input unexpectedly exposes {forbidden}"
+            );
+        }
+        let input_surface = serde_json::to_string(&tool["inputSchema"]).unwrap();
+        for forbidden in [
+            "materializ",
+            "action_id",
+            "decision_at",
+            "grant_id",
+            "owner_author",
+            "plan_file",
+            "private_record",
+            "recover",
+        ] {
+            assert!(
+                !input_surface.contains(forbidden),
+                "maintenance MCP input schema exposes {forbidden}: {input_surface}"
+            );
+        }
+        for other in tools
+            .iter()
+            .filter(|candidate| candidate["name"] != "plan_maintenance")
+        {
+            let surface = serde_json::to_string(&json!({
+                "name": other["name"],
+                "description": other["description"],
+                "inputSchema": other["inputSchema"],
+                "outputSchema": other.get("outputSchema"),
+            }))
+            .unwrap()
+            .to_ascii_lowercase();
+            for forbidden in [
+                "maintenance",
+                "repository-maintenance",
+                "decision_at",
+                "plan_file",
+                "private_record",
+                "owner_author",
+                "recover_maintenance",
+            ] {
+                assert!(
+                    !surface.contains(forbidden),
+                    "non-maintenance MCP tool exposes {forbidden}: {surface}"
+                );
+            }
         }
     }
 
@@ -2773,9 +2861,10 @@ mod tests {
             result["structuredContent"]["schema"],
             "memzoi/maintenance-plan"
         );
-        assert_eq!(
-            result["structuredContent"]["policy"]["contract_version"],
-            "maintenance-plan/2"
+        assert!(
+            result["structuredContent"]["policy"]
+                .get("contract_version")
+                .is_none()
         );
         assert_eq!(result["structuredContent"]["scope"]["kind"], "repository");
         assert_eq!(
@@ -2809,14 +2898,30 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_tool_defaults_optional_record_ids_and_evaluation_time() {
+    fn maintenance_tool_requires_record_ids_and_defaults_evaluation_time() {
         let (_temp, state) = capture_test_state();
         let before = managed_state_snapshot(&state);
 
+        let missing = maintenance_response(
+            &state,
+            "maintenance-missing-record-ids",
+            json!({ "schema": "memzoi/maintenance-request" }),
+        );
+        assert_eq!(missing["error"]["message"], INVALID_MAINTENANCE_REQUEST);
+        assert!(state.service.get().is_none());
+        assert_managed_state_unchanged(
+            &before,
+            &managed_state_snapshot(&state),
+            "invalid MCP maintenance request mutated state",
+        );
+
         let response = maintenance_response(
             &state,
-            "maintenance-defaults",
-            json!({ "schema": "memzoi/maintenance-request" }),
+            "maintenance-default-time",
+            json!({
+                "schema": "memzoi/maintenance-request",
+                "record_ids": []
+            }),
         );
 
         assert!(response.get("error").is_none(), "{response}");
@@ -2827,7 +2932,7 @@ mod tests {
         );
         assert!(state.service.get().is_none());
         let after = managed_state_snapshot(&state);
-        assert_managed_state_unchanged(&before, &after, "default MCP maintenance mutated state");
+        assert_managed_state_unchanged(&before, &after, "MCP maintenance planning mutated state");
     }
 
     #[test]

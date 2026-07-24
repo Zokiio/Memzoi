@@ -1,16 +1,19 @@
 use std::{
+    collections::BTreeSet,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use memzoi_core::{
     MAINTENANCE_REQUEST_SCHEMA, MaintenancePlan, MaintenancePlanRequest, MemoryPaths,
-    discover_paths, plan_maintenance, runtime_home,
+    REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA,
+    RepositoryMaintenanceMaterializationRequest, discover_paths, parse_maintenance_plan,
+    plan_maintenance, runtime_home, validate_repository_maintenance_selection,
 };
 
-use super::normalize_absolute_path;
+use super::{normalize_absolute_path, open_regular_artifact_without_symlinks, open_service};
 use crate::output::print_json;
 
 const MAINTENANCE_ARTIFACT_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -43,6 +46,92 @@ pub(super) fn plan_command(
         print_maintenance_human(&plan);
         Ok(())
     }
+}
+
+pub(super) fn materialize_command(
+    plan_file: PathBuf,
+    plan_id: String,
+    mut action_ids: Vec<String>,
+    decision_at: String,
+    as_json: bool,
+) -> Result<()> {
+    let plan = read_maintenance_plan(&plan_file)?;
+    ensure!(
+        plan.plan_id == plan_id,
+        "explicit maintenance plan ID does not match the artifact"
+    );
+    let unique = action_ids.iter().collect::<BTreeSet<_>>();
+    ensure!(
+        unique.len() == action_ids.len(),
+        "duplicate --action-id values are not allowed"
+    );
+    action_ids.sort();
+    let request = RepositoryMaintenanceMaterializationRequest {
+        schema: REPOSITORY_MAINTENANCE_MATERIALIZATION_REQUEST_SCHEMA.to_owned(),
+        plan_id,
+        selected_action_ids: action_ids,
+        decision_at,
+    };
+    request.validate()?;
+    validate_repository_maintenance_selection(&plan, &request)?;
+    let service = open_service()?;
+    let result = service.apply_repository_maintenance_materialization(&plan, &request)?;
+    if as_json {
+        print_json(&serde_json::to_value(result)?)
+    } else {
+        println!("repository-maintenance-materialization");
+        println!("plan_id\t{}", result.plan_id);
+        println!("selection_id\t{}", result.selection_id);
+        println!("decision_id\t{}", result.decision_id);
+        println!("decision_at\t{}", result.decision_at);
+        for output in result.outputs {
+            println!(
+                "output\t{}\t{}\t{}\t{}\t{}\t{}",
+                output.path,
+                output.record_id,
+                enum_text(output.action)?,
+                enum_text(output.role)?,
+                output.semantic_revision.revision_hash,
+                enum_text(output.outcome)?,
+            );
+        }
+        for command in result.review_commands {
+            println!(
+                "review\t{}\t{}",
+                command.program,
+                serde_json::to_string(&command.args)?
+            );
+        }
+        Ok(())
+    }
+}
+
+fn enum_text(value: impl serde::Serialize) -> Result<String> {
+    serde_json::to_value(value)?
+        .as_str()
+        .map(str::to_owned)
+        .context("maintenance result enum did not serialize as a string")
+}
+
+fn read_maintenance_plan(path: &Path) -> Result<MaintenancePlan> {
+    let file = open_regular_artifact_without_symlinks(path, "maintenance plan artifact")?;
+    let metadata = file
+        .metadata()
+        .context("failed to inspect opened maintenance plan artifact")?;
+    ensure!(
+        metadata.len() <= MAINTENANCE_ARTIFACT_MAX_BYTES as u64,
+        "maintenance plan artifact exceeds the 2 MiB limit"
+    );
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAINTENANCE_ARTIFACT_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .context("failed to read maintenance plan artifact")?;
+    ensure!(
+        bytes.len() <= MAINTENANCE_ARTIFACT_MAX_BYTES,
+        "maintenance plan artifact exceeds the 2 MiB limit"
+    );
+    let text = String::from_utf8(bytes).context("maintenance plan artifact must be UTF-8")?;
+    parse_maintenance_plan(&text).context("invalid memzoi/maintenance-plan artifact")
 }
 
 fn print_maintenance_human(plan: &MaintenancePlan) {
